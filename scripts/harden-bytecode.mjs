@@ -28,7 +28,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const env = { ...process.env, KRYPT_BYTECODE_APP_MODE: '1' };
 delete env.ELECTRON_RUN_AS_NODE; // must NOT be set — see the header comment
 
-const r = spawnSync(electron, [path.join(root, 'scripts', 'compile-bytecode.cjs')], {
+// Linux: Chromium's SUID sandbox helper must be root-owned with mode 4755,
+// which it is not in a fresh node_modules — a GitHub runner aborts with
+// "The SUID sandbox helper binary was found, but is not configured
+// correctly" and the build dies here (2026-09-06, the linux job). This
+// process only compiles bytecode: it loads no page, runs no renderer and
+// opens no window, so it has nothing to sandbox. The shipped app is
+// untouched — its sandbox is a runtime property of the packaged binary, not
+// of this build step.
+const args = [path.join(root, 'scripts', 'compile-bytecode.cjs')];
+if (process.platform === 'linux') args.unshift('--no-sandbox');
+
+const r = spawnSync(electron, args, {
   stdio: 'inherit',
   env,
 });

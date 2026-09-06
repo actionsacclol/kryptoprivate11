@@ -1,7 +1,7 @@
 {
  "name": "krypto-terminal",
  "productName": "Krypto Bot",
- "version": "1.0.0-beta.8",
+ "version": "1.0.0-beta.9",
  "description": "A free, local-first Solana memecoin trading terminal. Discover, analyse and trade — with a live launch scanner and automation engine built in. Part of the Krypt free tools suite.",
  "main": "dist-electron/main.js",
  "author": {

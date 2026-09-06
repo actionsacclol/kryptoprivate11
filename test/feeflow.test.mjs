@@ -166,7 +166,7 @@ console.log(`feeflow: ${passed}/${passed} tests passed`);
 // for sells, and leave a sell unbilled only when no estimate exists.
 {
   const fs = await import('node:fs');
-  const src = fs.readFileSync(new URL('../electron/engine/liveSigner.ts', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../electron/engine/liveSigner.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /estProceedsLamports\?: number \| Promise<number \| undefined>/, 'param takes the value or a promise');
   // The estimate is resolved INSIDE the relayer branch. Callers hand over a
   // promise so the read does not block the build (2026-09-05); billing is
@@ -174,7 +174,7 @@ console.log(`feeflow: ${passed}/${passed} tests passed`);
   const i = src.indexOf("p.action === 'sell'\n            ? Math.floor((await resolveEstProceeds(p.estProceedsLamports))");
   assert.ok(i > 0, 'relayer sell billing branch exists and resolves the estimate');
   assert.match(src, /async function resolveEstProceeds[\s\S]*catch \{\s*return 0;/, 'an unusable estimate bills zero');
-  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(eng, /estProceedsLamports: estProceeds/, 'manualSell passes the estimate');
   assert.match(
     eng,

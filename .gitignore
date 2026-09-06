@@ -5,3 +5,8 @@ release/
 test/.*.mjs
 *.log
 dist-electron-dev/
+
+# Build spill: the bytecode step leaves a copy of a compiled chunk in the
+# repo root. It is byte-identical to the one in dist-electron and is only a
+# hazard because `git add -A` would happily commit 7 MB of it.
+/*.jsc

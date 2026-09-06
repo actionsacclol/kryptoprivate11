@@ -211,7 +211,7 @@ ok('the seize is applied to buys only — the source proves it, not just the nam
   // The guarantee is worth more than a naming convention: read the call site
   // and check the gate sits inside the `action === 'buy'` block, so a sell
   // can never reach it.
-  const src = fs.readFileSync(new URL('../electron/engine/liveSigner.ts', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../electron/engine/liveSigner.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const buyBlock = src.slice(src.indexOf("if (p.action === 'buy') {"));
   const gate = buyBlock.indexOf('if (seized())');
   assert.ok(gate > 0, 'the seize gate is inside the buy block');

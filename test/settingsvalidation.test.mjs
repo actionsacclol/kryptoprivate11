@@ -122,7 +122,7 @@ console.log('settingsvalidation: all tests passed');
   // than the one being fixed. Pinned here because that merge is what makes
   // dropping the field safe.
   const fs = await import('node:fs');
-  const src = fs.readFileSync(new URL('../electron/system/settings-store.ts', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../electron/system/settings-store.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(
     src,
     /execution: \{ \.\.\.cur\.execution, \.\.\.\(patch\.execution \?\? \{\}\) \}/,
@@ -143,14 +143,14 @@ console.log('settingsvalidation: all tests passed');
 // leaves a user's own numbers alone; earlier steps must not re-fire.
 {
   const fs = await import('node:fs');
-  const src = fs.readFileSync(new URL('../electron/system/settings-store.ts', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../electron/system/settings-store.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /if \(fromRevision < 2\) \{/, 'revision-2 step is gated');
   assert.match(src, /if \(fromRevision < 3\) \{/, 'revision-3 step exists');
   assert.match(src, /maxLiveConsecutiveLosses === 2\) s\.execution\.maxLiveConsecutiveLosses = 0/);
   assert.match(src, /maxLiveSessionLossSol === 0\.03\) s\.execution\.maxLiveSessionLossSol = 0/);
   assert.match(src, /if \(fromRevision < 4\) \{/, 'revision-4 step exists');
   assert.match(src, /s\.execution\.localTxBuild = true;/, 'revision 4 turns the local builder on');
-  const types = fs.readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8');
+  const types = fs.readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /if \(fromRevision < 5\) \{/, 'revision-5 step exists');
   assert.match(types, /SETTINGS_REVISION = 5;/);
   assert.match(types, /localTxBuild: true,/, 'local builder is the default');

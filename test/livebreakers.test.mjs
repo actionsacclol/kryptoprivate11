@@ -103,7 +103,7 @@ test('a hard pause (decoder drift) wins over everything', () => {
 
 // ── Engine wiring pins ────────────────────────────────────────────────
 
-const engineSrc = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+const engineSrc = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const between = (startRe, endRe) => {
   const m = engineSrc.match(startRe);
   assert.ok(m, `engine.ts: cannot find ${startRe}`);
@@ -188,11 +188,11 @@ console.log(`livebreakers: ${passed}/${total} tests passed`);
 // Live is the DEFAULT trading mode (2026-08-29): a fresh profile arms as soon
 // as a wallet exists; Paper is the opt-in toggle.
 {
-  const src = fs.readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /liveEnabled: true,/, 'DEFAULT_SETTINGS.execution.liveEnabled must default to true');
-  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8');
+  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(ipc, /export function syncLiveMode/, 'boot/wallet arming helper must exist');
-  const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(main, /syncLiveMode\(\);/, 'main must arm at boot');
   assert.match(main, /onDisarm = \(reason\)/, 'every disarm must persist the mode bit');
   console.log('ok  live is the default mode; boot arms; disarm persists Paper');
@@ -202,10 +202,10 @@ console.log(`livebreakers: ${passed}/${total} tests passed`);
 // losing trades flipped a user to Paper. Session loss is REALISED PnL from
 // reconciled sells, never a wallet-balance delta that counts a buy as a loss.
 {
-  const src = fs.readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8');
+  const src = fs.readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /maxLiveSessionLossSol: 0,/, 'session-loss breaker defaults off');
   assert.match(src, /maxLiveConsecutiveLosses: 0,/, 'streak breaker defaults off');
-  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const body = eng.slice(eng.indexOf('private liveSessionLossSol()'), eng.indexOf('private liveSessionLossSol()') + 700);
   assert.match(body, /realizedPnlForSell/, 'session loss is realised PnL from the ledger');
   assert.doesNotMatch(body, /liveBaselineLamports - this\.walletBalanceLamports/, 'no balance-delta loss');
@@ -217,7 +217,7 @@ console.log(`livebreakers: ${passed}/${total} tests passed`);
 // switch must announce again once the bit is persisted — otherwise the top
 // bar shows Paper while the engine is armed (seen 2026-08-29).
 {
-  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8');
+  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const h = ipc.slice(ipc.indexOf("ipcMain.handle('live:setLive'"));
   const persistIdx = h.indexOf('liveEnabled: false } });');
   const announceIdx = h.indexOf('announceStatus()');
@@ -229,7 +229,7 @@ console.log(`livebreakers: ${passed}/${total} tests passed`);
 // `loss >= limit` comparison with the 0 default disarmed a user in Live mode
 // on every balance poll ("loss limit (−0 SOL)", 2026-08-30).
 {
-  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const i = eng.indexOf('private updateLiveBreakers()');
   const body = eng.slice(i, i + 1200);
   assert.match(body, /liveBreakerReason\(/, 'updateLiveBreakers must delegate to liveBreakerReason');
