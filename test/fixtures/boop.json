@@ -1,0 +1,40 @@
+{
+  "program": "boop8hVGQGqehUK2iVEMEnMrL5RbjywRzHKBmBE7ry4",
+  "sell": {
+    "sig": "3eaciWGDPFq81wS2qzdytVSE6ecq7aD7r8uczmFWUsUhUamchctX49gKXux61DNLS64kHqzicRDn4bWrRLSXJTo8",
+    "line": "Program data: zO+2TfEzTUIFlck20HEVU5hH0g7wqec7e8Gt8u6ztKr0lsqtJTCto4Aq/00zJQAAHvEUAAAAAAAnNgAAAAAAABCrZPrZjic/yz0mNnCTQDC+5FobIgUvtvUc05wpDoSqEKtk+tmOJz/LPSY2cJNAML7kWhsiBS+29RzTnCkOhKo=",
+    "args": [
+      "40902282128000",
+      "0"
+    ],
+    "expect": {
+      "isBuy": false,
+      "mint": "NoWaaDwAq1JBG8BPHKLTBzqiCVipytSSPfJ8WjMboop",
+      "amountIn": "40902282128000",
+      "amountOut": "1372446",
+      "fee": "13863",
+      "trader": "28577Bkgyc7iV2ev2EsWLto1SFqY9zF6VnpfK2DHsoMT"
+    }
+  },
+  "buy": {
+    "sig": "HFEHrskbRmohdd4mLrFE2vtmmDk3n8VJfPW7NRty9ZxGW8cM3KKf7dzuJp8ULgwQGg26urCYf5NGem5w5Q8AKwC",
+    "line": "Program data: R1nefNfA5ooCWqm3ROrQUUr1bzcQxW8SM4w1AtP0CU9SbbZqFAIVU4hyCQAAAAAA2jVFMz4SAABtGAAAAAAAAI4bq34Tnom1NP0lJFDTdRD7sV29K0Pz6peHtYaW/op5jhurfhOeibU0/SUkUNN1EPuxXb0rQ/Pql4e1hpb+ink=",
+    "args": [
+      "625397",
+      "0"
+    ],
+    "expect": {
+      "isBuy": true,
+      "mint": "ABztr3acxEhYUfgUA436jbiSPKP4kxsmL1X7gAAboop",
+      "amountIn": "619144",
+      "amountOut": "20058357446106",
+      "fee": "6253",
+      "trader": "AZjN96WUC8BUZWqtygeYQfXgdAY5WC7hM6uZwz3cc1rx"
+    }
+  },
+  "pool": {
+    "address": "5u3z6ixJtjGFDANgMWm6mWBw6YtNYfxM9o85f5a2evR8",
+    "mint": "ABztr3acxEhYUfgUA436jbiSPKP4kxsmL1X7gAAboop",
+    "data": "F7f4N2DYrGDiXQp0EIDRRp3dtg58I5iOUhFeWbsYN1IXEk+V3qdJfAJaqbdE6tBRSvVvNxDFbxIzjDUC0/QJT1JttmoUAhVTAKwj/AYAAAAA1JZHk/XoDQDc/wUUAAAAALygZQEAAAAFYr4bAAAAAJwASxXYTqoNHmT0AQA="
+  }
+}

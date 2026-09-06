@@ -1,0 +1,650 @@
+We have a strong architecture, but we are still missing several production-critical guarantees. The current prompt could produce an impressive dashboard and working paper trader while still creating duplicate buys, acting on rolled-back events, mispricing trades, or continuing after Pump changes its program.
+
+The biggest missing piece: execution invariants
+
+Before Fable writes more strategy code, define rules that must always be true:
+
+One strategy intent can create at most one economic position.
+No transaction signs against state older than the configured freshness limit.
+Unknown instructions, account layouts, program versions, or fee configurations disable trading.
+After a crash, the chain—not SQLite—is the source of truth.
+A timed-out RPC response never automatically means a transaction failed.
+Every live transaction can be fully decoded and policy-validated before signing.
+Exit processing always outranks discovery and enrichment work.
+Monetary calculations never use floating-point numbers.
+
+Those invariants are more valuable than another ten risk indicators.
+
+1. The first milestone is over-scoped
+
+The prompt currently asks Claude Code to build:
+
+Rust workspace
+Electron/Tauri app
+Solana feed
+Pump decoder
+Risk engine
+Wallet clustering
+Creator history
+Scoring
+Multiple strategies
+Paper execution
+Position management
+SQLite
+Replay lab
+Full dashboard
+
+That encourages shallow scaffolding instead of a reliable core.
+
+A better sequence is:
+
+Milestone 0 — protocol laboratory
+
+Only:
+
+Pin dependencies.
+Download and hash current official IDLs.
+Record current program IDs and ProgramData deployment slots.
+Gather 25–50 real mainnet transaction fixtures.
+Decode creation, buys, sells and completion.
+Reproduce actual balance changes and fees.
+Compare calculations against transaction metadata.
+Produce no UI and no trading.
+Milestone 1 — observer and recorder
+Native WebSocket development provider.
+Yellowstone provider.
+Full transaction normalization.
+SQLite or append-only event storage.
+Fork-aware event lifecycle.
+Live CLI feed.
+No strategies.
+Milestone 2 — deterministic replay and paper execution
+Exact reserve reconstruction.
+Risk checks.
+One filtered-momentum strategy.
+Executable liquidation-value PnL.
+Replay with feature-availability timestamps.
+No wallet required.
+Milestone 3 — desktop interface and shadow trading
+Electron dashboard.
+Read-only wallet.
+Shadow transaction construction.
+No signing.
+Milestone 4 — tightly limited live trading
+Policy-limited signer.
+Tiny maximum positions.
+Startup reconciliation.
+Duplicate-order prevention.
+Circuit breakers.
+Pump/PumpSwap only.
+
+This produces a much better result from Claude Code than asking for the whole product in one pass.
+
+2. Lock the stack to Electron
+
+The prompt says “Tauri or Electron,” but that is unnecessary ambiguity. Based on how you build Krypt software, specify:
+
+Electron
+React
+TypeScript
+Vite
+Rust sidecar engine
+Typed IPC contract
+No Node.js access in the renderer
+contextIsolation: true
+nodeIntegration: false
+Strict preload allowlist
+Strict Content Security Policy
+
+The Electron process should supervise the Rust engine, but the engine must continue protecting positions even if the renderer crashes or reloads.
+
+3. Fork-aware state is missing
+
+The prompt records commitment levels, but it does not say how the state engine handles a transaction observed at processed that later disappears from the canonical chain.
+
+Solana documentation warns that processed state can belong to a dropped fork and recommends careful blockhash and commitment handling.
+
+Every event needs a lifecycle:
+
+OBSERVED_PROCESSED
+CONFIRMED
+FINALIZED
+ORPHANED
+REPLACED
+
+State updates should be reversible until confirmed. Store:
+
+slot
+blockhash
+parent_slot
+signature
+outer_instruction_index
+inner_instruction_path
+commitment
+canonicality_status
+first_observed_at
+confirmed_at
+finalized_at
+orphaned_at
+
+The system also needs separate concepts for:
+
+Trading state: fastest processed view used to make decisions.
+Accounting state: confirmed chain view.
+Historical state: finalized data used for analytics and training.
+
+A trade triggered by an orphaned launch cannot be undone, so it should be tagged and handled as a special risk event.
+
+4. Full Solana transaction resolution
+
+The decoder must not rely only on logs or top-level instructions.
+
+It needs to resolve:
+
+Legacy and version-0 transactions.
+Address lookup tables.
+Writable and read-only loaded addresses.
+Inner CPI instructions.
+Stack height.
+Pre/post token balances.
+Pre/post SOL balances.
+Return data.
+Transaction errors.
+Compute units.
+Program log truncation.
+Multiple protocol actions inside one transaction.
+
+Solana’s transaction structure separates static account keys from addresses loaded through lookup tables, and inner CPI instructions appear separately in transaction metadata.
+
+The event identifier should be something like:
+
+signature + outer_instruction_index + inner_instruction_path + event_index
+
+Using only the signature is insufficient because one transaction may contain multiple buys, CPIs or protocol events.
+
+5. Program-upgrade detection
+
+This is a huge missing safety mechanism.
+
+Pump, PumpSwap and other programs are upgradeable. Solana program metadata includes a ProgramData account, upgrade authority and last deployment slot.
+
+At startup and continuously, record:
+
+program_id
+programdata_address
+upgrade_authority
+last_deployed_slot
+executable_hash
+idl_hash
+adapter_version
+
+If any supported program’s deployment slot or executable hash changes:
+
+Disable live entries immediately.
+Continue recording raw activity.
+Mark the adapter incompatible.
+Require new fixtures and decoder verification.
+Permit exits only through already validated instruction paths.
+Never automatically “try the old decoder.”
+
+The current Pump documentation already reflects substantial integration changes: unified buy_v2, sell_v2 and buy_exact_quote_in_v2 instructions, mandatory volume and sharing accounts, additional quote-mint accounts, and renamed quote-reserve fields.
+
+That makes runtime compatibility monitoring mandatory, not optional.
+
+6. Pump-specific details need to be explicit
+
+“Research the current IDL” is not strong enough. The prompt should explicitly require support or rejection for:
+
+buy_v2
+sell_v2
+buy_exact_quote_in_v2
+SOL and USDC quote-mint distinction
+user_volume_accumulator
+sharing_config
+Fee recipient selection
+Buyback fee recipient
+Creator vault
+Creator fee sharing
+Cashback coins
+Associated quote accounts
+Bonding-curve account extension
+Canonical versus noncanonical PumpSwap pools
+Migration state
+Dynamic global configuration
+
+Pump’s current documentation says the new v2 instructions use a unified mandatory-account interface and that integrations should migrate to it.
+
+Cashback also changes account requirements for certain sells and PumpSwap operations, so ignoring it can produce incorrect fees or transaction construction.
+
+Most importantly, never hardcode current fee percentages or reserve constants. Fetch and version the relevant on-chain configuration accounts. Pump has previously changed account sizes, creator fees and required accounts.
+
+7. Exactly-once economic execution
+
+Distributed systems cannot promise exactly-once message delivery, but Fable can aim for exactly-once economic intent.
+
+Create a persisted order state machine:
+
+CREATED
+POLICY_VALIDATED
+PERSISTED
+SIGNED
+SUBMITTED_UNKNOWN
+OBSERVED_PROCESSED
+CONFIRMED
+FINALIZED
+EXPIRED_NOT_FOUND
+REPLACED
+FAILED
+RECONCILED
+
+The critical scenario:
+
+Fable sends a buy.
+RPC accepts it.
+Network times out before returning the signature response.
+Fable assumes failure.
+Fable submits another buy.
+Both land.
+
+Prevent this with:
+
+Persisted intent ID before signing.
+Deterministic client order ID.
+Transaction signature persisted before submission.
+Signature-status lookup after timeout.
+Wallet balance-delta reconciliation.
+No replacement until the old blockhash expires or the original status is resolved.
+Per-mint execution mutex.
+Per-wallet transaction sequencing.
+Single-instance lock for the trading wallet.
+
+On startup, Fable must enter reconciliation mode before evaluating new entries.
+
+8. State freshness and quote validity
+
+The bot needs an explicit freshness budget:
+
+maximum_event_age_ms
+maximum_state_slot_lag
+maximum_quote_age_ms
+maximum_blockhash_age
+maximum_provider_divergence_slots
+
+Before signing:
+
+Verify current slot.
+Refetch or validate the relevant curve/pool accounts.
+Recalculate output and fees.
+Apply maximum-input or minimum-output protection.
+Revalidate the complete transaction.
+Abort when state has moved beyond tolerance.
+
+Simulation alone is not enough. The state may change between simulation and execution.
+
+For Pump, Fable should prefer exact-quote-in entry where appropriate and always use bounded outputs. It must understand the exact semantics of the currently supported instruction rather than treating “slippage” as one generic percentage.
+
+9. Paper fills are still too optimistic
+
+The current paper model includes latency, slippage and random failure, but it should replay the actual reserve sequence.
+
+For each simulated order:
+
+Locate the first chain state at which Fable could realistically have submitted.
+Add configured decision, construction and network delay.
+Determine the likely landing slot.
+Apply all intervening real trades to the reserves.
+Place Fable’s simulated trade at a configurable ordering percentile.
+Compute output from those reserves.
+Apply all protocol, creator and transaction fees.
+Determine whether the minimum-output condition would pass.
+Compute exits against future executable reserves.
+
+Do not calculate open-position value from spot price:
+
+wrong:
+token_balance × current_curve_price
+
+correct:
+quote received by selling token_balance now
+− protocol fees
+− creator fees
+− priority fee
+− Jito tip
+− price impact
+− account costs
+
+This “liquidation value” can differ massively from displayed mark value on a thin token.
+
+10. Integer-only financial calculations
+
+The prompt uses f64 in several examples. That is acceptable for a nonfinancial score, but never for:
+
+Lamports.
+Token base units.
+Reserves.
+Fees.
+Price calculations.
+PnL.
+Slippage bounds.
+Market capitalization.
+Position sizing.
+
+Use:
+
+u64 for native on-chain quantities where appropriate.
+u128 intermediates.
+Checked arithmetic.
+Fixed-point rational math.
+Explicit rounding direction.
+Protocol-matching fee order.
+
+Each calculation needs golden tests against real transactions.
+
+A one-unit rounding difference can cause an instruction to fail or can invalidate a replay result.
+
+11. Fee and transaction-cost accounting
+
+The PnL model must include:
+
+Base transaction fee.
+Compute priority fee.
+Jito tip.
+Protocol fee.
+Creator fee.
+Buyback fee where applicable.
+Transfer fee for supported tokens.
+ATA creation rent.
+WSOL account creation and closure.
+Failed-transaction fees.
+Failed Jito tips where applicable.
+Migration-related costs.
+Dust left in token accounts.
+Cashback actually claimable or received.
+
+Priority fees are localized to the writable accounts used by a transaction, so querying generic network fees can return misleadingly low numbers. Solana recommends including relevant accounts when estimating recent priority fees.
+
+Jito tip bidding should be treated separately from compute-unit pricing, with region health and tip-floor information considered by the send-lane manager.
+
+12. Provider disagreement and feed integrity
+
+Using multiple providers is not just “send to all of them.”
+
+Add a provider coordinator that tracks:
+
+Slot lag.
+Blockhash disagreement.
+Missing signatures.
+Duplicate rate.
+Reordered events.
+Transaction metadata completeness.
+Time to processed.
+Time to confirmed.
+Error rate.
+Rate limiting.
+Provider-specific commitment.
+
+When two providers disagree materially:
+
+Disable new entries.
+Continue exits using the healthiest provider.
+Record the divergence.
+Require a third source or confirmed reconciliation.
+
+Yellowstone should be the primary transaction feed in production; native WebSockets should be the fallback and development path. Standard RPC is suitable for lower-volume verification but is not a replacement for persistent indexing at production scale.
+
+13. Feature-time correctness and backtest leakage
+
+Every feature needs both:
+
+chain_effective_slot
+bot_available_at
+
+A creator-history result fetched ten seconds after launch cannot be treated as available at launch during replay.
+
+The replay engine must prevent:
+
+Lookahead bias.
+Using finalized data for a processed-time decision.
+Using holders discovered after entry.
+Using a future creator label.
+Using future wallet profitability.
+Using a token’s eventual graduation in an entry feature.
+Survivorship bias from only indexed tokens.
+Training and testing on launches by the same creator cluster.
+
+Use:
+
+Time-based train/validation/test splits.
+Walk-forward testing.
+Creator-cluster separation.
+Calibration curves.
+Score-bucket performance.
+Latency sensitivity.
+Regime-specific reporting.
+
+Do not add machine learning during the first milestone. First prove that deterministic features are timestamp-correct.
+
+14. Creator history and clustering cannot be synchronous
+
+The prompt makes creator reputation and wallet clustering sound immediately available. In reality, historical funding and behavior analysis requires an index or significant backfill.
+
+Split analysis into:
+
+Synchronous entry checks
+Current creator.
+Current creator buy.
+Direct funding evidence already cached.
+Current holder distribution.
+Known local blacklist.
+Recently cached creator history.
+Asynchronous enrichment
+Deep funding ancestry.
+Historical launches.
+Cross-token wallet co-occurrence.
+Realized wallet profitability.
+Metadata reuse.
+Social-account history.
+Multi-hop clusters.
+
+Missing data must be represented as Unknown, not silently converted into a neutral or passing score.
+
+15. Holder concentration must be protocol-aware
+
+“Top 10 holders” is not a sufficient metric during a bonding-curve launch.
+
+Fable needs:
+
+Raw supply concentration.
+Tradable-float concentration.
+Cluster-adjusted concentration.
+Creator-associated concentration.
+Early-buyer concentration.
+Concentration excluding protocol custody accounts.
+Concentration excluding curve, pool, burn and fee vaults.
+Concentration based on economic owner, not token-account address.
+
+A wallet can own many token accounts, and many wallets can belong to one funded cluster.
+
+Also, risk rules should be protocol-specific. A Pump token following the expected creation flow should not be judged by exactly the same mint-authority rules as an arbitrary Raydium token.
+
+16. Position sizing is underspecified
+
+The prompt sets a maximum quote amount, but the actual size should be the minimum of:
+
+configured maximum
+wallet risk allowance
+daily remaining risk
+liquidity-based maximum
+price-impact-based maximum
+creator/cluster exposure maximum
+strategy-confidence maximum
+available exit-liquidity maximum
+
+Add portfolio controls:
+
+Maximum exposure per mint.
+Maximum exposure per creator.
+Maximum exposure per wallet cluster.
+Maximum launches entered per minute.
+Maximum consecutive losses.
+Maximum daily drawdown.
+Maximum correlated open positions.
+Cooldown after emergency exits.
+Cooldown after feed or execution failures.
+
+A $50 entry may be tiny in wallet terms but enormous relative to the available exit liquidity.
+
+17. Metadata is an application-security risk
+
+Token metadata points to off-chain URLs.
+
+Never let Electron directly render arbitrary remote token content.
+
+Use a sandboxed metadata worker with:
+
+HTTPS-only by default.
+Blocked localhost and private network ranges.
+DNS rebinding protection.
+Redirect limits.
+Response-size limits.
+MIME validation.
+Timeouts.
+Image-dimension limits.
+No SVG, HTML or JavaScript rendering.
+No automatic wallet links.
+Content hashing.
+Cached sanitized thumbnails.
+Explicit marking of unverified social links.
+
+Otherwise a malicious token creator can use metadata to probe local services or attack the desktop renderer.
+
+18. Signer architecture needs to be stronger
+
+“Use the OS keychain” is not enough.
+
+Use a separate signer process with a narrow policy:
+
+allowed program IDs
+allowed quote mints
+maximum quote amount
+maximum fee
+maximum tip
+allowed token destination
+allowed wallet-owned accounts
+no arbitrary transfers
+no arbitrary approvals
+no unknown instructions
+no changing authorities
+no closing unrelated accounts
+
+The engine sends a fully constructed transaction to the signer. The signer independently decodes and validates it before signing.
+
+Live mode should:
+
+Require deliberate arming.
+Auto-disarm on restart.
+Auto-disarm after a program upgrade.
+Auto-disarm after provider divergence.
+Auto-disarm after decoder failures.
+Auto-disarm after a daily loss limit.
+Expire after a configured period.
+19. Execution and exit queues need priority
+
+Not all work is equal.
+
+Suggested priority:
+
+P0 emergency exits
+P1 open-position state and confirmations
+P2 transaction replacement/reconciliation
+P3 eligible entries
+P4 launch decoding
+P5 risk enrichment
+P6 metadata and social fetching
+P7 historical backfill
+
+Under overload, metadata may be dropped or delayed. An exit never should be.
+
+Add bounded queues, but define exactly what may be dropped and what must be persisted.
+
+20. Reproducibility and auditability
+
+Every decision should retain:
+
+application_version
+git_commit
+adapter_version
+program_executable_hash
+idl_hash
+configuration_hash
+strategy_version
+risk_rule_version
+provider
+provider_slot
+feature_snapshot
+transaction_builder_version
+
+Without this, you will not be able to explain why a replay next month differs from the original trade.
+
+Also add:
+
+Dependency lockfiles.
+cargo-deny.
+cargo-audit.
+npm lockfile enforcement.
+Secret scanning.
+SBOM generation.
+License checks.
+Signed releases.
+Update rollback.
+No telemetry by default.
+What I would cut from the first build
+
+To make the first result genuinely good, remove these from the initial implementation:
+
+Raydium.
+Meteora.
+Orca.
+Jupiter execution.
+Machine learning.
+Smart-wallet copying.
+Social sentiment.
+Deep wallet clustering.
+Live trading.
+Multiple strategies.
+Complex polished charts.
+
+Start with:
+
+Pump/PumpSwap
+SOL-paired tokens
+current v2 instructions
+mainnet transaction fixtures
+Yellowstone + RPC reconciliation
+event recorder
+fork-aware state
+deterministic risk rules
+one filtered-momentum strategy
+realistic paper execution
+CLI first
+Electron after core correctness
+Final assessment
+
+The previous prompt covers roughly 75% of the visible product, but only about 50–60% of the operational safeguards needed for live money.
+
+The most important additions are:
+
+Fork and rollback handling.
+Program upgrade detection.
+Persisted exactly-once economic intent.
+Ambiguous-submission recovery.
+State freshness enforcement.
+Full v0/ALT/CPI transaction decoding.
+Integer-only financial math.
+Executable liquidation-value PnL.
+Feature-time correctness.
+A policy-enforcing signer.
+Metadata sandboxing.
+Much smaller sequential milestones.
+
+Until those exist, Fable should remain a recorder, replay engine and paper trader, not a live sniper.

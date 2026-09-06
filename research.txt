@@ -1,0 +1,703 @@
+Memecoin Sniping Bot Research — Fable Build Plan
+
+My recommendation: build Solana-first. The best product is not a bot that blindly buys every token in the first slot. It is a low-latency trading engine that:
+
+Detects launches directly on-chain.
+Rejects obvious rugs and manipulated launches.
+Scores the first seconds of real trading.
+Executes through the fastest available route.
+Automatically exits when the original thesis breaks.
+Records everything for replay and strategy testing.
+
+That distinction matters. A June 2026 CoinGecko analysis found that 68.67% of Pump.fun tokens recorded their final trade on the same calendar day they launched. Meanwhile, the 2026 MemeTrans research project designed 122 launch-risk features and reported substantially lower losses when using its models rather than indiscriminate entry.
+
+The product Fable should build
+
+Rust execution engine + Electron/React interface.
+
+The Rust engine handles streams, decoding, scoring, transaction construction, signing and position management. Electron handles configuration, charts, logs, wallets and strategy controls. The UI must never be in the execution hot path.
+
+Solana feeds
+    ↓
+Protocol decoders
+    ↓
+Token state + wallet graph
+    ↓
+Hard safety filters
+    ↓
+Opportunity scoring
+    ↓
+Strategy state machine
+    ↓
+Transaction builder
+    ↓
+Jito / RPC / SWQoS send lanes
+    ↓
+Confirmation + position manager
+    ↓
+Event recorder and replay engine
+
+The system should be protocol-adapter based rather than written around one launchpad:
+
+LaunchpadAdapter
+├── PumpFunAdapter
+├── PumpSwapAdapter
+├── RaydiumLaunchLabAdapter
+├── RaydiumCpmmAdapter
+├── MeteoraDbcAdapter
+├── MeteoraDlmmAdapter
+├── BonkFunAdapter
+└── GenericPoolAdapter
+
+Pump.fun currently publishes its program documentation, IDLs and official TypeScript/Rust SDK references. Its newer trading interface includes buy_v2, sell_v2 and buy_exact_quote_in_v2, including support for different quote mints, so Fable should not build around older copied account layouts.
+
+1. Real-time launch detection
+Best production feed: Yellowstone gRPC
+
+Use Yellowstone gRPC to stream transactions and account updates involving supported program IDs. It is built on Solana’s Geyser interface and can stream transactions, blocks, slots and account updates with server-side filters. The repository includes clients for several languages.
+
+Repository: rpcpool/yellowstone-grpc
+
+Subscribe to:
+
+Pump.fun create, buy, sell and completion events.
+PumpSwap pool creation and swaps.
+Raydium CPMM, AMM and LaunchLab initialization.
+Meteora DBC, DAMM and DLMM pool initialization.
+Mint and token-account updates.
+Creator and watched-wallet transactions.
+Slots and block metadata for accurate latency measurement.
+
+Every received event should store both:
+
+chain_time
+slot
+transaction_index
+signature
+provider_received_at
+decoder_finished_at
+strategy_decided_at
+transaction_submitted_at
+confirmation_time
+
+Without local arrival timestamps, Fable cannot tell whether a strategy is bad or merely receiving data too slowly.
+
+Free fallback: native Solana WebSockets
+
+Native logsSubscribe, programSubscribe, signatureSubscribe and account subscriptions work without proprietary APIs. This is appropriate for development and as a secondary feed, although Yellowstone is the stronger production architecture.
+
+The bot needs:
+
+Automatic reconnect.
+Ping and health checks.
+Subscription restoration.
+Duplicate detection by signature/instruction index.
+Gap detection through slot numbers.
+Backfill using getTransaction after any gap.
+Do not use DexScreener as the launch detector
+
+DexScreener and GeckoTerminal are useful after discovery, but their indexed data is downstream from the chain. They should enrich a launch with liquidity, market history and cross-pool information—not determine when the launch occurred. DexScreener’s public API supports pair lookups and token profiles, while GeckoTerminal offers free pool, token and OHLCV endpoints.
+
+2. Protocol integrations
+Pump.fun and PumpSwap
+
+Use the official Pump public documentation and vendored IDLs as the source of truth. The Pump bonding-curve program is standardized, tokens become immediately tradeable, and completed curves migrate to PumpSwap.
+
+Fable should decode:
+
+Token creation.
+Creator address.
+Quote mint.
+Initial creator buy.
+Bonding-curve reserves.
+Curve completion percentage.
+Creator-fee and cashback configuration.
+Every buy and sell.
+PumpSwap migration.
+Canonical pool creation.
+Creator withdrawals and later sells.
+
+The account layout has changed over time. The Chainstack reference bot notes that integrations should compare IDLs against recent successful on-chain transactions because required accounts and PDAs can move ahead of published examples. That repo is valuable as a reference, but the production decoder should have fixture tests derived from real transactions.
+
+Raydium
+
+Use:
+
+raydium-io/raydium-sdk-V2
+raydium-io/raydium-sdk-V2-demo
+
+The demo specifically warns that newly created pools may take minutes to appear in Raydium’s indexed API and recommends reading pool information from RPC when immediate access is required. That reinforces the direct-on-chain approach.
+
+Fable needs separate decoders for:
+
+AMM v4.
+CPMM.
+CLMM.
+LaunchLab/bonding-curve launches.
+Pool initialization.
+Initial liquidity.
+LP minting, burning and withdrawals.
+
+Review the SDK’s GPL-3.0 licensing before copying or distributing its code inside a commercial application.
+
+Meteora
+
+Meteora publishes TypeScript and Rust SDKs and free public REST endpoints for DLMM, DAMM and dynamic bonding curves.
+
+Support:
+
+Dynamic Bonding Curve launches.
+DLMM pool initialization.
+DAMM v1/v2.
+Bin liquidity and price.
+Migration events.
+Dynamic fee changes.
+Pool liquidity removal.
+Orca
+
+Orca’s current orca-so/whirlpools repository contains the on-chain program and current SDKs. Do not build against the older orca-so/whirlpool-sdk, which is marked deprecated.
+
+Orca is less important for launch sniping but useful for post-launch liquidity and exit routing.
+
+Jupiter
+
+Use Jupiter primarily for:
+
+Exit routing.
+Cross-pool price comparison.
+Existing-token entries.
+Quote validation.
+Finding better execution after a token has liquidity across several venues.
+
+The current Jupiter developer platform exposes swap and price infrastructure, and Jupiter maintains an official Rust Swap API client.
+
+For first-launch entry, a direct protocol instruction will generally give Fable greater control over account preparation, transaction size and latency. Jupiter should remain the fallback or post-launch router.
+
+3. The token-risk engine
+
+The risk engine is more important than shaving another 50 milliseconds off execution.
+
+Immediate hard rejects
+
+Reject before scoring when any of these are found:
+
+Unsupported token program or protocol version.
+Unknown or malformed instruction layout.
+Active freeze authority, unless explicitly expected.
+Active mint authority where fixed supply is expected.
+Token-2022 default account state set to frozen.
+Transfer hook.
+Permanent delegate.
+Unexpected transfer fees.
+Mutable or dangerous extension combination.
+Suspicious mint-close authority.
+Unsupported quote asset.
+Sell transaction cannot be built or simulated.
+Creator or pool address is in a local blacklist.
+Liquidity or curve reserves below the configured minimum.
+One cluster controls an extreme percentage of circulating supply.
+Creator is already selling during evaluation.
+Pool initialization and token metadata disagree.
+
+Solana’s mint state exposes mint and freeze authorities, and a remaining freeze authority can prevent token accounts from transferring. Token-2022 adds further extension and authority types, including frozen-by-default accounts.
+
+For an initial production version, I would reject all unusual Token-2022 extensions rather than attempting to determine which combinations are harmless.
+
+External safety sources
+
+Use these only as additional evidence:
+
+GoPlus Solana Token Security API: free security data and Solana transaction simulation.
+RugCheck: secondary risk score and known-risk indicators.
+Local checks: always authoritative because external services can lag a brand-new token.
+Local blacklist: scam creators, compromised wallets, drainers and repeated rug clusters.
+
+A bot must not wait for an external API before every entry. Run local deterministic checks synchronously and allow third-party results to arrive during a short evaluation window.
+
+4. Creator and wallet intelligence
+
+This is where Fable can outperform generic sniper bots.
+
+For every creator, calculate:
+
+total prior launches
+prior graduations
+prior launches surviving 1h / 24h / 7d
+median peak return
+median token lifetime
+creator dump frequency
+median time until first creator sell
+wallet age
+funding source
+funding-wallet cluster
+prior blacklist connections
+reused metadata / images / domains
+First-buyer graph
+
+Do not count every new wallet as an independent buyer. Identify clusters using:
+
+Common funding wallet.
+Same funding transaction.
+Same exchange withdrawal batch.
+Identical buy amount and timing.
+Persistent co-occurrence across launches.
+Transfers between participating wallets.
+Reused fee payer.
+Reused lookup table or relayer.
+Jito bundle membership where observable.
+
+Recent memecoin research emphasizes bundle-level and holding-concentration features. MemeTrans includes contextual, transaction, concentration and time-series information, while separate 2026 work identified persistent groups of wallets appearing together among early Pump.fun buyers. The latter also warns that wallet-cohort activity alone is not proof of future success, so it should be treated as a manipulation/risk feature rather than a buy signal.
+
+Holder calculations
+
+Exclude from normal concentration calculations:
+
+Bonding-curve accounts.
+Liquidity pools.
+Burn addresses.
+Program-owned vaults.
+Fee vaults.
+Associated protocol accounts.
+
+Then calculate:
+
+Creator percentage.
+Top 5/10/20 holder percentage.
+Cluster-adjusted top-holder concentration.
+Gini coefficient.
+Wallet-size entropy.
+Percentage owned by wallets funded by the creator.
+Percentage acquired in the first bundle or slot.
+5. Opportunity score
+
+Use two stages.
+
+Stage A: static launch score
+
+Available immediately:
+
+creator reputation
+creator funding source
+token authorities
+Token-2022 extensions
+metadata completeness
+social links
+name/symbol duplication
+creator initial buy
+curve parameters
+launchpad
+quote mint
+known wallet participation
+Stage B: live-flow score
+
+Calculated during the first slots or seconds:
+
+unique buyer acceleration
+cluster-adjusted buyer acceleration
+net SOL/USDC inflow
+buy-to-sell volume
+trade-size distribution
+curve progress velocity
+price acceleration
+price impact
+creator behavior
+top-holder concentration change
+first-buyer selling
+large-wallet arrival
+transaction failure rate
+organic versus coordinated flow
+
+A useful model shape:
+
+Final score =
+    20% token safety
+  + 20% creator reputation
+  + 15% distribution quality
+  + 20% live order flow
+  + 10% liquidity quality
+  + 10% metadata/social quality
+  +  5% smart-wallet participation
+  - manipulation penalties
+
+The exact weights must come from Fable’s own replay data. Do not copy a social-media trader’s arbitrary “rug score.”
+
+A 2026 Pump.fun prediction study found that structural and behavioral features meaningfully improved graduation prediction beyond bonding-curve progress alone. Another recent preprint found that social-link presence and creator self-buy behavior were associated with higher graduation rates, but those relationships should be validated independently before becoming production weights.
+
+6. Strategies worth including
+Filtered early momentum — recommended default
+
+Detect creation immediately but require:
+
+Safety checks passed.
+Minimum organic buyers.
+Minimum net inflow.
+No creator sell.
+Acceptable clustered-holder concentration.
+Positive buyer acceleration.
+Predicted price impact under the configured limit.
+
+This sacrifices the absolute lowest entry for substantially better evidence.
+
+True launch sniper — extreme risk
+
+Buy immediately after token creation when only static information is available.
+
+Restrict it to:
+
+Whitelisted creators.
+Known launch sources.
+Known smart-wallet activity.
+Very small fixed position size.
+Strict time stop.
+Maximum daily loss.
+Curve momentum
+
+Enter when bonding-curve progress and buyer velocity accelerate but before graduation.
+
+Useful signals:
+
+Reserve growth acceleration.
+Increasing unique buyers.
+Declining concentration.
+Increasing median trade size without one-wallet domination.
+No large early-buyer distribution.
+Graduation/migration sniper
+
+Detect:
+
+Final bonding-curve purchases.
+Curve completion.
+PumpSwap/Raydium/Meteora migration.
+First post-migration pool state.
+Initial liquidity and immediately available exit route.
+
+This is technically harder but often has more usable evidence than buying at creation.
+
+Smart-wallet follow
+
+Maintain wallet scores based on:
+
+Realized PnL, not unrealized screenshots.
+Entry percentile.
+Exit quality.
+Sample size.
+Rug exposure.
+Creator connections.
+Whether the wallet is itself a launcher or insider.
+Cluster-adjusted activity.
+
+Copy with a maximum delay and refuse to follow positions where the tracked wallet already represents substantial liquidity or supply.
+
+Post-migration breakout
+
+Wait for standard AMM liquidity, then enter on:
+
+Liquidity growth.
+Sustained unique-buyer growth.
+Volume acceleration.
+Consolidation breakout.
+Reduced creator/insider exposure.
+
+It is slower but easier to test and considerably easier to exit.
+
+7. Transaction execution
+Prebuild everything possible
+
+At token detection time:
+
+Derive PDAs immediately.
+Prepare the associated token account instruction.
+Cache global protocol accounts.
+Cache fee-recipient accounts.
+Cache address lookup tables.
+Build direct buy and sell instruction templates.
+Maintain a fresh blockhash cache.
+Estimate compute units per protocol/version.
+
+Solana supports versioned transactions and address lookup tables, which can reduce account-list pressure for complex transactions.
+
+Priority fees
+
+Set both:
+
+Compute-unit limit.
+Compute-unit price.
+
+Solana priority is determined by requested compute units and compute-unit price. getRecentPrioritizationFees can return recent samples, including samples filtered by the writable accounts a transaction will lock.
+
+The fee manager should use percentiles:
+
+normal: p50
+competitive: p75
+high: p90
+emergency exit: p95+
+
+Do not request the maximum compute limit for every transaction; that can unnecessarily increase the calculated priority fee.
+
+Sending lanes
+
+Submit through multiple configurable lanes:
+
+Primary low-latency RPC.
+Secondary independent RPC.
+Jito block engine.
+Optional staked/SWQoS sender.
+Public RPC only as a last fallback.
+
+Jito publishes searcher examples and JSON-RPC tooling for bundles and transaction submission. Use bundles for reliable ordering or atomic execution of the bot’s own transactions, not sandwiching or manipulating unrelated users.
+
+Simulation policy
+
+Solana’s simulateTransaction executes against current chain state without broadcasting, while normal sendTransaction preflight verifies signatures and simulates unless disabled.
+
+Recommended policy:
+
+Unknown program or unusual token: mandatory simulation.
+Known standardized launchpad: static validation with optional skipped preflight.
+Every sell path: prebuilt and periodically simulation-tested.
+Emergency exit: permit skipped preflight after deterministic checks.
+Never trust a transaction returned by a third-party API without decoding and validating every instruction before signing.
+Confirmation manager
+
+Track:
+
+Processed.
+Confirmed.
+Finalized.
+Transaction error.
+Current block height.
+Last valid block height.
+Bundle result.
+Actual token balance delta.
+Actual SOL/USDC delta.
+
+Do not mark a trade successful merely because the RPC returned a signature.
+
+8. Position and exit engine
+
+A sniper that buys quickly but sells poorly is useless.
+
+Each position needs independent triggers:
+
+Hard percentage stop.
+Maximum SOL loss.
+Time stop.
+Trailing stop.
+Partial take-profit levels.
+Creator sell.
+Insider-cluster sell.
+Sudden liquidity withdrawal.
+Buyer velocity reversal.
+Sell-volume spike.
+Curve progress reversal.
+Holder concentration increase.
+Smart-wallet exit.
+Maximum price impact.
+Maximum position age.
+Global kill switch.
+
+Recommended exit state machine:
+
+OPEN
+├── TAKE_PROFIT_1
+├── TAKE_PROFIT_2
+├── TRAILING
+├── THESIS_INVALIDATED
+├── EMERGENCY_EXIT
+└── CLOSED
+
+Always retain enough SOL for associated accounts, priority fees and emergency exits. The bot should refuse a new trade if doing so would consume its transaction reserve.
+
+9. Data storage and backtesting
+
+Store both decoded data and raw evidence.
+
+Local development
+SQLite or DuckDB.
+Parquet files for transaction and feature datasets.
+Redis only if real-time shared state is needed.
+Larger deployment
+PostgreSQL for users, settings and positions.
+ClickHouse for swaps, wallet activity and time-series features.
+Redis for live state.
+Object storage for raw blocks, transactions and replay fixtures.
+Recorder schema
+launches
+tokens
+creators
+creator_history
+pools
+swaps
+wallets
+wallet_funding_edges
+wallet_clusters
+holder_snapshots
+risk_checks
+strategy_decisions
+quotes
+submitted_transactions
+transaction_results
+positions
+position_events
+provider_latency
+Backtesting requirements
+
+A realistic replay must include:
+
+Data-feed arrival delay.
+Decoder delay.
+Decision delay.
+Transaction construction delay.
+Priority fees.
+Jito tips.
+Slippage.
+Pool fees.
+Price impact.
+Failed transactions.
+Missed fills.
+Blockhash expiration.
+Confirmation delays.
+Exit liquidity.
+
+Never backtest by assuming the bot bought at the observed trade price immediately after a signal.
+
+Useful evaluation metrics:
+
+net PnL after all costs
+maximum drawdown
+rug-loss rate
+fill rate
+transaction landing rate
+median entry percentile
+median adverse excursion
+time in position
+profit by launchpad
+profit by score bucket
+profit by creator class
+PnL sensitivity to 100–1000ms delay
+
+Useful open datasets include MemeTrans and SolRPDS. SolRPDS contains more than 100,000 rows derived from billions of Solana transactions and is available under CC BY 4.0.
+
+10. Curated APIs and services
+Resource	Best use	Role
+Solana RPC/WSS	Raw state, transactions, submission	Core
+Yellowstone gRPC	Low-latency filtered streams	Core production
+Pump official SDK/IDL	Pump and PumpSwap instructions	Core
+Raydium SDK V2	Pools, swaps and liquidity	Core
+Meteora SDK/REST	DBC, DAMM and DLMM	Core
+Jupiter API	Quotes and cross-DEX routing	Core
+Jito	Bundles and transaction landing	Core
+DexScreener API	Pair enrichment, profiles and boosts	Secondary
+GeckoTerminal API	Free OHLCV and pool history	Secondary
+GoPlus	Token security and simulation	Secondary
+PumpPortal	Rapid prototyping/managed Pump feed	Optional, third party
+Bitquery	Parsed historical and real-time streams	Optional paid
+Solana Tracker	Holders, wallet PnL and market data	Optional paid
+
+PumpPortal is third-party rather than official Pump infrastructure, and its data access moved to API-key subscriptions effective May 1, 2026. Use it for prototyping or feed comparison, not as Fable’s only dependency.
+
+Bitquery offers parsed Pump, PumpSwap, Raydium, Meteora and other DEX streams through GraphQL, WebSocket, Kafka and gRPC, but it is primarily a convenience layer rather than a necessary dependency.
+
+11. RPC options
+
+For development:
+
+Chainstack free: currently advertises 3 million requests monthly, 25 RPS and WebSockets without requiring a card.
+Helius free: currently advertises 1 million credits and 10 RPS for testing. Advanced production streams and raw shreds move into expensive tiers.
+QuickNode trial: currently advertises 10 million API credits and 15 RPS, with Solana gRPC reserved for higher plans or add-ons.
+Native public Solana endpoints: acceptable for development, not the primary production sender.
+
+No paid API is required to prove the bot works. Paid infrastructure purchases lower latency, higher throughput and better transaction landing—not a profitable strategy.
+
+Fable should include a provider benchmark screen measuring:
+
+event latency
+missing-event percentage
+RPC request latency
+send-to-processed latency
+confirmation latency
+landing percentage
+429/error rate
+monthly estimated cost
+12. GitHub repositories worth studying
+Foundation and official sources
+rpcpool/yellowstone-grpc — Geyser/Yellowstone streaming.
+pump-fun/pump-public-docs — official Pump IDLs and program changes.
+raydium-io/raydium-sdk-V2 — Raydium integrations.
+raydium-io/raydium-sdk-V2-demo — practical examples and RPC pool reads.
+MeteoraAg/dlmm-sdk — Meteora DLMM.
+orca-so/whirlpools — current Orca program and SDK.
+jup-ag/jupiter-swap-api-client — official Jupiter Rust client.
+jito-labs/searcher-examples — Jito searcher and bundle examples.
+jito-labs/jito-js-rpc — Jito JavaScript JSON-RPC SDK.
+Strong reference implementations
+chainstacklabs/pumpfun-bonkfun-bot — listeners, calculations and trading examples without relying on a separate trading API.
+chainstacklabs/grpc-geyser-tutorial — Python Yellowstone examples, including Meteora monitoring.
+0xfnzero/solana-streamer — community Rust event-stream abstraction across Yellowstone, shreds and RPC.
+0xfnzero/sol-trade-sdk — community multi-DEX Rust trading SDK.
+0xfnzero/pumpfun-sdk — Pump event subscriptions and transaction construction.
+MadgicDev/solana-trade — broad protocol coverage useful for comparing adapter designs.
+ethduke/snipe_pools_solana — pool-monitoring concepts across several Solana venues.
+Research and safety
+git-disl/MemeTrans — launch-risk feature research and dataset.
+DeFiLabX/SolRPDS — Solana rug-pull dataset.
+degenfrends/solana-rugchecker — local TypeScript checks for holders, metadata and liquidity.
+
+Treat random “ultimate sniper bot” repositories as hostile until audited. Never run included binaries, never paste a funded seed phrase into them and search the entire codebase for outbound HTTP requests, private-key logging, clipboard access and hidden transaction destinations.
+
+13. Security requirements
+
+Fable should include:
+
+Separate trading hot wallet.
+Maximum wallet balance.
+Encrypted operating-system credential storage.
+No seed phrase in config files.
+No private key in logs, telemetry or crash reports.
+Transaction instruction preview.
+Destination allowlist.
+Maximum SOL per transaction.
+Maximum daily loss.
+Maximum open positions.
+Global emergency sell.
+Global disable switch.
+Automatic lock after repeated RPC or decoding errors.
+Signed application updates.
+Reproducible builds where possible.
+Dependency lockfiles and audit tooling.
+
+A third-party transaction service may return a serialized transaction, but Fable should decode and validate every program, account and transfer before signing.
+
+Also avoid scraping Pump’s website. Its terms restrict automated crawlers and bots accessing the Platform; direct on-chain RPC, published program documentation and official SDK integration are the cleaner technical path.
+
+14. What will make Fable’s bot genuinely better
+
+The strongest differentiators would be:
+
+Explainable decisions: every trade shows exactly why it passed or failed.
+Creator reputation database: locally built from historical launches.
+Cluster-adjusted holders: recognize ten wallets controlled by one actor.
+Multi-launchpad adapters: do not depend on whichever venue is temporarily popular.
+Automatic feed benchmarking: prove which provider is fastest from the user’s location.
+Migration state machine: understand bonding curve → pool transitions.
+Replay lab: test new strategies against recorded live streams.
+Actual-cost PnL: include failed fees, tips, slippage and price impact.
+Shadow mode: generate real decisions without signing.
+Fail-closed architecture: unknown instructions or program upgrades disable trading rather than guessing.
+Recommended build order
+
+Foundation: recorder, Yellowstone/native WSS, Pump decoder and transaction fixture tests.
+
+Safety: mint/extension analysis, creator history, holder concentration, wallet funding graph and sell-path validation.
+
+Execution: direct Pump/PumpSwap instructions, blockhash/fee manager, multiple send lanes and confirmation tracking.
+
+Strategy: filtered momentum, curve momentum, migration and smart-wallet strategies.
+
+Expansion: Raydium, Meteora, Bonk.fun, Orca and Jupiter routing.
+
+Intelligence: replay engine, feature store, calibrated risk model and creator/wallet reputation.
+
+The first live version should trade only Pump.fun/PumpSwap with tiny configurable positions. Multi-DEX support should come after the recorder and replay system demonstrate that the strategy remains profitable after actual latency and execution costs.
+
+A useful follow-up is a weekly watch for breaking changes in Pump, Raydium, Jupiter, Meteora, Jito and Yellowstone SDKs; tell me to set that up.

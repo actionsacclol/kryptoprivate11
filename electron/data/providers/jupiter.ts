@@ -1,0 +1,339 @@
+// Jupiter Lite API (lite-api.jup.ag) — the terminal's primary keyless
+// provider and the backbone of Discover.
+//
+// Jupiter's /tokens/v2 endpoints return, per mint and with no API key: price,
+// mcap, fdv, liquidity, holder count, holder change, 5m/1h/6h/24h buy/sell
+// counts and trader counts, ORGANIC volume (their wash/bot-filtered figure),
+// first-pool creation time, and an `audit` block carrying mint/freeze
+// authority state, top-holder percentage, dev balance percentage and the
+// number of other mints that dev has created.
+//
+// That last block is why Jupiter leads: it answers most of term.txt §6 for
+// any mint, including ones this install never watched launch. We still
+// re-verify mint and freeze authority on-chain before the security panel
+// calls them "pass" — a third-party audit flag is a hint, not a fact.
+
+import { getJson, memo } from '../http';
+import {
+  emptySummary,
+  type Launchpad,
+  type StatsWindow,
+  type TokenSummary,
+  type WindowStats,
+} from '@shared/market';
+
+// ── Wire shapes (only the fields we consume) ──────────────────────────
+
+interface JupStats {
+  priceChange?: number;
+  holderChange?: number;
+  liquidityChange?: number;
+  volumeChange?: number;
+  buyVolume?: number;
+  sellVolume?: number;
+  buyOrganicVolume?: number;
+  sellOrganicVolume?: number;
+  numBuys?: number;
+  numSells?: number;
+  numTraders?: number;
+  numOrganicBuyers?: number;
+  numNetBuyers?: number;
+}
+
+export interface JupAudit {
+  mintAuthorityDisabled?: boolean;
+  freezeAuthorityDisabled?: boolean;
+  topHoldersPercentage?: number;
+  devBalancePercentage?: number;
+  /** Total mints this dev has ever created. Verified present 2026-08-24. */
+  devMints?: number;
+  /** How many of those actually graduated — the useful half of devMints.
+   *  A dev with 8437 mints and 20 migrations is a launch farm. */
+  devMigrations?: number;
+}
+
+export interface JupToken {
+  id: string;
+  name?: string;
+  symbol?: string;
+  icon?: string;
+  decimals?: number;
+  dev?: string;
+  twitter?: string;
+  telegram?: string;
+  website?: string;
+  circSupply?: number;
+  totalSupply?: number;
+  tokenProgram?: string;
+  holderCount?: number;
+  fdv?: number;
+  mcap?: number;
+  usdPrice?: number;
+  liquidity?: number;
+  stats5m?: JupStats;
+  stats1h?: JupStats;
+  stats6h?: JupStats;
+  stats24h?: JupStats;
+  firstPool?: { id?: string; createdAt?: string };
+  audit?: JupAudit;
+  organicScore?: number;
+  organicScoreLabel?: string;
+  isVerified?: boolean;
+  tags?: string[];
+  launchpad?: string;
+  bondingCurve?: number;
+  graduatedPool?: string;
+  graduatedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// ── Mapping ───────────────────────────────────────────────────────────
+
+const num = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) ? v : null;
+
+function parseTime(v: unknown): number | null {
+  if (typeof v !== 'string' || !v) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
+}
+
+function mapStats(s: JupStats | undefined): WindowStats | undefined {
+  if (!s) return undefined;
+  const buyVol = num(s.buyVolume) ?? 0;
+  const sellVol = num(s.sellVolume) ?? 0;
+  const organic = (num(s.buyOrganicVolume) ?? 0) + (num(s.sellOrganicVolume) ?? 0);
+  return {
+    priceChangePct: num(s.priceChange),
+    volumeUsd: buyVol + sellVol,
+    buys: num(s.numBuys),
+    sells: num(s.numSells),
+    traders: num(s.numTraders),
+    organicVolumeUsd: organic > 0 ? organic : null,
+  };
+}
+
+/** Jupiter tags the launchpad on newer mints; the suffix is the fallback. */
+function detectLaunchpad(t: JupToken): Launchpad {
+  const lp = (t.launchpad ?? '').toLowerCase();
+  if (lp.includes('pump')) return 'pumpfun';
+  if (lp.includes('bonk') || lp.includes('letsbonk')) return 'bonk';
+  if (lp.includes('moonshot')) return 'moonshot';
+  if (lp.includes('believe')) return 'believe';
+  if (lp.includes('boop')) return 'boop';
+  if (lp.includes('meteora') || lp.includes('dbc')) return 'meteora';
+  if (lp.includes('raydium')) return 'raydium';
+  const id = t.id ?? '';
+  if (id.endsWith('pump')) return 'pumpfun';
+  if (id.endsWith('bonk')) return 'bonk';
+  if (id.endsWith('moon')) return 'moonshot';
+  if (id.endsWith('boop')) return 'boop';
+  return 'unknown';
+}
+
+export function toSummary(t: JupToken): TokenSummary {
+  const s = emptySummary(t.id);
+  s.name = t.name ?? '';
+  s.symbol = t.symbol ?? '';
+  s.imageUrl = t.icon ?? null;
+  s.decimals = t.decimals ?? 6;
+  s.createdAt = parseTime(t.firstPool?.createdAt) ?? parseTime(t.createdAt);
+  s.launchpad = detectLaunchpad(t);
+
+  s.priceUsd = num(t.usdPrice);
+  s.marketCapUsd = num(t.mcap);
+  s.fdvUsd = num(t.fdv);
+  s.liquidityUsd = num(t.liquidity);
+  s.circSupply = num(t.circSupply);
+  s.totalSupply = num(t.totalSupply);
+  s.holders = num(t.holderCount);
+  s.holderChange24h = num(t.stats24h?.holderChange);
+
+  for (const [win, raw] of [
+    ['5m', t.stats5m],
+    ['1h', t.stats1h],
+    ['6h', t.stats6h],
+    ['24h', t.stats24h],
+  ] as Array<[StatsWindow, JupStats | undefined]>) {
+    const mapped = mapStats(raw);
+    if (mapped) s.stats[win] = mapped;
+  }
+
+  // Jupiter does NOT expose bonding-curve progress (checked 2026-08-24) —
+  // it comes from pump.fun's virtual reserves or our own curve math. The
+  // field is read defensively in case it appears later.
+  const curve = num(t.bondingCurve);
+  s.bondingCurvePct = curve === null ? null : curve <= 1 ? curve * 100 : curve;
+  s.poolAddress = t.graduatedPool ?? t.firstPool?.id ?? null;
+
+  s.top10Pct = num(t.audit?.topHoldersPercentage);
+  s.devHoldingPct = num(t.audit?.devBalancePercentage);
+  s.creator = t.dev ?? null;
+  // Cross-launchpad creator record. Null when Jupiter omits it — a dev
+  // Jupiter has not counted is not a dev with zero launches.
+  s.audit.devMints = num(t.audit?.devMints);
+  s.audit.devMigrations = num(t.audit?.devMigrations);
+
+  s.socials = {
+    twitter: t.twitter ?? null,
+    telegram: t.telegram ?? null,
+    website: t.website ?? null,
+    dexPaid: false, // DexScreener owns this field
+  };
+
+  s.sources = {
+    price: 'jupiter',
+    marketCap: 'jupiter',
+    liquidity: 'jupiter',
+    holders: 'jupiter',
+    concentration: t.audit?.topHoldersPercentage === undefined ? 'none' : 'jupiter',
+    socials: 'jupiter',
+  };
+  s.fetchedAt = Date.now();
+  return s;
+}
+
+// ── Endpoints ─────────────────────────────────────────────────────────
+
+const TTL_LIST = 6_000;
+const TTL_TOKEN = 8_000;
+
+async function list(path: string, key: string, ttl: number): Promise<JupToken[]> {
+  const hit = await memo<JupToken[]>(key, ttl, async () => {
+    const r = await getJson<JupToken[]>('jupiter', path);
+    if (!r.ok || !Array.isArray(r.data)) return null;
+    return r.data;
+  });
+  return hit ?? [];
+}
+
+/** Newest mints Jupiter has indexed. Powers the NEW column's non-pump rows. */
+export function recent(limit = 40): Promise<JupToken[]> {
+  return list(`/tokens/v2/recent?limit=${Math.min(100, Math.max(1, limit))}`, `jup:recent:${limit}`, TTL_LIST);
+}
+
+/** Most-traded over a window. Powers TRENDING. */
+export function topTraded(window: '5m' | '1h' | '6h' | '24h', limit = 40): Promise<JupToken[]> {
+  return list(
+    `/tokens/v2/toptraded/${window}?limit=${Math.min(100, Math.max(1, limit))}`,
+    `jup:toptraded:${window}:${limit}`,
+    TTL_LIST,
+  );
+}
+
+/** Highest organic (wash-filtered) score. The quality half of TRENDING. */
+export function topOrganic(window: '5m' | '1h' | '6h' | '24h', limit = 40): Promise<JupToken[]> {
+  return list(
+    `/tokens/v2/toporganicscore/${window}?limit=${Math.min(100, Math.max(1, limit))}`,
+    `jup:toporganic:${window}:${limit}`,
+    TTL_LIST,
+  );
+}
+
+/** Free-text or mint search. Also the cheapest way to enrich a known mint. */
+export function search(query: string): Promise<JupToken[]> {
+  const q = query.trim().slice(0, 100);
+  if (!q) return Promise.resolve([]);
+  return list(`/tokens/v2/search?query=${encodeURIComponent(q)}`, `jup:search:${q}`, TTL_TOKEN);
+}
+
+/**
+ * Enrich up to 100 mints in ONE request. `search` accepts a comma-separated
+ * list of addresses, which is how a Discover column of pump.fun rows gets
+ * holder counts and audit flags without 40 separate calls.
+ */
+export async function byMints(mints: string[]): Promise<Map<string, JupToken>> {
+  const out = new Map<string, JupToken>();
+  const unique = [...new Set(mints.filter(Boolean))];
+  for (let i = 0; i < unique.length; i += 100) {
+    const batch = unique.slice(i, i + 100);
+    const rows = await list(
+      `/tokens/v2/search?query=${encodeURIComponent(batch.join(','))}`,
+      `jup:batch:${batch[0]}:${batch.length}`,
+      TTL_TOKEN,
+    );
+    for (const t of rows) if (t?.id) out.set(t.id, t);
+  }
+  return out;
+}
+
+/** USD price for arbitrary mints — used for the SOL/USD conversion. */
+export async function prices(mints: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const unique = [...new Set(mints.filter(Boolean))].slice(0, 50);
+  if (!unique.length) return out;
+  const r = await getJson<Record<string, { usdPrice?: number }>>(
+    'jupiter',
+    `/price/v3?ids=${unique.join(',')}`,
+  );
+  if (!r.ok || !r.data) return out;
+  for (const [mint, v] of Object.entries(r.data)) {
+    const p = num(v?.usdPrice);
+    if (p !== null) out.set(mint, p);
+  }
+  return out;
+}
+
+// ── Shield ────────────────────────────────────────────────────────────
+
+export interface ShieldVerdict {
+  /** True on a NOT_SELLABLE warning; false on a 200 without one; null when
+   *  Shield did not answer — silence is not "sellable". */
+  notSellable: boolean | null;
+  /** Warning types as Jupiter names them (NOT_VERIFIED, NEW_LISTING, ...). */
+  warnings: string[];
+}
+
+interface ShieldWarning {
+  type?: string;
+  message?: string;
+  severity?: string;
+}
+
+const TTL_SHIELD = 30_000;
+
+/**
+ * Jupiter Shield — per-mint warnings, batched up to 100 per call. Verified
+ * 2026-08-30: ~300 ms for 6 mints; NOT_SELLABLE is `critical`, the rest
+ * (NOT_VERIFIED, LOW_ORGANIC_ACTIVITY, NEW_LISTING) are `info`.
+ *
+ * A 200 answers for EVERY requested mint: one absent from the map has no
+ * warnings. A non-200 answers for none, and every mint gets null.
+ */
+export async function shield(mints: string[]): Promise<Map<string, ShieldVerdict>> {
+  const out = new Map<string, ShieldVerdict>();
+  const unique = [...new Set(mints.filter(Boolean))];
+  for (let i = 0; i < unique.length; i += 100) {
+    const batch = unique.slice(i, i + 100);
+    const hit = await memo<Record<string, ShieldWarning[]>>(`jup:shield:${batch.join(',')}`, TTL_SHIELD, async () => {
+      const r = await getJson<{ warnings?: Record<string, ShieldWarning[]> }>(
+        'jupiter',
+        `/ultra/v1/shield?mints=${encodeURIComponent(batch.join(','))}`,
+      );
+      if (!r.ok || !r.data || typeof r.data !== 'object') return null;
+      const w = r.data.warnings;
+      return w && typeof w === 'object' ? w : {};
+    });
+    for (const m of batch) {
+      if (!hit) {
+        out.set(m, { notSellable: null, warnings: [] });
+        continue;
+      }
+      const list = Array.isArray(hit[m]) ? hit[m] : [];
+      const types = list.map((x) => (typeof x?.type === 'string' ? x.type : '')).filter(Boolean);
+      out.set(m, { notSellable: types.includes('NOT_SELLABLE'), warnings: types });
+    }
+  }
+  return out;
+}
+
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
+/** SOL/USD, cached for 20s. Every SOL-denominated display depends on it. */
+export async function solUsd(): Promise<number | null> {
+  return memo<number>('jup:solusd', 20_000, async () => {
+    const p = await prices([WSOL_MINT]);
+    return p.get(WSOL_MINT) ?? null;
+  });
+}

@@ -1,0 +1,1282 @@
+You are building **Fable Sniper**, a production-minded, Solana-first memecoin launch monitoring and automated trading application.
+
+This is not a toy script and not a blind “buy every new token” bot. The goal is to create a well-structured foundation for a low-latency launch-detection, token-risk-analysis, strategy-testing, and execution system that can eventually support Pump.fun, PumpSwap, Raydium, Meteora, Bonk.fun, Jupiter, and other Solana venues.
+
+The first version must prioritize:
+
+1. Correctness.
+2. Safety.
+3. Observability.
+4. Replayability.
+5. Modular protocol support.
+6. Paper trading before live trading.
+7. Explainable strategy decisions.
+8. Fail-closed behavior when data is unknown or outdated.
+
+Do not claim profitability. Do not implement sandwich attacks, front-running of specific users, market manipulation, wash trading, spoofing, or any system intended to harm other traders.
+
+## Primary objective
+
+Create a strong first working version that:
+
+* Connects to Solana.
+* Detects new Pump.fun launches directly from on-chain activity.
+* Decodes supported Pump.fun events and accounts.
+* Performs local token and creator risk checks.
+* Tracks early buys, sells, holders, and bonding-curve activity.
+* Calculates an explainable launch score.
+* Runs in paper-trading and shadow modes.
+* Records raw and decoded events for replay.
+* Includes a modular execution interface, but keeps real-money trading disabled by default.
+* Provides a clean desktop dashboard for monitoring launches and decisions.
+
+Do not attempt to implement every launchpad in the first pass. Build the architecture so additional protocol adapters can be added cleanly.
+
+## Preferred technology stack
+
+Use:
+
+* Rust for the core engine.
+* Tokio for asynchronous tasks.
+* Tauri or Electron only for the desktop shell, with preference for Electron if integration is more straightforward.
+* React.
+* TypeScript.
+* Vite.
+* SQLite for initial local storage.
+* SQLx for Rust database access.
+* Serde for serialization.
+* Tracing for structured logs.
+* Reqwest for HTTP.
+* Solana Rust SDK crates where appropriate.
+* Native Solana WebSocket subscriptions for the free development feed.
+* A provider abstraction that can later support Yellowstone gRPC.
+* Vitest for frontend testing.
+* Rust unit and integration tests for the engine.
+
+Keep all signing, strategy execution, event decoding, wallet handling, and risk analysis in the Rust engine. The frontend must not be part of the latency-sensitive execution path.
+
+## Important implementation rule
+
+Before writing protocol-specific decoding logic, research and verify the current official sources.
+
+Use current official documentation and repositories wherever possible:
+
+* Solana RPC and WebSocket documentation.
+* Pump.fun public documentation and current IDLs.
+* Pump.fun and PumpSwap program details.
+* Yellowstone gRPC documentation.
+* Raydium SDK V2.
+* Meteora SDKs.
+* Jupiter swap documentation.
+* Jito transaction and bundle documentation.
+
+Do not copy random GitHub bot code without reviewing it.
+
+When using a community repository:
+
+* Inspect its license.
+* Inspect its dependencies.
+* Verify account layouts against current official IDLs.
+* Check for outdated program IDs.
+* Check for hidden outbound requests.
+* Check for wallet or key logging.
+* Check for hardcoded fee-recipient addresses.
+* Check whether returned transactions contain unexpected instructions.
+
+Create a `RESEARCH.md` file documenting:
+
+* Sources reviewed.
+* Official program IDs.
+* Current instruction names.
+* Current account layouts.
+* Repository licenses.
+* Information that still requires verification.
+* Assumptions made during implementation.
+* Any protocol details likely to change.
+
+Do not guess account layouts. If a current layout cannot be verified, create a clearly labeled stub and fail closed.
+
+# Architecture
+
+Structure the project as a workspace similar to:
+
+```text
+fable-sniper/
+├── apps/
+│   └── desktop/
+│       ├── src/
+│       ├── electron/
+│       └── package.json
+├── crates/
+│   ├── fable-core/
+│   ├── fable-chain/
+│   ├── fable-protocols/
+│   ├── fable-risk/
+│   ├── fable-strategy/
+│   ├── fable-execution/
+│   ├── fable-storage/
+│   └── fable-replay/
+├── fixtures/
+│   ├── transactions/
+│   ├── accounts/
+│   └── expected-events/
+├── config/
+│   ├── default.toml
+│   └── development.toml
+├── migrations/
+├── scripts/
+├── RESEARCH.md
+├── SECURITY.md
+├── ARCHITECTURE.md
+├── ROADMAP.md
+└── README.md
+```
+
+Exact names may change when justified, but maintain clear separation between:
+
+* Chain transport.
+* Protocol decoding.
+* Risk analysis.
+* Strategy decisions.
+* Execution.
+* Storage.
+* Replay.
+* User interface.
+
+# Core data flow
+
+Implement the system around this flow:
+
+```text
+Solana event sources
+    ↓
+Normalized chain events
+    ↓
+Protocol adapters
+    ↓
+Token and market state
+    ↓
+Deterministic hard-risk filters
+    ↓
+Opportunity scoring
+    ↓
+Strategy state machine
+    ↓
+Paper execution or live execution
+    ↓
+Confirmation and position manager
+    ↓
+Recorder and replay system
+```
+
+# Chain data provider abstraction
+
+Create a trait such as:
+
+```rust
+#[async_trait]
+pub trait ChainDataProvider {
+    async fn start(&self, sender: EventSender) -> Result<()>;
+    async fn health(&self) -> ProviderHealth;
+    async fn reconnect(&self) -> Result<()>;
+}
+```
+
+Initial providers:
+
+1. `SolanaWebsocketProvider`
+2. `SolanaRpcBackfillProvider`
+3. A compile-safe `YellowstoneGrpcProvider` interface or feature-gated implementation
+
+The WebSocket provider should support:
+
+* `logsSubscribe`
+* `programSubscribe`
+* `signatureSubscribe`
+* Slot subscriptions
+* Reconnection
+* Exponential backoff
+* Subscription restoration
+* Duplicate suppression
+* Slot-gap detection
+* RPC backfill after gaps
+* Provider health metrics
+
+Record:
+
+* Chain slot.
+* Signature.
+* Transaction index where available.
+* Chain timestamp where available.
+* Local provider receive timestamp.
+* Decode completion timestamp.
+* Strategy decision timestamp.
+* Submission timestamp.
+* Confirmation timestamp.
+
+Use monotonic local clocks for latency measurements where appropriate.
+
+# Normalized events
+
+Create strongly typed normalized events such as:
+
+```rust
+pub enum ChainEvent {
+    SlotUpdate(SlotUpdate),
+    TransactionObserved(TransactionObserved),
+    AccountUpdated(AccountUpdated),
+    ProtocolEvent(ProtocolEvent),
+    ProviderStatus(ProviderStatus),
+}
+```
+
+Protocol events should include:
+
+```rust
+pub enum ProtocolEvent {
+    TokenCreated(TokenCreatedEvent),
+    Buy(TradeEvent),
+    Sell(TradeEvent),
+    CurveUpdated(CurveUpdateEvent),
+    CurveCompleted(CurveCompletedEvent),
+    PoolCreated(PoolCreatedEvent),
+    LiquidityChanged(LiquidityChangedEvent),
+    MigrationDetected(MigrationEvent),
+}
+```
+
+Each event must retain enough source information to trace it back to:
+
+* Signature.
+* Slot.
+* Instruction index.
+* Inner-instruction index.
+* Program ID.
+* Raw account keys.
+* Raw instruction data or a reference to stored raw data.
+
+# Protocol adapter system
+
+Create a trait similar to:
+
+```rust
+pub trait ProtocolAdapter: Send + Sync {
+    fn protocol_name(&self) -> &'static str;
+    fn supported_program_ids(&self) -> &[Pubkey];
+    fn decode_transaction(
+        &self,
+        transaction: &ObservedTransaction,
+    ) -> Result<Vec<ProtocolEvent>>;
+}
+```
+
+Implement a first `PumpFunAdapter`.
+
+Prepare interfaces for:
+
+* `PumpSwapAdapter`
+* `RaydiumLaunchLabAdapter`
+* `RaydiumCpmmAdapter`
+* `MeteoraDbcAdapter`
+* `MeteoraDlmmAdapter`
+* `GenericPoolAdapter`
+
+Do not implement fake or guessed decoding for unsupported adapters. Use explicit `NotImplemented` status.
+
+# Pump.fun first implementation
+
+Research and use the current official Pump.fun program documentation and IDLs.
+
+The first adapter should attempt to support verified versions of:
+
+* Token creation.
+* Buy.
+* Sell.
+* Bonding-curve account updates.
+* Curve completion.
+* Creator address.
+* Quote mint.
+* Initial creator buy.
+* Virtual and real reserves.
+* Token supply.
+* Fee-related accounts where applicable.
+
+The code must be able to handle unknown discriminator values safely.
+
+Unknown instruction or account layouts must:
+
+* Produce a structured warning.
+* Save the raw transaction.
+* Mark the token or event as unsupported.
+* Prevent automatic live trading.
+* Not crash the entire process.
+
+Create fixture-based decoder tests using real public transaction data.
+
+Each fixture test should contain:
+
+* Raw transaction JSON or binary representation.
+* Expected decoded event.
+* Program version or observation date.
+* Expected account mappings.
+* Expected numeric values.
+* A test proving malformed data does not panic.
+
+# State engine
+
+Create an in-memory state engine that tracks:
+
+## Token state
+
+* Mint address.
+* Creator.
+* Protocol.
+* Creation slot.
+* Creation timestamp.
+* Quote mint.
+* Current reserves.
+* Curve progress.
+* Estimated price.
+* Market capitalization estimate.
+* Total buy volume.
+* Total sell volume.
+* Net inflow.
+* Unique buyers.
+* Unique sellers.
+* Creator buy amount.
+* Creator sell amount.
+* Current holder concentration.
+* Risk status.
+* Opportunity score.
+* Current strategy state.
+
+## Wallet state
+
+* First seen slot.
+* Funding source when known.
+* Buy count.
+* Sell count.
+* Tokens traded.
+* Realized and unrealized performance placeholders.
+* Creator association.
+* Wallet-cluster ID.
+* Known-risk labels.
+* Smart-wallet score placeholder.
+
+## Creator state
+
+* Prior launches.
+* Prior completed curves.
+* Estimated survival rate.
+* Estimated rug rate.
+* Median time to first creator sell.
+* Median launch lifetime.
+* Prior blacklist associations.
+* Reused metadata.
+* Reused funding source.
+
+Historical creator calculations can initially be incomplete, but design the schema and service interfaces correctly.
+
+# Risk engine
+
+Implement deterministic hard filters before opportunity scoring.
+
+Create a result format similar to:
+
+```rust
+pub struct RiskAssessment {
+    pub verdict: RiskVerdict,
+    pub checks: Vec<RiskCheckResult>,
+    pub risk_score: f64,
+    pub blocking_reasons: Vec<String>,
+    pub warnings: Vec<String>,
+}
+```
+
+Verdicts:
+
+```rust
+pub enum RiskVerdict {
+    Pass,
+    Warning,
+    Block,
+    Unsupported,
+}
+```
+
+Initial checks should include:
+
+* Mint authority still active.
+* Freeze authority still active.
+* Token program type.
+* Token-2022 extension detection.
+* Transfer hook detection.
+* Permanent delegate detection.
+* Default frozen-account state.
+* Transfer-fee extension.
+* Unexpected mint-close authority.
+* Unsupported extension combinations.
+* Creator supply percentage.
+* Top-holder concentration.
+* Cluster-adjusted holder concentration.
+* Creator currently selling.
+* Initial liquidity or reserves below threshold.
+* Quote asset not allowlisted.
+* Sell transaction cannot be constructed.
+* Sell transaction simulation failure.
+* Blacklisted creator.
+* Blacklisted funding wallet.
+* Unknown protocol version.
+* Malformed metadata.
+* Duplicate or suspicious metadata.
+* Excessive price impact.
+
+For the first version, fail closed on unusual Token-2022 extensions.
+
+Make all thresholds configurable.
+
+Do not rely only on third-party token-risk APIs. Define optional provider interfaces for GoPlus, RugCheck, or similar services, but local deterministic checks must remain primary.
+
+Third-party checks must:
+
+* Use timeouts.
+* Be cached.
+* Be treated as potentially delayed.
+* Never receive private keys.
+* Never block the entire event pipeline.
+* Clearly state their source and timestamp.
+
+# Wallet clustering
+
+Create a basic wallet-relationship graph.
+
+Track edges for:
+
+* Direct transfers.
+* Common funding wallet.
+* Same funding transaction.
+* Creator-to-buyer transfers.
+* Buyer-to-buyer transfers.
+* Repeated early-buyer co-occurrence.
+* Identical trade amount and timing patterns.
+
+The initial clustering algorithm may use deterministic heuristics.
+
+Do not treat clustering as proof that wallets belong to the same person. Express it as a confidence score.
+
+Example:
+
+```rust
+pub struct WalletClusterEvidence {
+    pub wallet_a: Pubkey,
+    pub wallet_b: Pubkey,
+    pub confidence: f64,
+    pub reasons: Vec<ClusterReason>,
+}
+```
+
+# Opportunity scoring
+
+Implement an explainable score from 0 to 100.
+
+Separate:
+
+1. Static launch score.
+2. Live-flow score.
+3. Risk penalties.
+4. Final score.
+
+Example categories:
+
+* Token safety.
+* Creator reputation.
+* Distribution quality.
+* Live order flow.
+* Liquidity quality.
+* Metadata and social quality.
+* Smart-wallet participation.
+* Manipulation penalties.
+
+Do not hardcode undocumented magic numbers throughout the code. Put weights and thresholds in configuration.
+
+Return detailed score components:
+
+```rust
+pub struct OpportunityScore {
+    pub total: f64,
+    pub token_safety: ScoreComponent,
+    pub creator_reputation: ScoreComponent,
+    pub distribution_quality: ScoreComponent,
+    pub live_order_flow: ScoreComponent,
+    pub liquidity_quality: ScoreComponent,
+    pub metadata_quality: ScoreComponent,
+    pub smart_wallet_activity: ScoreComponent,
+    pub penalties: Vec<ScorePenalty>,
+}
+```
+
+Every component should include:
+
+* Raw value.
+* Normalized score.
+* Weight.
+* Human-readable explanation.
+* Supporting measurements.
+
+# Live-flow features
+
+Calculate rolling windows such as:
+
+* 1 second.
+* 3 seconds.
+* 5 seconds.
+* 10 seconds.
+* 30 seconds.
+* 60 seconds.
+
+Features:
+
+* Unique buyer acceleration.
+* Cluster-adjusted buyer acceleration.
+* Buy count.
+* Sell count.
+* Buy volume.
+* Sell volume.
+* Net quote inflow.
+* Buy-to-sell ratio.
+* Median trade size.
+* Largest trade percentage.
+* Price acceleration.
+* Curve-progress velocity.
+* Creator behavior.
+* Early-buyer selling.
+* Holder concentration change.
+* Transaction failure rate.
+* Organic-buyer estimate.
+* Coordinated-wallet activity.
+
+Make the rolling feature engine efficient and independently testable.
+
+# Strategy framework
+
+Create a trait such as:
+
+```rust
+pub trait Strategy: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn evaluate(
+        &self,
+        context: &StrategyContext,
+    ) -> StrategyDecision;
+}
+```
+
+Decisions:
+
+```rust
+pub enum StrategyDecision {
+    Ignore,
+    Watch,
+    Enter(EntryIntent),
+    Increase(PositionAdjustment),
+    Reduce(PositionAdjustment),
+    Exit(ExitIntent),
+    Block(String),
+}
+```
+
+Implement these strategies initially:
+
+## 1. Filtered early momentum
+
+This should be the default.
+
+Possible entry requirements:
+
+* Risk verdict passes.
+* Minimum number of organic buyers.
+* Minimum net quote inflow.
+* No creator sell.
+* Cluster-adjusted concentration below threshold.
+* Buyer acceleration above threshold.
+* Estimated price impact below threshold.
+* Opportunity score above threshold.
+
+## 2. Shadow launch sniper
+
+Evaluates what would have happened if the bot bought immediately after creation, but never sends a live transaction.
+
+Use this to compare immediate entry against filtered momentum.
+
+## 3. Curve momentum
+
+Watches curve progress and enters when:
+
+* Buyer velocity is increasing.
+* Net inflow is positive.
+* Holder distribution is improving.
+* Creator is not selling.
+* No one wallet dominates volume.
+
+## 4. Graduation watcher
+
+Detect curve completion and prepare for a later PumpSwap migration implementation.
+
+The first version can record graduation signals without performing a live migration trade.
+
+# Strategy state machine
+
+Create explicit states:
+
+```rust
+pub enum TokenStrategyState {
+    Detected,
+    Evaluating,
+    Watching,
+    EntryEligible,
+    PaperPositionOpen,
+    LivePositionOpen,
+    ExitPending,
+    Closed,
+    Blocked,
+    Unsupported,
+}
+```
+
+State transitions must be persisted and logged.
+
+# Execution system
+
+Create an execution abstraction:
+
+```rust
+#[async_trait]
+pub trait ExecutionProvider {
+    async fn quote(&self, intent: &TradeIntent) -> Result<ExecutionQuote>;
+    async fn simulate(&self, transaction: &PreparedTransaction) -> Result<SimulationResult>;
+    async fn submit(&self, transaction: &PreparedTransaction) -> Result<SubmissionResult>;
+    async fn confirm(&self, submission: &SubmissionResult) -> Result<ConfirmationResult>;
+}
+```
+
+Initial implementations:
+
+* `PaperExecutionProvider`
+* `ShadowExecutionProvider`
+* `DisabledLiveExecutionProvider`
+
+The live provider should initially be disabled behind:
+
+* A compile-time feature flag.
+* A configuration flag.
+* A deliberate user confirmation.
+* Wallet balance limits.
+* Per-trade limits.
+* Daily-loss limits.
+
+Do not enable live trading by default.
+
+The paper engine should model:
+
+* Strategy decision time.
+* Configurable network latency.
+* Configurable construction latency.
+* Configurable submission latency.
+* Slippage.
+* Price impact.
+* Pool or protocol fees.
+* Priority fee.
+* Jito tip placeholder.
+* Failed transaction probability.
+* Blockhash expiration.
+* Missed fills.
+
+Do not assume a fill at the exact observed market price.
+
+# Future live transaction architecture
+
+Prepare interfaces for:
+
+* Direct Pump.fun instructions.
+* Direct PumpSwap instructions.
+* Jupiter-routed swaps.
+* Multiple RPC send lanes.
+* Jito submission.
+* Compute-unit limits.
+* Compute-unit pricing.
+* Recent priority-fee estimates.
+* Versioned transactions.
+* Address lookup tables.
+* Blockhash cache.
+* Confirmation tracking.
+
+Do not implement unsafe live signing until all transaction instructions can be decoded and validated before signing.
+
+Every future live transaction must be validated against:
+
+* Allowed program IDs.
+* Allowed transfer destinations.
+* Maximum quote amount.
+* Maximum fees.
+* Maximum price impact.
+* Expected mint.
+* Expected token account.
+* No unexpected SOL transfers.
+* No unexpected token approvals.
+* No unexpected permanent delegates.
+* No unknown instructions.
+
+# Wallet security
+
+Create a `WalletProvider` abstraction.
+
+Initial providers:
+
+* `NoWalletProvider`
+* `ReadOnlyWalletProvider`
+* Future `OsKeychainWalletProvider`
+
+Rules:
+
+* Never store a seed phrase in plaintext.
+* Never log a private key.
+* Never put a private key in frontend state.
+* Never include a private key in crash reports.
+* Never send a private key to an API.
+* Never ask the user to paste a seed phrase into an unencrypted config file.
+* Do not support arbitrary remote transaction signing.
+* Use a separate hot wallet with configurable maximum balance.
+
+Include a prominent `SECURITY.md`.
+
+# Position manager
+
+Implement paper positions with:
+
+* Entry price.
+* Effective fill price.
+* Entry time.
+* Entry slot.
+* Token amount.
+* Quote amount.
+* Current mark price.
+* Realized PnL.
+* Unrealized PnL.
+* Maximum favorable excursion.
+* Maximum adverse excursion.
+* Exit reason.
+* Strategy name.
+* Risk score at entry.
+* Opportunity score at entry.
+
+Exit triggers:
+
+* Hard stop loss.
+* Maximum quote loss.
+* Time stop.
+* Trailing stop.
+* Partial take profit.
+* Creator sell.
+* Cluster sell.
+* Buyer-velocity reversal.
+* Sell-volume spike.
+* Liquidity reduction.
+* Maximum position age.
+* Global kill switch.
+
+Implement configurable partial exits.
+
+Example states:
+
+```rust
+pub enum PositionState {
+    Open,
+    TakeProfitOne,
+    TakeProfitTwo,
+    Trailing,
+    ThesisInvalidated,
+    EmergencyExit,
+    Closed,
+}
+```
+
+# Storage
+
+Use SQLite initially.
+
+Create migrations for:
+
+* Raw chain events.
+* Decoded protocol events.
+* Tokens.
+* Creators.
+* Wallets.
+* Wallet funding edges.
+* Wallet clusters.
+* Trades.
+* Pools.
+* Holder snapshots.
+* Risk assessments.
+* Opportunity scores.
+* Strategy decisions.
+* Paper orders.
+* Paper fills.
+* Positions.
+* Position events.
+* Provider health.
+* Latency metrics.
+* Application settings.
+
+Raw events must be retained so decoding logic can be replayed after an adapter update.
+
+Store large raw payloads efficiently. Compression may be added when justified.
+
+# Replay engine
+
+The replay engine is a first-class feature.
+
+It should:
+
+* Read recorded raw and normalized events.
+* Replay them in original ordering.
+* Preserve relative timing.
+* Support accelerated playback.
+* Support deterministic strategy tests.
+* Allow changing strategy configuration.
+* Recalculate risk and opportunity scores.
+* Produce comparative results.
+
+Add a CLI command similar to:
+
+```bash
+cargo run -p fable-replay -- \
+  --session sessions/example-session.json \
+  --strategy filtered-momentum \
+  --speed 20
+```
+
+Replay output should include:
+
+* Number of launches.
+* Number blocked.
+* Number watched.
+* Number entered.
+* Number exited.
+* Net paper PnL.
+* Maximum drawdown.
+* Fill rate.
+* Estimated fees.
+* Rug-loss rate.
+* Results by score bucket.
+* Results by strategy.
+* Sensitivity to added latency.
+
+# Desktop application
+
+Build a clean, dark, modern interface.
+
+Do not make it look like a casino.
+
+Primary screens:
+
+## Live feed
+
+Show:
+
+* Token.
+* Mint.
+* Creator.
+* Protocol.
+* Age.
+* Curve progress.
+* Buyers.
+* Sellers.
+* Net inflow.
+* Risk verdict.
+* Opportunity score.
+* Strategy state.
+* Current paper position.
+
+## Token detail
+
+Show:
+
+* Price and curve timeline.
+* Buy and sell activity.
+* Holder concentration.
+* Cluster-adjusted concentration.
+* Creator information.
+* Creator prior launches.
+* Risk checks.
+* Score breakdown.
+* Strategy decisions.
+* Raw transaction references.
+* Event timeline.
+* Paper-trade results.
+
+## Positions
+
+Show:
+
+* Open positions.
+* Entry.
+* Current mark.
+* PnL.
+* Stop.
+* Take-profit levels.
+* Exit reason.
+* Strategy.
+* Risk score.
+* Score at entry.
+
+## Replay lab
+
+Allow:
+
+* Session selection.
+* Strategy selection.
+* Threshold editing.
+* Replay speed.
+* Latency simulation.
+* Fee simulation.
+* Results comparison.
+
+## Providers
+
+Show:
+
+* Connection status.
+* Current slot.
+* Event delay.
+* RPC latency.
+* Reconnect count.
+* Missing-slot detection.
+* Rate-limit errors.
+* Submission success placeholder.
+
+## Settings
+
+Sections:
+
+* RPC endpoints.
+* WebSocket endpoints.
+* Strategy thresholds.
+* Risk thresholds.
+* Paper execution assumptions.
+* Position sizing.
+* Daily-loss limit.
+* Logging.
+* Data retention.
+* Developer mode.
+
+Never expose private keys in the UI.
+
+# Configuration
+
+Use TOML or YAML with typed validation.
+
+Example configuration:
+
+```toml
+[network]
+cluster = "mainnet-beta"
+rpc_url = ""
+websocket_url = ""
+
+[trading]
+mode = "paper"
+max_quote_per_trade = 0.05
+max_open_positions = 3
+daily_loss_limit = 0.15
+reserve_sol = 0.03
+
+[risk]
+block_active_mint_authority = true
+block_active_freeze_authority = true
+block_unknown_token_2022_extensions = true
+max_creator_supply_percent = 10.0
+max_top_10_clustered_percent = 45.0
+minimum_quote_reserves = 1.0
+
+[strategy.filtered_momentum]
+enabled = true
+minimum_score = 72.0
+minimum_organic_buyers = 8
+minimum_net_inflow = 1.5
+maximum_price_impact_percent = 5.0
+evaluation_window_ms = 5000
+
+[paper]
+base_network_latency_ms = 250
+transaction_build_latency_ms = 20
+slippage_bps = 300
+priority_fee_lamports = 100000
+failed_transaction_probability = 0.02
+```
+
+Validate configuration at startup and refuse unsafe values.
+
+# Logging and observability
+
+Use structured logging.
+
+Include fields such as:
+
+* Token mint.
+* Creator.
+* Signature.
+* Slot.
+* Protocol.
+* Strategy.
+* Risk verdict.
+* Opportunity score.
+* Decision.
+* Position ID.
+* Provider.
+* Latency.
+
+Add:
+
+* Human-readable logs.
+* JSON logs.
+* Log rotation.
+* Configurable verbosity.
+* A UI log viewer.
+* Exportable debugging bundle with secrets removed.
+
+Metrics:
+
+* Events received.
+* Events decoded.
+* Decode failures.
+* Slot gaps.
+* Provider reconnects.
+* Tokens detected.
+* Tokens blocked.
+* Strategy evaluations.
+* Paper entries.
+* Paper exits.
+* Average event latency.
+* P50, P90, and P99 event latency.
+* Database write latency.
+* Queue depth.
+* Dropped events.
+
+# Concurrency and reliability
+
+Use bounded channels and explicit backpressure.
+
+Separate tasks for:
+
+* Provider ingest.
+* Raw persistence.
+* Decoding.
+* State updates.
+* Risk evaluation.
+* Strategy evaluation.
+* Paper execution.
+* Position monitoring.
+* UI event publishing.
+
+Do not let slow UI rendering block event ingestion.
+
+Add graceful shutdown:
+
+* Stop accepting new work.
+* Flush event queues.
+* Persist pending state.
+* Close database connections.
+* Write final provider metrics.
+
+The application must recover from:
+
+* WebSocket disconnects.
+* RPC timeouts.
+* Malformed events.
+* Unknown instructions.
+* Database-lock errors.
+* Partial event sequences.
+* Duplicate events.
+* Out-of-order events.
+* Frontend restarts.
+
+# Testing requirements
+
+Write meaningful tests.
+
+## Unit tests
+
+* Pump discriminator parsing.
+* Integer and decimal calculations.
+* Curve-progress calculations.
+* Price estimation.
+* Holder concentration.
+* Cluster-adjusted concentration.
+* Risk rules.
+* Score normalization.
+* Rolling feature windows.
+* Strategy conditions.
+* Position exit triggers.
+* Paper fill calculations.
+
+## Fixture tests
+
+* Real token creation.
+* Real buy.
+* Real sell.
+* Curve completion where available.
+* Unknown discriminator.
+* Truncated transaction.
+* Missing account.
+* Duplicate event.
+* Out-of-order event.
+
+## Integration tests
+
+* WebSocket event to database.
+* Raw event to decoded event.
+* Decoded event to strategy decision.
+* Strategy decision to paper position.
+* Replay determinism.
+* Application restart and state recovery.
+
+## Property tests where useful
+
+Test that:
+
+* Risk checks never panic on arbitrary bytes.
+* Price calculations do not overflow.
+* Negative balances cannot occur.
+* Position size never exceeds configured maximum.
+* Live execution cannot activate without all required flags.
+
+# Documentation
+
+Create:
+
+## README.md
+
+Include:
+
+* What the project currently does.
+* What it does not yet do.
+* Setup instructions.
+* Development commands.
+* Paper mode explanation.
+* Risk disclaimer.
+* Screenshots placeholder.
+* Architecture summary.
+
+## ARCHITECTURE.md
+
+Include:
+
+* Component diagram.
+* Event flow.
+* Provider abstraction.
+* Adapter abstraction.
+* Strategy abstraction.
+* Execution abstraction.
+* Storage design.
+* Replay design.
+* Failure handling.
+
+## RESEARCH.md
+
+Include all verified protocol research and sources.
+
+## SECURITY.md
+
+Include:
+
+* Threat model.
+* Wallet-safety rules.
+* Transaction-validation model.
+* Dependency-audit guidance.
+* Reporting process.
+* Known limitations.
+
+## ROADMAP.md
+
+Separate:
+
+* Completed.
+* Current milestone.
+* Next milestone.
+* Long-term work.
+
+# Initial milestone
+
+The first milestone is complete only when all of the following work:
+
+1. The desktop application launches.
+2. The Rust engine connects to a configurable Solana WebSocket endpoint.
+3. Program logs and slots can be received.
+4. Pump.fun-related transactions are detected.
+5. Verified Pump.fun events are decoded.
+6. Raw events are saved to SQLite.
+7. Tokens appear in the desktop live feed.
+8. Risk checks run and show explanations.
+9. Opportunity scores show component explanations.
+10. Filtered momentum strategy produces shadow or paper decisions.
+11. Paper positions can open and close.
+12. Replay can rerun a recorded session.
+13. Tests pass.
+14. Live trading remains disabled.
+15. Unknown protocol data fails closed.
+16. No private key is required.
+
+# Working method
+
+Before coding:
+
+1. Inspect the existing repository.
+2. Document the current structure.
+3. Identify reusable code.
+4. Verify current protocol information.
+5. Write `RESEARCH.md`.
+6. Write `ARCHITECTURE.md`.
+7. Create an implementation checklist.
+
+Then implement in small, testable phases.
+
+After each phase:
+
+* Run formatting.
+* Run linting.
+* Run tests.
+* Document completed work.
+* Note unresolved issues.
+* Avoid leaving silently broken placeholders.
+
+Use:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+npm run lint
+npm run test
+npm run build
+```
+
+Adapt commands to the final workspace.
+
+Do not delete working code merely to simplify implementation. Preserve existing behavior unless it is demonstrably incorrect or insecure.
+
+# Final response requirements
+
+After completing the initial implementation, provide:
+
+1. A summary of what was built.
+2. The final architecture.
+3. Files created and modified.
+4. Commands needed to run it.
+5. Tests performed.
+6. Current supported Pump.fun events.
+7. Known limitations.
+8. Safety mechanisms.
+9. What is still mocked or paper-only.
+10. The recommended next development milestone.
+
+Start by inspecting the repository and researching the latest official protocol documentation. Then build the strongest safe, testable first milestone possible without pretending unsupported features are finished.

@@ -1,0 +1,131 @@
+{
+ "name": "krypto-terminal",
+ "productName": "Krypto Bot",
+ "version": "1.0.0-beta.8",
+ "description": "A free, local-first Solana memecoin trading terminal. Discover, analyse and trade — with a live launch scanner and automation engine built in. Part of the Krypt free tools suite.",
+ "main": "dist-electron/main.js",
+ "author": {
+  "name": "Krypt",
+  "email": "hi@krypt.cc",
+  "url": "https://krypt.cc"
+ },
+ "homepage": "https://krypt.cc/tools/terminal",
+ "license": "MIT",
+ "private": true,
+ "scripts": {
+  "dev": "vite",
+  "build": "node scripts/clean-dist.mjs && node scripts/gen-fee-integrity.mjs && node scripts/gen-presence-integrity.mjs && node scripts/collect-licenses.mjs && vite build && node scripts/obfuscate-main.mjs && node scripts/harden-bytecode.mjs",
+  "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.json --noEmit",
+  "test": "node scripts/test.mjs",
+  "dist": "npm run build && electron-builder",
+  "make-ico": "node scripts/make-ico.mjs",
+  "test:market": "esbuild electron/data/market.ts --bundle --format=esm --platform=node --alias:@shared=./shared --outfile=test/.market.mjs && node test/market.live.mjs",
+  "test:launch": "esbuild electron/data/launchIntel.ts --bundle --format=esm --platform=node --alias:@shared=./shared --outfile=test/.launchintelmain.mjs && node test/launchintel.live.mjs",
+  "test:birdeye": "esbuild electron/data/providers/birdeye.ts --bundle --format=esm --platform=node --alias:@shared=./shared --outfile=test/.birdeye.mjs && node test/birdeye.live.mjs",
+  "test:launchlab": "esbuild electron/engine/launchLabDecoder.ts --bundle --format=esm --platform=node --outfile=test/.launchlab.mjs && esbuild electron/data/launchLabAccounts.ts --bundle --format=esm --platform=node --outfile=test/.launchlabaccounts.mjs && node test/launchlab.live.mjs",
+  "test:boop": "esbuild electron/engine/boopDecoder.ts --bundle --format=esm --platform=node --outfile=test/.boop.mjs && esbuild electron/data/boopAccounts.ts --bundle --format=esm --platform=node --outfile=test/.boopaccounts.mjs && esbuild electron/engine/boopWatcher.ts --bundle --format=esm --platform=node --external:ws --outfile=test/.boopwatcher.mjs && node test/boop.live.mjs",
+  "test:launchlab:tape": "esbuild electron/engine/launchLabWatcher.ts --bundle --format=esm --platform=node --external:ws --outfile=test/.launchlabwatcher.mjs && node test/launchlabtape.live.mjs",
+  "test:crash": "esbuild electron/system/crashGuard.ts --bundle --format=esm --platform=node --outfile=test/.crashguard.mjs && node test/crashguard.live.mjs",
+  "fixture:pump-layout": "esbuild electron/engine/base58.ts --bundle --format=esm --platform=node --outfile=test/.base58.mjs && node test/capture-pump-layout.mjs",
+  "test:jupiter": "esbuild electron/engine/jupiterRoute.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.jupiter.mjs && esbuild electron/system/signPolicy.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.signpolicy.mjs && esbuild electron/system/netAgent.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.netagent.mjs && node test/jupiter.live.mjs",
+  "test:prewarm": "esbuild electron/engine/prewarm.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.prewarm.mjs && esbuild electron/engine/confirmSocket.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.confirmsocket.mjs && esbuild electron/system/netAgent.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.netagent.mjs && node test/prewarm.live.mjs",
+  "test:dbc": "esbuild electron/engine/dbcWatcher.ts --bundle --format=esm --platform=node --external:ws --outfile=test/.dbcwatcher.mjs && node test/dbc.live.mjs"
+ },
+ "dependencies": {
+  "@fontsource/cinzel": "^5.3.0",
+  "@fontsource/jetbrains-mono": "^5.3.0",
+  "@fontsource/spline-sans": "^5.3.0",
+  "@noble/curves": "^1.8.1",
+  "@noble/hashes": "^1.7.1",
+  "@solana/web3.js": "^1.98.4",
+  "bytenode": "^1.6.0",
+  "discord-rpc": "^4.0.1",
+  "framer-motion": "^12.42.2",
+  "lightweight-charts": "^4.2.3",
+  "three": "^0.185.1",
+  "undici": "^6.28.0",
+  "ws": "^8.18.0"
+ },
+ "devDependencies": {
+  "@electron/fuses": "^2.1.3",
+  "@types/discord-rpc": "^4.0.9",
+  "@types/node": "^20.12.7",
+  "@types/react": "^18.2.74",
+  "@types/react-dom": "^18.2.24",
+  "@types/three": "^0.185.1",
+  "@types/ws": "^8.5.12",
+  "@vitejs/plugin-react": "^4.2.1",
+  "autoprefixer": "^10.4.19",
+  "electron": "43.4.1",
+  "electron-builder": "^24.13.3",
+  "esbuild": "^0.21.5",
+  "javascript-obfuscator": "^5.6.0",
+  "lucide-react": "^0.368.0",
+  "postcss": "^8.4.38",
+  "react": "^18.2.0",
+  "react-dom": "^18.2.0",
+  "tailwindcss": "^3.4.3",
+  "typescript": "^5.4.5",
+  "vite": "^5.2.9",
+  "vite-plugin-electron": "^0.28.4",
+  "vite-plugin-electron-renderer": "^0.14.5"
+ },
+ "build": {
+  "appId": "cc.krypt.terminal",
+  "productName": "Krypto Bot",
+  "files": [
+   "dist/**",
+   "dist-electron/**",
+   "resources/**",
+   "!dist-electron/bytecode-target.json",
+   "!**/*.map"
+  ],
+  "afterPack": "scripts/apply-fuses.cjs",
+  "directories": {
+   "buildResources": "build",
+   "output": "release"
+  },
+  "win": {
+   "target": [
+    "nsis"
+   ],
+   "icon": "resources/krypt.ico",
+   "artifactName": "${productName}-Setup-${version}.${ext}"
+  },
+  "nsis": {
+   "oneClick": false,
+   "allowToChangeInstallationDirectory": true,
+   "createDesktopShortcut": false,
+   "createStartMenuShortcut": true,
+   "installerIcon": "resources/krypt.ico",
+   "uninstallerIcon": "resources/krypt.ico",
+   "uninstallDisplayName": "Krypto Bot",
+   "shortcutName": "Krypto Bot"
+  },
+  "publish": null,
+  "mac": {
+   "target": [
+    "dmg",
+    "zip"
+   ],
+   "icon": "resources/krypt.icns",
+   "category": "public.app-category.finance",
+   "artifactName": "${productName}-${version}-${arch}.${ext}",
+   "gatekeeperAssess": false,
+   "darkModeSupport": true
+  },
+  "linux": {
+   "target": [
+    "AppImage",
+    "deb"
+   ],
+   "icon": "resources/icons",
+   "category": "Office;Finance",
+   "synopsis": "Solana trading terminal",
+   "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "dmg": {
+   "title": "${productName}"
+  }
+ }
+}

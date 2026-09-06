@@ -1,0 +1,61 @@
+/** @type {import('tailwindcss').Config} */
+// Krypto arcane-terminal theme. Token NAMES are kept from the Krypt kit
+// so every page keeps compiling; VALUES are re-tuned to the observatory
+// palette: obsidian blue-black, parchment text, arcane violet, ritual gold.
+export default {
+  content: ['./index.html', './src/**/*.{ts,tsx}'],
+  theme: {
+    extend: {
+      colors: {
+        // Parchment white — every text-white / border-white/10 in the app
+        // becomes warm engraved bone on the cold void. Deliberate.
+        white: '#F0EDE2',
+        'krypt-black': '#030409',
+        'krypt-void': '#06070F',
+        'krypt-surface': '#12172B',
+        'krypt-panel': '#0A0D1A',
+        'krypt-muted': '#8C92AB',
+        'krypt-indigo': '#3D4A7E',
+        'krypt-purple': '#8B7CE8',
+        'krypt-pink': '#B7A6FF',
+        'arc-gold': '#D9B45B',
+        'arc-crimson': '#E5484D',
+      },
+      fontFamily: {
+        sans: ['"Spline Sans"', 'system-ui', 'sans-serif'],
+        display: ['Cinzel', 'Georgia', 'serif'],
+        pixel: ['Cinzel', 'Georgia', 'serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+      },
+      boxShadow: {
+        'krypt-glow': '0 0 22px rgba(139, 124, 232, 0.28)',
+        'krypt-card': '0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(240, 237, 226, 0.04)',
+        'gold-glow': '0 0 18px rgba(217, 180, 91, 0.3)',
+        'crimson-glow': '0 0 18px rgba(229, 72, 77, 0.35)',
+      },
+      backgroundImage: {
+        'krypt-gradient': 'linear-gradient(135deg, #46418F 0%, #7A6AD9 100%)',
+        'krypt-radial': 'radial-gradient(1100px circle at 50% -14%, rgba(101, 92, 214, 0.13), transparent 62%)',
+      },
+      animation: {
+        'gradient-x': 'gradient-x 8s ease infinite',
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'fade-in': 'fade-in 0.25s ease-out both',
+        'pop-in': 'pop-in 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2) both',
+        // fill-mode backwards: no retained transform/filter after the run —
+        // a retained value would turn the page wrapper into a containing
+        // block and break fixed-position drawers/modals inside it.
+        'ink': 'ink 0.3s ease-out backwards',
+        'rune-pulse': 'rune-pulse 2.6s ease-in-out infinite',
+      },
+      keyframes: {
+        'gradient-x': { '0%, 100%': { backgroundPosition: '0% 50%' }, '50%': { backgroundPosition: '100% 50%' } },
+        'fade-in': { from: { opacity: 0, transform: 'translateY(4px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
+        'pop-in': { from: { opacity: 0, transform: 'scale(0.95)' }, to: { opacity: 1, transform: 'scale(1)' } },
+        'ink': { from: { opacity: 0 }, to: { opacity: 1 } },
+        'rune-pulse': { '0%, 100%': { opacity: 0.35 }, '50%': { opacity: 1 } },
+      },
+    },
+  },
+  plugins: [],
+};

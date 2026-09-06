@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    background-color: #06070F;
+    color: #F0EDE2;
+    font-family: 'Spline Sans', system-ui, -apple-system, sans-serif;
+    font-feature-settings: 'tnum' 0;
+  }
+  ::selection { background-color: rgba(139, 124, 232, 0.35); color: #F0EDE2; }
+  * { box-sizing: border-box; }
+  /* Observatory scrollbar — thin, dark, violet when handled. */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(240, 237, 226, 0.08); border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(139, 124, 232, 0.55); }
+}
+
+@layer utilities {
+  /* Wordmark sheen — engraved silver catching violet light. */
+  .text-krypt-gradient {
+    background-image: linear-gradient(105deg, #F0EDE2 0%, #B7A6FF 60%, #8B7CE8 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .text-krypt-shimmer {
+    background-image: linear-gradient(90deg, #F0EDE2 0%, #B7A6FF 50%, #F0EDE2 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .glow-purple    { box-shadow: 0 0 22px rgba(139, 124, 232, 0.28); }
+  .glow-recording { box-shadow: 0 0 16px rgba(229, 72, 77, 0.5); }
+  .glow-playing   { box-shadow: 0 0 16px rgba(52, 211, 153, 0.45); }
+  .glow-text {
+    text-shadow: 0 0 18px rgba(139, 124, 232, 0.5), 0 0 44px rgba(139, 124, 232, 0.18);
+  }
+  .glow-text-gold {
+    text-shadow: 0 0 16px rgba(217, 180, 91, 0.45), 0 0 40px rgba(217, 180, 91, 0.15);
+  }
+
+  /* Engraved instrument plate — the standard card surface. Hairline border,
+     inner top highlight, and etched corner ticks (the "corner runes"). */
+  /*
+   * NOTE ON BLUR. `backdrop-blur` makes the compositor re-blur whatever sits
+   * behind an element every frame that anything beneath it moves. On the
+   * chrome that is ALWAYS on screen (top bar, sidebar) over a scrolling list,
+   * that is a per-frame cost for an effect nobody can see through anyway, so
+   * those two use a near-opaque background instead. Blur is kept for the
+   * transient surfaces — modals, drawers, the search palette — where it is
+   * both visible and short-lived.
+   */
+  .plate {
+    position: relative;
+    border: 1px solid rgba(240, 237, 226, 0.09);
+    background-color: rgba(10, 13, 26, 0.82);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(240, 237, 226, 0.045);
+  }
+  .plate::after {
+    content: '';
+    position: absolute;
+    inset: 5px;
+    pointer-events: none;
+    --tick: rgba(240, 237, 226, 0.18);
+    background-image:
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
+      linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick));
+    background-repeat: no-repeat;
+    background-size: 9px 1px, 1px 9px, 9px 1px, 1px 9px, 9px 1px, 1px 9px, 9px 1px, 1px 9px;
+    background-position:
+      left top, left top, right top, right top,
+      left bottom, left bottom, right bottom, right bottom;
+  }
+  /*
+   * A cheap surface for LIST ITEMS.
+   *
+   * `.plate` costs a 34px-blur box-shadow plus a pseudo-element carrying eight
+   * gradient layers for its corner ticks. That is fine for the handful of big
+   * panels on a page — it is not fine 160 times over, which is what Discover
+   * asks for with four columns of forty cards. Large blur radii and stacked
+   * gradients are among the most expensive things Chromium paints, and they
+   * are repainted on hover, scroll and every re-render.
+   *
+   * This keeps the same border and background so the look holds, drops the
+   * blur to a tight 1px-ish edge, and has no pseudo-element at all.
+   */
+  .card {
+    position: relative;
+    border: 1px solid rgba(240, 237, 226, 0.09);
+    background-color: rgba(10, 13, 26, 0.82);
+    box-shadow: inset 0 1px 0 rgba(240, 237, 226, 0.045);
+  }
+  .card:hover {
+    border-color: rgba(157, 106, 255, 0.35);
+  }
+  /*
+   * Skip layout and paint for cards scrolled out of view.
+   *
+   * Discover keeps four scrolling columns of forty cards alive at once — about
+   * 10,000 DOM elements, of which maybe a fifth are actually visible. This is
+   * the browser's own answer to that: off-screen subtrees are not styled,
+   * laid out or painted until they approach the viewport. `contain-intrinsic-size`
+   * supplies a placeholder height so the scrollbar does not jump around while
+   * they are skipped.
+   *
+   * It is a one-line alternative to virtualising the list, with no scroll
+   * maths of our own to get wrong.
+   */
+  .card-list > .card {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 132px;
+  }
+
+  .plate-gold::after { --tick: rgba(217, 180, 91, 0.4); }
+  .plate-crimson::after { --tick: rgba(229, 72, 77, 0.45); }
+
+  /* Faint celestial dust behind hero panels. */
+  .grid-backdrop {
+    background-image:
+      radial-gradient(rgba(240, 237, 226, 0.07) 1px, transparent 1px),
+      radial-gradient(rgba(139, 124, 232, 0.06) 1px, transparent 1px);
+    background-size: 34px 34px, 56px 56px;
+    background-position: 0 0, 17px 23px;
+    mask-image: radial-gradient(ellipse 90% 85% at 50% 40%, black 30%, transparent 78%);
+    -webkit-mask-image: radial-gradient(ellipse 90% 85% at 50% 40%, black 30%, transparent 78%);
+  }
+
+  /* Fixed ambient star layer over the whole shell. */
+  .stars-backdrop {
+    background-image:
+      radial-gradient(rgba(240, 237, 226, 0.05) 1px, transparent 1px),
+      radial-gradient(rgba(240, 237, 226, 0.032) 1px, transparent 1px);
+    background-size: 190px 190px, 310px 310px;
+    background-position: 40px 60px, 130px 220px;
+  }
+
+  .scanlines {
+    background-image: repeating-linear-gradient(to bottom,
+      rgba(240,237,226,0.02) 0, rgba(240,237,226,0.02) 1px, transparent 1px, transparent 3px);
+  }
+
+  /* Celestial dust slowly drifting across a grid-backdrop surface. */
+  @keyframes dust-drift {
+    from { background-position: 0 0, 17px 23px; }
+    to   { background-position: -340px 190px, -560px 330px; }
+  }
+  .animate-dust { animation: dust-drift 90s linear infinite; }
+
+  @keyframes tape {
+    from { transform: translateX(0); }
+    to   { transform: translateX(-50%); }
+  }
+  .animate-tape { animation: tape 40s linear infinite; }
+
+  /* Spark travelling along a pipeline connector. */
+  @keyframes spark-run {
+    0%   { left: -6px; opacity: 0; }
+    12%  { opacity: 1; }
+    88%  { opacity: 1; }
+    100% { left: calc(100% + 2px); opacity: 0; }
+  }
+  .animate-spark { animation: spark-run 1.8s linear infinite; }
+}

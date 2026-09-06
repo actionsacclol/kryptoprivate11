@@ -1,0 +1,165 @@
+# Installers for Windows, macOS and Linux, built by GitHub.
+#
+# WHEN IT RUNS
+#   • every push to main/master  → installers as downloadable artifacts
+#   • a tag like v1.0.0          → the same installers, attached to a GitHub
+#                                  Release, with checksums
+#   • the "Run workflow" button  → whenever you want one
+#
+# WHY THREE RUNNERS. The main process is compiled to V8 bytecode, and V8
+# accepts cached data only from a matching version, flag set and CPU
+# features — so a macOS or Linux artifact cannot be produced on Windows.
+# Each platform is therefore built on its own runner, and `npm run dist`
+# fails loudly if that rule is ever broken (scripts/apply-fuses.cjs).
+#
+# SIGNING. Nothing here is code-signed. Windows shows a SmartScreen warning
+# and macOS Gatekeeper blocks the app on other people's machines until you
+# add certificates — see the notes at the bottom of this file.
+name: Build installers
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+# A newer push supersedes an older one on the same branch; a tag build is
+# never cancelled.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: write # needed only by the release job
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            dist: npm run dist
+            artifacts: |
+              release/*.exe
+              release/*.exe.sha256
+          - os: macos-latest
+            name: macos
+            dist: npm run dist
+            artifacts: |
+              release/*.dmg
+              release/*.zip
+          - os: ubuntu-latest
+            name: linux
+            # The bytecode step runs Electron in app mode, which wants a
+            # display on Linux even though it never opens a window.
+            dist: xvfb-run --auto-servernum npm run dist
+            artifacts: |
+              release/*.AppImage
+              release/*.deb
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # install.js is skipped by --ignore-scripts and then run explicitly:
+      # that is the one postinstall this project needs (it fetches the
+      # Electron binary), and skipping every other package's scripts is the
+      # safer default for a project that signs transactions.
+      - name: Install a virtual display (Linux only)
+        if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Fetch the Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build installer
+        run: ${{ matrix.dist }}
+        env:
+          # Unsigned build: stop electron-builder hunting for a certificate
+          # and failing the job when it does not find one.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # A checksum beside the installer, so anyone downloading it can verify
+      # they got what this run produced.
+      - name: Checksum (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem release/*.exe | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h *$($_.Name)" | Out-File "$($_.FullName).sha256" -Encoding ascii
+          }
+
+      - name: Checksum (macOS / Linux)
+        if: matrix.name != 'windows'
+        run: |
+          cd release
+          for f in *.dmg *.zip *.AppImage *.deb; do
+            [ -e "$f" ] || continue
+            shasum -a 256 "$f" > "$f.sha256" 2>/dev/null || sha256sum "$f" > "$f.sha256"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: krypto-bot-${{ matrix.name }}
+          path: |
+            ${{ matrix.artifacts }}
+            release/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  # Tag builds also become a GitHub Release with the installers attached.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: List what will be published
+        run: find artifacts -type f | sort
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          draft: true # published by hand, after the downloads have been tried
+          body: |
+            Installers for Windows, macOS and Linux, built by GitHub Actions
+            from this tag. Checksums are attached beside each file.
+
+            These builds are **not code-signed**: Windows shows a SmartScreen
+            warning, and macOS will refuse to open the app until it is signed
+            and notarised.
+# ── Adding signing later ─────────────────────────────────────────────
+#
+# Windows: put the certificate's base64 in the secret CSC_LINK and its
+# password in CSC_KEY_PASSWORD, then pass both into the build step's env.
+# electron-builder signs automatically once they are present.
+#
+# macOS: CSC_LINK / CSC_KEY_PASSWORD for the Developer ID certificate, plus
+# APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID for notarisation,
+# and remove CSC_IDENTITY_AUTO_DISCOVERY: false above. Notarisation adds
+# several minutes to the macOS job.
+#
+# Neither is optional for a public release: an unsigned trading app that
+# holds a private key is exactly what a careful user should refuse to run.
