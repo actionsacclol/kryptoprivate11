@@ -1305,7 +1305,6 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
   if (!knownOwner) addrs.push(p.mint);
   if (wantGlobal) addrs.push(globalFor());
   let multi = await getMultipleAccountInfo(p.httpUrl, addrs);
-  if (!multi.ok || !multi.data) multi = await getMultipleAccountInfo(p.httpUrl, addrs);
   if (!multi.ok || !multi.data) return { ok: false, message: `account read: ${multi.message}` };
   const byAddr = new Map(addrs.map((a, i) => [a, multi.data?.[i] ?? null]));
 

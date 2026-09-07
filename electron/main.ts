@@ -367,6 +367,8 @@ async function bootstrap(): Promise<void> {
   paperBook.init(app.getPath('userData'));
   alertStore.init(app.getPath('userData'));
   copyTrade.init(app.getPath('userData'));
+  // The configs are loaded: point the wallet watcher at the enabled ones.
+  getEngine().syncCopyWatch();
   if (advOrders.pausedCount() > 0) {
     logger.warn(
       `${advOrders.pausedCount()} advanced order(s) restored PAUSED after restart — resume them from the Orders page`,

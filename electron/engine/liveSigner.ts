@@ -10,6 +10,7 @@ import { VersionedTransaction } from '@solana/web3.js';
 import { buildTrade } from './relayer';
 import { buildLocalTrade, invalidateTemplates } from './txBuilder';
 import { simulateTransaction, getBalance, getLatestBlockhashInfo, getTokenBalanceRawForMint } from './rpcClient';
+import { isTransportFailureMessage } from '@shared/rpcErrors';
 import { buildJupiterSwap } from './jupiterRoute';
 import { ataFor, TOKEN_2022_PROGRAM } from './addresses';
 import { planTips, injectTransfersFit, broadcastAndConfirm, MAX_TX_BYTES, type PlannedTransfer, type TipPlan, type TipExecSettings } from './broadcast';
@@ -513,8 +514,17 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
     // invalidate it and retry via the relayer. Post-broadcast failures are
     // final: the tx may land, retrying would double-spend.
     if (source === 'local' && (res.stage === 'validate' || res.stage === 'simulate' || res.stage === 'guard')) {
-      invalidateTemplates();
-      lastFail = { ...res, message: `local tx ${res.stage} failed (template invalidated): ${res.message}`, timing };
+      // A host that answered 429 / 5xx / nothing did not simulate anything:
+      // that says nothing about the template, and counting it as a strike
+      // let three rate-limited orders in ten minutes suspend the derived
+      // layout for half an hour (2026-09-06).
+      const transport = isTransportFailureMessage(res.message);
+      if (!transport) invalidateTemplates();
+      lastFail = {
+        ...res,
+        message: `local tx ${res.stage} failed (${transport ? 'transport, template kept' : 'template invalidated'}): ${res.message}`,
+        timing,
+      };
       continue;
     }
     return res;
@@ -799,7 +809,10 @@ async function runPipeline(
   const preLamports = preRes.ok && preRes.data !== undefined ? preRes.data : null;
   const postLamports = sim.data.postLamports[0];
   if (preLamports === null || postLamports === null) {
-    return { ok: false, stage: 'guard', message: 'Could not read pre/post balance for the loss guard — refusing' };
+    // Name the cause: a 429 here reads as "rate limited", which the sell
+    // retry recognises, rather than as a mystery refusal.
+    const why = preLamports === null && !preRes.ok ? ` (${preRes.message})` : '';
+    return { ok: false, stage: 'guard', message: `Could not read pre/post balance for the loss guard${why} — refusing` };
   }
   const lossSol = (preLamports - postLamports) / LAMPORTS_PER_SOL;
   // Sells spend no SOL (they yield it), so bound = overhead only. Buys bound

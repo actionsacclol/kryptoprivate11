@@ -144,7 +144,140 @@ function billIfHelius(httpUrl: string): void {
   }
 }
 
+// ── Rate-limit memory per host ────────────────────────────────────────
+//
+// 2026-09-06 (rate-limit swarm): nothing in this file remembered a 429. N
+// concurrent callers each paused 400 ms and re-hit the same host, then
+// failed over — a burst that crossed the limit became two to three times
+// the traffic, on two hosts. Two things fix that:
+//
+//   1. The host is PARKED on a 429 for its own Retry-After (the public RPC
+//      sends 10 s) or 1 s doubling to 10 s. Every caller consults the park:
+//      reads go to the other endpoint while it lasts, and when there is no
+//      other endpoint the caller waits it out (bounded) instead of firing
+//      into it. A trade is delayed by at most PARK_WAIT_CAP_MS, never lost.
+//   2. A token bucket per host paces bursts BEFORE they 429: public 10/s
+//      with a 4/s per-method window (documented 100 and 40 per 10 s),
+//      Helius free 9/s. Ordinary traffic never touches the bucket; a
+//      fan-out of ten wallets is spread over ~3 s instead of dying at t=0.
+//      `sendTransaction` is never delayed — it has its own lanes and its
+//      own resend cadence, and a late send is worse than a refused one.
+//
+// Both are keyed by HOST, never URL, so a keyed URL never reaches a log.
+
+const parkedUntil = new Map<string, number>();
+const parkStrikes = new Map<string, { count: number; lastAt: number }>();
+const PARK_BASE_MS = 1_000;
+const PARK_MAX_MS = 10_000;
+const PARK_STRIKE_DECAY_MS = 60_000;
+/** Longest a caller with no alternative endpoint waits for a park to end. */
+const PARK_WAIT_CAP_MS = 2_500;
+
+const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
+
+function noteRateLimit(httpUrl: string, retryAfter: string | null): number {
+  const host = safeHost(httpUrl);
+  const now = Date.now();
+  const prev = parkStrikes.get(host);
+  const count = prev && now - prev.lastAt < PARK_STRIKE_DECAY_MS ? prev.count + 1 : 1;
+  parkStrikes.set(host, { count, lastAt: now });
+  let length = Math.min(PARK_MAX_MS, PARK_BASE_MS * 2 ** (count - 1));
+  const ra = retryAfter ? Number(retryAfter) : NaN;
+  if (Number.isFinite(ra) && ra > 0) length = Math.min(PARK_MAX_MS, Math.max(length, ra * 1000));
+  const until = now + length;
+  if (until > (parkedUntil.get(host) ?? 0)) parkedUntil.set(host, until);
+  return length;
+}
+
+/** Milliseconds until this endpoint's host stops being rate limited, or 0. */
+export function rpcParkRemainingMs(httpUrl: string): number {
+  return Math.max(0, (parkedUntil.get(safeHost(httpUrl)) ?? 0) - Date.now());
+}
+
+/** Wait out a park when there is nowhere else to go — bounded, jittered so
+ *  the callers that piled up do not all fire in the same millisecond. */
+async function awaitPark(httpUrl: string): Promise<void> {
+  const parked = rpcParkRemainingMs(httpUrl);
+  if (parked > 0) await sleep(Math.min(parked, PARK_WAIT_CAP_MS) + Math.random() * 250);
+}
+
+/** Websocket handshakes refused with 429 park the host for sockets too, so
+ *  every socket class backs off together instead of each redialing on its
+ *  own clock (eight sockets × their own 1 s backoff was a handshake storm). */
+const socketParkedUntil = new Map<string, number>();
+const SOCKET_PARK_MS = 30_000;
+
+export function noteSocketRateLimit(url: string, errText: string): boolean {
+  if (!/(?:^|[^0-9])429(?:[^0-9]|$)/.test(errText ?? '')) return false;
+  const host = safeHost(url);
+  const prev = socketParkedUntil.get(host) ?? 0;
+  const until = Date.now() + SOCKET_PARK_MS;
+  if (until > prev) socketParkedUntil.set(host, until);
+  return true;
+}
+
+export function socketParkRemainingMs(url: string): number {
+  return Math.max(0, (socketParkedUntil.get(safeHost(url)) ?? 0) - Date.now());
+}
+
+interface Bucket {
+  tokens: number;
+  last: number;
+  rate: number;
+  burst: number;
+}
+const buckets = new Map<string, Bucket>();
+const PUBLIC_HOSTS = new Set(['api.mainnet-beta.solana.com', 'api.mainnet.solana.com']);
+/** Deepest pacing delay handed out: past this the backlog is a bug, not a burst. */
+const BUCKET_WAIT_CAP_MS = 8_000;
+
+function bucketSpecs(host: string, method: string): Array<{ key: string; rate: number; burst: number }> {
+  if (/helius/i.test(host)) return [{ key: host, rate: 9, burst: 9 }];
+  if (PUBLIC_HOSTS.has(host)) {
+    return [
+      { key: host, rate: 10, burst: 10 },
+      { key: `${host}#${method}`, rate: 4, burst: 8 },
+    ];
+  }
+  return [{ key: host, rate: 20, burst: 20 }];
+}
+
+/** Reserve `cost` tokens; returns how long the caller must wait first. A
+ *  bucket may go negative — that is the reservation, and it is what turns
+ *  a burst into a paced sequence rather than a pile-up at the front. */
+function reserve(spec: { key: string; rate: number; burst: number }, cost: number, now: number): number {
+  let b = buckets.get(spec.key);
+  if (!b) {
+    b = { tokens: spec.burst, last: now, rate: spec.rate, burst: spec.burst };
+    buckets.set(spec.key, b);
+  }
+  b.tokens = Math.min(b.burst, b.tokens + ((now - b.last) / 1000) * b.rate);
+  b.last = now;
+  b.tokens -= cost;
+  return b.tokens >= 0 ? 0 : Math.min(BUCKET_WAIT_CAP_MS, (-b.tokens / b.rate) * 1000);
+}
+
+async function acquire(httpUrl: string, method: string, cost = 1): Promise<void> {
+  if (method === 'sendTransaction') return;
+  const host = safeHost(httpUrl);
+  const now = Date.now();
+  let wait = 0;
+  for (const spec of bucketSpecs(host, method)) wait = Math.max(wait, reserve(spec, cost, now));
+  if (wait > 0) await sleep(wait);
+}
+
+/** Read a 429's Retry-After without assuming a real Response (tests stub
+ *  fetch with bare objects). */
+function retryAfterOf(res: { headers?: { get?: (name: string) => string | null } }): string | null {
+  try {
+    return res.headers?.get?.('retry-after') ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function callOnce<T>(httpUrl: string, method: string, params: unknown[]): Promise<RpcResult<T>> {
+  await acquire(httpUrl, method);
   billIfHelius(httpUrl);
   try {
     const res = await fetch(httpUrl, {
@@ -153,13 +286,22 @@ async function callOnce<T>(httpUrl: string, method: string, params: unknown[]): 
       body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
       signal: AbortSignal.timeout(8000),
     });
-    if (!res.ok) return { ok: false, message: `RPC HTTP ${res.status}` };
+    if (!res.ok) {
+      if (res.status === 429) noteRateLimit(httpUrl, retryAfterOf(res));
+      return { ok: false, message: `RPC HTTP ${res.status}` };
+    }
     const body = (await res.json()) as { result?: T; error?: { message?: string } };
     if (body.error) return { ok: false, message: body.error.message ?? 'RPC error' };
     return { ok: true, message: 'ok', data: body.result };
   } catch (err) {
     return { ok: false, message: (err as Error)?.message ?? 'RPC request failed' };
   }
+}
+
+function noteFallback(httpUrl: string, method: string, why: string, viaAlt: { ok: boolean; message: string }): void {
+  if (Date.now() - lastFallbackNoteAt <= 60_000) return;
+  lastFallbackNoteAt = Date.now();
+  fallbackLog?.(`RPC ${safeHost(httpUrl)} ${why} — ${method} answered by the fallback endpoint${viaAlt.ok ? '' : `, which also failed (${viaAlt.message})`}`);
 }
 
 async function call<T>(httpUrl: string, method: string, params: unknown[]): Promise<RpcResult<T>> {
@@ -173,6 +315,18 @@ async function call<T>(httpUrl: string, method: string, params: unknown[]): Prom
   if (isRejectedNow(httpUrl)) {
     const alt = otherEndpoint();
     if (alt) return callOnce<T>(alt, method, params);
+  }
+
+  // A host that just said 429: use the other endpoint while the park lasts;
+  // with no other endpoint, wait it out rather than fire into it.
+  if (rpcParkRemainingMs(httpUrl) > 0) {
+    const alt = otherEndpoint();
+    if (alt && rpcParkRemainingMs(alt) === 0) {
+      const viaAlt = await callOnce<T>(alt, method, params);
+      if (viaAlt.ok || !isTransportFailure(viaAlt)) return viaAlt;
+    } else {
+      await awaitPark(httpUrl);
+    }
   }
 
   let r = await callOnce<T>(httpUrl, method, params);
@@ -190,26 +344,38 @@ async function call<T>(httpUrl: string, method: string, params: unknown[]): Prom
   }
 
   if (!isTransportFailure(r)) return r;
-  // A rate limit needs a beat longer than a blip before the same host will
-  // take the call again.
-  await new Promise((res) => setTimeout(res, isRateLimited(r) ? RETRY_PAUSE_MS * 2 : RETRY_PAUSE_MS));
+
+  if (isRateLimited(r)) {
+    // The host just refused us. The other endpoint answers now if it can;
+    // this one is asked again only once its park has passed.
+    const alt = otherEndpoint();
+    if (alt && rpcParkRemainingMs(alt) === 0) {
+      const viaAlt = await callOnce<T>(alt, method, params);
+      if (viaAlt.ok) {
+        noteFallback(httpUrl, method, 'is rate limited (HTTP 429)', viaAlt);
+        return viaAlt;
+      }
+    }
+    await awaitPark(httpUrl);
+    return callOnce<T>(httpUrl, method, params);
+  }
+
+  // A 5xx or a dropped connection: one quick retry, then the other endpoint.
+  await sleep(RETRY_PAUSE_MS);
   r = await callOnce<T>(httpUrl, method, params);
   if (!isTransportFailure(r)) return r;
-  const alt = fallbackHttpUrl?.();
-  if (!alt || alt === httpUrl) return r;
+  const alt = otherEndpoint();
+  if (!alt) return r;
   const viaAlt = await callOnce<T>(alt, method, params);
-  if (Date.now() - lastFallbackNoteAt > 60_000) {
-    lastFallbackNoteAt = Date.now();
-    const host = (() => {
-      try {
-        return new URL(httpUrl).host;
-      } catch {
-        return 'primary RPC';
-      }
-    })();
-    fallbackLog?.(`RPC ${host} failed twice (${r.message}) — ${method} answered by the fallback endpoint${viaAlt.ok ? '' : `, which also failed (${viaAlt.message})`}`);
-  }
+  noteFallback(httpUrl, method, `failed twice (${r.message})`, viaAlt);
   return viaAlt.ok ? viaAlt : r;
+}
+
+/** Any JSON-RPC method through the same park, bucket, retry and failover as
+ *  the typed helpers — for the few callers that used to fetch on their own
+ *  and so never noticed a 429 (the fee estimator). */
+export function rpcCall<T>(httpUrl: string, method: string, params: unknown[]): Promise<RpcResult<T>> {
+  return call<T>(httpUrl, method, params);
 }
 
 export async function getAccountInfo(httpUrl: string, pubkey: string): Promise<RpcResult<AccountInfo | null>> {
@@ -503,6 +669,9 @@ export async function getTransactions(httpUrl: string, signatures: string[]): Pr
     method: 'getTransaction',
     params: [sig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }],
   }));
+  // Same park and bucket as a single call, at the batch's real cost.
+  await awaitPark(httpUrl);
+  await acquire(httpUrl, 'getTransaction', signatures.length);
   try {
     const res = await fetch(httpUrl, {
       method: 'POST',
@@ -510,7 +679,10 @@ export async function getTransactions(httpUrl: string, signatures: string[]): Pr
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(8000),
     });
-    if (!res.ok) return { ok: false, message: `RPC HTTP ${res.status}` };
+    if (!res.ok) {
+      if (res.status === 429) noteRateLimit(httpUrl, retryAfterOf(res));
+      return { ok: false, message: `RPC HTTP ${res.status}` };
+    }
     const replies = (await res.json()) as Array<{ id?: number; result?: RawTransaction | null; error?: unknown }>;
     if (!Array.isArray(replies)) return { ok: false, message: 'batch reply is not an array' };
     const out: Array<RawTransaction | null> = signatures.map(() => null);

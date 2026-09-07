@@ -79,6 +79,31 @@ export function realized(): number {
   return paperRealizedSol(book);
 }
 
+/**
+ * A position or round trip booked before its symbol was known (a pasted
+ * mint the feed never carried) learns it once the market layer names the
+ * token, so the replay and the card stop saying "$???". Only empty symbols
+ * are touched; the numbers are never.
+ */
+export function noteSymbol(mint: string, symbol: string): void {
+  const sym = (symbol ?? '').trim();
+  if (!sym) return;
+  let changed = false;
+  const open = book.open.map((p) => {
+    if (p.mint !== mint || p.symbol) return p;
+    changed = true;
+    return { ...p, symbol: sym };
+  });
+  const closed = book.closed.map((c) => {
+    if (c.mint !== mint || c.symbol) return c;
+    changed = true;
+    return { ...c, symbol: sym };
+  });
+  if (!changed) return;
+  book = { ...book, open, closed };
+  save();
+}
+
 /** Test hook. */
 export function _load(b: PaperBook): void {
   book = b;

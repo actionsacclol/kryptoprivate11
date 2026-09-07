@@ -54,3 +54,26 @@ export function safeHost(url: string): string {
     return 'the RPC endpoint';
   }
 }
+
+/**
+ * Did this failure text come from a rate limit — an RPC's "HTTP 429", or a
+ * provider the HTTP layer parked ("rate limited")? Loose on purpose: the
+ * message has usually been wrapped ("Simulation call failed: RPC HTTP 429")
+ * by the time anyone asks, so the anchored classifier above cannot see it.
+ */
+export function mentionsRateLimit(message: string): boolean {
+  return /RPC HTTP 429|rate limited|\(429\)/i.test(message ?? '');
+}
+
+/**
+ * A failure of the TRANSPORT rather than of the transaction: a 429, a 5xx,
+ * a dropped socket, a timeout. Used where a simulation failure would
+ * otherwise be read as "the template is stale" — a host saying "slow down"
+ * proves nothing about the transaction it never simulated.
+ */
+export function isTransportFailureMessage(message: string): boolean {
+  const m = message ?? '';
+  if (mentionsRateLimit(m)) return true;
+  if (/RPC HTTP (5\d\d|408)/.test(m)) return true;
+  return /fetch failed|ECONN|EAI_AGAIN|socket|network|other side closed|timed out|aborted/i.test(m);
+}

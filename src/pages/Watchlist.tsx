@@ -7,15 +7,17 @@ import { useTerminal } from '../state/TerminalProvider';
 
 // Watchlist — the pinned tokens from term.txt section 19.
 //
-// Rows are loaded one at a time through market:summary rather than the
-// Discover feeds, because a pinned token is usually not in any of the four
-// columns any more. That means it costs one request per token, so it
-// refreshes on a slower cadence than Discover does.
+// Rows are loaded through market:summaries rather than the Discover feeds,
+// because a pinned token is usually not in any of the four columns any
+// more. One round trip for the whole list (the Jupiter half is a single
+// batched call main-side); it refreshes on a slower cadence than Discover
+// does, and not at all while the window is hidden.
 
 export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const term = useTerminal();
   const [rows, setRows] = useState<Record<string, TokenSummary>>({});
   const [loading, setLoading] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!term.watchlist.length) {
@@ -23,22 +25,33 @@ export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string) => 
       return;
     }
     setLoading(true);
-    const results = await Promise.all(
-      term.watchlist.map(async (mint) => {
-        const r = await window.krypt.market.summary(mint);
-        return r.ok && r.data ? ([mint, r.data] as const) : null;
-      }),
-    );
-    const next: Record<string, TokenSummary> = {};
-    for (const entry of results) if (entry) next[entry[0]] = entry[1];
-    setRows(next);
-    setLoading(false);
+    try {
+      const r = await window.krypt.market.summaries(term.watchlist);
+      if (r.ok && r.data) {
+        // A parked provider leaves the previous rows on screen with a note.
+        setRows((prev) => ({ ...prev, ...r.data }));
+        setNote(r.message !== 'ok' ? r.message : null);
+      } else {
+        setNote(r.message);
+      }
+    } finally {
+      setLoading(false);
+    }
   }, [term.watchlist]);
 
   useEffect(() => {
     void load();
-    const id = setInterval(() => void load(), 20_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 20_000);
+    const onVisible = (): void => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load]);
 
   return (
@@ -62,12 +75,17 @@ export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string) => 
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-3">
+          {note && (
+            <div className="col-span-full rounded-md border border-arc-gold/25 bg-arc-gold/10 px-3 py-2">
+              <p className="text-[10px] text-arc-gold/90 leading-relaxed">{note}</p>
+            </div>
+          )}
           {term.watchlist.map((mint) => {
             const t = rows[mint];
             if (!t) {
               return (
                 <div key={mint} className="plate rounded-lg px-3 py-6 flex items-center justify-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin text-krypt-purple" />
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin text-krypt-purple" /> : <span className="text-[10px] text-krypt-muted">no data yet</span>}
                   <span className="text-[11px] font-mono text-krypt-muted">{mint.slice(0, 10)}…</span>
                   <button
                     onClick={() => term.toggleWatch(mint)}

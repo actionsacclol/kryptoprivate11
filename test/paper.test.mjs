@@ -7,6 +7,7 @@
 
 import assert from 'node:assert';
 import {
+  paperHistoryRows,
   emptyPaperBook,
   openPaper,
   sellPaper,
@@ -207,4 +208,37 @@ await run();
   assert.equal(modelledPaperFill(NaN, 0.001), null);
   assert.equal(modelledPaperFill(1, NaN), null);
   console.log('ok  a modelled paper fill charges real fees, or refuses');
+}
+
+// ── paper fills appear in the trade history, labelled ────────────────
+{
+  let book = emptyPaperBook();
+  book = openPaper(book, { mint: 'M1', symbol: 'ONE', tokens: 1000, costSol: 0.1, decimalsKnown: true }, 1_000).book;
+  book = sellPaper(book, 'M1', 50, 0.0002, 2_000).book; // partial: 500 tokens, stays open
+  book = openPaper(book, { mint: 'M2', symbol: 'TWO', tokens: 10, costSol: 0.05, decimalsKnown: true }, 3_000).book;
+  book = sellPaper(book, 'M2', 100, 0.004, 4_000).book; // closed round trip
+  const rows = paperHistoryRows(book);
+  assert.equal(rows.length, 4, 'two fills on the open position, two rows for the closed round trip');
+  assert.ok(rows.every((r) => r.paper === true && r.signature === null && r.feeSol === null), 'every row is labelled paper, unsigned, unfeed');
+  assert.deepEqual(rows.map((r) => r.at), [4_000, 3_000, 2_000, 1_000], 'newest first, like the ledger');
+  const [closeSell, closeBuy, partial, firstBuy] = rows;
+  assert.equal(firstBuy.side, 'buy');
+  assert.equal(firstBuy.requested, 0.1, 'a buy asks in SOL');
+  assert.equal(firstBuy.solDelta, -0.1, 'signed like the ledger: a buy is money out');
+  assert.equal(firstBuy.tokenDelta, 1000);
+  assert.equal(partial.side, 'sell');
+  assert.equal(partial.requested, 50, 'a sell asks in percent, rebuilt from the tokens held before it');
+  assert.ok(partial.solDelta > 0 && partial.tokenDelta === -500);
+  assert.equal(closeBuy.mint, 'M2');
+  assert.equal(closeBuy.requested, 0.05);
+  assert.equal(closeSell.requested, 100);
+  assert.ok(closeSell.solDelta > 0);
+  assert.equal(closeSell.tokenDelta, -10);
+  assert.match(closeSell.note, /^Paper — /);
+  assert.ok(!/folded/.test(closeSell.note), 'one buy, one sell: nothing was folded');
+  // A position whose decimals are unknown shows no token count — raw units are not a number to print.
+  let raw = emptyPaperBook();
+  raw = openPaper(raw, { mint: 'M3', symbol: 'RAW', tokens: 123456, costSol: 0.02, decimalsKnown: false }, 5_000).book;
+  assert.equal(paperHistoryRows(raw)[0].tokenDelta, null);
+  console.log('ok  paper fills become labelled trade-history rows');
 }

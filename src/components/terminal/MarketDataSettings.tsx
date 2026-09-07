@@ -150,6 +150,12 @@ export function MarketDataSettings({
                     <span className={p.errors > 0 ? 'text-rose-400/80' : undefined}>{p.errors} errors</span>
                     <span>{p.latencyMs === null ? '—' : `${p.latencyMs}ms`}</span>
                     {p.lastCallAt && <span>{fmtAgo(p.lastCallAt)} ago</span>}
+                    {p.cooldownMs > 0 && (
+                      <span className="text-arc-gold" title="The provider answered 429; nothing is sent to it until this runs out.">
+                        rate limited · retrying in {Math.ceil(p.cooldownMs / 1000)}s
+                      </span>
+                    )}
+                    {p.queued > 5 && <span title="Calls waiting in this provider&apos;s queue.">{p.queued} queued</span>}
                     {!p.usable && !p.keyless && <span className="text-arc-gold">needs an API key</span>}
                     {p.lastError && (
                       <span className="text-rose-400/70 truncate" title={p.lastError}>

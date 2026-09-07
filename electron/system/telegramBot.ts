@@ -108,8 +108,19 @@ async function poll(): Promise<void> {
       const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (!res.ok) {
         // 409 means another poller is attached to the same token. Backing off
-        // rather than hammering keeps the other one working.
-        await backoff(res.status === 409 ? 'another client is polling this bot' : `HTTP ${res.status}`);
+        // rather than hammering keeps the other one working. A 429 names its
+        // own wait (`parameters.retry_after`, seconds) — honour it exactly:
+        // Telegram counts an early retry against the next window too.
+        let retryAfterMs = 0;
+        if (res.status === 429) {
+          try {
+            const body = (await res.json()) as { parameters?: { retry_after?: number } };
+            retryAfterMs = Math.max(0, Math.min(120_000, (body?.parameters?.retry_after ?? 0) * 1000));
+          } catch {
+            /* no body — the exponential wait applies */
+          }
+        }
+        await backoff(res.status === 409 ? 'another client is polling this bot' : `HTTP ${res.status}`, retryAfterMs);
         continue;
       }
       const body = (await res.json()) as { ok?: boolean; result?: TgUpdate[] };
@@ -130,10 +141,10 @@ async function poll(): Promise<void> {
   }
 }
 
-async function backoff(why: string): Promise<void> {
+async function backoff(why: string, atLeastMs = 0): Promise<void> {
   consecutiveErrors += 1;
   // Only complain once per outage, not once per retry.
   if (consecutiveErrors === 1) host?.log('warn', `Telegram poll failed (${why}); retrying`);
-  const wait = Math.min(30_000, 1_000 * 2 ** Math.min(consecutiveErrors, 5));
+  const wait = Math.max(atLeastMs, Math.min(30_000, 1_000 * 2 ** Math.min(consecutiveErrors, 5)));
   await new Promise((r) => setTimeout(r, wait));
 }

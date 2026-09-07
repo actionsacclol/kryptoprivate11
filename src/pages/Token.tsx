@@ -79,6 +79,9 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   const [chartMode, setChartMode] = useState<'price' | 'mcap'>('mcap');
   const [series, setSeries] = useState<CandleSeries | null>(null);
   const [chartLoading, setChartLoading] = useState(false);
+  /** Why the last full chart load failed — a parked provider, usually — so
+   *  the empty chart says "rate limited, retrying in 12 s" and not "no data". */
+  const [chartError, setChartError] = useState<string | null>(null);
   // Live-update plumbing. The chart handle applies ticks and tail candles
   // imperatively — no setState, no React re-render, no full repaint.
   const chartApiRef = useRef<KryptChartHandle>(null);
@@ -263,8 +266,11 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
       if (cancelled) return;
       if (r.ok && r.data) {
         setSeries(r.data);
+        setChartError(null);
         const cs = r.data.candles;
         lastCandleTimeRef.current = cs.length ? cs[cs.length - 1].time : 0;
+      } else if (!r.ok) {
+        setChartError(r.message);
       }
       // A cache/tape answer arrives first; the provider-merged series follows
       // as a `candles` event (below), so the spinner stays while it loads.
@@ -716,7 +722,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
             ) : (
               <div className="h-[360px] flex items-center justify-center rounded-md border border-dashed border-white/10">
                 <p className="max-w-md text-center text-[12px] text-krypt-muted leading-relaxed px-6">
-                  {series?.note ?? (chartLoading ? 'Loading candles…' : 'No chart data for this token yet.')}
+                  {series?.note ?? chartError ?? (chartLoading ? 'Loading candles…' : 'No chart data for this token yet.')}
                 </p>
               </div>
             )}

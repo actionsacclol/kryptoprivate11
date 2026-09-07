@@ -192,11 +192,12 @@ export function SettingsPage() {
             <TextInput value={heliusKey} onChange={setHeliusKey} placeholder="Paste your Helius API key" />
             <RpcKeyWarning />
             <div className="text-[11px] text-krypt-muted/70 mt-1">
-              Used only where it matters — live trade simulation, sending, confirmation, and send-time fee
-              estimates — so a free key lasts months. Bulk traffic (launch scanning, mint checks) stays on
-              free public endpoints, which measured just as fast for that work: a burst of 20 account reads
-              ran 190ms median on the public RPC against 170ms on Helius, both with no failures. The key
-              stays on this machine and is stripped from recordings.
+              Used where it matters — live trade simulation, sending, confirmation, send-time fee estimates,
+              and the holder and token-account reads the free public RPC refuses outright (it answers those
+              with HTTP 429). Launch scanning and plain account reads stay on the free public endpoints,
+              which measured just as fast for that work. The free Helius plan allows about ten requests a
+              second; the app paces itself under that. The key stays on this machine and is stripped from
+              recordings.
             </div>
             <div className="mt-2">
               <CreditMeter

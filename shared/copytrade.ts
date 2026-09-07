@@ -103,6 +103,24 @@ export interface CopyTrade {
   reason: string | null;
 }
 
+/**
+ * How a followed wallet is being watched. Since 2026-09-06 every followed
+ * wallet has its own subscription on the live socket, and its swaps are
+ * read from the transaction's balance deltas — so a leader trading through
+ * Jupiter into Raydium or Meteora is seen, not only one on the pump.fun
+ * curve. `over-cap` is the public socket's ten-subscription limit; a Helius
+ * key lifts it.
+ */
+export interface CopyWatchStatus {
+  state: 'watching' | 'connecting' | 'over-cap' | 'off';
+  /** Last transaction seen from the wallet (any kind), ms. */
+  lastSeenAt: number | null;
+  /** Last SWAP decoded from it, ms. */
+  lastSwapAt: number | null;
+  seen: number;
+  swaps: number;
+}
+
 export interface CopySnapshot {
   configs: CopyConfig[];
   stats: Record<string, CopyStats>;
@@ -110,6 +128,8 @@ export interface CopySnapshot {
   /** Live copying is possible right now. */
   liveExecutable: boolean;
   liveBlockedReason: string | null;
+  /** Per followed wallet: is it being watched, and when was it last seen. */
+  watch: Record<string, CopyWatchStatus>;
 }
 
 export function defaultConfig(wallet: string, label: string): Omit<CopyConfig, 'id' | 'createdAt'> {

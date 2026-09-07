@@ -39,7 +39,7 @@
 import WebSocket from 'ws';
 import type { LogNotification, InnerEvent } from './feed';
 import { decodeCpiEventData, PUMP_PROGRAM_ID } from './pumpDecoder';
-import { getTransactions, resolveAccountKeys, noteSocketRejection } from './rpcClient';
+import { getTransactions, resolveAccountKeys, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from './rpcClient';
 import { base58Decode } from './base58';
 
 export interface PriorityFeedHost {
@@ -146,6 +146,15 @@ function connect(): void {
     running = false;
     return;
   }
+  // The host refused a handshake with 429 recently (any socket class): wait
+  // the park out rather than add another handshake to the storm.
+  const parked = socketParkRemainingMs(url);
+  if (parked > 0) {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, parked + Math.random() * 1_000);
+    return;
+  }
+  currentUrl = url;
   let sock: WebSocket;
   try {
     sock = new WebSocket(url, { handshakeTimeout: 10_000, perMessageDeflate: false });
@@ -175,7 +184,8 @@ function connect(): void {
   });
 
   sock.on('open', () => {
-    attempts = 0;
+    // NOT `attempts = 0` here: an endpoint that accepts and then drops would
+    // be redialled at 2 s forever. The first ack or notification resets it.
     lastAlive = Date.now();
     pingTimer = setInterval(() => {
       if (sock.readyState !== WebSocket.OPEN) return;
@@ -203,6 +213,7 @@ function connect(): void {
     let msg: {
       id?: number;
       result?: number;
+      error?: { code?: number; message?: string };
       method?: string;
       params?: { subscription?: number; result?: { value?: { signature?: string; logs?: string[]; err?: unknown }; context?: { slot?: number } } };
     };
@@ -212,8 +223,19 @@ function connect(): void {
       return;
     }
 
+    // A rejected subscribe ("Too many subscriptions" is the realistic one)
+    // used to vanish: the mint sat in `wanted` with no id, no retry and no
+    // line in the log. Say so; the mint stays on the slower public pool.
+    if (typeof msg.id === 'number' && msg.error) {
+      const mint = pending.get(msg.id);
+      pending.delete(msg.id);
+      host?.log('warn', `priority feed: subscribe rejected for ${mint ? `${mint.slice(0, 8)}…` : 'a mint'} — ${msg.error.message ?? 'no reason given'}; it stays on the public pool`);
+      return;
+    }
+
     // Subscription confirmation: remember the id so we can unsubscribe later.
     if (typeof msg.id === 'number' && typeof msg.result === 'number') {
+      attempts = 0;
       const mint = pending.get(msg.id);
       pending.delete(msg.id);
       if (mint && wanted.has(mint)) wanted.set(mint, msg.result);
@@ -223,6 +245,7 @@ function connect(): void {
     if (msg.method !== 'logsNotification') return;
     const value = msg.params?.result?.value;
     if (!value?.signature || !Array.isArray(value.logs)) return;
+    attempts = 0;
     events += 1;
     // Straight into the engine's normal path. The engine dedupes by signature
     // across every feed, so an event arriving here first simply means the
@@ -249,12 +272,33 @@ function connect(): void {
     // once; the url picker then stops offering the keyed socket, instead of
     // reconnect-looping against a key the endpoint has already turned down.
     noteSocketRejection(url, why);
+    noteSocketRateLimit(url, why);
     if (ws === sock) scheduleReconnect(why);
   });
 }
 
+/** The url the live socket was dialled with — for the subscription cap. */
+let currentUrl = '';
+/** The default public socket caps subscriptions at 10 per connection
+ *  (`x-ratelimit-pubsub-limit: 10`, observed 2026-09-06); past that the host
+ *  rejects the subscribe and the mint would sit unsubscribed. Positions are
+ *  watched before tape mints, so the cap lands on the tape. */
+const PUBLIC_SUB_CAP = 10;
+let capNotedAt = 0;
+const keyed = (u: string): boolean => /api-key=|[?&]token=/i.test(u);
+
 function subscribe(mint: string): void {
   if (ws?.readyState !== WebSocket.OPEN || !host) return;
+  if (!keyed(currentUrl)) {
+    const live = [...wanted.values()].filter((v) => v !== null).length + pending.size;
+    if (live >= PUBLIC_SUB_CAP) {
+      if (Date.now() - capNotedAt > 60_000) {
+        capNotedAt = Date.now();
+        host.log('info', `priority feed: the public socket allows ${PUBLIC_SUB_CAP} subscriptions — ${mint.slice(0, 8)}… stays on the firehose (a Helius key lifts this)`);
+      }
+      return;
+    }
+  }
   const id = nextId++;
   pending.set(id, mint);
   try {

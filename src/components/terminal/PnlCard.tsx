@@ -5,6 +5,7 @@ import { cls, fmtUsd } from '../../utils/format';
 import { CARD_H, CARD_PAD, CARD_W, cardLayout } from './cardLayout';
 import { GifPicker } from './GifPicker';
 import { dataUrlType, decodeAnimation, frameAt, type GifAnimation } from './gifFrames';
+import { encodeCardGif } from './gifExport';
 import { useToast } from '../../state/ToastProvider';
 
 // PnL cards (term.txt §15).
@@ -422,10 +423,59 @@ export function PnlCard({
       const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, 'image/png'));
       if (!blob) throw new Error('could not render');
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      toast.success('PnL card copied — paste it anywhere');
+      toast.success(bgAnim ? 'Still image copied (a copied image cannot animate — use Copy GIF for the moving one)' : 'PnL card copied — paste it anywhere');
     } catch (err) {
       toast.error(`Copy failed: ${(err as Error).message}`);
     }
+  };
+
+  // ── The animated card as a real GIF ───────────────────────────────────
+  // A copied IMAGE is a bitmap on every platform, so with a GIF behind the
+  // card "Copy image" gave a still (2026-09-06). The moving card is encoded
+  // as an actual GIF — one frame per background frame, drawn at the moment
+  // that frame shows — and travels as a file: onto the clipboard where the
+  // OS carries file references, or saved.
+  const [encoding, setEncoding] = useState<number | null>(null);
+
+  const makeGif = async (): Promise<Uint8Array | null> => {
+    const canvas = canvasRef.current;
+    if (!canvas || !bgAnim || encoding !== null) return null;
+    setEncoding(0);
+    try {
+      const bytes = await encodeCardGif(
+        bgAnim,
+        W,
+        H,
+        (elapsed) => {
+          clockRef.current = elapsed;
+          draw();
+          return canvasRef.current;
+        },
+        (f) => setEncoding(f),
+      );
+      return bytes;
+    } catch (err) {
+      toast.error(`Could not encode the GIF: ${(err as Error).message}`);
+      return null;
+    } finally {
+      setEncoding(null);
+    }
+  };
+
+  const copyGif = async (): Promise<void> => {
+    const bytes = await makeGif();
+    if (!bytes) return;
+    const r = await window.krypt.card.copyFile(`krypt-${viewFor(subject).fileTag}`, bytes);
+    if (r.ok) toast.success(r.message);
+    else toast.error(r.message);
+  };
+
+  const saveGif = async (): Promise<void> => {
+    const bytes = await makeGif();
+    if (!bytes) return;
+    const r = await window.krypt.card.saveFile(`krypt-${viewFor(subject).fileTag}`, bytes);
+    if (r.ok) toast.success(r.message);
+    else if (!/cancelled/i.test(r.message)) toast.error(r.message);
   };
 
   const download = (): void => {
@@ -534,23 +584,48 @@ export function PnlCard({
           />
         )}
 
-        <div className="flex items-center gap-2 mt-3">
+        <div className="flex flex-wrap items-center gap-2 mt-3">
           {bgAnim && (
-            <button
-              onClick={saveVideo}
-              disabled={recording}
-              className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
-            >
-              {recording ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
-              {recording ? 'Recording…' : 'Save video'}
-            </button>
+            <>
+              {/* With a moving background the GIF is the primary artefact;
+                  the still copy stays available but says what it is. */}
+              <button
+                onClick={() => void copyGif()}
+                disabled={encoding !== null}
+                className="inline-flex items-center gap-2 rounded-lg border border-krypt-purple/50 bg-krypt-gradient px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-60"
+              >
+                {encoding !== null ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                {encoding !== null ? `Encoding ${Math.round(encoding * 100)}%` : 'Copy GIF'}
+              </button>
+              <button
+                onClick={() => void saveGif()}
+                disabled={encoding !== null}
+                className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
+              >
+                <Download className="h-4 w-4" />
+                Save GIF
+              </button>
+              <button
+                onClick={saveVideo}
+                disabled={recording}
+                className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
+              >
+                {recording ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
+                {recording ? 'Recording…' : 'Save video'}
+              </button>
+            </>
           )}
           <button
             onClick={() => void copy()}
-            className="inline-flex items-center gap-2 rounded-lg border border-krypt-purple/50 bg-krypt-gradient px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110"
+            className={cls(
+              'inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition',
+              bgAnim
+                ? 'border border-white/10 bg-white/5 text-white/90 hover:bg-white/10'
+                : 'border border-krypt-purple/50 bg-krypt-gradient hover:brightness-110',
+            )}
           >
             <Copy className="h-4 w-4" />
-            Copy image
+            {bgAnim ? 'Copy still' : 'Copy image'}
           </button>
           <button
             onClick={download}

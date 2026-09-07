@@ -30,7 +30,7 @@ import WebSocket from 'ws';
 import { PUMP_PROGRAM_ID, type PumpEvent } from './pumpDecoder';
 import type { AmmEvent } from './ammDecoder';
 import { base58Decode } from './base58';
-import { noteSocketRejection, parseWireTransaction, resolveAccountKeys, type RawIx } from './rpcClient';
+import { noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs, parseWireTransaction, resolveAccountKeys, type RawIx } from './rpcClient';
 import type { FeedSocketStatus, FeedState } from '@shared/types';
 
 /** An event decoded from an emit_cpi inner instruction rather than a log. */
@@ -70,7 +70,7 @@ export interface FeedTiming {
   initialBackoffMs?: number;
   maxBackoffMs?: number;
   /** A socket open this long without dropping counts as healthy: its backoff
-   *  resets. (A notification resets it immediately.) */
+   *  resets. (A notification alone does not — see the message handler.) */
   backoffResetAfterMs?: number;
   /** No subscribe ack AND no notification within this window → reconnect. */
   subscribeAckTimeoutMs?: number;
@@ -237,6 +237,18 @@ abstract class RpcSocket {
 
   private connect(as: FeedState): void {
     if (!this.wantRunning) return;
+    // The host refused a handshake with 429 recently (any socket class):
+    // wait the park out rather than add another handshake to the storm.
+    const parked = socketParkRemainingMs(this.url);
+    if (parked > 0) {
+      this.setState('reconnecting', `${this.host} rate limited handshakes — waiting ${Math.ceil(parked / 1000)}s`);
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        if (this.wantRunning) this.connect(as);
+      }, parked + Math.random() * 1_000);
+      return;
+    }
     this.setState(as, `connecting to ${this.host}`);
     let ws: WebSocket;
     try {
@@ -275,6 +287,14 @@ abstract class RpcSocket {
     ws.on('message', (raw) => {
       const receivedAt = Date.now();
       this.bytes += frameLength(raw);
+      // Inbound traffic is proof of life. A busy node can delay a pong past
+      // the deadline while streaming perfectly well; killing the firehose
+      // socket for that and redialling was the 2026-09-03 storm shape
+      // (priorityFeed and confirmSocket already counted frames as life).
+      if (this.pongTimer) {
+        clearTimeout(this.pongTimer);
+        this.pongTimer = null;
+      }
       let msg: RpcMessage;
       try {
         msg = JSON.parse(String(raw));
@@ -302,8 +322,11 @@ abstract class RpcSocket {
       if (msg.method !== this.notificationMethod()) return;
       // Data flowing proves the subscription regardless of the ack: some
       // providers answer with a notification before (or instead of) the ack.
+      // It does NOT reset the backoff: an overloaded node that accepts,
+      // streams for two seconds and sheds the connection would otherwise be
+      // redialled at 1 s forever. Only `backoffResetAfterMs` of staying up
+      // earns that (armHealthyTimer).
       this.clearAckTimer();
-      this.backoffMs = this.timing.initialBackoffMs;
       if (this.state !== 'live') this.setState('live', 'first notification');
       this.handleNotification(msg.params?.result, receivedAt);
     });
@@ -318,6 +341,9 @@ abstract class RpcSocket {
 
     ws.on('error', (err) => {
       noteSocketRejection(this.url, err.message);
+      // A handshake 429 parks the HOST for every socket class (rpcClient),
+      // so the pump, amm, priority and confirm sockets back off together.
+      noteSocketRateLimit(this.url, err.message);
       this.scheduleReconnect(`socket error: ${err.message}`);
     });
 

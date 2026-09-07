@@ -165,6 +165,9 @@ export interface TradeHistoryRow {
   signature: string | null;
   state: 'pending' | 'reconciled' | 'unreconciled';
   note: string | null;
+  /** A paper fill (modelled, never on chain). The Trades tab labels it and
+   *  can filter on it; absent on every real row. */
+  paper?: boolean;
 }
 
 export function emptyPortfolio(): PortfolioSummary {
@@ -201,7 +204,7 @@ export function emptyPortfolio(): PortfolioSummary {
 export function toCsv(rows: TradeHistoryRow[]): string {
   const head = [
     'time', 'mint', 'symbol', 'side', 'requested',
-    'sol_delta', 'token_delta', 'fee_sol', 'signature', 'state', 'note',
+    'sol_delta', 'token_delta', 'fee_sol', 'signature', 'state', 'note', 'paper',
   ].join(',');
   const esc = (v: unknown): string => {
     if (v === null || v === undefined) return '';
@@ -212,7 +215,7 @@ export function toCsv(rows: TradeHistoryRow[]): string {
     [
       new Date(r.at).toISOString(),
       r.mint, r.symbol, r.side, r.requested,
-      r.solDelta, r.tokenDelta, r.feeSol, r.signature, r.state, r.note,
+      r.solDelta, r.tokenDelta, r.feeSol, r.signature, r.state, r.note, r.paper ? 'yes' : '',
     ].map(esc).join(','),
   );
   return [head, ...lines].join('\n');

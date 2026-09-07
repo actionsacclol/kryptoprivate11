@@ -257,7 +257,14 @@ export function Discover({ onOpenToken }: { onOpenToken: (mint: string) => void 
                     expanded === col.id ? 'flex flex-col gap-1.5' : 'space-y-2',
                   )}
                 >
-                  {state.error ? (
+                  {state.error && rows.length > 0 && (
+                    // Rows survived a parked provider: keep them, say why they
+                    // are not refreshing. A 429 used to blank the column.
+                    <div className={cls('rounded-md border border-arc-gold/25 bg-arc-gold/10 px-3 py-2', expanded === col.id && 'col-span-full')}>
+                      <p className="text-[10px] text-arc-gold/90 leading-relaxed">{state.error}</p>
+                    </div>
+                  )}
+                  {state.error && rows.length === 0 ? (
                     <div className={cls('rounded-md border border-rose-400/25 bg-rose-500/10 px-3 py-3', expanded === col.id && 'col-span-full')}>
                       <p className="text-[11px] text-rose-200 leading-relaxed">{state.error}</p>
                       <button

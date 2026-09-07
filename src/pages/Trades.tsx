@@ -46,12 +46,15 @@ function price(p: number | null): string {
 
 function ClosedRow({
   t,
+  paper,
   solUsd,
   onOpen,
   onShare,
   onReplay,
 }: {
   t: ClosedTrade;
+  /** A paper round trip: the fills were modelled, never broadcast. */
+  paper: boolean;
   solUsd: number | null;
   onOpen: () => void;
   onShare: () => void;
@@ -63,6 +66,11 @@ function ClosedRow({
       <button onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex items-baseline gap-2">
           <span className="truncate text-[14px] font-semibold text-white">{t.symbol || shortAddr(t.mint)}</span>
+          {paper && (
+            <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-[0.18em] text-amber-300">
+              Paper
+            </span>
+          )}
           <span className="whitespace-nowrap font-mono text-[10px] text-krypt-muted/60">
             {when(t.closedAt)} · held {holdLabel(t.holdMs)} · {t.buys} buy{t.buys === 1 ? '' : 's'} / {t.sells} sell
             {t.sells === 1 ? '' : 's'}
@@ -158,23 +166,49 @@ export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
 
   useEffect(() => {
     void load();
+    // A fill, real or paper, lands here at once — the page used to load
+    // once on mount, so a paper round trip done a moment earlier was missing
+    // until the user left and came back (2026-09-06).
+    const off = window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'fill' || ev.kind === 'paper') void load();
+    });
+    return off;
   }, [load]);
 
   const closed = data?.closed ?? [];
+  const paperClosed = data?.paper.closed ?? [];
   const open = data?.positions ?? [];
+  // One list, newest first, paper rows marked. The separate Paper book page
+  // went on 2026-09-06: a paper round trip is a trade you made, and it
+  // belongs beside the real ones — labelled, and kept out of the totals.
+  const rows = useMemo(
+    () =>
+      [...closed.map((t) => ({ t, paper: false })), ...paperClosed.map((t) => ({ t, paper: true }))].sort(
+        (a, b) => b.t.closedAt - a.t.closedAt,
+      ),
+    [closed, paperClosed],
+  );
   const totals = useMemo(() => {
     const realised = closed.reduce((a, c) => a + c.pnlSol, 0);
     const wins = closed.filter((c) => c.pnlSol > 0).length;
-    return { realised, wins, count: closed.length };
-  }, [closed]);
+    const paperPnl = paperClosed.reduce((a, c) => a + c.pnlSol, 0);
+    return { realised, wins, count: closed.length, paperCount: paperClosed.length, paperPnl };
+  }, [closed, paperClosed]);
 
   return (
     <Page
       title="Trades"
       subtitle={
-        totals.count
-          ? `${totals.count} closed round trip${totals.count === 1 ? '' : 's'} · ${totals.wins} up, ${totals.count - totals.wins} down · ${totals.realised >= 0 ? '+' : ''}${totals.realised.toFixed(4)} SOL realised`
-          : 'Every round trip you complete lands here'
+        totals.count || totals.paperCount
+          ? [
+              totals.count
+                ? `${totals.count} closed round trip${totals.count === 1 ? '' : 's'} · ${totals.wins} up, ${totals.count - totals.wins} down · ${totals.realised >= 0 ? '+' : ''}${totals.realised.toFixed(4)} SOL realised`
+                : 'No real round trips yet',
+              totals.paperCount ? `${totals.paperCount} paper (${totals.paperPnl >= 0 ? '+' : ''}${totals.paperPnl.toFixed(4)} SOL, not counted)` : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')
+          : 'Every round trip you complete lands here, paper or real'
       }
       actions={
         <div className="flex items-center gap-2">
@@ -189,20 +223,21 @@ export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
       }
     >
       <Section
-        title={`Closed (${closed.length})`}
-        description="What actually left the wallet and what actually came back, read from the chain. Make a card from one, or replay it: the candles arrive as they happened, the PnL moves with them, and it ends on the realised number."
+        title={`Closed (${rows.length})`}
+        description="What actually left the wallet and what actually came back, read from the chain. Rows marked paper were modelled fills that never touched the chain and count toward nothing. Make a card from one, or replay it: the candles arrive as they happened, the PnL moves with them, and it ends on the realised number."
       >
-        {closed.length === 0 ? (
+        {rows.length === 0 ? (
           <Empty
             title={loading ? 'Reading your fills…' : 'No completed trades yet'}
-            message="A trade appears here once you have sold everything you bought of a token. Buy and sell from the token page and it lands here by itself. Simulate builds a made-up one if you just want to see how the replay and the card look."
+            message="A trade appears here once you have sold everything you bought of a token, in Paper or Live. Buy and sell from the token page and it lands here by itself. Simulate builds a made-up one if you just want to see how the replay and the card look."
           />
         ) : (
           <Card padded={false} className="overflow-hidden">
-            {closed.map((t) => (
+            {rows.map(({ t, paper }) => (
               <ClosedRow
-                key={`${t.mint}-${t.closedAt}`}
+                key={`${paper ? 'paper-' : ''}${t.mint}-${t.closedAt}`}
                 t={t}
+                paper={paper}
                 solUsd={data?.solUsd ?? null}
                 onOpen={() => onOpenToken(t.mint)}
                 onShare={() => setShare({ kind: 'trade', trade: t })}

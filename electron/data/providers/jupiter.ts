@@ -13,7 +13,7 @@
 // re-verify mint and freeze authority on-chain before the security panel
 // calls them "pass" — a third-party audit flag is a hint, not a fact.
 
-import { getJson, memo } from '../http';
+import { cached, getJson, memo, putCache } from '../http';
 import {
   emptySummary,
   type Launchpad,
@@ -199,10 +199,28 @@ export function toSummary(t: JupToken): TokenSummary {
 const TTL_LIST = 6_000;
 const TTL_TOKEN = 8_000;
 
-async function list(path: string, key: string, ttl: number): Promise<JupToken[]> {
+/**
+ * Every row any list or batch returns is also remembered PER MINT, so a
+ * later single-mint `search` (the token page, the portfolio, the watchlist,
+ * the orders poll) is answered from memory instead of a request. Before
+ * 2026-09-06 a Discover refresh fetched the same forty mints Jupiter had
+ * just listed, and a portfolio of thirty mints was thirty searches every
+ * twenty seconds — ~180 calls a minute for facts already in hand.
+ */
+const tokenKey = (mint: string): string => `jup:tok:${mint}`;
+
+function rememberTokens(rows: JupToken[]): void {
+  for (const t of rows) if (t?.id) putCache(tokenKey(t.id), t, TTL_TOKEN);
+}
+
+/** A bare mint address (base58, 32–44 chars) rather than free text. */
+const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+async function list(path: string, key: string, ttl: number, opts: { priority?: boolean } = {}): Promise<JupToken[]> {
   const hit = await memo<JupToken[]>(key, ttl, async () => {
-    const r = await getJson<JupToken[]>('jupiter', path);
+    const r = await getJson<JupToken[]>('jupiter', path, opts.priority ? { priority: true } : {});
     if (!r.ok || !Array.isArray(r.data)) return null;
+    rememberTokens(r.data);
     return r.data;
   });
   return hit ?? [];
@@ -235,6 +253,11 @@ export function topOrganic(window: '5m' | '1h' | '6h' | '24h', limit = 40): Prom
 export function search(query: string): Promise<JupToken[]> {
   const q = query.trim().slice(0, 100);
   if (!q) return Promise.resolve([]);
+  // A mint a list or batch already returned is answered from memory.
+  if (MINT_RE.test(q)) {
+    const known = cached<JupToken>(tokenKey(q));
+    if (known) return Promise.resolve([known]);
+  }
   return list(`/tokens/v2/search?query=${encodeURIComponent(q)}`, `jup:search:${q}`, TTL_TOKEN);
 }
 
@@ -242,16 +265,31 @@ export function search(query: string): Promise<JupToken[]> {
  * Enrich up to 100 mints in ONE request. `search` accepts a comma-separated
  * list of addresses, which is how a Discover column of pump.fun rows gets
  * holder counts and audit flags without 40 separate calls.
+ *
+ * Only the mints NOT already in the per-mint memory are requested, and the
+ * batch is keyed by its exact (sorted) membership. The old key — first mint
+ * plus count — missed on every refresh of a column whose newest row had
+ * changed (so the whole page was re-fetched every four seconds) and could
+ * answer one set's rows for another set that happened to share its first
+ * mint and length.
  */
-export async function byMints(mints: string[]): Promise<Map<string, JupToken>> {
+export async function byMints(mints: string[], opts: { priority?: boolean } = {}): Promise<Map<string, JupToken>> {
   const out = new Map<string, JupToken>();
   const unique = [...new Set(mints.filter(Boolean))];
-  for (let i = 0; i < unique.length; i += 100) {
-    const batch = unique.slice(i, i + 100);
+  const misses: string[] = [];
+  for (const m of unique) {
+    const known = cached<JupToken>(tokenKey(m));
+    if (known) out.set(m, known);
+    else misses.push(m);
+  }
+  misses.sort();
+  for (let i = 0; i < misses.length; i += 100) {
+    const batch = misses.slice(i, i + 100);
     const rows = await list(
       `/tokens/v2/search?query=${encodeURIComponent(batch.join(','))}`,
-      `jup:batch:${batch[0]}:${batch.length}`,
+      `jup:batch:${batch.join(',')}`,
       TTL_TOKEN,
+      opts,
     );
     for (const t of rows) if (t?.id) out.set(t.id, t);
   }
@@ -301,15 +339,25 @@ const TTL_SHIELD = 30_000;
  * A 200 answers for EVERY requested mint: one absent from the map has no
  * warnings. A non-200 answers for none, and every mint gets null.
  */
-export async function shield(mints: string[]): Promise<Map<string, ShieldVerdict>> {
+export async function shield(mints: string[], opts: { priority?: boolean } = {}): Promise<Map<string, ShieldVerdict>> {
   const out = new Map<string, ShieldVerdict>();
   const unique = [...new Set(mints.filter(Boolean))];
-  for (let i = 0; i < unique.length; i += 100) {
-    const batch = unique.slice(i, i + 100);
+  // Per-mint memory first (same reasoning as byMints): a Discover page
+  // whose row set shifted by one mint asked Shield about all forty again.
+  const misses: string[] = [];
+  for (const m of unique) {
+    const known = cached<ShieldVerdict>(`jup:shieldv:${m}`);
+    if (known) out.set(m, known);
+    else misses.push(m);
+  }
+  misses.sort();
+  for (let i = 0; i < misses.length; i += 100) {
+    const batch = misses.slice(i, i + 100);
     const hit = await memo<Record<string, ShieldWarning[]>>(`jup:shield:${batch.join(',')}`, TTL_SHIELD, async () => {
       const r = await getJson<{ warnings?: Record<string, ShieldWarning[]> }>(
         'jupiter',
         `/ultra/v1/shield?mints=${encodeURIComponent(batch.join(','))}`,
+        opts.priority ? { priority: true } : {},
       );
       if (!r.ok || !r.data || typeof r.data !== 'object') return null;
       const w = r.data.warnings;
@@ -322,7 +370,9 @@ export async function shield(mints: string[]): Promise<Map<string, ShieldVerdict
       }
       const list = Array.isArray(hit[m]) ? hit[m] : [];
       const types = list.map((x) => (typeof x?.type === 'string' ? x.type : '')).filter(Boolean);
-      out.set(m, { notSellable: types.includes('NOT_SELLABLE'), warnings: types });
+      const verdict = { notSellable: types.includes('NOT_SELLABLE'), warnings: types };
+      putCache(`jup:shieldv:${m}`, verdict, TTL_SHIELD);
+      out.set(m, verdict);
     }
   }
   return out;

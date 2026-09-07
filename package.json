@@ -41,6 +41,7 @@
   "bytenode": "^1.6.0",
   "discord-rpc": "^4.0.1",
   "framer-motion": "^12.42.2",
+  "gifenc": "^1.0.3",
   "lightweight-charts": "^4.2.3",
   "three": "^0.185.1",
   "undici": "^6.28.0",

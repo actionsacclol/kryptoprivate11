@@ -270,6 +270,50 @@ test('a failed execution is NOT retried', async () => {
   assert.equal(ord.all()[0].state, 'failed');
 });
 
+// Rate-limit swarm 2026-09-06: a refusal BEFORE broadcast by a rate limit
+// has no post-broadcast state to double-spend against, so the order goes
+// back to armed (bounded) instead of dying with the stop-loss still needed.
+test('a rate-limited refusal before broadcast re-arms the order', async () => {
+  const h = setup({ sellResult: { ok: false, message: 'Simulation call failed: RPC HTTP 429' } });
+  mk('stop_loss', 20, { ref: 0.001, amount: 100 });
+  ord.onTick({ mint: MINT, priceSol: 0.0005, mcapUsd: null });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h.calls.sells.length, 1);
+  const o = ord.all()[0];
+  assert.equal(o.state, 'armed', 'nothing was broadcast, so the order is armed again');
+  assert.match(o.note, /rate limited/);
+  assert.ok(h.calls.toasts.some((t) => t.level === 'warn' && /rate limited/.test(t.message)), 'the user is told');
+  ord.onTick({ mint: MINT, priceSol: 0.0005, mcapUsd: null });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h.calls.sells.length, 2, 'the next tick fires it again');
+});
+
+test('re-arming after rate limits is bounded, then the order fails with the reason', async () => {
+  const h = setup({ sellResult: { ok: false, message: 'jupiter: quote: jupiter: rate limited (429) — pausing 20s' } });
+  mk('stop_loss', 20, { ref: 0.001, amount: 100 });
+  for (let i = 0; i < 8; i++) {
+    ord.onTick({ mint: MINT, priceSol: 0.0005, mcapUsd: null });
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(h.calls.sells.length, 6, 'five re-arms, then the sixth failure is final');
+  const o = ord.all()[0];
+  assert.equal(o.state, 'failed');
+  assert.match(o.note, /rate limited/);
+});
+
+// A signature means something was broadcast: a 429 seen AFTER that (a
+// status poll, say) must never re-arm — §5 applies in full.
+test('a rate-limited failure WITH a signature is never re-armed', async () => {
+  const h = setup({ sellResult: { ok: false, message: 'confirm: RPC HTTP 429', signature: 'sigX' } });
+  mk('stop_loss', 20, { ref: 0.001, amount: 100 });
+  for (let i = 0; i < 5; i++) {
+    ord.onTick({ mint: MINT, priceSol: 0.0005, mcapUsd: null });
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(h.calls.sells.length, 1);
+  assert.equal(ord.all()[0].state, 'failed');
+});
+
 // ── Lifecycle ─────────────────────────────────────────────────────────
 
 test('cancel stops an armed order from firing', async () => {

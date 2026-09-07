@@ -398,10 +398,38 @@ export function WalletsPage() {
                     </div>
                   )}
 
+                  {/* How the wallet is being watched. Every followed wallet
+                      has its own subscription on the live socket, on any DEX;
+                      this line is what turns silence into an explanation. */}
+                  {c.enabled && (() => {
+                    const w = snap?.watch?.[c.wallet];
+                    if (!w) return null;
+                    if (w.state === 'over-cap') {
+                      return (
+                        <p className="text-[10px] text-arc-gold/90">
+                          Not watched: the free public socket allows 10 followed wallets. Add a Helius key in Settings to
+                          follow more.
+                        </p>
+                      );
+                    }
+                    if (w.state === 'off') {
+                      return <p className="text-[10px] text-rose-300/80">Not watched — no websocket endpoint is configured.</p>;
+                    }
+                    if (w.state === 'connecting') {
+                      return <p className="text-[10px] text-krypt-muted/60">Connecting to the live socket…</p>;
+                    }
+                    return (
+                      <p className="text-[10px] text-krypt-muted/60">
+                        Watching on the live socket, any DEX · {w.seen} transaction{w.seen === 1 ? '' : 's'} seen
+                        {w.lastSeenAt ? `, last ${fmtAgo(w.lastSeenAt)} ago` : ' so far'} · {w.swaps} swap{w.swaps === 1 ? '' : 's'}
+                        {w.lastSwapAt ? ` (last ${fmtAgo(w.lastSwapAt)} ago)` : ''}
+                      </p>
+                    );
+                  })()}
                   {st && st.trades === 0 && c.enabled && (
                     <p className="text-[10px] text-krypt-muted/60">
-                      Nothing copied yet. This only sees trades on the live Pump.fun feed, so the engine has to be
-                      running — press Start scanning.
+                      Nothing copied yet. Every trade this wallet signs is read from the live socket, whatever DEX it
+                      used; buys that pass your filters appear here, and skipped ones say why.
                     </p>
                   )}
                 </Card>

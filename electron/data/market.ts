@@ -51,7 +51,7 @@ import {
   type TradeRow,
   type TraderScanRow,
 } from '@shared/market';
-import { cached, cooldownRemainingMs, memo, providerHost, telemetry } from './http';
+import { cached, cooldownRemainingMs, memo, providerHost, queueDepth, telemetry } from './http';
 import * as jup from './providers/jupiter';
 import * as ds from './providers/dexscreener';
 import * as pf from './providers/pumpfun';
@@ -235,8 +235,41 @@ export function providerStatuses(): ProviderStatus[] {
       lastError: t.lastError,
       lastCallAt: t.lastCallAt,
       latencyMs: t.latencyMs,
+      cooldownMs: cooldownRemainingMs(id),
+      queued: queueDepth(id),
     };
   });
+}
+
+/**
+ * One line naming the parked providers among `only` (default: all) and when
+ * each is asked again, or '' when none is. Carried back as a result's
+ * message so the renderer can say "rate limited" instead of showing an
+ * empty list under a fresh "2s ago" stamp.
+ */
+export function parkNote(only?: ProviderId[]): string {
+  const parked = parkedProviders().filter((id) => !only || only.includes(id));
+  if (!parked.length) return '';
+  const parts = parked.map((id) => `${PROVIDER_META[id].label} (retrying in ${Math.ceil(cooldownRemainingMs(id) / 1000)}s)`);
+  return `Rate limited by ${parts.join(', ')}.`;
+}
+
+/**
+ * The providers a Discover column's ROWS come from. The intel providers
+ * (swap-api seeks, RugCheck, DexScreener, Birdeye) only decorate rows with
+ * badges, and a badge that lags is not a stale column — a swap-api park used
+ * to stamp "showing the last good rows" on all four columns while every row
+ * in them was fresh (2026-09-06).
+ */
+const COLUMN_ROW_SOURCES: Record<DiscoverColumn, ProviderId[]> = {
+  new: ['pumpfun', 'jupiter', 'geckoterminal'],
+  graduating: ['pumpfun', 'geckoterminal'],
+  migrated: ['pumpfun', 'geckoterminal'],
+  trending: ['jupiter'],
+};
+
+export function discoverParkNote(column: DiscoverColumn): string {
+  return parkNote(COLUMN_ROW_SOURCES[column]);
 }
 
 // ── Merge helpers ─────────────────────────────────────────────────────
@@ -593,12 +626,27 @@ const ODDS_ATTACH_MIN_AGE_S = 60;
 async function attachRugReports(rows: TokenSummary[]): Promise<void> {
   if (!usable('pumpswap')) return;
   const now = Date.now();
+  // Curve rows only. The rules were measured on the launch window of tokens
+  // still on their curve; a Migrated row (curve gone, `bondingCurvePct`
+  // null) was being judged too — forty extra coin lookups and seeks per
+  // refresh of a column whose cards never show the badge.
   const queue = rows.filter(
-    (r) => r.launchpad === 'pumpfun' && r.createdAt !== null && (now - r.createdAt) / 1000 >= RUG_ATTACH_MIN_AGE_S,
+    (r) =>
+      r.launchpad === 'pumpfun' &&
+      r.createdAt !== null &&
+      (now - r.createdAt) / 1000 >= RUG_ATTACH_MIN_AGE_S &&
+      r.bondingCurvePct !== null &&
+      r.bondingCurvePct < 100,
   );
   if (!queue.length) return;
+  // The budget is a DEADLINE for starting rows, not just for waiting: the
+  // workers used to keep draining the queue after the race resolved, so
+  // every refresh added the whole column to the pump.fun / swap-api queues
+  // and the token page's own lookups sat behind minutes of seeks.
+  const deadline = now + RUG_ATTACH_BUDGET_MS;
   const worker = async (): Promise<void> => {
     for (;;) {
+      if (Date.now() >= deadline) return;
       const r = queue.shift();
       if (!r) return;
       const oldEnoughForOdds = r.createdAt !== null && (now - r.createdAt) / 1000 >= ODDS_ATTACH_MIN_AGE_S;
@@ -1016,6 +1064,52 @@ export async function summary(mint: string): Promise<TokenSummary> {
   return hit ?? emptySummary(mint);
 }
 
+/**
+ * Summaries for MANY mints with the batched Jupiter routes warmed first —
+ * one search and one Shield call for the whole set — so each per-mint
+ * assembly finds its Jupiter half in memory and only the pump.fun and
+ * DexScreener halves go out, `concurrency` wide behind the per-host gate.
+ *
+ * The portfolio (sixty mints, three pollers), the watchlist and the orders
+ * poll each priced their mints one `summary()` at a time: two Jupiter calls
+ * per mint per refresh, which on its own put an idle app over Jupiter's
+ * budget (rate-limit swarm, 2026-09-06). `priority` puts the Jupiter batch
+ * on the trade lane — for the orders poll, whose price a stop-loss evaluates
+ * against and which must not go blind behind a parked provider.
+ */
+export async function summaryMany(
+  mints: string[],
+  concurrency = 4,
+  opts: { priority?: boolean } = {},
+): Promise<Map<string, TokenSummary>> {
+  const out = new Map<string, TokenSummary>();
+  const unique = [...new Set(mints.filter(Boolean))];
+  if (!unique.length) return out;
+  const cold = unique.filter((m) => summaryIfCached(m) === null);
+  if (cold.length && usable('jupiter')) {
+    await Promise.all([jup.byMints(cold, opts), jup.shield(cold, opts)]).catch(() => undefined);
+  }
+  const lanes = Math.max(1, Math.min(concurrency, unique.length));
+  await Promise.all(
+    Array.from({ length: lanes }, async (_, lane) => {
+      for (let i = lane; i < unique.length; i += lanes) {
+        const m = unique[i];
+        try {
+          out.set(m, await summary(m));
+        } catch {
+          /* an unpriced mint is simply absent — the caller says so */
+        }
+      }
+    }),
+  );
+  return out;
+}
+
+/** Providers currently parked after a 429 — for a message that names them. */
+export function parkedProviders(): ProviderId[] {
+  return (Object.keys(PROVIDER_META) as ProviderId[]).filter((id) => cooldownRemainingMs(id) > 0);
+}
+
 async function buildSummary(mint: string): Promise<TokenSummary> {
   const c = need();
   let s = emptySummary(mint);
@@ -1391,7 +1485,9 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       ? `This token is still on its bonding curve at ${s.bondingCurvePct?.toFixed(1)}%, so no chart provider indexes it yet. Start the engine (Start scanning) and keep this page open — Krypt will build the chart from its own live feed.`
       : subMinute
         ? `No ${interval} data. Sub-minute candles come from the live feed (start the engine and open this token) or from Birdeye with an API key.`
-        : 'No candle source returned data for this token.',
+        : parked
+          ? `Chart provider rate limited — retrying in ${Math.ceil(Math.max(cooldownRemainingMs('geckoterminal'), cooldownRemainingMs('birdeye')) / 1000)}s.`
+          : 'No candle source returned data for this token.',
   };
 }
 

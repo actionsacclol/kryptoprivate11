@@ -41,6 +41,7 @@ import {
   type OrderState,
 } from '@shared/orders';
 import * as recorder from './recorder';
+import { mentionsRateLimit } from '@shared/rpcErrors';
 
 const FILE = 'adv-orders.json';
 const MAX_ORDERS = 200;
@@ -392,6 +393,11 @@ export function onTick(t: MarketTick): void {
   }
 }
 
+/** Re-arms granted to an order whose execution was refused by a rate limit
+ *  before broadcast. In memory only: a restart starts the count over. */
+const rateLimitRearms = new Map<string, number>();
+const MAX_RATE_LIMIT_REARMS = 5;
+
 async function execute(o: AdvOrder): Promise<void> {
   const h = host;
   if (!h) return;
@@ -438,6 +444,22 @@ async function execute(o: AdvOrder): Promise<void> {
       // evidence for.
       finish(o, 'triggered', `Broadcast, awaiting confirmation — ${res.message}`, res.signature);
       h.toast('warn', `${o.symbol || 'Order'} sent, unconfirmed — may still land`);
+    } else if (!res.signature && mentionsRateLimit(res.message) && (rateLimitRearms.get(o.id) ?? 0) < MAX_RATE_LIMIT_REARMS) {
+      // Refused BEFORE broadcast by a rate limit — no signature exists, so
+      // there is no post-broadcast state and §5 does not apply. Re-arm: a
+      // stop-loss that dies because an RPC said "slow down" is a stop-loss
+      // that silently never fired (2026-09-06). Bounded, so a host that is
+      // down for an hour ends in `failed` with the reason, not a loop.
+      const n = (rateLimitRearms.get(o.id) ?? 0) + 1;
+      rateLimitRearms.set(o.id, n);
+      o.state = 'armed';
+      o.triggeredAt = null;
+      o.note = `Condition met but NOT executed — rate limited (${res.message}). Still armed (attempt ${n}/${MAX_RATE_LIMIT_REARMS}).`;
+      o.updatedAt = Date.now();
+      persistNow();
+      h.changed();
+      h.log('warn', `order re-armed after a rate limit: ${describeOrder(o)} on ${o.symbol || o.mint.slice(0, 8)} — ${res.message}`);
+      h.toast('warn', `${o.symbol || 'Order'}: not executed, rate limited — still armed`);
     } else {
       // Deliberately NOT retried. See the header, §5.
       finish(o, 'failed', res.message, res.signature ?? null);

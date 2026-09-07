@@ -405,7 +405,7 @@ export function Onboarding({
 
               <Field
                 label="Helius API key"
-                hint="Free tier. Used only where it matters — trade simulation, sending, confirmation and fee estimates — so a free key lasts months. Bulk scanning stays on public endpoints. Paste the key or the whole URL."
+                hint="Free tier. Used where it matters — trade simulation, sending, confirmation, fee estimates, and the holder reads the public RPC refuses with 429. Launch scanning stays on public endpoints. Paste the key or the whole URL."
                 value={helius}
                 onChange={(v) => {
                   setHelius(v);

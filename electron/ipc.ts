@@ -2,8 +2,9 @@
 // the greppable contract between main and renderer. Handlers never throw
 // across IPC; they return { ok, message, data? }.
 
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import fs from 'node:fs';
+import path from 'node:path';
 import { resolveRpc, type AppSettings, type EngineEvent, type IpcResult } from '@shared/types';
 import * as store from './system/settings-store';
 import { validateSettingsPatch } from './system/settingsValidation';
@@ -933,7 +934,9 @@ export function registerIpc(): void {
     const w = STATS_WINDOWS.includes(win as StatsWindow) ? (win as StatsWindow) : '5m';
     try {
       const rows = await market.discover(column as DiscoverColumn, Number.isFinite(n) ? n : 40, w);
-      return ok('ok', rows);
+      // A parked provider rides back in the message so the column can say
+      // 'rate limited' over the rows it keeps, instead of blanking.
+      return ok(market.discoverParkNote(column as DiscoverColumn) || 'ok', rows);
     } catch (err) {
       return fail(`Discover failed: ${(err as Error).message}`);
     }
@@ -954,6 +957,19 @@ export function registerIpc(): void {
       return ok('ok', await market.summary(mint));
     } catch (err) {
       return fail(`Summary failed: ${(err as Error).message}`);
+    }
+  });
+
+  // Many mints in one round trip, with the Jupiter half batched main-side.
+  // The watchlist asked one summary per pin every 20 s — thirty pins were
+  // sixty Jupiter calls a refresh (rate-limit swarm, 2026-09-06).
+  ipcMain.handle('market:summaries', async (_e, mints: unknown) => {
+    if (!Array.isArray(mints) || mints.length > 100 || !mints.every(isMint)) return fail('Invalid mint list');
+    try {
+      const map = await market.summaryMany(mints as string[], 3);
+      return ok(market.parkNote() || 'ok', Object.fromEntries(map));
+    } catch (err) {
+      return fail(`Summaries failed: ${(err as Error).message}`);
     }
   });
 
@@ -1250,6 +1266,76 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle('portfolio:history', () => ok('ok', getEngine().tradeHistory()));
+
+  // ── Share-card files (2026-09-06) ─────────────────────────────────────
+  //
+  // An animated card cannot be copied as an IMAGE — no clipboard carries an
+  // animated image that way — so it travels as a FILE. The renderer encodes
+  // the GIF; main writes it and either saves it where the user chose or
+  // puts the file itself on the clipboard (Windows and macOS carry file
+  // references; Linux falls back to a save). Bytes are validated, the name
+  // is ours, and nothing here reads a path from the renderer.
+  const CARD_MAX_BYTES = 25 * 1024 * 1024;
+  const cardBytes = (raw: unknown): Buffer | null => {
+    if (raw instanceof Uint8Array) return raw.byteLength > 0 && raw.byteLength <= CARD_MAX_BYTES ? Buffer.from(raw) : null;
+    if (raw instanceof ArrayBuffer) return raw.byteLength > 0 && raw.byteLength <= CARD_MAX_BYTES ? Buffer.from(raw) : null;
+    return null;
+  };
+  const cardName = (raw: unknown, ext: 'gif'): string => {
+    const base = typeof raw === 'string' ? raw.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) : '';
+    return (base || 'krypt-card') + '.' + ext;
+  };
+
+  ipcMain.handle('card:saveFile', async (_e, name: unknown, bytes: unknown) => {
+    const buf = cardBytes(bytes);
+    if (!buf) return fail('Nothing to save');
+    const win = BrowserWindow.getFocusedWindow();
+    const res = await dialog.showSaveDialog(win!, {
+      title: 'Save animated card',
+      defaultPath: path.join(app.getPath('downloads'), cardName(name, 'gif')),
+      filters: [{ name: 'GIF', extensions: ['gif'] }],
+    });
+    if (res.canceled || !res.filePath) return fail('Save cancelled');
+    try {
+      fs.writeFileSync(res.filePath, buf);
+      shell.showItemInFolder(res.filePath);
+      return ok('Saved ' + path.basename(res.filePath));
+    } catch (err) {
+      return fail('Save failed: ' + (err as Error).message);
+    }
+  });
+
+  ipcMain.handle('card:copyFile', (_e, name: unknown, bytes: unknown) => {
+    const buf = cardBytes(bytes);
+    if (!buf) return fail('Nothing to copy');
+    const dir = path.join(app.getPath('temp'), 'krypto-bot-cards');
+    let filePath: string;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      filePath = path.join(dir, cardName(name, 'gif'));
+      fs.writeFileSync(filePath, buf);
+    } catch (err) {
+      return fail('Could not write the file: ' + (err as Error).message);
+    }
+    try {
+      if (process.platform === 'win32') {
+        // CFSTR_FILENAMEW: a UTF-16 path with a terminating NUL. Explorer,
+        // Discord, Telegram and Slack accept it as a pasted file.
+        clipboard.writeBuffer('FileNameW', Buffer.from(filePath + '\0', 'ucs2'));
+      } else if (process.platform === 'darwin') {
+        clipboard.writeBuffer('public.file-url', Buffer.from('file://' + encodeURI(filePath)));
+      } else {
+        // No portable file clipboard on Linux; hand the user the file instead.
+        shell.showItemInFolder(filePath);
+        return ok('Animated GIF saved and shown in your file manager — this system has no file clipboard, so drag it in from there.', { path: filePath, clipboard: false });
+      }
+      return ok('Animated GIF copied as a file — paste it into Discord, Telegram, Slack or a folder. For X, use Save GIF and upload it.', { path: filePath, clipboard: true });
+    } catch (err) {
+      shell.showItemInFolder(filePath);
+      return fail('Copy failed (' + (err as Error).message + '); the GIF was saved and shown in your file manager instead.');
+    }
+  });
+
 
   ipcMain.handle('portfolio:export', async (_e, format: unknown) => {
     const fmt = format === 'json' ? 'json' : 'csv';

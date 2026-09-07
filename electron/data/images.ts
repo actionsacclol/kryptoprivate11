@@ -52,9 +52,21 @@ interface Cached {
   body: Buffer;
   type: string;
   at: number;
+  /** A refusal (4xx/5xx, timeout, wrong type) remembered until this time.
+   *  Without it a dead or rate-limited icon was re-fetched on every mount —
+   *  Discover remounts 160 cards per visit, nearly all on one CDN, and a
+   *  429 there was replayed in full every time the user came back
+   *  (rate-limit swarm, 2026-09-06). */
+  until?: number;
 }
 
+const NEGATIVE_TTL_MS = 10 * 60_000;
+const NEGATIVE_TTL_TRANSIENT_MS = 2 * 60_000;
+
 const cache = new Map<string, Cached>();
+/** Loads in progress, so forty cards asking for the same icon share ONE
+ *  request instead of sixteen parallel ones and a queue behind them. */
+const inflight = new Map<string, Promise<Cached | null>>();
 let enabled = true;
 
 /** Wired to `settings.data.loadTokenImages`. Off = nothing is ever fetched. */
@@ -123,10 +135,16 @@ export function registerImageProtocol(): void {
 
     const hit = cache.get(target);
     if (hit) {
-      return new Response(new Uint8Array(hit.body), {
-        status: 200,
-        headers: { 'content-type': hit.type, 'cache-control': 'private, max-age=3600' },
-      });
+      if (hit.until !== undefined) {
+        // A remembered refusal: blank until it ages out, no request.
+        if (Date.now() < hit.until) return blankResponse();
+        cache.delete(target);
+      } else {
+        return new Response(new Uint8Array(hit.body), {
+          status: 200,
+          headers: { 'content-type': hit.type, 'cache-control': 'private, max-age=3600' },
+        });
+      }
     }
 
     let parsed: URL;
@@ -138,34 +156,61 @@ export function registerImageProtocol(): void {
     if (parsed.protocol !== 'https:') return blankResponse();
     if (!(await hostIsPublic(parsed.hostname))) return blankResponse();
 
-    try {
-      const res = await fetch(parsed, {
-        // A 30x is how an image host pivots us somewhere we already refused.
-        redirect: 'error',
-        headers: {
-          accept: 'image/*',
-          // Do not tell the host which token page the user is on.
-          'user-agent': 'KryptTerminal',
-        },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
-      if (!res.ok) return blankResponse();
-
-      const type = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
-      if (!isRenderableImageType(type)) return blankResponse();
-
-      const body = await readCapped(res);
-      if (!body || body.length === 0) return blankResponse();
-
-      put(target, { body, type, at: Date.now() });
-      return new Response(new Uint8Array(body), {
-        status: 200,
-        headers: { 'content-type': type, 'cache-control': 'private, max-age=3600' },
-      });
-    } catch {
-      return blankResponse();
+    let load = inflight.get(target);
+    if (!load) {
+      load = fetchIcon(target, parsed).finally(() => inflight.delete(target));
+      inflight.set(target, load);
     }
+    const entry = await load;
+    if (!entry) return blankResponse();
+    return new Response(new Uint8Array(entry.body), {
+      status: 200,
+      headers: { 'content-type': entry.type, 'cache-control': 'private, max-age=3600' },
+    });
   });
+}
+
+/** Remember that this icon could not be had, for `ms`. */
+function refuse(target: string, ms: number): null {
+  put(target, { body: BLANK, type: 'image/png', at: Date.now(), until: Date.now() + ms });
+  return null;
+}
+
+async function fetchIcon(target: string, parsed: URL): Promise<Cached | null> {
+  try {
+    const res = await fetch(parsed, {
+      // A 30x is how an image host pivots us somewhere we already refused.
+      redirect: 'error',
+      headers: {
+        accept: 'image/*',
+        // Do not tell the host which token page the user is on.
+        'user-agent': 'KryptTerminal',
+      },
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      // A 429 says how long; a 404 is permanent enough for ten minutes.
+      void res.body?.cancel().catch(() => undefined);
+      const retryAfter = Number(res.headers.get('retry-after'));
+      const ms = res.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(NEGATIVE_TTL_MS, Math.max(5_000, retryAfter * 1000))
+        : res.status >= 500 ? NEGATIVE_TTL_TRANSIENT_MS : NEGATIVE_TTL_MS;
+      return refuse(target, ms);
+    }
+
+    const type = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (!isRenderableImageType(type)) return refuse(target, NEGATIVE_TTL_MS);
+
+    const body = await readCapped(res);
+    if (!body || body.length === 0) return refuse(target, NEGATIVE_TTL_MS);
+
+    const entry = { body, type, at: Date.now() };
+    put(target, entry);
+    return entry;
+  } catch {
+    // Timeout or connection failure: try again in a couple of minutes.
+    return refuse(target, NEGATIVE_TTL_TRANSIENT_MS);
+  }
 }
 
 export function clearImageCache(): void {

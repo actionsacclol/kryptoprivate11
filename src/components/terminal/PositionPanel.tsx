@@ -71,15 +71,25 @@ export function PositionPanel({
     void load();
     // A position is priced by the same providers as the chart; 20s keeps the
     // value honest without doubling the Portfolio page's traffic.
-    const id = setInterval(() => void load(), 20_000);
+    // Not while hidden: a minimised window priced the whole portfolio every
+    // 20 s for nobody. The next visible moment reloads.
+    const id = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 20_000);
+    const onVisible = (): void => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     // A fill on this mint re-reads at once — landed (tokens are in the
     // wallet) and again reconciled (cost basis is known) — so the panel
     // never sits up to 20 s behind the toast that said the trade landed.
     const off = window.krypt.engine.onEvent((ev) => {
       if (ev.kind === 'fill' && ev.mint === mint && ev.state !== 'failed') void load();
+      if (ev.kind === 'paper' && ev.mint === mint) void load();
     });
     return () => {
       clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
       off();
     };
   }, [load, refreshKey, mint]);

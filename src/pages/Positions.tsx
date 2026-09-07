@@ -12,7 +12,7 @@ import { cls, fmtAgo, fmtClock, fmtPct, fmtPrice, fmtSol, shortAddr } from '../u
 /** On-chain truth: every SPL token the trading wallet holds right now —
  *  including leftovers from previous runs or crashes that no session
  *  position list remembers. */
-function HoldingsSection() {
+export function HoldingsSection() {
   const { settings } = useAppState();
   const toast = useToast();
   const modal = useModal();

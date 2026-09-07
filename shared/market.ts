@@ -67,6 +67,10 @@ export interface ProviderStatus {
   lastCallAt: number | null;
   /** Median round-trip over the last 20 calls, ms. */
   latencyMs: number | null;
+  /** Parked after a 429: milliseconds until it is asked again, else 0. */
+  cooldownMs: number;
+  /** Calls waiting in its queue right now. */
+  queued: number;
 }
 
 // ── Discovery ─────────────────────────────────────────────────────────

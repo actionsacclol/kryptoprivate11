@@ -31,6 +31,9 @@ import {
   revealCount,
   runningPnl,
   trimCandles,
+  anchorCandlesToEntry,
+  pickSyntheticInterval,
+  syntheticCandles,
 } from './replayPlan';
 
 type Shape = 'wide' | 'tall';
@@ -78,6 +81,9 @@ export function TradeReplay({
   const [candles, setCandles] = useState<Candle[] | null>(null);
   const [interval, setIntervalUsed] = useState<CandleInterval | null>(null);
   const [unit, setUnit] = useState<'sol' | 'usd'>('sol');
+  /** Where the candles came from: the provider as-is, the provider scaled
+   *  to SOL at the entry, or a seeded path drawn between the two fills. */
+  const [path, setPath] = useState<'real' | 'scaled' | 'illustrative'>('real');
   const [loading, setLoading] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -137,32 +143,62 @@ export function TradeReplay({
       setLoading(false);
       return;
     }
+    /** The illustrative path, when the fills allow one. True if it was used. */
+    const useSyntheticPath = (): boolean => {
+      const iv = pickSyntheticInterval(trade.openedAt, trade.closedAt);
+      const synth = syntheticCandles(trade, iv);
+      if (!synth) return false;
+      setCandles(synth);
+      setIntervalUsed(iv);
+      setUnit('sol');
+      setPath('illustrative');
+      setProblem(null);
+      return true;
+    };
     void (async () => {
       setLoading(true);
       setProblem(null);
+      setPath('real');
       try {
         const iv = pickInterval(trade.openedAt, trade.closedAt, Date.now());
         const r = await window.krypt.market.candles(trade.mint, iv, REPLAY_CANDLE_LIMIT);
         if (!live) return;
         if (!r.ok || !r.data) {
-          setProblem(r.message || 'No chart data came back for this token.');
+          if (!useSyntheticPath()) setProblem(r.message || 'No chart data came back for this token.');
           return;
         }
         const win = replayWindow(trade.openedAt, trade.closedAt);
         const inWindow = trimCandles(r.data.candles, win);
-        setIntervalUsed(r.data.effectiveInterval ?? r.data.interval);
-        setUnit(r.data.unit);
         if (inWindow.length < 3) {
-          setProblem(
-            `Only ${inWindow.length} candle${inWindow.length === 1 ? '' : 's'} exist for the window this trade lived in. ` +
-              'Providers keep less history for a token this old (or this quiet), so there is nothing to animate.',
-          );
-          setCandles(inWindow);
+          // No history survives for this window. The entry and exit prices
+          // still do, so draw a path between them and say so on the frame.
+          if (!useSyntheticPath()) {
+            setIntervalUsed(r.data.effectiveInterval ?? r.data.interval);
+            setUnit(r.data.unit);
+            setProblem(
+              `Only ${inWindow.length} candle${inWindow.length === 1 ? '' : 's'} exist for the window this trade lived in, ` +
+                'and neither fill price is known, so there is nothing honest to animate.',
+            );
+            setCandles(inWindow);
+          }
           return;
         }
-        setCandles(inWindow);
+        // USD history is scaled to SOL at the entry fill, so the running
+        // PnL compares like with like (see replayPlan.anchorCandlesToEntry).
+        if (r.data.unit === 'usd') {
+          const a = anchorCandlesToEntry(inWindow, trade.openedAt, trade.entryPriceSol);
+          setCandles(a.candles);
+          setUnit(a.anchored ? 'sol' : 'usd');
+          setPath(a.anchored ? 'scaled' : 'real');
+        } else {
+          setCandles(inWindow);
+          setUnit('sol');
+          setPath('real');
+        }
+        setIntervalUsed(r.data.effectiveInterval ?? r.data.interval);
       } catch (e) {
-        if (live) setProblem(`Chart load failed: ${(e as Error).message}`);
+        if (!live) return;
+        if (!useSyntheticPath()) setProblem(`Chart load failed: ${(e as Error).message}`);
       } finally {
         if (live) setLoading(false);
       }
@@ -336,6 +372,10 @@ export function TradeReplay({
       ctx.font = `500 ${L.footerSize}px "JetBrains Mono", ui-monospace, monospace`;
       const parts = [`in ${trade.costSol.toFixed(3)}`, `out ${trade.proceedsSol.toFixed(3)} SOL`];
       if (interval) parts.push(`${interval} candles${unit === 'usd' ? ' (USD)' : ''}`);
+      // The frame says what the path is. A synthetic path is never passed
+      // off as history: entry and exit are the real fills, the rest is not.
+      if (path === 'illustrative') parts.push('path illustrative · entry & exit real');
+      else if (path === 'scaled') parts.push('USD history scaled to SOL at entry');
       ctx.fillText(parts.join('  ·  '), padX, L.footer);
 
       ctx.fillStyle = ACCENT;
@@ -343,7 +383,7 @@ export function TradeReplay({
       const brand = 'krypt.cc';
       ctx.fillText(brand, W - padX - ctx.measureText(brand).width, L.footer);
     },
-    [candles, shape, trade, interval, unit, bgImage, bgAnim],
+    [candles, shape, trade, interval, unit, path, bgImage, bgAnim],
   );
 
   // First paint and any change to shape or data: show the finished chart, so
@@ -557,6 +597,20 @@ export function TradeReplay({
           </div>
         ) : (
           <canvas ref={canvasRef} width={w} height={h} className="w-full rounded-lg border border-white/10 bg-black" />
+        )}
+
+        {!loading && !problem && path === 'illustrative' && (
+          <div className="mt-2 rounded-lg border border-arc-gold/30 bg-arc-gold/10 px-4 py-2 text-[11px] leading-relaxed text-arc-gold">
+            No candle history survives for this token, so the price path is drawn, not fetched: a seeded random walk that
+            starts at your real entry price and ends at your real exit price. The entry, exit and PnL are the actual
+            fills; the shape in between is illustrative, and the frame says so.
+          </div>
+        )}
+        {!loading && !problem && path === 'scaled' && (
+          <div className="mt-2 text-[10px] leading-relaxed text-krypt-muted/60">
+            The provider&rsquo;s history is in USD; it is scaled to SOL at your entry fill so the running PnL compares like
+            with like. The realised figure at the end is from the fills themselves.
+          </div>
         )}
 
         {gifOpen && <GifPicker onClose={() => setGifOpen(false)} onPick={useBackground} />}

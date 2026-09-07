@@ -14,7 +14,7 @@
 
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { shouldRetrySell, nextConsecutiveLosses, liveBreakerReason, escalatedSellSlippagePct } from './.livebreakers.mjs';
+import { shouldRetrySell, shouldRetryPreBroadcast, nextConsecutiveLosses, liveBreakerReason, escalatedSellSlippagePct } from './.livebreakers.mjs';
 
 let passed = 0;
 let total = 0;
@@ -181,6 +181,43 @@ test('engine: a pending buy/sell is booked to the ledger, not dropped', () => {
   const sell = between(/async manualSell\(/, /\n  private static readonly WSOL_MINT/);
   assert.match(buy, /res\.stage === 'pending'[\s\S]*ledger\.recordFill/);
   assert.match(sell, /res\.stage === 'pending'[\s\S]*ledger\.recordFill/);
+});
+
+// ── 6. a rate-limited refusal BEFORE broadcast is retried; after it, never ──
+test('a pre-broadcast rate-limit refusal is retried once', () => {
+  const r = (stage, message) => ({ ok: false, stage, message });
+  assert.equal(shouldRetryPreBroadcast(r('simulate', 'Simulation call failed: RPC HTTP 429')), true);
+  assert.equal(shouldRetryPreBroadcast(r('guard', 'Could not read pre/post balance for the loss guard (RPC HTTP 429) — refusing')), true);
+  assert.equal(shouldRetryPreBroadcast(r('relayer', 'jupiter: quote: jupiter: rate limited (429) — pausing 20s')), true);
+  // The chain answered: not a rate limit, not retried here.
+  assert.equal(shouldRetryPreBroadcast(r('simulate', 'Simulation reverted: {"Custom":6004}')), false);
+  // Anything at or after broadcast is post-broadcast state: never.
+  assert.equal(shouldRetryPreBroadcast(r('send', 'RPC HTTP 429')), false);
+  assert.equal(shouldRetryPreBroadcast(r('confirm', 'RPC HTTP 429')), false);
+  assert.equal(shouldRetryPreBroadcast(r('pending', 'RPC HTTP 429')), false);
+  assert.equal(shouldRetryPreBroadcast({ ok: true, stage: 'confirm', message: 'ok' }), false);
+});
+
+// The engine wiring for rule 6: sellWithRetry consults the pre-broadcast
+// rule FIRST, so a stop-loss whose simulate got 'RPC HTTP 429' is sent
+// again after a pause, and the wider-slippage rule judges the retried
+// result. The 2026-09-06 incident: a 100% sell at a -35% stop died on
+// exactly that string while other rules landed.
+test('the engine retries a pre-broadcast rate-limit refusal before the wider-slippage rule', () => {
+  const at = engineSrc.indexOf('private async sellWithRetry(');
+  assert.ok(at > -1, 'sellWithRetry exists');
+  const body = engineSrc.slice(at, at + 3000);
+  const pre = body.indexOf('shouldRetryPreBroadcast(res)');
+  const wide = body.indexOf('shouldRetrySell(params.amount, res)');
+  assert.ok(pre > -1, 'the pre-broadcast rule is consulted');
+  assert.ok(wide > -1, 'the wider-slippage rule is still consulted');
+  assert.ok(pre < wide, 'rate-limit retry first, then the wider-slippage retry sees the retried result');
+  assert.ok(body.slice(pre, wide).includes('res = await executeTrade(params)'), 'the retry re-sends the SAME params (same slippage: the host moved, not the price)');
+  // And the stop-loss path reaches it: the advanced-order host sells through manualSell, which sells through sellWithRetry.
+  const flat = engineSrc.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('sell: async (mint, percent) => { const r = await this.manualSell(mint, percent);'), 'advanced orders sell through manualSell');
+  const ms = engineSrc.indexOf('async manualSell(');
+  assert.ok(ms > -1 && engineSrc.slice(ms, ms + 4000).includes('this.sellWithRetry('), 'manualSell goes through sellWithRetry');
 });
 
 console.log(`livebreakers: ${passed}/${total} tests passed`);

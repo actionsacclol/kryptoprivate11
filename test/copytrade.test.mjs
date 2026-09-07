@@ -266,4 +266,23 @@ async function run() {
   console.log(`copytrade: ${passed}/${cases.length} tests passed`);
 }
 
+// ── The same transaction from two feeds is one trade ─────────────────
+// A leader's pump.fun trade arrives from the curve firehose AND from the
+// wallet watcher's own subscription; the signature dedupes the pair.
+test('a signature seen twice is evaluated once', async () => {
+  const h = setup({ priceSol: 0.001 });
+  copy.upsert(cfg());
+  copy.onWalletTrade(trade({ signature: 'sigSame' }));
+  copy.onWalletTrade(trade({ signature: 'sigSame' }));
+  await new Promise((r) => setTimeout(r, 40));
+  const mine = copy.snapshot().recent.filter((t) => t.mint === MINT);
+  assert.equal(mine.length, 1, 'one record for one transaction');
+  // Trades without a signature (the simulator, tests) are not deduped.
+  copy.onWalletTrade(trade());
+  copy.onWalletTrade(trade());
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(copy.snapshot().recent.filter((t) => t.mint === MINT).length, 3);
+  assert.deepEqual(copy.openMints(), [MINT], 'open copies name their mints for the price poll');
+});
+
 await run();

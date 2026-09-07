@@ -285,9 +285,16 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       setColumns((c) => {
         const prev = c[column];
         if (r.ok && r.data) {
+          // An empty page while a provider is parked is the park, not the
+          // market: keep what is on screen and say why (main puts the park
+          // note in `message`), rather than blanking the column under a
+          // fresh "2s ago" stamp — which read as "nothing is launching".
+          if (r.data.length === 0 && prev.rows.length > 0 && r.message !== 'ok') {
+            return { ...c, [column]: { ...prev, loading: false, error: `${r.message} Showing the last good rows.` } };
+          }
           return {
             ...c,
-            [column]: { rows: reuseRows(prev.rows, r.data), loading: false, error: null, fetchedAt: Date.now() },
+            [column]: { rows: reuseRows(prev.rows, r.data), loading: false, error: r.message !== 'ok' ? r.message : null, fetchedAt: Date.now() },
           };
         }
         // Same error again: nothing on screen changes, so keep the object.

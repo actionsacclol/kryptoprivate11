@@ -18,7 +18,7 @@
 // in electron/engine/paperBook.ts.
 // ──────────────────────────────────────────────────────────────────────
 
-import type { ClosedTrade, Position } from './portfolio';
+import type { ClosedTrade, Position, TradeHistoryRow } from './portfolio';
 
 /** Flat cost modelled on every paper sell, percent of gross proceeds. */
 export const PAPER_ROUND_TRIP_COST_PCT = 1;
@@ -242,6 +242,60 @@ export function paperRealizedSol(book: PaperBook): number {
   const closed = book.closed.reduce((a, t) => a + t.pnlSol, 0);
   const partial = book.open.reduce((a, p) => a + p.realizedSol, 0);
   return round(closed + partial);
+}
+
+/**
+ * Paper fills as trade-history rows, so the Trades tab shows them beside the
+ * real ones, labelled (2026-09-06: they were missing from it entirely).
+ *
+ * An open position still carries its fills, so each fill is a row; a sell's
+ * "asked" percent is rebuilt from the tokens held before it. A closed round
+ * trip keeps only its totals, so it becomes one buy row at open and one sell
+ * row at close, and its note says when several fills were folded in.
+ *
+ * The numbers are the model's, never the chain's: `solDelta` is signed the
+ * way the ledger signs it (a buy is negative), `feeSol` is null because the
+ * model folds fees into the fill price, there is no signature, and
+ * `paper: true` is what the UI keys the label and the filter off.
+ */
+export function paperHistoryRows(book: PaperBook): TradeHistoryRow[] {
+  const rows: TradeHistoryRow[] = [];
+  const note = `Paper — ${PAPER_FILL_MODEL}`;
+  const base = (p: { mint: string; symbol: string }, at: number): Omit<TradeHistoryRow, 'side' | 'requested' | 'solDelta' | 'tokenDelta'> => ({
+    at,
+    mint: p.mint,
+    symbol: p.symbol,
+    feeSol: null,
+    signature: null,
+    state: 'reconciled',
+    note,
+    paper: true,
+  });
+  for (const p of book.open) {
+    let held = 0;
+    for (const f of p.fills) {
+      // Raw units when decimals are unknown are not a token count the row
+      // can honestly show.
+      const tokens = p.decimalsKnown ? f.tokens : null;
+      if (f.side === 'buy') {
+        rows.push({ ...base(p, f.at), side: 'buy', requested: f.sol, solDelta: -f.sol, tokenDelta: tokens });
+        held += f.tokens;
+      } else {
+        const pct = held > 0 ? Math.max(1, Math.min(100, Math.round((f.tokens / held) * 100))) : 100;
+        rows.push({ ...base(p, f.at), side: 'sell', requested: pct, solDelta: f.sol, tokenDelta: tokens === null ? null : -tokens });
+        held = Math.max(0, held - f.tokens);
+      }
+    }
+  }
+  for (const c of book.closed) {
+    const folded =
+      c.buys > 1 || c.sells > 1
+        ? ` · ${c.buys} buy${c.buys === 1 ? '' : 's'} and ${c.sells} sell${c.sells === 1 ? '' : 's'} folded into one round trip`
+        : '';
+    rows.push({ ...base(c, c.openedAt), note: note + folded, side: 'buy', requested: c.costSol, solDelta: -c.costSol, tokenDelta: c.tokensBought });
+    rows.push({ ...base(c, c.closedAt), note: note + folded, side: 'sell', requested: 100, solDelta: c.proceedsSol, tokenDelta: -c.tokensSold });
+  }
+  return rows.sort((a, b) => b.at - a.at);
 }
 
 export interface PaperPriceInput {

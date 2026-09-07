@@ -16,7 +16,7 @@
 // would then refuse. Rate budget: the jupiter host gap is 120 ms and these
 // calls carry `priority: true` — they never queue behind Discover.
 
-import { getJson, memo } from '../data/http';
+import { getJson, memo, type FetchResult } from '../data/http';
 import { KNOWN_TRADE_PROGRAMS } from '../system/signPolicy';
 
 const WSOL = 'So11111111111111111111111111111111111111112';
@@ -84,6 +84,19 @@ async function allowedDexLabels(): Promise<string[] | null> {
   return labels.size ? [...labels] : null;
 }
 
+/**
+ * One more try after a 429, a beat later. Jupiter is the only route for a
+ * graduated token and for every partial sell, and a single refused quote
+ * used to end the order (the relayer behind it 400s anonymous requests).
+ * Bounded at one retry so an exit is delayed by ~1.2 s, never stalled.
+ */
+async function onceMoreOn429<T>(run: () => Promise<FetchResult<T>>): Promise<FetchResult<T>> {
+  const first = await run();
+  if (first.status !== 429) return first;
+  await new Promise((r) => setTimeout(r, 1_200));
+  return run();
+}
+
 export async function buildJupiterSwap(req: JupiterSwapRequest): Promise<JupiterSwapResult> {
   const isBuy = req.action === 'buy';
   const inputMint = isBuy ? WSOL : req.mint;
@@ -103,7 +116,9 @@ export async function buildJupiterSwap(req: JupiterSwapRequest): Promise<Jupiter
   });
   if (dexes) q.set('dexes', dexes.join(','));
 
-  const quote = await getJson<QuoteResponse>('jupiter', `/swap/v1/quote?${q.toString()}`, { priority: true, timeoutMs: 6_000 });
+  const quote = await onceMoreOn429(() =>
+    getJson<QuoteResponse>('jupiter', `/swap/v1/quote?${q.toString()}`, { priority: true, timeoutMs: 6_000 }),
+  );
   if (!quote.ok || !quote.data) return { ok: false, message: `quote: ${quote.message}` };
   const qd = quote.data;
   if (qd.error || !qd.outAmount) {
@@ -113,17 +128,19 @@ export async function buildJupiterSwap(req: JupiterSwapRequest): Promise<Jupiter
   // Priority fee: Jupiter sizes the compute budget itself; we cap what it may
   // spend at the SOL the caller would have paid on our own build.
   const maxLamports = Math.max(1_000, Math.min(20_000_000, Math.round(req.priorityFeeSol * LAMPORTS_PER_SOL)));
-  const swap = await getJson<SwapResponse>('jupiter', '/swap/v1/swap', {
-    priority: true,
-    timeoutMs: 8_000,
-    json: {
-      quoteResponse: qd,
-      userPublicKey: req.publicKey,
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports, priorityLevel: 'high' } },
-    },
-  });
+  const swap = await onceMoreOn429(() =>
+    getJson<SwapResponse>('jupiter', '/swap/v1/swap', {
+      priority: true,
+      timeoutMs: 8_000,
+      json: {
+        quoteResponse: qd,
+        userPublicKey: req.publicKey,
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports, priorityLevel: 'high' } },
+      },
+    }),
+  );
   if (!swap.ok || !swap.data) return { ok: false, message: `swap: ${swap.message}` };
   if (swap.data.error || !swap.data.swapTransaction) return { ok: false, message: `swap: ${swap.data.error ?? 'no transaction returned'}` };
 
@@ -158,18 +175,23 @@ export async function buildJupiterSwap(req: JupiterSwapRequest): Promise<Jupiter
  */
 export async function quoteSellLamports(mint: string, raw: bigint): Promise<{ lamports: number; route: string[] } | null> {
   if (raw <= 0n) return null;
-  const dexes = await allowedDexLabels();
-  const q = new URLSearchParams({
-    inputMint: mint,
-    outputMint: WSOL,
-    amount: raw.toString(),
-    slippageBps: '1000',
-    restrictIntermediateTokens: 'true',
+  // A DISPLAY value, so: not on the priority lane (six of these fired
+  // together used to bypass Jupiter's park and re-park it while a real sell
+  // waited), and memoised 20 s so the three portfolio pollers share one.
+  return memo(`jup:liq:${mint}:${raw.toString()}`, 20_000, async () => {
+    const dexes = await allowedDexLabels();
+    const q = new URLSearchParams({
+      inputMint: mint,
+      outputMint: WSOL,
+      amount: raw.toString(),
+      slippageBps: '1000',
+      restrictIntermediateTokens: 'true',
+    });
+    if (dexes) q.set('dexes', dexes.join(','));
+    const quote = await getJson<QuoteResponse>('jupiter', `/swap/v1/quote?${q.toString()}`, { timeoutMs: 4_000 });
+    if (!quote.ok || !quote.data || quote.data.error || !quote.data.outAmount) return null;
+    const lamports = Number(quote.data.outAmount);
+    if (!Number.isFinite(lamports) || lamports < 0) return null;
+    return { lamports, route: (quote.data.routePlan ?? []).map((r) => r.swapInfo?.label ?? '?') };
   });
-  if (dexes) q.set('dexes', dexes.join(','));
-  const quote = await getJson<QuoteResponse>('jupiter', `/swap/v1/quote?${q.toString()}`, { priority: true, timeoutMs: 4_000 });
-  if (!quote.ok || !quote.data || quote.data.error || !quote.data.outAmount) return null;
-  const lamports = Number(quote.data.outAmount);
-  if (!Number.isFinite(lamports) || lamports < 0) return null;
-  return { lamports, route: (quote.data.routePlan ?? []).map((r) => r.swapInfo?.label ?? '?') };
 }

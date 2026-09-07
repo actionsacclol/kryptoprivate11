@@ -11,6 +11,10 @@ import {
   revealCount,
   runningPnl,
   trimCandles,
+  anchorCandlesToEntry,
+  pickSyntheticInterval,
+  syntheticCandles,
+  tradePrices,
 } from './.replayplan.mjs';
 
 const MIN = 60_000;
@@ -97,4 +101,73 @@ const now = 1_700_000_000_000;
   assert.equal(frameCount(1e9, 60), 3600, 'the frame count is bounded');
   console.log('ok  the frame count is bounded at both ends');
 }
+// ── Units: USD history is scaled to SOL at the entry fill ─────────────
+{
+  // A +300 % trade: bought at 0.000001 SOL, sold at 0.000004. The history
+  // comes back in USD at SOL = $150, so every close is 150× the SOL price.
+  const opened = now - 10 * MIN;
+  const closed = now - 2 * MIN;
+  const usd = [];
+  for (let i = 0; i < 20; i++) {
+    const t = Math.floor(opened / 1000) - 60 + i * 60;
+    const sol = 0.000001 * (1 + (3 * Math.max(0, i - 1)) / 18); // 1× at the entry candle (i = 1), 4× at the end
+    const p = sol * 150;
+    usd.push({ time: t, open: p, high: p * 1.01, low: p * 0.99, close: p, volume: 0 });
+  }
+  const before = runningPnl(usd[usd.length - 1].close, 0.000001, 0.5);
+  assert.ok(before.pct > 30_000, 'the raw comparison is the 40,000 % bug: ' + before.pct.toFixed(0));
+  const a = anchorCandlesToEntry(usd, opened, 0.000001);
+  assert.equal(a.anchored, true);
+  const atEntry = a.candles.filter((c) => c.time <= Math.floor(opened / 1000)).pop();
+  assert.ok(Math.abs(atEntry.close - 0.000001) < 1e-15, 'the candle at the entry closes at the entry price');
+  const after = runningPnl(a.candles[a.candles.length - 1].close, 0.000001, 0.5);
+  assert.ok(Math.abs(after.pct - 300) < 1e-6, 'the running PnL at the end is the real +300 %: ' + after.pct);
+  assert.ok(Math.abs(after.sol - 1.5) < 1e-9, 'and +1.5 SOL on a 0.5 SOL position');
+  // Wicks scale with the closes; nothing else changes.
+  assert.equal(a.candles.length, usd.length);
+  assert.ok(a.candles.every((c, i) => Math.abs(c.high / c.close - usd[i].high / usd[i].close) < 1e-9));
+  // Nothing to anchor on: unchanged, and said so.
+  assert.equal(anchorCandlesToEntry(usd, opened, null).anchored, false);
+  assert.equal(anchorCandlesToEntry([], opened, 0.000001).anchored, false);
+  console.log('ok  USD history is anchored to the SOL entry price');
+}
+
+// ── A trade with no history gets a path pinned to its real fills ───────
+{
+  const trade = { mint: 'MintA', openedAt: now - 30 * MIN, closedAt: now - 5 * MIN, entryPriceSol: 0.00002, exitPriceSol: 0.00008, pnlPct: 300 };
+  const iv = pickSyntheticInterval(trade.openedAt, trade.closedAt);
+  const a = syntheticCandles(trade, iv);
+  const b = syntheticCandles(trade, iv);
+  assert.ok(a && a.length >= 12, 'enough candles to animate: ' + (a ? a.length : 'null'));
+  assert.deepEqual(a, b, 'seeded from the trade: the same trade always draws the same path');
+  assert.notDeepEqual(a, syntheticCandles({ ...trade, mint: 'MintB' }, iv), 'a different trade draws a different path');
+  const step = INTERVAL_SECONDS[iv];
+  for (let i = 1; i < a.length; i++) assert.equal(a[i].time - a[i - 1].time, step, 'evenly spaced');
+  for (const c of a) {
+    assert.ok(c.low > 0 && c.low <= Math.min(c.open, c.close) && c.high >= Math.max(c.open, c.close), 'a well-formed candle');
+  }
+  const openSec = Math.floor(trade.openedAt / 1000);
+  const closeSec = Math.floor(trade.closedAt / 1000);
+  const atEntry = a.filter((c) => c.time <= openSec).pop();
+  const atExit = a.filter((c) => c.time <= closeSec).pop();
+  assert.equal(atEntry.close, 0.00002, 'starts at the real entry price');
+  assert.equal(atExit.close, 0.00008, 'ends at the real exit price');
+  assert.ok(a[0].time < openSec && a[a.length - 1].time > closeSec, 'context either side of the hold');
+  const pnlAtExit = runningPnl(atExit.close, trade.entryPriceSol, 1);
+  assert.ok(Math.abs(pnlAtExit.pct - 300) < 1e-9, 'the running PnL at the exit is the realised +300 %');
+  // One fill price missing: rebuilt from the other and the realised percent.
+  assert.deepEqual(tradePrices({ entryPriceSol: 0.00002, exitPriceSol: null, pnlPct: 300 }), { entry: 0.00002, exit: 0.00008 });
+  assert.deepEqual(tradePrices({ entryPriceSol: null, exitPriceSol: 0.00008, pnlPct: 300 }), { entry: 0.00002, exit: 0.00008 });
+  // Neither known: nothing honest to draw.
+  assert.equal(tradePrices({ entryPriceSol: null, exitPriceSol: null, pnlPct: 300 }), null);
+  assert.equal(syntheticCandles({ ...trade, entryPriceSol: null, exitPriceSol: null }, iv), null);
+  // A loss works the same way.
+  const loss = syntheticCandles({ ...trade, exitPriceSol: 0.00001, pnlPct: -50 }, iv);
+  assert.equal(loss.filter((c) => c.time <= closeSec).pop().close, 0.00001);
+  // A ten-second scalp still gets a usable number of candles.
+  const scalp = syntheticCandles({ ...trade, openedAt: now - 20_000, closedAt: now - 10_000 });
+  assert.ok(scalp && scalp.length >= 12, 'scalp: ' + (scalp ? scalp.length : 'null'));
+  console.log('ok  a trade with no history gets a seeded path pinned to its fills');
+}
+
 console.log('replayplan: all tests passed');

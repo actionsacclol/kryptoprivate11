@@ -96,7 +96,9 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   { id: 'launches', label: 'Launches', hint: 'Live launch scanner', icon: Rocket },
   { id: 'strategy', label: 'Spellbook', hint: 'Strategy settings', icon: BookMarked },
   { id: 'execution', label: 'Execution', hint: 'Fees, lanes and send plans', icon: Gauge },
-  { id: 'paper', label: 'Paper book', hint: 'Trades placed in Paper mode', icon: BookMarked },
+  // 'paper' (the old Paper book page) is no longer listed: paper round trips
+  // sit on the Trades page beside the real ones, marked, and the wallet
+  // holdings it also carried moved to the Wallet page (2026-09-06).
   { id: 'backtest', label: 'Backtest', icon: FlaskConical },
   { id: 'history', label: 'History', icon: HistoryIcon },
   { id: 'console', label: 'Grimoire', hint: 'Console log', icon: ScrollText },

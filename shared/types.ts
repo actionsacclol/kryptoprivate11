@@ -774,6 +774,9 @@ export type EngineEvent =
    * `failed` = reverted or expired. `side` is the user's intent.
    */
   | { kind: 'fill'; mint: string; side: 'buy' | 'sell'; signature: string; state: 'landed' | 'reconciled' | 'failed' }
+  /** A paper fill was booked (never on chain): the position panel and the
+   *  Trades tab reload, like they do for a real fill. */
+  | { kind: 'paper'; mint: string; side: 'buy' | 'sell' }
   /** A launch was flagged as a potential runner (see shared/runners.ts). */
   | { kind: 'runner'; runner: import('./runners').RunnerFlag }
   /** The whole flag list, pushed when expiry removed some of it. */

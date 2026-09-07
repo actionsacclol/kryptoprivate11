@@ -261,6 +261,12 @@ async function tick(run: Run): Promise<void> {
       schedule(run, 60_000);
       return;
     }
+    const gapLeft = globalGapLeft();
+    if (gapLeft > 0) {
+      run.status.lastLine = 'another group traded a moment ago — spacing lab trades';
+      schedule(run, gapLeft + between(500, 2_000));
+      return;
+    }
     const active = host.activePublicKey();
     const members = host
       .members(groupId)
@@ -291,6 +297,7 @@ async function tick(run: Run): Promise<void> {
     const pick = pool[Math.floor(Math.random() * pool.length)];
     run.status.lastLine = `${wallet.label}: buying ${sol} SOL of ${pick.symbol || pick.mint.slice(0, 6)}`;
     push();
+    lastTradeAt = Date.now();
     const res = await host.buy(wallet.id, pick.mint, sol);
     if (!live(run)) return; // a newer run replaced this one mid-buy; its bag is recorded below regardless
     run.tradeStamps.push(Date.now());
@@ -329,6 +336,18 @@ async function tick(run: Run): Promise<void> {
   }
 }
 
+/** Across EVERY run: a lab BUY never goes out within this of any other lab
+ *  trade. Twenty groups at a 5 s gap each was 160 trades a minute — three
+ *  times the keyed host's whole free budget (rate-limit swarm, 2026-09-06).
+ *  Each trade is ~10 RPC calls plus a Discover assembly, so ten seconds
+ *  keeps the lab under a tenth of the budget and leaves the user's own
+ *  orders room. Sells are exits: they move the clock but are never held. */
+const GLOBAL_TRADE_GAP_MS = 10_000;
+let lastTradeAt = 0;
+function globalGapLeft(): number {
+  return Math.max(0, lastTradeAt + GLOBAL_TRADE_GAP_MS - Date.now());
+}
+
 function armSell(groupId: string, open: RandomOpen, ms: number): void {
   const run = runs.get(groupId);
   if (!run) return;
@@ -365,6 +384,9 @@ async function sellOpen(groupId: string, open: RandomOpen): Promise<void> {
       host.log('warn', `lab random: ${run.status.lastLine}`);
       return;
     }
+    // A sell is an exit and is never held back; it does move the clock, so
+    // the next BUY anywhere keeps its distance from it.
+    lastTradeAt = Date.now();
     const res = await host.sell(open.walletId, open.mint);
     if (res.signature) run.signatures.push(res.signature);
     if (res.ok) {
@@ -408,4 +430,9 @@ async function sellOpen(groupId: string, open: RandomOpen): Promise<void> {
 }
 
 /** Test seam. */
-export const __internals = { runs, tick, sellOpen, realizedOf };
+/** Tests drive ticks by hand; the global lab spacing is not what they measure. */
+const resetTradeClock = (): void => {
+  lastTradeAt = 0;
+};
+
+export const __internals = { runs, tick, sellOpen, realizedOf, resetTradeClock };

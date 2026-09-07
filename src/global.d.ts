@@ -156,6 +156,12 @@ declare global {
         randomStop: (groupId: string) => Promise<IpcResult<RandomRunStatus>>;
         status: () => Promise<IpcResult<RandomRunStatus[]>>;
       };
+      card: {
+        /** Save an encoded animated card through a save dialog. */
+        saveFile: (name: string, bytes: Uint8Array) => Promise<IpcResult>;
+        /** Put the encoded animated card on the clipboard AS A FILE. */
+        copyFile: (name: string, bytes: Uint8Array) => Promise<IpcResult<{ path: string; clipboard: boolean }>>;
+      };
       ai: {
         analyze: (mint: string, force?: boolean) => Promise<IpcResult<AiAnalysis>>;
         cached: (mint: string) => Promise<IpcResult<AiAnalysis | null>>;
@@ -208,6 +214,8 @@ declare global {
         discover: (column: DiscoverColumn, limit: number, win: StatsWindow) => Promise<IpcResult<TokenSummary[]>>;
         token: (mint: string) => Promise<IpcResult<TokenDetail>>;
         summary: (mint: string) => Promise<IpcResult<TokenSummary>>;
+        /** Many at once; the Jupiter half is one batched call main-side. */
+        summaries: (mints: string[]) => Promise<IpcResult<Record<string, TokenSummary>>>;
         candles: (mint: string, interval: CandleInterval, limit: number) => Promise<IpcResult<CandleSeries>>;
         candlesTail: (mint: string, interval: CandleInterval, sinceTime: number) => Promise<IpcResult<CandleSeries>>;
         holders: (mint: string, limit: number) => Promise<IpcResult<HolderReport>>;

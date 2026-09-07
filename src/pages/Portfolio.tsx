@@ -138,6 +138,9 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
   const [history, setHistory] = useState<TradeHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>('positions');
+  // Paper fills share the list, labelled; this keeps them apart on demand.
+  const [histFilter, setHistFilter] = useState<'all' | 'live' | 'paper'>('all');
+  const shownHistory = history.filter((r) => (histFilter === 'all' ? true : histFilter === 'paper' ? r.paper === true : !r.paper));
   const [share, setShare] = useState<CardSubject | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
 
@@ -152,8 +155,19 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
 
   useEffect(() => {
     void load();
-    const id = setInterval(() => void load(), 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 30_000);
+    // A fill — real or paper — shows up at once rather than on the next
+    // 30 s tick: a paper round trip done seconds before opening this page
+    // used to be missing from the Trades tab until the poll came round.
+    const off = window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'fill' || ev.kind === 'paper') void load();
+    });
+    return () => {
+      clearInterval(id);
+      off();
+    };
     // `load` is stable enough; re-running on every toast identity change
     // would restart the interval constantly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -291,83 +305,58 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
         </div>
       )}
 
+      {/* One list. Open paper positions sit with the real ones, carrying the
+          Paper chip (PositionRow), and count toward none of the totals above;
+          their fills are on the Trades tab like every other fill. The separate
+          paper section went on 2026-09-06 — two lists for one wallet read as
+          two products. */}
       {tab === 'positions' &&
-        (data && data.positions.length > 0 ? (
+        (data && data.positions.length + data.paper.positions.length > 0 ? (
           <div className="space-y-2">
             {data.positions.map((p) => (
               <PositionRow key={p.mint} p={p} onOpen={() => onOpenToken(p.mint)} onShare={() => setShare({ kind: 'position', position: p })} />
             ))}
+            {data.paper.positions.map((p) => (
+              <PositionRow key={`paper-${p.mint}`} p={p} onOpen={() => onOpenToken(p.mint)} onShare={() => setShare({ kind: 'position', position: p })} />
+            ))}
+            {data.paper.positions.length > 0 && (
+              <p className="text-[10px] text-krypt-muted/55 px-3 pt-1 leading-relaxed">
+                Rows marked <span className="text-amber-300/80">paper</span> are simulated fills, never broadcast; exits are
+                modelled ({data.paper.model}) and they count toward none of the totals above.
+              </p>
+            )}
           </div>
         ) : (
           <Empty
             title="No open positions"
-            message="Tokens bought through Krypt appear here with their real cost basis, read back from the chain."
+            message="Tokens bought through Krypt appear here with their real cost basis, read back from the chain. Paper positions appear here too, marked."
           />
         ))}
-
-      {/* Paper positions — their own section, their own total. Nothing here
-          is in the headline figures above; a simulated fill is not money. */}
-      {tab === 'positions' && data && (data.paper.positions.length > 0 || data.paper.closed.length > 0) && (
-        <div className="mt-6">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.18em] text-amber-300">
-              Paper
-            </span>
-            <h3 className="text-[12px] font-semibold text-white">Paper positions ({data.paper.positions.length})</h3>
-            <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
-            <span className="text-[11px] font-mono text-krypt-muted/80">
-              realized{' '}
-              <span className={cls('font-semibold', toneFor(data.paper.realizedPnlSol))}>
-                {data.paper.realizedPnlSol >= 0 ? '+' : ''}{sol(data.paper.realizedPnlSol)} SOL
-              </span>
-              <span className="text-amber-300/70"> (paper)</span>
-            </span>
-          </div>
-          <p className="text-[10px] text-amber-300/70 mb-2 leading-relaxed">
-            Simulated fills, never broadcast. Entry cost and token count are the simulation&rsquo;s real numbers;
-            exits are modelled — {data.paper.model}. Not included in the totals above.
-          </p>
-          {data.paper.positions.length > 0 ? (
-            <div className="space-y-2">
-              {data.paper.positions.map((p) => (
-                <PositionRow key={`paper-${p.mint}`} p={p} onOpen={() => onOpenToken(p.mint)} onShare={() => setShare({ kind: 'position', position: p })} />
-              ))}
-            </div>
-          ) : (
-            <p className="text-[11px] text-krypt-muted/60">No open paper positions.</p>
-          )}
-          {data.paper.closed.length > 0 && (
-            <div className="mt-3 space-y-1">
-              <div className="text-[10px] uppercase tracking-[0.14em] text-krypt-muted/60 px-3">
-                Closed paper round trips ({data.paper.closed.length})
-              </div>
-              {data.paper.closed.slice(0, 15).map((c) => (
-                <div
-                  key={`paper-${c.mint}-${c.closedAt}`}
-                  className="flex items-center gap-3 rounded-md px-3 py-1.5 text-[11px] font-mono hover:bg-white/[0.04] transition"
-                >
-                  <button onClick={() => onOpenToken(c.mint)} className="w-28 text-left text-white/85 hover:text-krypt-purple truncate">
-                    {c.symbol || shortAddr(c.mint, 4)}
-                  </button>
-                  <span className="text-krypt-muted w-24 text-right">{sol(c.costSol)} in</span>
-                  <span className="text-krypt-muted w-24 text-right">{sol(c.proceedsSol)} out</span>
-                  <span className={cls('w-24 text-right font-semibold', toneFor(c.pnlSol))}>
-                    {c.pnlSol >= 0 ? '+' : ''}{sol(c.pnlSol)}
-                  </span>
-                  <span className={cls('w-20 text-right', toneFor(c.pnlSol))}>
-                    {c.pnlPct >= 0 ? '+' : ''}{c.pnlPct.toFixed(0)}%
-                  </span>
-                  <span className="flex-1 text-right text-krypt-muted/60">{fmtDur(c.holdMs)}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {tab === 'history' &&
         (history.length > 0 ? (
           <div className="space-y-1">
+            {/* Paper fills sit in the same list, labelled; the filter keeps
+                them apart when the real record is what matters. */}
+            {history.some((r) => r.paper) && (
+              <div className="flex items-center gap-1 px-3 pb-1">
+                {(['all', 'live', 'paper'] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setHistFilter(f)}
+                    className={cls(
+                      'rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] transition',
+                      histFilter === f ? 'bg-white/10 text-white' : 'text-krypt-muted/60 hover:text-white',
+                    )}
+                  >
+                    {f}
+                  </button>
+                ))}
+                <span className="ml-2 text-[10px] text-krypt-muted/50">
+                  {history.filter((r) => r.paper).length} paper · {history.filter((r) => !r.paper).length} live
+                </span>
+              </div>
+            )}
             <div className="flex items-center gap-2 px-3 text-[10px] uppercase tracking-[0.14em] text-krypt-muted/60">
               <span className="w-32">Time</span>
               <span className="w-16">Side</span>
@@ -377,7 +366,7 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
               <span className="w-20 text-right">Fee</span>
               <span className="w-24 text-right">State</span>
             </div>
-            {history.map((r, i) => (
+            {shownHistory.map((r, i) => (
               <div
                 key={`${r.signature ?? i}-${i}`}
                 className="flex items-center gap-2 rounded-md px-3 py-1.5 text-[11px] font-mono hover:bg-white/[0.04] transition"
@@ -388,9 +377,14 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
                 </span>
                 <button
                   onClick={() => onOpenToken(r.mint)}
-                  className="flex-1 text-left text-white/85 hover:text-krypt-purple truncate"
+                  className="flex-1 text-left text-white/85 hover:text-krypt-purple truncate flex items-center gap-1.5 min-w-0"
                 >
-                  {r.symbol || shortAddr(r.mint, 5)}
+                  <span className="truncate">{r.symbol || shortAddr(r.mint, 5)}</span>
+                  {r.paper && (
+                    <span className="shrink-0 rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-[0.18em] text-amber-300">
+                      Paper
+                    </span>
+                  )}
                 </button>
                 <span className="w-20 text-right text-krypt-muted">
                   {r.side === 'buy' ? `${r.requested} SOL` : `${r.requested}%`}
@@ -404,18 +398,25 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
                 <span
                   className={cls(
                     'w-24 text-right text-[10px]',
-                    r.state === 'reconciled' ? 'text-emerald-400/80' : r.state === 'pending' ? 'text-arc-gold/80' : 'text-rose-400/80',
+                    r.paper
+                      ? 'text-amber-300/80'
+                      : r.state === 'reconciled' ? 'text-emerald-400/80' : r.state === 'pending' ? 'text-arc-gold/80' : 'text-rose-400/80',
                   )}
                   title={r.note ?? undefined}
                 >
-                  {r.state}
+                  {r.paper ? 'paper' : r.state}
                 </span>
               </div>
             ))}
+            {shownHistory.length === 0 && (
+              <p className="text-[11px] text-krypt-muted/60 px-3 py-4">No {histFilter} trades yet.</p>
+            )}
             <p className="text-[10px] text-krypt-muted/55 px-3 pt-2 leading-relaxed">
               &ldquo;SOL moved&rdquo; is the actual change in your wallet balance for that transaction, read back from
               the chain — it includes the priority fee, any tip, the relayer&rsquo;s cut, rent and slippage. It is not
-              the amount that was requested.
+              the amount that was requested. Rows marked <span className="text-amber-300/80">paper</span> never touched
+              the chain: their SOL is the fill model&rsquo;s, fees folded into the price, and they count toward none of
+              the totals above.
             </p>
           </div>
         ) : (

@@ -104,6 +104,7 @@ const s2 = start('g1');
 assert.equal(s2.ok, true, s2.message);
 const run2 = __internals.runs.get('g1');
 clearTimeout(run2.nextTimer);
+__internals.resetTradeClock(); // the 10 s global lab spacing is not what this measures
 assert.ok(Math.abs(status()[0].realizedSol) < 1e-9, 'baseline absorbs the earlier loss');
 assert.equal(run2.gen, run.gen + 1);
 await __internals.tick(run2);

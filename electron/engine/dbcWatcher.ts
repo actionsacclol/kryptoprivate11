@@ -28,6 +28,8 @@ import { getSignaturesForAddress, getTransaction, resolveAccountKeys } from './r
 /** How many pools may be watched at once. The tape allows 8 subscriptions;
  *  this is deliberately smaller because each pool costs RPC calls. */
 const MAX_POOLS = 3;
+const MAX_FETCHES_IN_FLIGHT = 6;
+let fetchesInFlight = 0;
 
 /** Ignore a transaction we have already fetched (sockets race and dedupe
  *  upstream, but a retry or a reorg can still repeat one). */
@@ -224,7 +226,17 @@ async function onNotification(mint: string, pool: string, decimals: number, n: L
   if (!watches.has(mint)) return;
   if (!remember(n.signature)) return;
 
-  const res = await getTransaction(h.httpUrl(), n.signature);
+  // Bounded: a hot pool at five swaps a second is five getTransaction a
+  // second on the keyed host — its whole free budget. Past a few in flight
+  // a swap is dropped (one missing candle) rather than queued into a 429.
+  if (fetchesInFlight >= MAX_FETCHES_IN_FLIGHT) return;
+  fetchesInFlight += 1;
+  let res: Awaited<ReturnType<typeof getTransaction>>;
+  try {
+    res = await getTransaction(h.httpUrl(), n.signature);
+  } finally {
+    fetchesInFlight -= 1;
+  }
   if (!res.ok || !res.data) return;
   const tx = res.data;
   if (tx.meta?.err) return;

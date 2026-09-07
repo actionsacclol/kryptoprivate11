@@ -140,5 +140,14 @@
  "esbuild shared/rpcErrors.ts --bundle --format=esm --platform=node --outfile=test/.rpcerrors.mjs",
  "node test/rpcerrors.test.mjs",
  "esbuild electron/engine/rpcClient.ts --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --bundle --alias:@shared=./shared --alias:electron=./test/electron-stub.mjs --format=esm --platform=node --outfile=test/.rpcclient.mjs",
- "node test/rpcfailover.test.mjs"
+ "node test/rpcfailover.test.mjs",
+ "node test/rpcratelimit.test.mjs",
+ "esbuild electron/data/http.ts --bundle --format=esm --platform=node --alias:@shared=./shared --outfile=test/.http.mjs",
+ "node test/http.test.mjs",
+ "esbuild electron/engine/walletSwap.ts --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --bundle --alias:@shared=./shared --alias:electron=./test/electron-stub.mjs --format=esm --platform=node --outfile=test/.walletswap.mjs",
+ "node test/walletswap.test.mjs",
+ "esbuild electron/engine/walletWatcher.ts --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --bundle --alias:@shared=./shared --alias:electron=./test/electron-stub.mjs --external:ws --format=esm --platform=node --outfile=test/.walletwatcher.mjs",
+ "node test/walletwatcher.test.mjs",
+ "esbuild src/components/terminal/gifExport.ts --bundle --format=esm --platform=node --outfile=test/.gifexport.mjs",
+ "node test/gifexport.test.mjs"
 ]

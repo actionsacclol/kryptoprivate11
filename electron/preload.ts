@@ -122,6 +122,10 @@ const api = {
     randomStop: (groupId: string) => ipcRenderer.invoke('lab:randomStop', groupId),
     status: () => ipcRenderer.invoke('lab:status'),
   },
+  card: {
+    saveFile: (name: string, bytes: Uint8Array) => ipcRenderer.invoke('card:saveFile', name, bytes),
+    copyFile: (name: string, bytes: Uint8Array) => ipcRenderer.invoke('card:copyFile', name, bytes),
+  },
   ai: {
     analyze: (mint: string, force?: boolean) => ipcRenderer.invoke('ai:analyze', mint, force ?? false),
     cached: (mint: string) => ipcRenderer.invoke('ai:cached', mint),
@@ -174,6 +178,7 @@ const api = {
       ipcRenderer.invoke('market:discover', column, limit, win),
     token: (mint: string) => ipcRenderer.invoke('market:token', mint),
     summary: (mint: string) => ipcRenderer.invoke('market:summary', mint),
+    summaries: (mints: string[]) => ipcRenderer.invoke('market:summaries', mints),
     candles: (mint: string, interval: CandleInterval, limit: number) =>
       ipcRenderer.invoke('market:candles', mint, interval, limit),
     candlesTail: (mint: string, interval: CandleInterval, sinceTime: number) =>

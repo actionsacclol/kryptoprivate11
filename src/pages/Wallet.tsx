@@ -8,6 +8,7 @@ import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
 import { SwitchToPaper } from '../components/SwitchToPaper';
 import { FanoutPanel } from '../components/terminal/FanoutPanel';
+import { HoldingsSection } from './Positions';
 import type { LiveState, WalletInfo, WalletSummary } from '@shared/types';
 import { cls, fmtClock } from '../utils/format';
 
@@ -757,6 +758,11 @@ export function WalletPage() {
               </GhostButton>
             </Card>
           </Section>
+
+          {/* On-chain holdings, with sell-all and rent reclaim. Lived on the
+              old Paper book page until 2026-09-06; the wallet is where a
+              stranger looks for what the wallet holds. */}
+          <HoldingsSection />
         </>
       )}
     </Page>

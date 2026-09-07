@@ -142,7 +142,7 @@ async function coins(params: {
   });
   if (params.complete !== undefined) q.set('complete', String(params.complete));
   const hit = await memo<PumpCoin[]>(params.key, params.ttlMs, async () => {
-    const r = await getJson<PumpCoin[]>('pumpfun', `/coins?${q.toString()}`);
+    const r = await getJson<PumpCoin[]>('pumpfun', `/coins?${q.toString()}`, { lane: 'list' });
     if (!r.ok || !Array.isArray(r.data)) return null;
     return r.data.filter((c) => c && typeof c.mint === 'string' && !c.is_banned);
   });
@@ -242,7 +242,7 @@ export async function byCreator(creator: string, maxPages = 2): Promise<{ coins:
       includeNsfw: 'true', // a track record must not hide the nsfw launches
     });
     const hit = await memo<PumpCoin[]>(`pf:creator:${creator}:${p}`, 60_000, async () => {
-      const r = await getJson<PumpCoin[]>('pumpfun', `/coins?${q.toString()}`);
+      const r = await getJson<PumpCoin[]>('pumpfun', `/coins?${q.toString()}`, { lane: 'list' });
       if (!r.ok || !Array.isArray(r.data)) return null;
       return r.data.filter((c) => c && typeof c.mint === 'string');
     });

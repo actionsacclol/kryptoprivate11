@@ -8,6 +8,8 @@
 // All fee quantities are integer micro-lamports per CU.
 
 import type { FeeUrgency } from '@shared/types';
+import { mentionsRateLimit } from '@shared/rpcErrors';
+import { rpcCall } from './rpcClient';
 
 export interface FeeEstimate {
   /** Compute-unit price in micro-lamports, per urgency percentile. */
@@ -29,77 +31,56 @@ function percentile(sorted: number[], p: number): number {
   return sorted[idx];
 }
 
+// Both backends go through rpcClient (2026-09-06): the raw fetches here
+// ignored a 429 — no park, no failover, and a Helius refusal was followed by
+// a second call to the same host — and then quietly priced the trade with
+// the hard-coded FALLBACK. `rpcCall` shares the per-host park and bucket
+// with the trade's own calls.
+
 /** Raw getRecentPrioritizationFees scoped to the given writable accounts. */
 async function fromRpc(httpUrl: string, writableAccounts: string[]): Promise<FeeEstimate | null> {
-  try {
-    const res = await fetch(httpUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getRecentPrioritizationFees',
-        params: [writableAccounts.slice(0, 128)],
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const body = (await res.json()) as { result?: Array<{ prioritizationFee: number }> };
-    const fees = (body.result ?? []).map((r) => r.prioritizationFee).filter((n) => n > 0).sort((a, b) => a - b);
-    if (fees.length === 0) return { ...FALLBACK, source: 'fallback', scopedTo: writableAccounts };
-    return {
-      p50: percentile(fees, 50),
-      p75: percentile(fees, 75),
-      p90: percentile(fees, 90),
-      p95: percentile(fees, 95),
-      source: 'rpc',
-      scopedTo: writableAccounts,
-    };
-  } catch {
-    return null;
-  }
+  const r = await rpcCall<Array<{ prioritizationFee: number }>>(httpUrl, 'getRecentPrioritizationFees', [writableAccounts.slice(0, 128)]);
+  if (!r.ok) return null;
+  const fees = (r.data ?? []).map((x) => x.prioritizationFee).filter((n) => n > 0).sort((a, b) => a - b);
+  if (fees.length === 0) return { ...FALLBACK, source: 'fallback', scopedTo: writableAccounts };
+  return {
+    p50: percentile(fees, 50),
+    p75: percentile(fees, 75),
+    p90: percentile(fees, 90),
+    p95: percentile(fees, 95),
+    source: 'rpc',
+    scopedTo: writableAccounts,
+  };
 }
 
-/** Helius getPriorityFeeEstimate (only when the RPC host is Helius). */
-async function fromHelius(httpUrl: string, writableAccounts: string[]): Promise<FeeEstimate | null> {
+/** Helius getPriorityFeeEstimate (only when the RPC host is Helius).
+ *  'rate-limited' when the host said 429: asking it the raw method next
+ *  would only be refused again. */
+async function fromHelius(httpUrl: string, writableAccounts: string[]): Promise<FeeEstimate | null | 'rate-limited'> {
   if (!/helius/i.test(httpUrl)) return null;
-  try {
-    const res = await fetch(httpUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'getPriorityFeeEstimate',
-        params: [{ accountKeys: writableAccounts.slice(0, 128), options: { includeAllPriorityFeeLevels: true } }],
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const body = (await res.json()) as {
-      result?: { priorityFeeLevels?: { medium?: number; high?: number; veryHigh?: number } };
-    };
-    const lv = body.result?.priorityFeeLevels;
-    if (!lv) return null;
-    return {
-      p50: Math.round(lv.medium ?? FALLBACK.p50),
-      p75: Math.round(lv.high ?? FALLBACK.p75),
-      p90: Math.round(lv.veryHigh ?? FALLBACK.p90),
-      p95: Math.round((lv.veryHigh ?? FALLBACK.p95) * 1.5),
-      source: 'helius',
-      scopedTo: writableAccounts,
-    };
-  } catch {
-    return null;
-  }
+  const r = await rpcCall<{ priorityFeeLevels?: { medium?: number; high?: number; veryHigh?: number } }>(
+    httpUrl,
+    'getPriorityFeeEstimate',
+    [{ accountKeys: writableAccounts.slice(0, 128), options: { includeAllPriorityFeeLevels: true } }],
+  );
+  if (!r.ok) return mentionsRateLimit(r.message) ? 'rate-limited' : null;
+  const lv = r.data?.priorityFeeLevels;
+  if (!lv) return null;
+  return {
+    p50: Math.round(lv.medium ?? FALLBACK.p50),
+    p75: Math.round(lv.high ?? FALLBACK.p75),
+    p90: Math.round(lv.veryHigh ?? FALLBACK.p90),
+    p95: Math.round((lv.veryHigh ?? FALLBACK.p95) * 1.5),
+    source: 'helius',
+    scopedTo: writableAccounts,
+  };
 }
 
 export async function estimate(httpUrl: string, writableAccounts: string[]): Promise<FeeEstimate> {
-  return (
-    (await fromHelius(httpUrl, writableAccounts)) ??
-    (await fromRpc(httpUrl, writableAccounts)) ??
-    { ...FALLBACK, source: 'fallback', scopedTo: writableAccounts }
-  );
+  const helius = await fromHelius(httpUrl, writableAccounts);
+  if (helius && helius !== 'rate-limited') return helius;
+  const rpc = helius === 'rate-limited' ? null : await fromRpc(httpUrl, writableAccounts);
+  return rpc ?? { ...FALLBACK, source: 'fallback', scopedTo: writableAccounts };
 }
 
 export function priceFor(est: FeeEstimate, urgency: FeeUrgency): number {

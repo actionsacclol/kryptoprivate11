@@ -1,3 +1,4 @@
+import { mentionsRateLimit } from './rpcErrors';
 // Pure decision rules for REAL-money execution. No I/O; the engine feeds
 // them state and acts on the answer. Kept out of the engine so each rule is
 // pinned by a test (test/livebreakers.test.mjs), the way the order-safety
@@ -74,4 +75,18 @@ export function liveBreakerReason(st: LiveBreakerState, lim: LiveBreakerLimits):
   if (lim.maxLiveConsecutiveLosses > 0 && st.consecutiveLosses >= lim.maxLiveConsecutiveLosses)
     return `${lim.maxLiveConsecutiveLosses} live losses in a row`;
   return null;
+}
+
+/**
+ * A sell refused BEFORE broadcast by a rate limit — an RPC 429 at simulate
+ * or the pre-balance read, a parked provider on the Jupiter route. Nothing
+ * was sent, so a retry cannot double-spend; and an exit that dies on "slow
+ * down" is a stop-loss that silently never fired (2026-09-06 swarm). One
+ * retry after a pause, at the SAME slippage — the price did not move, the
+ * host did.
+ */
+export function shouldRetryPreBroadcast(res: { ok: boolean; stage: string; message: string }): boolean {
+  if (res.ok) return false;
+  if (res.stage === 'send' || res.stage === 'confirm' || res.stage === 'pending') return false;
+  return mentionsRateLimit(res.message);
 }

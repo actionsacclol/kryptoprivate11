@@ -21,6 +21,7 @@ import {
   type CopySnapshot,
   type CopyStats,
   type CopyTrade,
+  type CopyWatchStatus,
 } from '@shared/copytrade';
 import { FEE_BPS } from '@shared/fees';
 import * as recorder from './recorder';
@@ -46,6 +47,8 @@ export interface CopyHost {
   log(level: 'info' | 'warn' | 'error', line: string): void;
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   changed(): void;
+  /** The wallet watcher's per-wallet status, for the snapshot. */
+  watchStatus?(): Record<string, CopyWatchStatus>;
 }
 
 let host: CopyHost | null = null;
@@ -176,6 +179,7 @@ export function snapshot(): CopySnapshot {
     recent: trades.slice(0, 100).map((t) => ({ ...t })),
     liveExecutable: blocked === null,
     liveBlockedReason: blocked,
+    watch: host?.watchStatus?.() ?? {},
   };
 }
 
@@ -219,6 +223,30 @@ export interface WalletTrade {
   sol: number;
   priceSol: number;
   at: number;
+  /** The transaction, when known. A leader's pump.fun trade arrives twice —
+   *  from the curve firehose and from the wallet watcher — and must be
+   *  evaluated once. */
+  signature?: string;
+}
+
+/** Signatures already evaluated, newest last; bounded. */
+const handled = new Set<string>();
+const HANDLED_CAP = 1_000;
+
+function alreadyHandled(signature: string | undefined): boolean {
+  if (!signature) return false;
+  if (handled.has(signature)) return true;
+  handled.add(signature);
+  if (handled.size > HANDLED_CAP) {
+    const oldest = handled.values().next().value;
+    if (oldest !== undefined) handled.delete(oldest);
+  }
+  return false;
+}
+
+/** Mints with an open copy, paper or live — the engine keeps them priced. */
+export function openMints(): string[] {
+  return [...new Set(trades.filter((t) => t.state === 'open').map((t) => t.mint))];
 }
 
 /**
@@ -233,6 +261,7 @@ export function onWalletTrade(t: WalletTrade): void {
   if (!h) return;
   const matching = configs.filter((c) => c.enabled && c.wallet === t.wallet);
   if (!matching.length) return;
+  if (alreadyHandled(t.signature)) return;
 
   for (const c of matching) {
     if (!t.isBuy) {
@@ -374,6 +403,7 @@ export function _reset(): void {
   configs = [];
   trades = [];
   filePath = '';
+  handled.clear();
 }
 
 export function _load(c: CopyConfig[], t: CopyTrade[]): void {

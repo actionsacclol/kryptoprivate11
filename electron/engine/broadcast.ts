@@ -489,9 +489,16 @@ export async function broadcastAndConfirm(opts: {
   // With the confirmation socket open the push is what usually wins; the
   // poll can afford to be gentler on the RPC's rate limit (the same limit
   // the trade's own simulate/send calls share).
-  const FAST_POLL_MS = opts.wssUrl && confirmSocket.isOpen() ? 500 : 300;
-  const SLOW_POLL_MS = 1_000;
+  // With the socket open the push wins by ~130 ms and the poll is a safety
+  // net, so it runs at 1 s; without it the poll IS the confirmation and
+  // stays at 300 ms. Five wallets fanning out at 500 ms each was 165
+  // getSignatureStatuses per ten seconds — four times the public window
+  // (rate-limit swarm, 2026-09-06). A 429 on a poll doubles the wait.
+  const socketOpen = !!opts.wssUrl && confirmSocket.isOpen();
+  const FAST_POLL_MS = socketOpen ? 1_000 : 300;
+  const SLOW_POLL_MS = socketOpen ? 1_500 : 1_000;
   const fastUntil = Date.now() + 4_000;
+  let pollPenaltyMs = 0;
   let lastSend = 0;
   let laneNotes = '';
   let sendMs = 0;
@@ -557,7 +564,7 @@ export async function broadcastAndConfirm(opts: {
   sendMs = Date.now() - t0;
   sentAt = Date.now();
   while (Date.now() < deadline) {
-    const pollMs = Date.now() < fastUntil ? FAST_POLL_MS : SLOW_POLL_MS;
+    const pollMs = (Date.now() < fastUntil ? FAST_POLL_MS : SLOW_POLL_MS) + pollPenaltyMs;
     await Promise.race([
       new Promise((r) => setTimeout(r, pollMs)),
       ...(wsPending ? [wsPending] : []),
@@ -569,6 +576,9 @@ export async function broadcastAndConfirm(opts: {
       return done({ landed: true, chainErr: false, laneNotes, expired: false });
     }
     const st = await getSignatureStatuses(opts.httpUrl, [opts.signature]);
+    // A rate-limited poll backs off (1 s, 2 s, capped at 3 s extra) instead
+    // of asking again at the same cadence; a good answer lifts the penalty.
+    pollPenaltyMs = !st.ok && /429/.test(st.message) ? Math.min(3_000, pollPenaltyMs ? pollPenaltyMs * 2 : 1_000) : 0;
     if (st.ok && st.data) {
       const s = st.data[0];
       if (s?.err) return done({ landed: false, chainErr: true, laneNotes, expired: false });
