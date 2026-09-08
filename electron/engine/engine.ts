@@ -45,7 +45,7 @@ import * as feeEstimator from './feeEstimator';
 import * as jitoTips from './jitoTips';
 import * as tradePrewarm from './prewarm';
 import * as randomLab from './randomLab';
-import { between as labBetween, DEFAULT_FOLLOW, type FollowSettings } from '@shared/lab';
+import { between as labBetween, DEFAULT_FOLLOW, defaultGroupConfig, type FollowSettings } from '@shared/lab';
 import { quoteSellLamports } from './jupiterRoute';
 import { prewarm, TOKEN_2022_PROGRAM, type PrewarmedAddresses } from './addresses';
 import { parseMintExtensions, mintWarning } from './mintExtensions';
@@ -366,6 +366,7 @@ export class SniperEngine {
           sol: swap.sol,
           priceSol: swap.priceSol,
           soldFraction: swap.soldFraction,
+          tokens: swap.tokens,
           at,
           signature,
         });
@@ -388,7 +389,13 @@ export class SniperEngine {
 
     randomLab.attach({
       armed: () => this.armed && this.getSettings().execution.liveEnabled,
-      config: (groupId) => wallet.groups().find((g) => g.id === groupId)?.lab ?? null,
+      // A group gets its lab block on the first Save; a fresh one has none.
+      // Start on defaults used to answer "No such group" for a group that was
+      // on screen (Save was disabled with nothing changed, so no way out).
+      config: (groupId) => {
+        const g = wallet.groups().find((x) => x.id === groupId);
+        return g ? (g.lab ?? defaultGroupConfig()) : null;
+      },
       members: (groupId) => wallet.groups().find((g) => g.id === groupId)?.members ?? [],
       activePublicKey: () => wallet.publicKey(),
       balanceSol: async (publicKey) => {
@@ -1947,6 +1954,11 @@ export class SniperEngine {
     return r;
   }
 
+  /** Start a followed wallet's own record over. */
+  resetCopyLeader(wallet: string): { ok: boolean; message: string } {
+    return copyTrade.resetLeader(wallet);
+  }
+
   /** Point the wallet watcher at exactly the wallets with an enabled copy
    *  config. Called after every config change and once at boot, after the
    *  configs are loaded. */
@@ -2010,7 +2022,7 @@ export class SniperEngine {
    *  follows as a 'portfolio' event. Keyed by owner so a switched signer
    *  never sees another wallet's numbers. Measured 2026-09-08: without this
    *  Portfolio and Trades showed nothing for 5–7 s on every visit. */
-  private lastPortfolio: { at: number; owner: string; summary: import('@shared/portfolio').PortfolioSummary } | null = null;
+  private lastPortfolio: { at: number; startedAt: number; owner: string; summary: import('@shared/portfolio').PortfolioSummary } | null = null;
   /** Set on every fill and paper fill; the fast path reports stale past it. */
   private portfolioDirtyAt = 0;
   private portfolioRebuildTimer: NodeJS.Timeout | null = null;
@@ -2022,7 +2034,7 @@ export class SniperEngine {
     const lp = this.lastPortfolio;
     const owner = wallet.publicKey() ?? '';
     if (!lp || lp.owner !== owner) return null;
-    const stale = Date.now() - lp.at > 3_000 || this.portfolioDirtyAt > lp.at;
+    const stale = Date.now() - lp.at > 3_000 || this.portfolioDirtyAt > lp.startedAt;
     if (stale) this.schedulePortfolioRebuild(0);
     return { summary: lp.summary, stale, generatedAt: lp.at };
   }
@@ -2053,8 +2065,13 @@ export class SniperEngine {
 
   async portfolioSummary(): Promise<import('@shared/portfolio').PortfolioSummary> {
     const now = Date.now();
-    if (this.portfolioShared && now - this.portfolioShared.at < 3_000) return this.portfolioShared.p;
-    const p = this.buildPortfolioSummary();
+    // Share a build started in the last 3 s — unless a fill landed after it
+    // started: that build read the holdings before the fill and would answer
+    // the "Landed" toast with the position missing.
+    if (this.portfolioShared && now - this.portfolioShared.at < 3_000 && this.portfolioShared.at >= this.portfolioDirtyAt) {
+      return this.portfolioShared.p;
+    }
+    const p = this.buildPortfolioSummary(now);
     this.portfolioShared = { at: now, p };
     p.catch(() => {
       this.portfolioShared = null;
@@ -2062,16 +2079,20 @@ export class SniperEngine {
     return p;
   }
 
-  private async buildPortfolioSummary(): Promise<import('@shared/portfolio').PortfolioSummary> {
+  private async buildPortfolioSummary(startedAt = Date.now()): Promise<import('@shared/portfolio').PortfolioSummary> {
     const s = this.getSettings();
     const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
+    // The wallet this build is FOR. wallet:select cannot cancel a build in
+    // flight; one that straddles the switch is returned to its caller but
+    // never kept or broadcast as the new wallet's (review 2026-09-08).
+    const owner = wallet.publicKey() ?? '';
 
     const held = await this.holdings();
     const holdings = held.ok && held.data ? held.data : [];
     // Opportunistically retry fills whose reconciliation failed earlier —
     // usually the RPC was rate-limited at the moment the trade landed. After
     // the holdings read, so it does not compete with it for the RPC bucket.
-    void ledger.reconcilePending(httpUrl, wallet.publicKey()).catch(() => undefined);
+    void ledger.reconcilePending(httpUrl, owner || null).catch(() => undefined);
     // Liquidation quotes run alongside the price lookups below.
     const liquidationP = this.liquidationQuotes(holdings);
 
@@ -2081,7 +2102,7 @@ export class SniperEngine {
     }>();
     const paperOpen = paperBook.list();
     const paperClosed = paperBook.closed();
-    const basis = ledger.basisByMint(wallet.publicKey());
+    const basis = ledger.basisByMint(owner || null);
     const decimalsOf = new Map<string, number>();
     const take = (mint: string, sum: import('@shared/market').TokenSummary): void => {
       prices.set(mint, {
@@ -2163,7 +2184,8 @@ export class SniperEngine {
       model: PAPER_FILL_MODEL,
     };
     out.stale = false;
-    this.lastPortfolio = { at: Date.now(), owner: wallet.publicKey() ?? '', summary: out };
+    if (owner !== (wallet.publicKey() ?? '')) return out; // switched mid-build: not the new wallet's
+    this.lastPortfolio = { at: Date.now(), startedAt, owner, summary: out };
     this.emit({ kind: 'portfolio', summary: out });
     return out;
   }
@@ -2566,6 +2588,9 @@ export class SniperEngine {
       warning: this.mintWarnings.get(h.mint),
     }));
     const at = Date.now();
+    // Switched mid-read: answer the caller, but this is not the new
+    // wallet's list — never keep or broadcast it as such.
+    if (owner !== wallet.publicKey()) return { ok: true, message: 'ok', data };
     const prev = this.lastHoldings;
     const changed =
       !prev || prev.owner !== owner || prev.data.length !== data.length || prev.data.some((h, i) => h.mint !== data[i].mint || h.amountRaw !== data[i].amountRaw);

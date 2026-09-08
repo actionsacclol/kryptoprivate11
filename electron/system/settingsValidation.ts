@@ -52,13 +52,22 @@ const OWNED_ELSEWHERE = new Set(['execution.liveEnabled']);
 const BOUNDS: Record<string, { min: number; max: number; int?: boolean }> = {
   'execution.maxLiveSol': { min: 0.000001, max: 25 },
   'execution.liveSlippagePct': { min: 0, max: 50 },
+  // Both live breakers are OFF at 0 (the shipped default since revision 3;
+  // liveBreakers.ts checks `> 0`). Until 2026-09-08 the streak bound started
+  // at 1, so the default itself failed validation — and because every
+  // execution panel saves by spreading the stored block, NO execution
+  // setting could be saved by a user on defaults (the same symptom as the
+  // liveEnabled strip above, a different cause). A default must pass its own
+  // bound; test/settingsvalidation.test.mjs now pins that for every field.
   'execution.maxLiveSessionLossSol': { min: 0, max: 100 },
-  'execution.maxLiveConsecutiveLosses': { min: 1, max: 50, int: true },
+  'execution.maxLiveConsecutiveLosses': { min: 0, max: 50, int: true },
   'execution.cashoutThresholdSol': { min: 0.000001, max: 100 },
   'execution.computeUnitLimit': { min: 10_000, max: 1_400_000, int: true },
   'strategy.maxSessionLossSol': { min: 0, max: 1000 },
   'strategy.maxConsecutiveLosses': { min: 1, max: 100, int: true },
   'strategy.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
+  // Chat trading spends real SOL on a typed command.
+  'bots.trading.maxBuySol': { min: 0.000001, max: 25 },
   // Terminal data settings. A refresh interval of 0 would hammer four
   // third-party APIs in a tight loop and get the user rate-limited into a
   // broken-looking app, so the floor is enforced here rather than in the UI.
@@ -134,6 +143,15 @@ function checkLeaf(path: string, value: unknown, def: unknown): string | null {
     return null;
   }
   if (Array.isArray(value)) return `${path}: expected ${typeof def}, got a list`;
+  // A null default is a nullable string (a paired bot's owner id): pairing
+  // writes the string, and every bots switch then spreads it back. Until
+  // 2026-09-08 that spread was "wrong type" — a paired user could not toggle
+  // push alerts or chat trading at all.
+  if (def === null) {
+    if (value === null) return null;
+    if (typeof value === 'string') return value.length > 2_000 ? `${path}: string too long` : null;
+    return `${path}: expected text or null, got ${typeof value}`;
+  }
   if (typeof value !== typeof def) {
     return `${path}: expected ${typeof def}, got ${typeof value}`;
   }
@@ -202,11 +220,14 @@ export function validateSettingsPatch(raw: unknown): Validated {
         if (isPlainObject(defLeaf)) {
           if (!isPlainObject(v2)) return { ok: false, message: `${key}.${k2}: expected an object` };
           const inner: Record<string, unknown> = {};
+          // Same leaf rules as one level up: until 2026-09-08 this loop only
+          // compared types, so the runner-alert and chat-trading bounds and
+          // enums above were dead — 0 alerts an hour, a bogus bucket and a
+          // NaN chat buy cap all saved.
           for (const [k3, v3] of Object.entries(v2)) {
             if (!(k3 in defLeaf)) continue;
-            if (typeof v3 !== typeof (defLeaf as Record<string, unknown>)[k3]) {
-              return { ok: false, message: `Rejected settings update — ${key}.${k2}.${k3}: wrong type` };
-            }
+            const err3 = checkLeaf(`${key}.${k2}.${k3}`, v3, (defLeaf as Record<string, unknown>)[k3]);
+            if (err3) return { ok: false, message: `Rejected settings update — ${err3}` };
             inner[k3] = v3;
           }
           nested[k2] = inner;

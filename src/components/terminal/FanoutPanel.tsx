@@ -84,6 +84,14 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
   const [jitter, setJitter] = useState(30); // percent, total mode only
   const [stagger, setStagger] = useState(true);
   const [busy, setBusy] = useState(false);
+  // The engine caps the fan-out TOTAL at the per-trade cap; checked here so
+  // the "REAL SOL" confirm is never followed by a refusal.
+  const [cap, setCap] = useState<number | null>(null);
+  useEffect(() => {
+    void window.krypt.settings.get().then((r) => {
+      if (r.ok && r.data) setCap(r.data.execution.maxLiveSol);
+    });
+  }, []);
 
   const loadGroups = useCallback(async () => {
     const r = await window.krypt.wallet.groups();
@@ -127,6 +135,11 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
     const amt = Number(amount);
     if (!(amt > 0)) return toast.error('Amount must be positive');
 
+    const total = mode === 'same' ? amt * ids.length : amt;
+    if (cap !== null && total > cap) {
+      toast.error(`Fan-out total ${total.toFixed(3)} SOL is above your ${cap} SOL per-trade cap — lower the amount, or raise the cap on the Wallet page.`);
+      return;
+    }
     const totalNote =
       mode === 'same' ? `${amt} SOL × ${ids.length} = ${(amt * ids.length).toFixed(4)} SOL total` : `${amt} SOL split across ${ids.length}`;
     const yes = await modal.confirm({
@@ -165,6 +178,7 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
             onChange={(e) => setNewGroup(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && void createGroup()}
             placeholder="New group name"
+            maxLength={32}
             className="flex-1 rounded bg-black/40 border border-white/15 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60"
           />
           <PrimaryButton onClick={() => void createGroup()} disabled={!newGroup.trim()} className="!py-1.5">

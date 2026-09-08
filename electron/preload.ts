@@ -169,6 +169,7 @@ const api = {
     list: () => ipcRenderer.invoke('copy:list'),
     save: (config: Partial<CopyConfig>) => ipcRenderer.invoke('copy:save', config),
     remove: (id: string) => ipcRenderer.invoke('copy:remove', id),
+    resetStats: (wallet: string) => ipcRenderer.invoke('copy:resetStats', wallet),
   },
   portfolio: {
     summary: (opts?: { stale?: boolean }) => ipcRenderer.invoke('portfolio:summary', opts),
@@ -188,6 +189,8 @@ const api = {
     summaries: (mints: string[]) => ipcRenderer.invoke('market:summaries', mints),
     candles: (mint: string, interval: CandleInterval, limit: number) =>
       ipcRenderer.invoke('market:candles', mint, interval, limit),
+    candlesFull: (mint: string, interval: CandleInterval, limit: number) =>
+      ipcRenderer.invoke('market:candlesFull', mint, interval, limit),
     candlesTail: (mint: string, interval: CandleInterval, sinceTime: number) =>
       ipcRenderer.invoke('market:candlesTail', mint, interval, sinceTime),
     holders: (mint: string, limit: number) => ipcRenderer.invoke('market:holders', mint, limit),

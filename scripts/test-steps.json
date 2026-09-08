@@ -81,6 +81,7 @@
  "node test/withdraw.test.mjs",
  "node test/walletstore.test.mjs",
  "node test/wallet.test.mjs",
+ "esbuild shared/types.ts --bundle --format=esm --platform=node --outfile=test/.types.mjs",
  "node test/settingsvalidation.test.mjs",
  "node test/market.test.mjs",
  "node test/advorders.test.mjs",

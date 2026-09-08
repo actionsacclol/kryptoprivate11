@@ -61,4 +61,16 @@ const W = [
   assert.equal(lossCapHit(0.1, 0.05), false);
   console.log('ok  loss cap is on realised PnL');
 }
+// The planner mirrors the fund handler's bounds, so the confirm is never
+// followed by a refusal.
+{
+  const p = planFund(W, 'each', 51, null);
+  assert.equal(p.ok, false);
+  assert.match(p.message, /per wallet/);
+  const t = planFund(W, 'each', 40, null);
+  assert.equal(t.ok, false);
+  assert.match(t.message, /per batch/);
+  assert.equal(planFund(W, 'each', 30, null).ok, true, '3 × 30 = 90 is under the 100 batch cap');
+  console.log('ok  planFund mirrors the fund handler bounds (50 SOL per wallet, 100 per batch)');
+}
 console.log('lab: all tests passed');

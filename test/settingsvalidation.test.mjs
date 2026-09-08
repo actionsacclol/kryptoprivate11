@@ -4,6 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { validateSettingsPatch as v } from './.settingsvalidation.mjs';
+import { DEFAULT_SETTINGS } from './.types.mjs';
 
 // Ordinary updates pass through unchanged.
 {
@@ -61,7 +62,34 @@ import { validateSettingsPatch as v } from './.settingsvalidation.mjs';
 {
   assert.equal(v({ execution: { maxLiveConsecutiveLosses: 2.5 } }).ok, false);
   assert.equal(v({ execution: { maxLiveConsecutiveLosses: 3 } }).ok, true);
+  assert.equal(v({ execution: { maxLiveConsecutiveLosses: 51 } }).ok, false);
+  assert.equal(v({ execution: { maxLiveConsecutiveLosses: -1 } }).ok, false);
   console.log('ok  integer-only fields reject fractions');
+}
+
+// 0 is "off" for both live breakers — the shipped default, and what the
+// revision-3 migration writes. Until 2026-09-08 the streak bound started at
+// 1, which rejected the default and with it every execution save.
+{
+  assert.equal(v({ execution: { maxLiveConsecutiveLosses: 0 } }).ok, true, 'streak breaker off');
+  assert.equal(v({ execution: { maxLiveSessionLossSol: 0 } }).ok, true, 'session-loss breaker off');
+  // What the auto-cashout switch actually sends: the stored block, spread.
+  const r = v({ execution: { ...DEFAULT_SETTINGS.execution, autoCashout: true } });
+  assert.equal(r.ok, true, r.message);
+  assert.equal(r.patch.execution.autoCashout, true);
+  assert.equal(r.patch.execution.maxLiveConsecutiveLosses, 0);
+  console.log('ok  a breaker at 0 (off) passes, so an execution-block spread on defaults saves');
+}
+
+// Every shipped default passes its own bound — a default outside its bound
+// blocks every panel that spreads the block it lives in.
+{
+  for (const [key, block] of Object.entries(DEFAULT_SETTINGS)) {
+    if (key === 'settingsRevision') continue;
+    const r = v({ [key]: block });
+    assert.equal(r.ok, true, `default block "${key}" must validate: ${r.message}`);
+  }
+  console.log('ok  every default settings block passes validation');
 }
 
 // Enums are closed.
@@ -206,4 +234,45 @@ console.log('settingsvalidation: all tests passed');
   assert.match(main, /app\.on\('child-process-gone'/, 'a dying GPU process is handled');
   assert.match(main, /store\.update\(\{ hardwareAcceleration: false \}\)/, 'and turns the setting off for the next start');
   console.log('ok  main.ts reads the GPU setting before ready and falls back after GPU crashes');
+}
+
+// A paired bot: pairing writes ownerId as a STRING over a null default, and
+// every bots switch then spreads it back. Until 2026-09-08 that was "wrong
+// type" — a paired user could not toggle push alerts or chat trading.
+{
+  const r = v({ bots: { ...DEFAULT_SETTINGS.bots, telegram: { ...DEFAULT_SETTINGS.bots.telegram, ownerId: '123456', pushAlerts: false } } });
+  assert.equal(r.ok, true, r.message);
+  assert.equal(r.patch.bots.telegram.ownerId, '123456');
+  assert.equal(r.patch.bots.telegram.pushAlerts, false);
+  assert.equal(v({ bots: { telegram: { ownerId: null } } }).ok, true, 'unpaired');
+  assert.equal(v({ bots: { telegram: { ownerId: 123456 } } }).ok, false, 'a number is not an id');
+  assert.equal(v({ bots: { telegram: { ownerId: { id: 1 } } } }).ok, false, 'nor an object');
+  console.log('ok  a paired bot (string owner id over a null default) still saves');
+}
+
+// Third-level bounds and enums are enforced — they were dead rules.
+{
+  assert.equal(v({ strategy: { runnerAlerts: { maxPerHour: 0 } } }).ok, false);
+  assert.equal(v({ strategy: { runnerAlerts: { maxPerHour: 2.5 } } }).ok, false);
+  assert.equal(v({ strategy: { runnerAlerts: { maxPerHour: NaN } } }).ok, false);
+  assert.equal(v({ strategy: { runnerAlerts: { maxPerHour: 12 } } }).ok, true);
+  assert.equal(v({ strategy: { runnerAlerts: { minBucket: 'bogus' } } }).ok, false);
+  assert.equal(v({ strategy: { runnerAlerts: { minBucket: 'top1' } } }).ok, true);
+  assert.equal(v({ bots: { trading: { maxBuySol: -1 } } }).ok, false);
+  assert.equal(v({ bots: { trading: { maxBuySol: NaN } } }).ok, false);
+  assert.equal(v({ bots: { trading: { maxBuySol: 0.1 } } }).ok, true);
+  assert.equal(v({ bots: { trading: { requireConfirm: 'yes' } } }).ok, false, 'types still checked');
+  console.log('ok  nested bounds and enums are enforced');
+}
+
+// The Helius feed socket is derived (key + switch) and never stored: the
+// renderer hydrates from the RAW store, and a resolved copy that reached the
+// store is dropped on load.
+{
+  const fs = await import('node:fs');
+  const storeSrc = fs.readFileSync(new URL('../electron/system/settings-store.ts', import.meta.url), 'utf8');
+  assert.match(storeSrc, /helius-rpc\\.com/, 'mergeState strips the derived feed socket from extraWssUrls');
+  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8');
+  assert.match(ipc, /'engine:snapshot'[^\n]*settings: store\.load\(\)/, 'the renderer hydrates from the raw store, not the resolved rpc');
+  console.log('ok  the derived Helius socket never round-trips into settings.json');
 }

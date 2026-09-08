@@ -80,6 +80,12 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
   // stored once (its own field) and never duplicated into settings.json.
   const rpc = { ...d.rpc, ...(loaded.rpc ?? {}) };
   delete rpc.heliusHttpUrl;
+  // The Helius feed socket is derived too (key + heliusFeedSocket, appended
+  // by resolveRpc). A resolved copy that reached the store — every RPC save
+  // until 2026-09-08 — is dropped here, and duplicates with it.
+  rpc.extraWssUrls = [
+    ...new Set((rpc.extraWssUrls ?? []).filter((u) => typeof u === 'string' && !/helius-rpc\.com/i.test(u) && !/api-key=/i.test(u))),
+  ];
   // `autoLive` (autonomous real trading) was removed 2026-08-16. Drop it from
   // old saves so it never round-trips back into settings.json.
   const execution = { ...d.execution, ...(loaded.execution ?? {}) } as AppSettings['execution'] & { autoLive?: boolean };

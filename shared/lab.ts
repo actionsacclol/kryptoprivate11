@@ -128,6 +128,8 @@ export const RENT_EXEMPT_LAMPORTS = 890_880;
 export const FUND_HEADROOM_LAMPORTS = 1_500_000;
 /** One fund call moves at most this much in total (20 wallets × 5 SOL). */
 export const MAX_FUND_BATCH_LAMPORTS = 100 * LAMPORTS_PER_SOL;
+/** Per-wallet ceiling for one fund transfer; the handler enforces the same. */
+export const MAX_FUND_PER_WALLET_SOL = 50;
 /** The IPC caps one call at this many wallets; the pages disable above it. */
 export const MAX_LAB_WALLETS_PER_CALL = 20;
 
@@ -158,11 +160,17 @@ export function planFund(
   if (!wallets.length) return { ok: false, message: 'No wallets selected', targets: [], totalLamports: 0 };
   if (!(sol > 0) || !Number.isFinite(sol)) return { ok: false, message: 'Amount must be positive', targets: [], totalLamports: 0 };
   const per = mode === 'each' ? sol : sol / wallets.length;
+  if (per > MAX_FUND_PER_WALLET_SOL) {
+    return { ok: false, message: `At most ${MAX_FUND_PER_WALLET_SOL} SOL per wallet`, targets: [], totalLamports: 0 };
+  }
   const perLamports = Math.floor(per * LAMPORTS_PER_SOL);
   if (perLamports < RENT_EXEMPT_LAMPORTS) {
     return { ok: false, message: `Each wallet needs at least ${(RENT_EXEMPT_LAMPORTS / LAMPORTS_PER_SOL).toFixed(6)} SOL to exist (rent)`, targets: [], totalLamports: 0 };
   }
   const totalLamports = perLamports * wallets.length;
+  if (totalLamports > MAX_FUND_BATCH_LAMPORTS) {
+    return { ok: false, message: `Fund at most ${MAX_FUND_BATCH_LAMPORTS / LAMPORTS_PER_SOL} SOL per batch`, targets: [], totalLamports: 0 };
+  }
   if (sourceBalanceSol !== null) {
     const available = Math.floor(sourceBalanceSol * LAMPORTS_PER_SOL) - FUND_HEADROOM_LAMPORTS;
     if (totalLamports > available) {

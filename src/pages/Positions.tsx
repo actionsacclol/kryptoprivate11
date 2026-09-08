@@ -43,6 +43,13 @@ export function HoldingsSection() {
         setHoldings(ev.data);
         rememberHoldings(ev.data, ev.at);
       }
+      // A different signer now: the old wallet's bags — and their Sell
+      // buttons — must not sit here until the 30 s poll.
+      if (ev.kind === 'walletSwitched') {
+        setHoldings(null);
+        setError(null);
+        void refresh();
+      }
     });
     return () => {
       clearInterval(t);

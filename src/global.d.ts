@@ -194,6 +194,8 @@ declare global {
         list: () => Promise<IpcResult<CopySnapshot>>;
         save: (config: Partial<CopyConfig>) => Promise<IpcResult<CopySnapshot>>;
         remove: (id: string) => Promise<IpcResult<CopySnapshot>>;
+        /** Start a followed wallet's own record over; configs and copies stay. */
+        resetStats: (wallet: string) => Promise<IpcResult<CopySnapshot>>;
       };
       automation: {
         list: () => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
@@ -227,6 +229,9 @@ declare global {
         /** Many at once; the Jupiter half is one batched call main-side. */
         summaries: (mints: string[]) => Promise<IpcResult<Record<string, TokenSummary>>>;
         candles: (mint: string, interval: CandleInterval, limit: number) => Promise<IpcResult<CandleSeries>>;
+        /** The full merged series, awaited however long the provider walk
+         *  takes — for one-shot callers that cannot take the `candles` push. */
+        candlesFull: (mint: string, interval: CandleInterval, limit: number) => Promise<IpcResult<CandleSeries>>;
         candlesTail: (mint: string, interval: CandleInterval, sinceTime: number) => Promise<IpcResult<CandleSeries>>;
         holders: (mint: string, limit: number) => Promise<IpcResult<HolderReport>>;
         trades: (mint: string, limit: number) => Promise<IpcResult<{ rows: TradeRow[]; source: string; note: string | null }>>;

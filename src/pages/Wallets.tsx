@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Copy, FlaskConical, Plus, Trash2, TriangleAlert, Zap } from 'lucide-react';
+import { Copy, FlaskConical, Plus, RotateCcw, Trash2, TriangleAlert, Zap } from 'lucide-react';
 import {
+  LEADER_RANK_KEYS,
+  MIN_TRIPS_FOR_RANK,
   copySize,
   defaultConfig,
+  leaderWinRate,
+  rankLeaders,
   validateConfig,
   winRate,
   type CopyConfig,
   type CopySnapshot,
+  type LeaderRankKey,
 } from '@shared/copytrade';
 import type { WatchedWallet } from '@shared/types';
 import { Card, Empty, GhostButton, Page, PrimaryButton, Section } from '../components/common';
 import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
-import { cls, fmtAgo, shortAddr, toneFor } from '../utils/format';
+import { cls, fmtAgo, fmtDur, shortAddr, toneFor } from '../utils/format';
 
 // Wallet tracking + copy trading (term.txt §9 and §11).
 //
@@ -74,6 +79,7 @@ function ConfigEditor({
             value={c.label}
             onChange={(e) => set('label', e.target.value)}
             placeholder="Good Pump Trader"
+            maxLength={40}
             className={numBox}
           />
         </Field>
@@ -194,6 +200,7 @@ export function WalletsPage() {
   const [editing, setEditing] = useState<(Omit<CopyConfig, 'id' | 'createdAt'> & { id?: string }) | null>(null);
   const [newAddr, setNewAddr] = useState('');
   const [newLabel, setNewLabel] = useState('');
+  const [rankBy, setRankBy] = useState<LeaderRankKey>('realizedPnlSol');
 
   const load = useCallback(async () => {
     const [c, w] = await Promise.all([window.krypt.copy.list(), window.krypt.watchlist.get()]);
@@ -276,6 +283,37 @@ export function WalletsPage() {
     if (r.ok && r.data) setSnap(r.data);
   };
 
+  // The leaderboard: THEIR record per followed wallet (every swap seen,
+  // copied or not), next to what copying them did for us.
+  const leaderRows = snap ? rankLeaders(Object.values(snap.leaders).filter((l) => l.buys + l.sells > 0), rankBy) : [];
+  const labelFor = (wallet: string): string => snap?.configs.find((c) => c.wallet === wallet)?.label || shortAddr(wallet, 6);
+  const ourCopies = (wallet: string): { copies: number; closed: number; realized: number } => {
+    const out = { copies: 0, closed: 0, realized: 0 };
+    if (!snap) return out;
+    for (const c of snap.configs) {
+      if (c.wallet !== wallet) continue;
+      const st = snap.stats[c.id];
+      if (!st) continue;
+      out.copies += st.trades;
+      out.closed += st.wins + st.losses;
+      out.realized += st.realizedPnlSol;
+    }
+    return out;
+  };
+  const signed = (v: number): string => `${v >= 0 ? '+' : ''}${v.toFixed(3)}`;
+  const resetLeader = async (wallet: string): Promise<void> => {
+    const yes = await modal.confirm({
+      title: 'Start this record over',
+      message: `Clear the scored trades for ${labelFor(wallet)}? Your config and your copies stay.`,
+      confirmLabel: 'Clear record',
+      destructive: true,
+    });
+    if (!yes) return;
+    const r = await window.krypt.copy.resetStats(wallet);
+    if (r.ok && r.data) setSnap(r.data);
+    else if (!r.ok) toast.error(r.message);
+  };
+
   return (
     <Page
       title="Copy Trading"
@@ -293,6 +331,115 @@ export function WalletsPage() {
       {editing && (
         <Section title={editing.id ? 'Edit config' : 'New copy config'}>
           <ConfigEditor initial={editing} onSave={(c) => void save(c)} onCancel={() => setEditing(null)} />
+        </Section>
+      )}
+
+      {/* Leaderboard — THEIR record, whether or not a copy happened. */}
+      {snap && leaderRows.length > 0 && (
+        <Section
+          title="Leaderboard"
+          description="Every swap seen on a followed wallet is scored as THEIR trade — whether or not your filters let a copy through — so wallets run on paper compare on their own record. Sells of tokens bought before you followed are counted, not scored."
+        >
+          <Card className="space-y-3">
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+              <span className="uppercase tracking-[0.14em] text-krypt-muted/60 mr-1">Rank by</span>
+              {LEADER_RANK_KEYS.map((k) => (
+                <button
+                  key={k.key}
+                  onClick={() => setRankBy(k.key)}
+                  className={cls(
+                    'rounded-md border px-2 py-1 font-semibold transition',
+                    rankBy === k.key ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white' : 'border-white/10 text-krypt-muted hover:text-white',
+                  )}
+                >
+                  {k.label}
+                </button>
+              ))}
+              <span className="flex-1" />
+              <span className="text-krypt-muted/50">fewer than {MIN_TRIPS_FOR_RANK} closed trades ranks last</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px] font-mono">
+                <thead>
+                  <tr className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">
+                    <th className="text-left font-normal py-1 pr-2">#</th>
+                    <th className="text-left font-normal py-1 pr-3">Wallet</th>
+                    <th className="text-right font-normal py-1 px-2">Trades</th>
+                    <th className="text-right font-normal py-1 px-2">Win</th>
+                    <th className="text-right font-normal py-1 px-2">Realized</th>
+                    <th className="text-right font-normal py-1 px-2">Return</th>
+                    <th className="text-right font-normal py-1 px-2">Open</th>
+                    <th className="text-right font-normal py-1 px-2">Unreal.</th>
+                    <th className="text-right font-normal py-1 px-2">Avg hold</th>
+                    <th className="text-right font-normal py-1 px-2">/ day</th>
+                    <th className="text-right font-normal py-1 px-2">Your copies</th>
+                    <th className="text-right font-normal py-1 pl-2">Since</th>
+                    <th className="py-1" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaderRows.map((l, i) => {
+                    const wr = leaderWinRate(l);
+                    const small = l.roundTrips < MIN_TRIPS_FOR_RANK;
+                    const ours = ourCopies(l.wallet);
+                    const scored = l.roundTrips > 0 || l.realizedPnlSol !== 0;
+                    return (
+                      <tr key={l.wallet} className="border-t border-white/[0.06] hover:bg-white/[0.03]">
+                        <td className="py-1.5 pr-2 text-krypt-muted/60">{i + 1}</td>
+                        <td className="py-1.5 pr-3">
+                          <div className="text-white/90 truncate max-w-[10rem]">{labelFor(l.wallet)}</div>
+                          <div className="text-[9px] text-krypt-muted/60">
+                            {shortAddr(l.wallet, 4)}
+                            {small ? ` · ${l.roundTrips}/${MIN_TRIPS_FOR_RANK} closed` : ''}
+                          </div>
+                        </td>
+                        <td className="py-1.5 px-2 text-right text-white/85">
+                          {l.roundTrips}
+                          <span className="text-krypt-muted/60"> ({l.wins}/{l.losses})</span>
+                        </td>
+                        <td className="py-1.5 px-2 text-right text-white/85">{wr === null ? '—' : `${wr.toFixed(0)}%`}</td>
+                        <td className={cls('py-1.5 px-2 text-right', scored ? toneFor(l.realizedPnlSol) : 'text-krypt-muted')}>
+                          {scored ? signed(l.realizedPnlSol) : '—'}
+                        </td>
+                        <td className={cls('py-1.5 px-2 text-right', l.returnPct === null ? 'text-krypt-muted' : toneFor(l.returnPct))}>
+                          {l.returnPct === null ? '—' : `${l.returnPct >= 0 ? '+' : ''}${l.returnPct.toFixed(0)}%`}
+                        </td>
+                        <td className="py-1.5 px-2 text-right text-white/85">
+                          {l.openCount}
+                          {l.openCount > 0 ? <span className="text-krypt-muted/60"> · {l.openCostSol.toFixed(2)}</span> : null}
+                        </td>
+                        <td className={cls('py-1.5 px-2 text-right', l.unrealizedPnlSol === null ? 'text-krypt-muted' : toneFor(l.unrealizedPnlSol))}>
+                          {l.unrealizedPnlSol === null ? '—' : signed(l.unrealizedPnlSol)}
+                        </td>
+                        <td className="py-1.5 px-2 text-right text-white/85">{l.avgHoldMs === null ? '—' : fmtDur(l.avgHoldMs)}</td>
+                        <td className="py-1.5 px-2 text-right text-white/85">{l.tradesPerDay === null ? '—' : l.tradesPerDay.toFixed(1)}</td>
+                        <td className="py-1.5 px-2 text-right text-white/85">
+                          {ours.copies}
+                          {ours.closed > 0 ? <span className={toneFor(ours.realized)}> · {signed(ours.realized)}</span> : null}
+                        </td>
+                        <td className="py-1.5 pl-2 text-right text-krypt-muted/70">{l.watchedSince ? `${fmtAgo(l.watchedSince)} ago` : '—'}</td>
+                        <td className="py-1.5 pl-2 text-right">
+                          <button
+                            onClick={() => void resetLeader(l.wallet)}
+                            title="Start this wallet's record over"
+                            className="text-krypt-muted/50 hover:text-white transition"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {leaderRows.some((l) => l.unscoredSells > 0) && (
+              <p className="text-[10px] text-krypt-muted/60">
+                Sells of tokens bought before you followed: {leaderRows.reduce((a, l) => a + l.unscoredSells, 0)} — counted in the
+                trade rate, left out of PnL.
+              </p>
+            )}
+          </Card>
         </Section>
       )}
 
@@ -507,6 +654,7 @@ export function WalletsPage() {
               value={newLabel}
               onChange={(e) => setNewLabel(e.target.value)}
               placeholder="Label"
+              maxLength={32}
               className="w-48 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-krypt-purple/50"
             />
             <GhostButton onClick={() => void addTracked()} disabled={newAddr.trim().length < 32}>

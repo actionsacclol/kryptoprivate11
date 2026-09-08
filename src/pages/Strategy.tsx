@@ -28,6 +28,13 @@ interface SpellPreset {
   patch: Partial<StrategySettings>;
 }
 
+// The data-refit defaults minus the switches that are not "how strict":
+// runner alerts and paper entries are the user's own choices, and a preset
+// used to flip both back.
+const BALANCED_PATCH = Object.fromEntries(
+  Object.entries(DEFAULT_SETTINGS.strategy).filter(([k]) => k !== 'runnerAlerts' && k !== 'paperEntries'),
+) as Partial<StrategySettings>;
+
 const PRESETS: SpellPreset[] = [
   {
     name: 'Warded',
@@ -50,7 +57,7 @@ const PRESETS: SpellPreset[] = [
     glyph: '✦',
     line: 'The data-refit defaults — clean book, early curve, capped crowd.',
     tone: 'gold',
-    patch: { ...DEFAULT_SETTINGS.strategy },
+    patch: BALANCED_PATCH,
   },
   {
     name: 'Reckless',

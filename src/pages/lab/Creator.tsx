@@ -120,6 +120,7 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
               onChange={(e) => setNewGroup(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && void createGroup()}
               placeholder="New group name"
+              maxLength={32}
               className={cls(inputCls, 'w-56')}
             />
             <PrimaryButton onClick={() => void createGroup()} disabled={!newGroup.trim()} className="!py-1.5">
@@ -218,6 +219,7 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
               value={createPrefix}
               onChange={(e) => setCreatePrefix(e.target.value)}
               placeholder="label prefix (optional)"
+              maxLength={24}
               className={cls(inputCls, 'w-44')}
             />
             <PrimaryButton onClick={() => void createMany()} disabled={!target || busy === 'create'} className="!py-1.5">

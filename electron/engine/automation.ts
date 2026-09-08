@@ -345,7 +345,7 @@ export function all(): UserScript[] {
 }
 
 export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): { ok: boolean; message: string; id?: string } {
-  const v = validateScript(input);
+  const v = validateScript(input, { maxLiveSol: host?.maxLiveSol() });
   if (!v.ok) return { ok: false, message: v.message };
   const now = Date.now();
   if (input.id) {

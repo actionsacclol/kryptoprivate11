@@ -2,7 +2,7 @@
 // manual orders placed on a whole group at once (2026-09-03). Every leg is
 // a normal signed trade per wallet: simulation, loss guard, platform fee.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { DEFAULT_FOLLOW, validateFollow, type FollowSettings } from '@shared/lab';
 import type { WalletGroupView } from '@shared/types';
 import { Badge, Card, Empty, GhostButton, NumberInput, Page, PrimaryButton, Section, Switch } from '../../components/common';
@@ -49,6 +49,14 @@ export function CopierPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const [buySol, setBuySol] = useState(0.01);
   const [stagger, setStagger] = useState(500);
   const [results, setResults] = useState<{ kind: 'buy' | 'sell'; rows: OrderResult[] } | null>(null);
+  // The engine caps the group TOTAL at the per-trade cap; checked before the
+  // "REAL SOL" confirm rather than after it.
+  const [cap, setCap] = useState<number | null>(null);
+  useEffect(() => {
+    void window.krypt.settings.get().then((r) => {
+      if (r.ok && r.data) setCap(r.data.execution.maxLiveSol);
+    });
+  }, []);
   const og = groups.find((g) => g.id === orderGroup) ?? null;
   const orderWallets = (og?.members ?? []).filter((m) => m.id !== active?.id).map((m) => m.id);
   const mintOk = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint.trim());
@@ -57,6 +65,10 @@ export function CopierPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const doBuy = async (): Promise<void> => {
     if (busy || !og || !mintOk) return;
     if (orderTooMany) return toast.error(orderTooMany);
+    const total = buyMode === 'same' ? buySol * orderWallets.length : buySol;
+    if (cap !== null && total > cap) {
+      return toast.error(`Group total ${total.toFixed(3)} SOL is above your ${cap} SOL per-trade cap — lower the amount, or raise the cap on the Wallet page.`);
+    }
     setBusy('buy');
     const yes = await modal.confirm({
       title: `Buy with “${og.name}”`,

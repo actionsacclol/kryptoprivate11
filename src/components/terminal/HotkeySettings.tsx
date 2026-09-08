@@ -97,20 +97,30 @@ export function HotkeySettings({
     patchBindings(hk.bindings.map((b) => (b.id === id ? { ...b, ...patch } : b)));
   };
 
-  const setAmount = (id: string, raw: string): void => {
+  // Committed on blur/Enter, never per keystroke: an armed key used to save
+  // (and arm) every intermediate digit — typing 25 % passed through a live
+  // 2 % — and the leading "0." of a sub-1 SOL buy was refused and snapped
+  // back. Returns false when the value is not accepted, so the field can
+  // show the stored amount again.
+  const setAmount = (id: string, raw: string): boolean => {
     const n = Number(raw);
-    if (!Number.isFinite(n)) return;
+    if (!Number.isFinite(n) || raw.trim() === '') return false;
     const b = hk.bindings.find((x) => x.id === id);
-    if (!b) return;
+    if (!b) return false;
     if (b.action.kind === 'buy') {
-      if (n <= 0 || n > 25) return;
+      if (n <= 0 || n > 25) return false;
       setBinding(id, { action: { kind: 'buy', sol: n } });
-    } else if (b.action.kind === 'sell') {
-      const p = Math.round(n);
-      if (p < 1 || p > 100) return;
-      setBinding(id, { action: { kind: 'sell', percent: p } });
+      return true;
     }
+    if (b.action.kind === 'sell') {
+      const p = Math.round(n);
+      if (p < 1 || p > 100) return false;
+      setBinding(id, { action: { kind: 'sell', percent: p } });
+      return true;
+    }
+    return false;
   };
+  const amountOf = (a: HotkeyBinding['action']): number => (a.kind === 'buy' ? a.sol : a.kind === 'sell' ? a.percent : 0);
 
   const armedCount = hk.bindings.filter((b) => b.enabled).length;
   const overCap = hk.bindings.filter(
@@ -193,9 +203,15 @@ export function HotkeySettings({
               {b.action.kind !== 'emergency_sell' && (
                 <div className="flex items-center rounded-md border border-white/10 bg-black/40 overflow-hidden">
                   <input
+                    key={`${b.id}:${amountOf(b.action)}`}
                     type="number"
-                    value={b.action.kind === 'buy' ? b.action.sol : b.action.percent}
-                    onChange={(e) => setAmount(b.id, e.target.value)}
+                    defaultValue={amountOf(b.action)}
+                    onBlur={(e) => {
+                      if (!setAmount(b.id, e.target.value)) e.target.value = String(amountOf(b.action));
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                    }}
                     step={b.action.kind === 'buy' ? 0.05 : 5}
                     className="w-16 bg-transparent px-2 py-1 text-[11px] font-mono text-white outline-none text-right"
                   />

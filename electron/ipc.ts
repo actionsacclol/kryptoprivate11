@@ -260,7 +260,13 @@ export function registerIpc(): void {
     return r.ok ? ok(r.message) : fail(r.message);
   });
 
-  ipcMain.handle('engine:snapshot', () => ok('ok', getEngine().snapshot()));
+  // The engine's copy of the settings is the RESOLVED form (Helius key
+  // expanded into the feed socket + http endpoint). The renderer must see
+  // the RAW store: it spreads `rpc` back on every RPC save, and until
+  // 2026-09-08 that wrote the key-bearing feed socket into extraWssUrls —
+  // one more copy per save, a socket that outlived its switch, and after
+  // 31 saves every RPC save rejected by the 32-entry cap.
+  ipcMain.handle('engine:snapshot', () => ok('ok', { ...getEngine().snapshot(), settings: store.load() }));
 
   ipcMain.handle('engine:execution', () => ok('ok', getEngine().executionSnapshot()));
 
@@ -461,7 +467,9 @@ export function registerIpc(): void {
     // snapshot — sell-all, recovery, scripts and the portfolio build call
     // engine.holdings() and wait for the chain.
     const fast = getEngine().holdingsCached();
-    if (fast) return ok('ok', fast.data);
+    if (fast && !fast.stale) return ok('ok', fast.data);
+    // Stale (or none): wait for the chain read — the page already painted
+    // its seed, and a failed refresh must surface as the error it is.
     const r = await getEngine().holdings();
     return r.ok ? ok('ok', r.data) : fail(r.message);
   });
@@ -778,7 +786,7 @@ export function registerIpc(): void {
       if (!pk) return fail('A target is not one of your wallets');
       if (seen.has(pk)) return fail('A wallet is listed twice');
       seen.add(pk);
-      if (!(sol > 0) || !Number.isFinite(sol) || sol > 50) return fail('Amount per wallet must be between 0 and 50 SOL');
+      if (!(sol > 0) || !Number.isFinite(sol) || sol > lab.MAX_FUND_PER_WALLET_SOL) return fail(`Amount per wallet must be between 0 and ${lab.MAX_FUND_PER_WALLET_SOL} SOL`);
       const lamports = Math.round(sol * 1e9);
       totalLamports += lamports;
       resolved.push({ publicKey: pk, lamports });
@@ -1040,6 +1048,21 @@ export function registerIpc(): void {
     const n = Number(limit);
     try {
       return ok('ok', await market.candlesFast(mint, interval as CandleInterval, Number.isFinite(n) ? n : 500));
+    } catch (err) {
+      return fail(`Chart load failed: ${(err as Error).message}`);
+    }
+  });
+
+  // The full merged series, however long the provider walk takes. For a
+  // deliberate, non-navigation ask (the trade replay) — market:candles
+  // answers a pending placeholder after 1.2 s, which the token page upgrades
+  // from the `candles` push but a one-shot caller would take as "no chart".
+  ipcMain.handle('market:candlesFull', async (_e, mint: unknown, interval: unknown, limit: unknown) => {
+    if (!isMint(mint)) return fail('Invalid mint address');
+    if (!CANDLE_INTERVALS.includes(interval as CandleInterval)) return fail('Unknown interval');
+    const n = Number(limit);
+    try {
+      return ok('ok', await market.candles(mint, interval as CandleInterval, Number.isFinite(n) ? n : 500));
     } catch (err) {
       return fail(`Chart load failed: ${(err as Error).message}`);
     }
@@ -1421,6 +1444,13 @@ export function registerIpc(): void {
   ipcMain.handle('copy:remove', (_e, id: unknown) => {
     if (typeof id !== 'string' || !id) return fail('Invalid id');
     const r = getEngine().removeCopyConfig(id);
+    return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
+  });
+
+  // Start a followed wallet's OWN record over (the configs and copies stay).
+  ipcMain.handle('copy:resetStats', (_e, wallet: unknown) => {
+    if (typeof wallet !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) return fail('Invalid wallet');
+    const r = getEngine().resetCopyLeader(wallet);
     return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
   });
 

@@ -1,4 +1,45 @@
 import { useEffect, useState } from 'react';
+
+/** A whole number committed on blur/Enter and clamped to its bound. Saving
+ *  on every keystroke rejected the first digit of "15" (below the floor),
+ *  React snapped the field back, and the user ended up with "105". */
+function BoundedInt({
+  value,
+  min,
+  max,
+  onCommit,
+  className,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onCommit: (n: number) => void;
+  className: string;
+}) {
+  return (
+    <input
+      key={value}
+      type="number"
+      min={min}
+      max={max}
+      defaultValue={value}
+      onBlur={(e) => {
+        const n = Math.round(Number(e.target.value));
+        if (!Number.isFinite(n) || e.target.value.trim() === '') {
+          e.target.value = String(value);
+          return;
+        }
+        const clamped = Math.min(max, Math.max(min, n));
+        if (clamped !== value) onCommit(clamped);
+        else e.target.value = String(value);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+      }}
+      className={className}
+    />
+  );
+}
 import { AlertCircle, CheckCircle2, MinusCircle } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import type { ProviderId, ProviderStatus } from '@shared/market';
@@ -250,17 +291,11 @@ export function MarketDataSettings({
               Discover refresh
             </label>
             <div className="flex items-center rounded-lg border border-white/10 bg-black/40 overflow-hidden">
-              <input
-                type="number"
+              <BoundedInt
+                value={settings.data.discoverRefreshSec}
                 min={2}
                 max={300}
-                value={settings.data.discoverRefreshSec}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) {
-                    void updateSettings({ data: { ...settings.data, discoverRefreshSec: Math.round(n) } });
-                  }
-                }}
+                onCommit={(n) => void updateSettings({ data: { ...settings.data, discoverRefreshSec: n } })}
                 className="flex-1 bg-transparent px-3 py-2 text-sm font-mono text-white outline-none"
               />
               <span className="px-3 text-[11px] uppercase text-krypt-muted">sec</span>
@@ -271,17 +306,11 @@ export function MarketDataSettings({
               Rows per column
             </label>
             <div className="flex items-center rounded-lg border border-white/10 bg-black/40 overflow-hidden">
-              <input
-                type="number"
+              <BoundedInt
+                value={settings.data.discoverLimit}
                 min={5}
                 max={80}
-                value={settings.data.discoverLimit}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) {
-                    void updateSettings({ data: { ...settings.data, discoverLimit: Math.round(n) } });
-                  }
-                }}
+                onCommit={(n) => void updateSettings({ data: { ...settings.data, discoverLimit: n } })}
                 className="flex-1 bg-transparent px-3 py-2 text-sm font-mono text-white outline-none"
               />
               <span className="px-3 text-[11px] uppercase text-krypt-muted">rows</span>

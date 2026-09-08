@@ -161,7 +161,10 @@ export function TradeReplay({
       setPath('real');
       try {
         const iv = pickInterval(trade.openedAt, trade.closedAt, Date.now());
-        const r = await window.krypt.market.candles(trade.mint, iv, REPLAY_CANDLE_LIMIT);
+        // The FULL series: market.candles is the token page's fast answer and
+        // hands back an empty pending placeholder after 1.2 s, which a
+        // one-shot caller would read as "no history".
+        const r = await window.krypt.market.candlesFull(trade.mint, iv, REPLAY_CANDLE_LIMIT);
         if (!live) return;
         if (!r.ok || !r.data) {
           if (!useSyntheticPath()) setProblem(r.message || 'No chart data came back for this token.');

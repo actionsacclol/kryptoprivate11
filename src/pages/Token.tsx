@@ -910,6 +910,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                 orders={orders}
                 executable={ordersExecutable}
                 blockedReason={ordersBlocked}
+                maxLiveSol={settings?.execution.maxLiveSol ?? null}
                 onChanged={() => void loadOrders()}
               />
             </div>

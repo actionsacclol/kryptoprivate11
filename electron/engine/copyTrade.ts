@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   copySize,
+  emptyLeaderStats,
   validateConfig,
   type CopyConfig,
   type CopyMode,
@@ -22,6 +23,8 @@ import {
   type CopyStats,
   type CopyTrade,
   type CopyWatchStatus,
+  type LeaderRoundTrip,
+  type LeaderStats,
 } from '@shared/copytrade';
 import { FEE_BPS } from '@shared/fees';
 import * as recorder from './recorder';
@@ -32,6 +35,8 @@ const MAX_CONFIGS = 25;
 
 let configs: CopyConfig[] = [];
 let trades: CopyTrade[] = [];
+/** Per followed wallet: THEIR positions and round trips (see below). */
+let leaders: Record<string, LeaderBook> = {};
 let filePath = '';
 let saveTimer: NodeJS.Timeout | null = null;
 
@@ -63,12 +68,19 @@ export function attach(h: CopyHost): void {
 export function init(userDataDir: string): void {
   filePath = path.join(userDataDir, FILE);
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as { version: 1; configs: CopyConfig[]; trades: CopyTrade[] };
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+      version: 1;
+      configs: CopyConfig[];
+      trades: CopyTrade[];
+      leaders?: Record<string, LeaderBook>;
+    };
     configs = Array.isArray(raw?.configs) ? raw.configs : [];
     trades = Array.isArray(raw?.trades) ? raw.trades : [];
+    leaders = raw?.leaders && typeof raw.leaders === 'object' && !Array.isArray(raw.leaders) ? raw.leaders : {};
   } catch {
     configs = [];
     trades = [];
+    leaders = {};
   }
   // A LIVE config never survives a restart armed. Same reasoning as orders:
   // an app that was closed for a week must not resume spending on wake.
@@ -87,7 +99,7 @@ function persist(): void {
   saveTimer = setTimeout(() => {
     try {
       const tmp = `${filePath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ version: 1, configs, trades: trades.slice(0, MAX_TRADES) }, null, 2), 'utf8');
+      fs.writeFileSync(tmp, JSON.stringify({ version: 1, configs, trades: trades.slice(0, MAX_TRADES), leaders }, null, 2), 'utf8');
       fs.renameSync(tmp, filePath);
     } catch {
       /* memory stays authoritative */
@@ -133,9 +145,12 @@ export function upsert(input: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: stri
 
 export function remove(id: string): { ok: boolean; message: string } {
   const before = configs.length;
+  const gone = configs.find((c) => c.id === id);
   configs = configs.filter((c) => c.id !== id);
   if (configs.length === before) return { ok: false, message: 'Config not found' };
   trades = trades.filter((t) => t.configId !== id);
+  // Their record goes with the last config that followed them.
+  if (gone && !configs.some((c) => c.wallet === gone.wallet)) delete leaders[gone.wallet];
   persist();
   host?.changed();
   return { ok: true, message: 'Stopped following' };
@@ -179,6 +194,8 @@ function statsFor(c: CopyConfig): CopyStats {
 export function snapshot(): CopySnapshot {
   const stats: Record<string, CopyStats> = {};
   for (const c of configs) stats[c.id] = statsFor(c);
+  const leaderStats: Record<string, LeaderStats> = {};
+  for (const w of new Set(configs.map((c) => c.wallet))) leaderStats[w] = leaderStatsFor(w);
   const blocked = host?.liveBlockedReason() ?? null;
   return {
     configs: all(),
@@ -187,7 +204,192 @@ export function snapshot(): CopySnapshot {
     liveExecutable: blocked === null,
     liveBlockedReason: blocked,
     watch: host?.watchStatus?.() ?? {},
+    leaders: leaderStats,
   };
+}
+
+// ── The leader's own record ───────────────────────────────────────────
+//
+// What the LEADER did, scored from every swap seen on their wallet since a
+// config first followed it — whether or not a copy happened (2026-09-08).
+// The copy scorecard answers "what did following them cost or make ME,
+// through my filters and delay"; this answers "are they any good", which is
+// what a user testing five wallets on paper is asking. Average cost per
+// (wallet, mint): a position opens on the first buy seen and closes when a
+// sell leaves nothing (their own fraction says so, or the tracked tokens are
+// spent). A sell of tokens bought BEFORE we watched has no known cost and is
+// counted, never scored.
+
+interface LeaderPos {
+  mint: string;
+  symbol: string;
+  /** Tracked tokens still held. */
+  tokens: number;
+  /** Cost of the tracked tokens still held. */
+  costSol: number;
+  /** Everything spent on this position. */
+  costTotal: number;
+  proceedsSol: number;
+  realizedSol: number;
+  openedAt: number;
+  lastAt: number;
+  buys: number;
+  sells: number;
+  /** Last price seen for the mint (their fill or a tape tick). */
+  markPriceSol: number | null;
+}
+
+interface LeaderBook {
+  positions: Record<string, LeaderPos>;
+  /** Newest first. */
+  trips: LeaderRoundTrip[];
+  buys: number;
+  sells: number;
+  unscoredSells: number;
+  firstAt: number | null;
+  lastAt: number | null;
+}
+
+const MAX_TRIPS_PER_LEADER = 300;
+const MAX_OPEN_PER_LEADER = 200;
+
+function bookFor(wallet: string): LeaderBook {
+  let b = leaders[wallet];
+  if (!b) {
+    b = { positions: {}, trips: [], buys: 0, sells: 0, unscoredSells: 0, firstAt: null, lastAt: null };
+    leaders[wallet] = b;
+  }
+  return b;
+}
+
+function trackLeader(t: WalletTrade): void {
+  const b = bookFor(t.wallet);
+  b.firstAt = b.firstAt === null ? t.at : Math.min(b.firstAt, t.at);
+  b.lastAt = b.lastAt === null ? t.at : Math.max(b.lastAt, t.at);
+  // Token count from the transaction when the watcher gave it; else from
+  // the fill price (the simulator and tests).
+  const tokens = t.tokens !== undefined && t.tokens > 0 ? t.tokens : t.priceSol > 0 ? t.sol / t.priceSol : 0;
+
+  if (t.isBuy) {
+    b.buys += 1;
+    if (!(tokens > 0) || !(t.sol > 0)) return;
+    let p = b.positions[t.mint];
+    if (!p) {
+      p = {
+        mint: t.mint,
+        symbol: t.symbol,
+        tokens: 0,
+        costSol: 0,
+        costTotal: 0,
+        proceedsSol: 0,
+        realizedSol: 0,
+        openedAt: t.at,
+        lastAt: t.at,
+        buys: 0,
+        sells: 0,
+        markPriceSol: null,
+      };
+      b.positions[t.mint] = p;
+      const open = Object.values(b.positions);
+      if (open.length > MAX_OPEN_PER_LEADER) {
+        const oldest = open.reduce((a, x) => (x.lastAt < a.lastAt ? x : a));
+        delete b.positions[oldest.mint];
+      }
+    }
+    p.tokens += tokens;
+    p.costSol += t.sol;
+    p.costTotal += t.sol;
+    p.buys += 1;
+    p.lastAt = t.at;
+    if (t.priceSol > 0) p.markPriceSol = t.priceSol;
+    if (t.symbol && !p.symbol) p.symbol = t.symbol;
+    return;
+  }
+
+  b.sells += 1;
+  const p = b.positions[t.mint];
+  if (!p || !(p.tokens > 0) || !(tokens > 0)) {
+    b.unscoredSells += 1;
+    return;
+  }
+  const sold = Math.min(tokens, p.tokens);
+  // The part of this sell whose cost is known; the rest was bought before
+  // we watched and is counted, not scored.
+  const share = sold / tokens;
+  if (share < 0.999) b.unscoredSells += 1;
+  const cost = p.costSol * (sold / p.tokens);
+  const proceeds = t.sol * share;
+  p.tokens -= sold;
+  p.costSol -= cost;
+  p.proceedsSol += proceeds;
+  p.realizedSol += proceeds - cost;
+  p.sells += 1;
+  p.lastAt = t.at;
+  if (t.priceSol > 0) p.markPriceSol = t.priceSol;
+  const f = t.soldFraction;
+  const flat = (f !== null && f !== undefined && f >= 0.995) || p.tokens <= 1e-9 || p.costSol <= 1e-9;
+  if (!flat) return;
+  b.trips.unshift({
+    mint: p.mint,
+    symbol: p.symbol,
+    costSol: p.costTotal,
+    proceedsSol: p.proceedsSol,
+    pnlSol: p.realizedSol,
+    openedAt: p.openedAt,
+    closedAt: t.at,
+    buys: p.buys,
+    sells: p.sells,
+  });
+  if (b.trips.length > MAX_TRIPS_PER_LEADER) b.trips.length = MAX_TRIPS_PER_LEADER;
+  delete b.positions[t.mint];
+}
+
+function leaderStatsFor(wallet: string): LeaderStats {
+  const b = leaders[wallet];
+  if (!b) return emptyLeaderStats(wallet);
+  const open = Object.values(b.positions);
+  const trips = b.trips;
+  const tripCost = trips.reduce((a, x) => a + x.costSol, 0);
+  const tripPnl = trips.reduce((a, x) => a + x.pnlSol, 0);
+  let unrealized: number | null = null;
+  for (const p of open) {
+    const px = p.markPriceSol ?? host?.priceSol(p.mint) ?? null;
+    if (px === null || !(px > 0)) continue;
+    unrealized = (unrealized ?? 0) + (p.tokens * px - p.costSol);
+  }
+  const holds = trips.map((x) => x.closedAt - x.openedAt).filter((ms) => ms >= 0);
+  const days = b.firstAt === null ? null : Math.max(1, (Date.now() - b.firstAt) / 86_400_000);
+  return {
+    wallet,
+    watchedSince: b.firstAt,
+    lastTradeAt: b.lastAt,
+    buys: b.buys,
+    sells: b.sells,
+    roundTrips: trips.length,
+    wins: trips.filter((x) => x.pnlSol > 0).length,
+    losses: trips.filter((x) => x.pnlSol < 0).length,
+    realizedPnlSol: tripPnl + open.reduce((a, p) => a + p.realizedSol, 0),
+    volumeSol: tripCost + open.reduce((a, p) => a + p.costTotal, 0),
+    openCount: open.length,
+    openCostSol: open.reduce((a, p) => a + p.costSol, 0),
+    unrealizedPnlSol: unrealized,
+    avgHoldMs: holds.length ? holds.reduce((a, x) => a + x, 0) / holds.length : null,
+    bestSol: trips.length ? Math.max(...trips.map((x) => x.pnlSol)) : null,
+    worstSol: trips.length ? Math.min(...trips.map((x) => x.pnlSol)) : null,
+    unscoredSells: b.unscoredSells,
+    tradesPerDay: days === null ? null : (b.buys + b.sells) / days,
+    returnPct: tripCost > 0 ? (tripPnl / tripCost) * 100 : null,
+    recentTrips: trips.slice(0, 8).map((x) => ({ ...x })),
+  };
+}
+
+/** Start a wallet's record over (the configs and copies stay). */
+export function resetLeader(wallet: string): { ok: boolean; message: string } {
+  if (!configs.some((c) => c.wallet === wallet)) return { ok: false, message: 'Not following that wallet' };
+  delete leaders[wallet];
+  persist();
+  host?.changed();
+  return { ok: true, message: 'Record cleared' };
 }
 
 // ── Daily limits ──────────────────────────────────────────────────────
@@ -239,6 +441,8 @@ export interface WalletTrade {
   /** Sell: the share of their holding they sold, 0–1 (walletSwap). Null or
    *  absent = unknown, mirrored as "all of it". */
   soldFraction?: number | null;
+  /** Tokens moved, UI units (walletSwap). Absent = derived from the price. */
+  tokens?: number;
 }
 
 /** Signatures already evaluated, newest last; bounded. */
@@ -274,6 +478,11 @@ export function onWalletTrade(t: WalletTrade): void {
   const matching = configs.filter((c) => c.enabled && c.wallet === t.wallet);
   if (!matching.length) return;
   if (alreadyHandled(t.signature)) return;
+
+  // Their record first: scored whatever the configs below decide.
+  trackLeader(t);
+  persist();
+  h.changed();
 
   for (const c of matching) {
     if (!t.isBuy) {
@@ -546,17 +755,28 @@ export function markToMarket(mint: string, priceSol: number): void {
     if (t.state !== 'open' || t.mint !== mint || t.entryPriceSol === null) continue;
     t.exitPriceSol = priceSol;
   }
+  for (const b of Object.values(leaders)) {
+    const p = b.positions[mint];
+    if (p) p.markPriceSol = priceSol;
+  }
 }
 
 /** Test seam. */
 export function _reset(): void {
   configs = [];
   trades = [];
+  leaders = {};
   filePath = '';
   handled.clear();
 }
 
-export function _load(c: CopyConfig[], t: CopyTrade[]): void {
+export function _load(c: CopyConfig[], t: CopyTrade[], l: Record<string, LeaderBook> = {}): void {
   configs = c;
   trades = t;
+  leaders = l;
+}
+
+/** Test seam: the raw book, as persisted. */
+export function _leaders(): Record<string, LeaderBook> {
+  return leaders;
 }

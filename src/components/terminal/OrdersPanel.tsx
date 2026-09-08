@@ -125,14 +125,19 @@ export function OrdersPanel({
   orders,
   executable,
   blockedReason,
+  maxLiveSol = null,
   onChanged,
 }: {
   token: TokenSummary;
   orders: AdvOrder[];
   executable: boolean;
   blockedReason: string | null;
+  /** The execution per-trade cap; a buy order above it is refused by the
+   *  engine, so the form defaults under it and says so before the click. */
+  maxLiveSol?: number | null;
   onChanged: () => void;
 }) {
+  const buyDefault = String(maxLiveSol !== null && maxLiveSol < 0.1 ? maxLiveSol : 0.1);
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<OrderKind>('stop_loss');
@@ -154,11 +159,11 @@ export function OrdersPanel({
     } else if (isConditional(k)) {
       setBasis('pct');
       setTriggerValue('');
-      setAmount(isBuyKind(k) ? '0.1' : '100');
+      setAmount(isBuyKind(k) ? buyDefault : '100');
     } else {
       setBasis('mcap_usd');
       setTriggerValue(token.marketCapUsd ? String(Math.round(token.marketCapUsd)) : '');
-      setAmount(isBuyKind(k) ? '0.1' : '50');
+      setAmount(isBuyKind(k) ? buyDefault : '50');
     }
   };
 
@@ -182,7 +187,15 @@ export function OrdersPanel({
     triggerBasis: basis,
     amount: Number(amount),
   };
-  const validity = anchorProblem ? { ok: false, message: anchorProblem } : validateOrder(req);
+  const capProblem =
+    isBuyKind(kind) && maxLiveSol !== null && Number(amount) > maxLiveSol
+      ? `Above your per-trade cap of ${maxLiveSol} SOL — raise it on the Wallet page or buy less.`
+      : null;
+  const validity = anchorProblem
+    ? { ok: false, message: anchorProblem }
+    : capProblem
+      ? { ok: false, message: capProblem }
+      : validateOrder(req);
 
   const submit = async (): Promise<void> => {
     setBusy(true);

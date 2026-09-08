@@ -308,6 +308,54 @@ Three user reports in one day, all fixed on `release/beta.7` (see
   prompt for any assistant; the Variables panel is the field guide. See
   `docs/user-scripting.md`.
 
+- **Copy trading: the leader's own record + Leaderboard** (2026-09-08). Every swap seen on a
+  followed wallet is scored as THEIR trade — whether or not a copy happened (the filters skip
+  most of what a leader does, so the copy scorecard could never say "are they any good").
+  `copyTrade.trackLeader`: average cost per (wallet, mint), a position opens on the first buy
+  seen and closes when a sell leaves nothing (their `soldFraction` ≥ 99.5 % or the tracked
+  tokens are spent); `LeaderStats` per wallet in `CopySnapshot.leaders` (round trips, W/L,
+  realised, return %, open + mark-to-market unrealised, avg hold, trades/day, best/worst,
+  recent trips). A sell of tokens bought BEFORE we watched has no known cost: counted in
+  `unscoredSells`, never scored. Persisted as `leaders` in copytrade.json; goes with the last
+  config that followed the wallet; `copy:resetStats(wallet)` starts it over. Wallets page →
+  "Leaderboard": rank by realised / return % / win rate / trades per day / unrealised, with
+  fewer than `MIN_TRIPS_FOR_RANK` (5) closed trips ranking last, next to what copying them did
+  for us. `test/copytrade.test.mjs` pins the accounting (partial sells, oversize sells, unscored
+  sells, reload, reset, removal) and `rankLeaders`.
+- **User-breaking audit (2026-09-08, three read-only sweeps after the breaker bug)** — all fixed,
+  each pinned by a test where the code is pure:
+  - *Paired bot blocked every bots save*: pairing writes `ownerId` as a string over a `null`
+    default and the third-level type check refused the spread. A null default now means
+    "text or null" (`checkLeaf`), and that nested loop runs the same leaf rules as the level
+    above — the runner-alert and chat-trading bounds/enums had been dead rules (0 alerts an
+    hour, a bogus bucket, a NaN chat buy cap all saved).
+  - *Helius feed socket round-tripped into settings.json*: `engine:snapshot` handed the
+    renderer the RESOLVED rpc block and every RPC save spread it back — one more copy of the
+    key-bearing socket URL per save, the socket outliving its switch, and after 31 saves every
+    RPC save refused by the 32-entry cap. The snapshot now carries the raw store; `mergeState`
+    strips and dedupes any Helius/api-key entry on load.
+  - *Warmer "No such group"*: a fresh group has no `lab` block until its first Save, and Save
+    was disabled with nothing changed. The engine now runs such a group on `defaultGroupConfig()`.
+  - *Keystroke saves*: Discover refresh / rows per column (typing "15" gave "105") and the
+    hotkey amount (an armed key saved every intermediate digit) commit on blur/Enter, clamped.
+  - *Defaults above the live cap*: the order panel defaults under `maxLiveSol` and shows the cap
+    problem before the click; fan-out and group buys check the total against the cap before the
+    REAL-SOL confirm; a rule buying above the cap is refused at save with the reason.
+  - Low: cashout threshold 0 explained instead of refused, Balanced preset no longer resets
+    runner alerts / paper entries, `planFund` mirrors the 50-per-wallet / 100-per-batch bounds,
+    name inputs carry the store's `maxLength`, the holdings fast path answers only a FRESH copy
+    so an RPC failure surfaces.
+  - From the same review, three regressions in the day's speed work: a build/holdings read that
+    straddled a wallet switch was kept as the new wallet's; the 3 s shared build swallowed the
+    fill-driven rebuild; the Wallet page's holdings list kept the old wallet's tokens (with Sell
+    buttons) after "Use". Trade replay now asks `market:candlesFull` (the fast path's 1.2 s
+    placeholder read as "no candles").
+- **Execution settings rejected on defaults (second cause)**: `maxLiveConsecutiveLosses`
+  ships as 0 (= off, what the revision-3 migration writes) but the validator bound started
+  at 1, so the spread every execution panel sends was refused with "must be between 1 and
+  50" — auto cash-out, MEV mode, slippage, max live SOL all unsaveable, and no field to
+  change it. Bound is now 0–50; the Wallet page has fields for both live breakers
+  (0 = off); a test pins that every shipped default passes its own bound.
 - **Navigation speed** (`docs/nav-speed-2026-09-08.md`, measured with `npm run test:nav:e2e`):
   Portfolio 6.9 s → ~50 ms, Trades 4.3 s → ~90 ms, Token page 1.0 s → 10 ms, Discover return
   150 → 10 ms. The engine keeps its last portfolio build and holdings and pushes rebuilds as

@@ -148,6 +148,131 @@ export interface CopySnapshot {
   liveBlockedReason: string | null;
   /** Per followed wallet: is it being watched, and when was it last seen. */
   watch: Record<string, CopyWatchStatus>;
+  /** Per followed wallet: THEIR record, from every swap seen (below). */
+  leaders: Record<string, LeaderStats>;
+}
+
+// ── The leader's own record ───────────────────────────────────────────
+//
+// The copy scorecard answers "what did following them cost or make ME,
+// through my filters and delay". A user running five wallets on paper is
+// asking a different question — "are they any good" — and the copies alone
+// cannot answer it: the filters skip most of what a leader does. So every
+// swap seen on a followed wallet is scored as THEIR trade (2026-09-08),
+// average-cost per token, from the first buy seen to the sell that leaves
+// nothing. A sell of tokens bought BEFORE we watched has no known cost and
+// is counted, never scored — the record must not flatter itself with
+// proceeds whose cost it did not see.
+
+/** One of the leader's round trips: first buy seen → last sell. */
+export interface LeaderRoundTrip {
+  mint: string;
+  symbol: string;
+  /** SOL they spent on it while watched. */
+  costSol: number;
+  /** SOL they got back. */
+  proceedsSol: number;
+  pnlSol: number;
+  openedAt: number;
+  closedAt: number;
+  buys: number;
+  sells: number;
+}
+
+export interface LeaderStats {
+  wallet: string;
+  /** First swap seen, ms — the record starts here, not at their history. */
+  watchedSince: number | null;
+  lastTradeAt: number | null;
+  buys: number;
+  sells: number;
+  /** Positions opened AND closed while watched. */
+  roundTrips: number;
+  wins: number;
+  losses: number;
+  /** Closed round trips plus the sold share of open ones, SOL. */
+  realizedPnlSol: number;
+  /** SOL they put into positions while watched. */
+  volumeSol: number;
+  openCount: number;
+  openCostSol: number;
+  /** Open positions at the last price known; null when none is priced. */
+  unrealizedPnlSol: number | null;
+  avgHoldMs: number | null;
+  bestSol: number | null;
+  worstSol: number | null;
+  /** Sells (or parts of sells) of tokens bought before we watched. */
+  unscoredSells: number;
+  /** Buys + sells per day since the first swap seen. */
+  tradesPerDay: number | null;
+  /** Realised over cost across closed round trips, %. */
+  returnPct: number | null;
+  /** Newest first. */
+  recentTrips: LeaderRoundTrip[];
+}
+
+export function emptyLeaderStats(wallet: string): LeaderStats {
+  return {
+    wallet,
+    watchedSince: null,
+    lastTradeAt: null,
+    buys: 0,
+    sells: 0,
+    roundTrips: 0,
+    wins: 0,
+    losses: 0,
+    realizedPnlSol: 0,
+    volumeSol: 0,
+    openCount: 0,
+    openCostSol: 0,
+    unrealizedPnlSol: null,
+    avgHoldMs: null,
+    bestSol: null,
+    worstSol: null,
+    unscoredSells: 0,
+    tradesPerDay: null,
+    returnPct: null,
+    recentTrips: [],
+  };
+}
+
+/** Win rate over closed round trips, or null before any closed. */
+export function leaderWinRate(s: LeaderStats): number | null {
+  const n = s.wins + s.losses;
+  return n > 0 ? (s.wins / n) * 100 : null;
+}
+
+/** Fewer closed round trips than this and a rank says nothing — such a
+ *  wallet sorts after every wallet with a real sample, whatever its number. */
+export const MIN_TRIPS_FOR_RANK = 5;
+
+export type LeaderRankKey = 'realizedPnlSol' | 'returnPct' | 'winRatePct' | 'tradesPerDay' | 'unrealizedPnlSol';
+
+export const LEADER_RANK_KEYS: Array<{ key: LeaderRankKey; label: string }> = [
+  { key: 'realizedPnlSol', label: 'Realized' },
+  { key: 'returnPct', label: 'Return %' },
+  { key: 'winRatePct', label: 'Win rate' },
+  { key: 'tradesPerDay', label: 'Trades / day' },
+  { key: 'unrealizedPnlSol', label: 'Unrealized' },
+];
+
+/** Best first by the chosen key. Small samples rank after real ones;
+ *  unknowns (null) after everything; ties broken by more round trips. */
+export function rankLeaders(list: LeaderStats[], by: LeaderRankKey): LeaderStats[] {
+  const val = (s: LeaderStats): number | null => (by === 'winRatePct' ? leaderWinRate(s) : s[by]);
+  const enough = (s: LeaderStats): boolean => s.roundTrips >= MIN_TRIPS_FOR_RANK;
+  return [...list].sort((a, b) => {
+    const ea = enough(a);
+    const eb = enough(b);
+    if (ea !== eb) return ea ? -1 : 1;
+    const va = val(a);
+    const vb = val(b);
+    if (va === null && vb === null) return b.roundTrips - a.roundTrips;
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    if (vb !== va) return vb - va;
+    return b.roundTrips - a.roundTrips;
+  });
 }
 
 export function defaultConfig(wallet: string, label: string): Omit<CopyConfig, 'id' | 'createdAt'> {

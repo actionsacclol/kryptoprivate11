@@ -705,7 +705,13 @@ export function validateRules(r: RuleSet): { ok: boolean; message: string } {
   return { ok: true, message: 'ok' };
 }
 
-export function validateScript(s: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>): { ok: boolean; message: string } {
+export function validateScript(
+  s: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>,
+  /** The execution per-trade cap when known: a buy above it would be
+   *  refused at every placement, so it is refused once, here, with the
+   *  reason. */
+  opts: { maxLiveSol?: number } = {},
+): { ok: boolean; message: string } {
   if (!s.name || !s.name.trim() || s.name.length > 60) return { ok: false, message: 'Name: 1–60 characters' };
   if (s.kind !== 'rules' && s.kind !== 'code') return { ok: false, message: 'Unknown script kind' };
   if (s.mode !== 'paper' && s.mode !== 'live') return { ok: false, message: 'Mode must be paper or live' };
@@ -718,7 +724,11 @@ export function validateScript(s: Omit<UserScript, 'id' | 'createdAt' | 'updated
     const r = validateRules(s.rules);
     if (!r.ok) return r;
     for (const a of s.rules.actions) {
-      if ((a.type === 'buy' || a.type === 'limit_buy') && a.sol > s.budget.maxSolPerTrade) return { ok: false, message: `Buy ${a.sol} SOL is above this script's max per trade (${s.budget.maxSolPerTrade})` };
+      if (a.type !== 'buy' && a.type !== 'limit_buy') continue;
+      if (a.sol > s.budget.maxSolPerTrade) return { ok: false, message: `Buy ${a.sol} SOL is above this script's max per trade (${s.budget.maxSolPerTrade})` };
+      if (opts.maxLiveSol !== undefined && a.sol > opts.maxLiveSol) {
+        return { ok: false, message: `Buy ${a.sol} SOL is above your per-trade cap (${opts.maxLiveSol} SOL, Wallet page) — every placement would be refused` };
+      }
     }
   }
   return { ok: true, message: 'ok' };

@@ -93,6 +93,33 @@ function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol:
               warn={(n) => (n <= 0 ? 'Must be greater than 0' : n > 50 ? 'Very high slippage' : null)}
             />
           </div>
+          {/* The two live breakers. Both OFF at 0 (the default since the
+              terminal pivot: two ordinary losing trades used to flip a
+              manual trader to Paper). They had no field anywhere, so a
+              value the store rejected could not be changed by the user. */}
+          <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
+            <div className="text-sm font-semibold text-white mb-1">Session loss cap</div>
+            <NumberInput
+              value={e.maxLiveSessionLossSol}
+              onChange={(n) => void updateSettings({ execution: { ...e, maxLiveSessionLossSol: Math.max(0, n) } })}
+              suffix="SOL"
+              warn={(n) => (n < 0 ? 'Must be 0 or more' : n > 100 ? 'Max 100 SOL' : null)}
+            />
+            <p className="mt-1.5 text-[11px] text-krypt-muted leading-relaxed">
+              Realised losses this session (from confirmed sells) past this pause live trading. 0 = off.
+            </p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
+            <div className="text-sm font-semibold text-white mb-1">Losses in a row</div>
+            <NumberInput
+              value={e.maxLiveConsecutiveLosses}
+              onChange={(n) => void updateSettings({ execution: { ...e, maxLiveConsecutiveLosses: Math.max(0, Math.round(n)) } })}
+              warn={(n) => (n < 0 ? 'Must be 0 or more' : n > 50 ? 'Max 50' : null)}
+            />
+            <p className="mt-1.5 text-[11px] text-krypt-muted leading-relaxed">
+              Consecutive realised losses that pause live trading. Whole number, 0 = off.
+            </p>
+          </div>
         </div>
 
         <div className="rounded-xl border border-white/10 bg-black/30 p-4 space-y-3">
@@ -717,7 +744,12 @@ export function WalletPage() {
                     max={100}
                     step={0.01}
                     suffix="SOL"
-                    onChange={(v) => void updateSettings({ execution: { ...settings.execution, cashoutThresholdSol: v } })}
+                    warn={(v) => (v <= 0 ? 'Turn auto cash-out off with the switch — the threshold itself must be above 0' : v > 100 ? 'Max 100 SOL' : null)}
+                    onChange={(v) => {
+                      // 0 is not "off" here (it would sweep on dust) and the
+                      // store refuses it — the switch above is off.
+                      if (v > 0 && v <= 100) void updateSettings({ execution: { ...settings.execution, cashoutThresholdSol: v } });
+                    }}
                   />
                 </div>
               </div>

@@ -10,7 +10,7 @@
 
 import assert from 'node:assert';
 import * as copy from './.copytrade.mjs';
-import { copySize, defaultConfig, validateConfig, winRate } from './.copyshared.mjs';
+import { copySize, defaultConfig, emptyLeaderStats, leaderWinRate, rankLeaders, validateConfig, winRate } from './.copyshared.mjs';
 
 let passed = 0;
 const cases = [];
@@ -436,6 +436,144 @@ test('a signature seen twice is evaluated once', async () => {
   await new Promise((r) => setTimeout(r, 40));
   assert.equal(copy.snapshot().recent.filter((t) => t.mint === MINT).length, 3);
   assert.deepEqual(copy.openMints(), [MINT], 'open copies name their mints for the price poll');
+});
+
+// ── The leader's own record ───────────────────────────────────────────
+//
+// The copy scorecard answers "what did following them do for ME"; this
+// answers "are they any good" — scored from every swap seen, whether or not
+// a copy happened, and never from proceeds whose cost was not seen.
+
+const sell = (over = {}) => trade({ isBuy: false, ...over });
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+
+test('LEADER: a buy and a full sell make one scored round trip with THEIR result, copied or not', async () => {
+  setup();
+  copy.upsert(cfg({ minKryptScore: 99 })); // the copy itself is filtered out…
+  const t0 = Date.now() - 60_000;
+  copy.onWalletTrade(trade({ at: t0 })); // 1 SOL → 1000 tokens
+  copy.onWalletTrade(sell({ sol: 1.5, priceSol: 0.0015, soldFraction: 1, at: t0 + 30_000 }));
+  await new Promise((r) => setTimeout(r, 40));
+  const s = copy.snapshot();
+  assert.equal(s.stats[s.configs[0].id].skipped, 1, '…and recorded as such');
+  const L = s.leaders[WALLET];
+  assert.equal(L.buys, 1);
+  assert.equal(L.sells, 1);
+  assert.equal(L.roundTrips, 1);
+  assert.equal(L.wins, 1);
+  assert.equal(L.losses, 0);
+  assert.ok(near(L.realizedPnlSol, 0.5), 'they made +0.5');
+  assert.ok(near(L.returnPct, 50));
+  assert.ok(near(L.volumeSol, 1));
+  assert.equal(L.openCount, 0);
+  assert.equal(L.avgHoldMs, 30_000);
+  assert.equal(L.bestSol, L.worstSol);
+  assert.equal(L.recentTrips[0].symbol, 'COPY');
+  assert.equal(L.watchedSince, t0);
+});
+
+test('LEADER: a partial sell scores its share; the rest stays open and marks to the last price', async () => {
+  setup();
+  copy.upsert(cfg());
+  copy.onWalletTrade(trade()); // 1 SOL, 1000 tokens
+  copy.onWalletTrade(sell({ sol: 0.6, priceSol: 0.0015, soldFraction: 0.4 })); // 400 tokens for 0.6
+  await new Promise((r) => setTimeout(r, 40));
+  let L = copy.snapshot().leaders[WALLET];
+  assert.equal(L.roundTrips, 0);
+  assert.equal(L.openCount, 1);
+  assert.ok(near(L.realizedPnlSol, 0.2), '0.6 back against 0.4 of cost');
+  assert.ok(near(L.openCostSol, 0.6));
+  assert.ok(near(L.unrealizedPnlSol, 600 * 0.0015 - 0.6), 'marked at their fill');
+  copy.markToMarket(MINT, 0.002);
+  L = copy.snapshot().leaders[WALLET];
+  assert.ok(near(L.unrealizedPnlSol, 600 * 0.002 - 0.6), 'marked at the tape');
+  copy.onWalletTrade(sell({ sol: 1.2, priceSol: 0.002, soldFraction: 1 }));
+  await new Promise((r) => setTimeout(r, 40));
+  L = copy.snapshot().leaders[WALLET];
+  assert.equal(L.roundTrips, 1);
+  assert.ok(near(L.realizedPnlSol, 0.8), '+0.2 then +0.6');
+  assert.equal(L.openCount, 0);
+  assert.equal(L.unrealizedPnlSol, null);
+});
+
+test('LEADER: a sell of tokens bought before we watched is counted, never scored', async () => {
+  setup();
+  copy.upsert(cfg());
+  copy.onWalletTrade(sell({ sol: 3, priceSol: 0.003, soldFraction: 1 }));
+  await new Promise((r) => setTimeout(r, 40));
+  const L = copy.snapshot().leaders[WALLET];
+  assert.equal(L.sells, 1);
+  assert.equal(L.unscoredSells, 1);
+  assert.equal(L.roundTrips, 0);
+  assert.equal(L.realizedPnlSol, 0);
+  assert.equal(L.returnPct, null);
+});
+
+test('LEADER: a sell bigger than the tracked position scores only the tracked share', async () => {
+  setup();
+  copy.upsert(cfg());
+  copy.onWalletTrade(trade()); // 1000 tracked
+  copy.onWalletTrade(sell({ sol: 4, priceSol: 0.002, tokens: 2000, soldFraction: 1 })); // they sold 2000
+  await new Promise((r) => setTimeout(r, 40));
+  const L = copy.snapshot().leaders[WALLET];
+  assert.equal(L.roundTrips, 1);
+  assert.ok(near(L.realizedPnlSol, 1), 'half the proceeds (2 SOL) against the 1 SOL cost');
+  assert.equal(L.unscoredSells, 1, 'the other half had no known cost');
+});
+
+test('LEADER: a losing trip is a loss; best/worst, rate and order follow', async () => {
+  setup();
+  copy.upsert(cfg());
+  const M2 = 'CopyMint222222222222222222222222222222222';
+  copy.onWalletTrade(trade());
+  copy.onWalletTrade(sell({ sol: 0.5, priceSol: 0.0005, soldFraction: 1 })); // −0.5
+  copy.onWalletTrade(trade({ mint: M2, symbol: 'TWO' }));
+  copy.onWalletTrade(sell({ mint: M2, symbol: 'TWO', sol: 2, priceSol: 0.002, soldFraction: 1 })); // +1
+  await new Promise((r) => setTimeout(r, 40));
+  const L = copy.snapshot().leaders[WALLET];
+  assert.equal(L.roundTrips, 2);
+  assert.equal(L.wins, 1);
+  assert.equal(L.losses, 1);
+  assert.ok(near(L.realizedPnlSol, 0.5));
+  assert.ok(near(L.bestSol, 1));
+  assert.ok(near(L.worstSol, -0.5));
+  assert.ok(near(L.tradesPerDay, 4), 'four swaps inside the first day');
+  assert.equal(L.recentTrips[0].symbol, 'TWO', 'newest first');
+});
+
+test('LEADER: the record survives a reload, resets on request, and goes with the last config', async () => {
+  setup();
+  copy.upsert(cfg());
+  copy.onWalletTrade(trade());
+  await new Promise((r) => setTimeout(r, 40));
+  const book = JSON.parse(JSON.stringify(copy._leaders()));
+  const configs = copy.all();
+  copy._reset();
+  copy.attach(makeHost().host);
+  copy._load(configs, [], book);
+  assert.equal(copy.snapshot().leaders[WALLET].openCount, 1, 'reloaded from the file');
+  assert.equal(copy.resetLeader('Nobody11111111111111111111111111111111111').ok, false);
+  assert.equal(copy.resetLeader(WALLET).ok, true);
+  assert.equal(copy.snapshot().leaders[WALLET].buys, 0, 'cleared; the config stays');
+  copy.onWalletTrade(trade());
+  await new Promise((r) => setTimeout(r, 40));
+  copy.remove(configs[0].id);
+  assert.equal(copy.snapshot().leaders[WALLET], undefined, 'gone with the last config');
+});
+
+test('rankLeaders: the chosen key, small samples last, unknowns after everything', () => {
+  const mk = (wallet, over) => ({ ...emptyLeaderStats(wallet), ...over });
+  const list = [
+    mk('small-but-huge', { roundTrips: 2, wins: 2, realizedPnlSol: 9 }),
+    mk('steady', { roundTrips: 8, wins: 6, losses: 2, realizedPnlSol: 1.2, returnPct: 20 }),
+    mk('loser', { roundTrips: 6, wins: 1, losses: 5, realizedPnlSol: -2, returnPct: -40 }),
+    mk('unknown', { roundTrips: 5, wins: 3, losses: 2, realizedPnlSol: 0.4, returnPct: null }),
+  ];
+  assert.deepEqual(rankLeaders(list, 'realizedPnlSol').map((l) => l.wallet), ['steady', 'unknown', 'loser', 'small-but-huge']);
+  assert.deepEqual(rankLeaders(list, 'returnPct').map((l) => l.wallet), ['steady', 'loser', 'unknown', 'small-but-huge']);
+  assert.deepEqual(rankLeaders(list, 'winRatePct').map((l) => l.wallet), ['steady', 'unknown', 'loser', 'small-but-huge']);
+  assert.equal(leaderWinRate(list[0]), 100);
+  assert.equal(leaderWinRate(emptyLeaderStats('x')), null);
 });
 
 await run();

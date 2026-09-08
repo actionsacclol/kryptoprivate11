@@ -220,6 +220,10 @@ test('validation: a launch rule cannot sell, a position rule cannot buy, scopes 
   const s = defaultScript('rules');
   assert.equal(validateScript({ ...s, budget: { ...s.budget, maxSolPerTrade: 0 } }).ok, false);
   assert.equal(validateScript({ ...s, rules: { ...s.rules, actions: [{ type: 'buy', sol: 5 }] } }).ok, false, 'a rule cannot buy more than its own budget cap');
+  const under = { ...s, budget: { ...s.budget, maxSolPerTrade: 0.05 }, rules: { ...s.rules, actions: [{ type: 'buy', sol: 0.04 }] } };
+  assert.equal(validateScript(under, { maxLiveSol: 0.03 }).ok, false, 'nor above the execution per-trade cap — every placement would be refused');
+  assert.equal(validateScript(under, { maxLiveSol: 0.05 }).ok, true);
+  assert.equal(validateScript(under).ok, true, 'no cap known → budget rule only');
   assert.equal(validateScript({ ...defaultScript('code'), code: '' }).ok, false);
   assert.match(describeRules(defaultRules()), /On Launch update when Krypt score ≥ 70 and Hard risk flag is false and Unique buyers ≥ 15: buy 0.02 SOL/);
 });
