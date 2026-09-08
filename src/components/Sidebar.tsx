@@ -16,7 +16,8 @@ import {
   Sparkles,
   Telescope,
   BookMarked,
-  Wallet, Flame, Coins, Thermometer, Copy, FolderPlus, Receipt } from 'lucide-react';
+  Wallet, Flame, Coins, Thermometer, Copy, FolderPlus, Receipt, Code2 } from 'lucide-react';
+import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
 import { cls } from '../utils/format';
 
@@ -43,6 +44,7 @@ export type RouteId =
   | 'copier'
   | 'orders'
   | 'wallets'
+  | 'scripts'
   | 'dashboard'
   | 'launches'
   | 'positions'
@@ -89,6 +91,7 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   // It also used to be called "Wallets", one letter from the page holding YOUR
   // keys — a collision that got worse once a single "Wallet" held several.
   { id: 'wallets', label: 'Copy Trading', hint: "Follow other traders' wallets", icon: Users },
+  { id: 'scripts', label: 'Scripts', hint: 'Your own rules and code, under a budget — paper first', icon: Code2 },
   { id: 'creator', label: 'Group Wallets', hint: 'Make a group of wallets to fund, warm or trade together', icon: FolderPlus },
   { id: 'funder', label: 'Funder', hint: 'Fund wallets from the active one, by group or individually; collect back', icon: Coins },
   { id: 'warmer', label: 'Warmer', hint: 'Random autotrading on a group or one wallet, under a loss cap', icon: Thermometer },
@@ -128,6 +131,9 @@ function NavButton({
   return (
     <button
       onClick={() => onNavigate(route.id)}
+      // The chunk starts loading on hover: by the click it is usually cached.
+      onMouseEnter={() => void prefetchRoute(route.id)}
+      onFocus={() => void prefetchRoute(route.id)}
       title={route.hint}
       className={cls(
         'group flex items-center gap-3 rounded-md px-3 py-2 text-[13px] font-medium transition relative',

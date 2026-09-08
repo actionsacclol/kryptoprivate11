@@ -158,13 +158,20 @@ const api = {
     mute: (id: string, muted: boolean) => ipcRenderer.invoke('alerts:mute', id, muted),
     clearFired: () => ipcRenderer.invoke('alerts:clearFired'),
   },
+  automation: {
+    list: () => ipcRenderer.invoke('automation:list'),
+    save: (script: unknown) => ipcRenderer.invoke('automation:save', script),
+    remove: (id: string) => ipcRenderer.invoke('automation:remove', id),
+    setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('automation:setEnabled', id, enabled),
+    killSwitch: (on: boolean) => ipcRenderer.invoke('automation:killSwitch', on),
+  },
   copy: {
     list: () => ipcRenderer.invoke('copy:list'),
     save: (config: Partial<CopyConfig>) => ipcRenderer.invoke('copy:save', config),
     remove: (id: string) => ipcRenderer.invoke('copy:remove', id),
   },
   portfolio: {
-    summary: () => ipcRenderer.invoke('portfolio:summary'),
+    summary: (opts?: { stale?: boolean }) => ipcRenderer.invoke('portfolio:summary', opts),
     history: () => ipcRenderer.invoke('portfolio:history'),
     export: (format: 'csv' | 'json') => ipcRenderer.invoke('portfolio:export', format),
   },

@@ -80,6 +80,9 @@ export interface PaperSummary {
 }
 
 export interface PortfolioSummary {
+  /** True when this is the engine's LAST build served at once while a fresh
+   *  one runs (a 'portfolio' event follows). Absent/false = freshly built. */
+  stale?: boolean;
   /** Wallet SOL balance. */
   solBalance: number | null;
   solUsd: number | null;

@@ -126,6 +126,8 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
     onboarded: loaded.onboarded ?? d.onboarded,
     watchOnBuy: loaded.watchOnBuy ?? d.watchOnBuy,
     recorderEnabled: loaded.recorderEnabled ?? d.recorderEnabled,
+    reduceEffects: loaded.reduceEffects ?? d.reduceEffects,
+    hardwareAcceleration: loaded.hardwareAcceleration ?? d.hardwareAcceleration,
     recorderDir: loaded.recorderDir ?? d.recorderDir,
     recorderMaxGb: typeof loaded.recorderMaxGb === 'number' ? loaded.recorderMaxGb : d.recorderMaxGb,
     recordFirehose: loaded.recordFirehose ?? d.recordFirehose,

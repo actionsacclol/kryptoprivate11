@@ -195,8 +195,18 @@ declare global {
         save: (config: Partial<CopyConfig>) => Promise<IpcResult<CopySnapshot>>;
         remove: (id: string) => Promise<IpcResult<CopySnapshot>>;
       };
+      automation: {
+        list: () => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+        save: (script: Partial<import('@shared/automation').UserScript>) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+        remove: (id: string) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+        setEnabled: (id: string, enabled: boolean) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+        killSwitch: (on: boolean) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+      };
       portfolio: {
-        summary: () => Promise<IpcResult<PortfolioSummary>>;
+        /** `stale: true` answers at once from the engine's last build (marked
+         *  `stale`, with `generatedAt`) and refreshes behind a 'portfolio'
+         *  event; without it the call awaits a full rebuild. */
+        summary: (opts?: { stale?: boolean }) => Promise<IpcResult<PortfolioSummary>>;
         history: () => Promise<IpcResult<TradeHistoryRow[]>>;
         export: (format: 'csv' | 'json') => Promise<IpcResult>;
       };

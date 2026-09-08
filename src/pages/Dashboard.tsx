@@ -3,12 +3,12 @@
 // pipeline underneath, then launch rate, the replay archive, and recent
 // closes. Every arcane label maps to real engine state.
 
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ArrowRight, Crosshair, Database, FolderOpen } from 'lucide-react';
 import { Card, Empty, GhostButton, Section } from '../components/common';
 import { useAppState } from '../state/AppStateProvider';
-import { Radar3D } from '../components/viz/Radar3D';
+import { useReduceEffects, EffectsOff } from '../components/viz/useReduceEffects';
 import { AreaChart } from '../components/viz/AreaChart';
 import { Bars } from '../components/viz/Bars';
 import { NumberTicker } from '../components/viz/NumberTicker';
@@ -18,6 +18,10 @@ import type { RouteId } from '../components/Sidebar';
 import { useToast } from '../state/ToastProvider';
 import type { LaunchRow } from '@shared/types';
 import { cls, fmtBytes, fmtDur, fmtPct, fmtPrice, fmtSol } from '../utils/format';
+
+// three.js rides with the observatory alone: the cards and numbers paint
+// first and the orb follows from its own chunk.
+const Radar3D = lazy(() => import('../components/viz/Radar3D').then((m) => ({ default: m.Radar3D })));
 
 function OrbLabel({ text, on, tone = 'violet' }: { text: string; on: boolean; tone?: 'violet' | 'gold' }) {
   return (
@@ -51,6 +55,7 @@ function LedgerStat({ label, value, tone }: { label: string; value: string; tone
 export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) {
   const { status, positions, launches, equity } = useAppState();
   const toast = useToast();
+  const reduceEffects = useReduceEffects();
   const [rec, setRec] = useState<{ files: number; totalBytes: number }>({ files: 0, totalBytes: 0 });
   // Snapshot, not just a mint: the launches list is capped, so the row behind
   // an open drawer can be evicted mid-inspection. Fresh data wins when
@@ -145,11 +150,17 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
           >
             {/* Dust lives on its own layer — the mask must not fade the orb or labels. */}
             <div className="absolute inset-0 grid-backdrop animate-dust pointer-events-none" aria-hidden="true" />
-            <Radar3D
-              launches={launches}
-              live={status.feed === 'live'}
-              onSelect={openDrawer}
-            />
+            {reduceEffects === false ? (
+              <Suspense fallback={<EffectsOff label="" />}>
+                <Radar3D
+                  launches={launches}
+                  live={status.feed === 'live'}
+                  onSelect={openDrawer}
+                />
+              </Suspense>
+            ) : (
+              <EffectsOff label={reduceEffects === null ? '' : 'Effects reduced · Settings › Display'} />
+            )}
             <div className="pointer-events-none absolute top-4 left-5">
               <div className="font-display text-[10px] uppercase tracking-[0.34em] text-arc-gold/75">The Observatory</div>
               <div className="mt-1.5 text-3xl font-bold font-mono tabular-nums text-white glow-text">

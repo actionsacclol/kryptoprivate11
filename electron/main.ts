@@ -24,6 +24,7 @@ import * as randomLab from './engine/randomLab';
 import * as paperBook from './engine/paperBook';
 import * as alertStore from './engine/alerts';
 import * as copyTrade from './engine/copyTrade';
+import * as automation from './engine/automation';
 import * as programWatch from './engine/programWatch';
 import { registerImageProtocol, registerImageScheme, setEnabled as setImagesEnabled } from './data/images';
 import { installNetAgent } from './system/netAgent';
@@ -196,6 +197,38 @@ if (process.platform === 'win32') {
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 }
 
+// GPU. A user-mode app cannot blue-screen Windows, but a WebGL scene that
+// renders every frame can provoke a bad graphics driver into one (a user's
+// BSOD, 2026-09-08). Hardware acceleration is a setting, read here because
+// Chromium only honours the switch BEFORE the app is ready; and a GPU
+// process that keeps dying turns the setting off for the next start, so a
+// machine with a broken driver ends up on software rendering by itself.
+if (!store.load().hardwareAcceleration) {
+  app.disableHardwareAcceleration();
+  logger.warn('gpu: hardware acceleration is OFF (Settings → Display) — software rendering');
+}
+let gpuCrashesThisRun = 0;
+app.on('child-process-gone', (_e, details) => {
+  if (details.type !== 'GPU') return;
+  gpuCrashesThisRun++;
+  logger.error(`gpu: GPU process gone (${details.reason}, exit ${details.exitCode}) — ${gpuCrashesThisRun} this run`);
+  let body = 'The graphics driver crashed under Krypto Bot. Chromium is falling back to software rendering for now.';
+  if (gpuCrashesThisRun >= 2 && store.load().hardwareAcceleration) {
+    try {
+      store.update({ hardwareAcceleration: false });
+      body += ' Hardware acceleration has been turned off for the next start (Settings → Display to turn it back on).';
+      logger.warn('gpu: hardware acceleration turned OFF after repeated GPU process crashes');
+    } catch (err) {
+      logger.error(`gpu: could not persist the fallback: ${(err as Error).message}`);
+    }
+  }
+  try {
+    if (Notification.isSupported()) new Notification({ title: 'Graphics driver crashed', body }).show();
+  } catch {
+    /* the log has it */
+  }
+});
+
 app.whenReady().then(bootstrap);
 }
 
@@ -367,6 +400,9 @@ async function bootstrap(): Promise<void> {
   paperBook.init(app.getPath('userData'));
   alertStore.init(app.getPath('userData'));
   copyTrade.init(app.getPath('userData'));
+  // User scripts and rules. Live ones come back disabled; paper ones
+  // resume once the engine exists (startEnabled, below registerIpc).
+  automation.init(app.getPath('userData'));
   // The configs are loaded: point the wallet watcher at the enabled ones.
   getEngine().syncCopyWatch();
   if (advOrders.pausedCount() > 0) {
@@ -376,6 +412,10 @@ async function bootstrap(): Promise<void> {
   }
 
   registerIpc();
+  // Sandboxes are windows, so only now: the app is ready and the engine
+  // (which hosts the scripts) exists.
+  automation.startTimers();
+  void automation.startEnabled();
   const state = store.load();
   // Referral payouts ride every trade, so the address has to be live from the
   // first one — not only after the user next opens Settings.
@@ -498,6 +538,9 @@ app.on('window-all-closed', () => {
 
 let quitDrained = false;
 app.on('before-quit', (e) => {
+  // Scripts first: their sandboxes are windows, and a script must not fire
+  // into a closing engine.
+  void automation.shutdown();
   const engine = getEngine();
   const wasRunning = engine.isRunning();
   if (wasRunning) engine.stop(); // queues auto-sell of held tokens (if enabled)

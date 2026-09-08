@@ -268,6 +268,64 @@ multi-endpoint RPC with a latency probe; DBC per-tick `getTransaction` batching;
 batched summaries (needs a new IPC channel); AppStateProvider slice contexts; scoping
 obfuscation off the hot path.
 
+## 1.1.0 — sells on every pump coin class, real copy sells, GPU safety (2026-09-08)
+
+Three user reports in one day, all fixed on `release/beta.7` (see
+`docs/pump-coin-classes-2026-09-07.md` for the first):
+- **"Simulation reverted: Overflow (6024)" on a sell** — a pump **mayhem-mode** coin (curve
+  byte 81; the coins that run to six-figure caps on the curve). Its trades need a RESERVED
+  fee recipient (Global @483); the local builder used the normal one (`NotAuthorized`),
+  Jupiter has no route, and PumpPortal's router build reverts with that Overflow. Now
+  `parseCurve` reads `mayhem` / `cashback` / `quoteMint`, the builder picks the reserved
+  recipient, inserts the user volume accumulator on **cashback** sells (byte 82; was
+  `InvalidCashbackAccumulator`), refuses non-SOL-quoted curves up front, and sizes
+  **partial sells** itself (`sellPct`, ATA closed only at 100 %) so ladders use it too.
+  Verified by unsigned simulation on real holders for all three classes.
+- **A "pump" token no route would sell** was a Token-2022 spam airdrop (PermanentDelegate,
+  an advertisement for a name). `mintExtensions.ts` reads the extensions; holdings carry a
+  `warning`, Positions labels them "airdrop?", sell-all sends them last, the failure
+  message names the cause.
+- **Copy trading "sold" in history while the coins stayed** — the copier had never placed
+  a sell (`CopyHost` had only `buy`); the one 40 % that left was the default take-profit
+  ladder. Now a leader's sell is mirrored as their fraction of OUR holding (from the
+  transaction's pre-balances), through `manualSell`, recorded as an `exit` slice only on a
+  confirmed fill; failed / blocked / unreadable-fraction sells are recorded as skipped with
+  the reason and leave the copy open.
+- **A user's BSOD**: the app cannot cause one, but its WebGL scenes can provoke a bad GPU
+  driver. Settings → Display: **Reduce effects** (scenes replaced by a still, no WebGL
+  context created) and **Hardware acceleration** (read before app-ready; turns itself off
+  after the GPU process dies twice in a run).
+- PumpPortal `trade-local` builds again since ~09-07; the "400 to everyone" hint is gone.
+- **User scripting** (Automation → Scripts): no-code rules and sandboxed JavaScript, each
+  under its own budget (max SOL per trade refused over cap, buys/day, open positions,
+  actions/min, daily loss stop that disables), paper first, live disarmed on restart, a
+  kill switch, and every buy/sell through the engine's own pipeline. Code runs in a
+  hidden sandboxed renderer with no Node and no network; `npm run test:sandbox` proves it
+  in a real Electron. Triggers: launch, launch update, runner, position, price tick,
+  followed-wallet trade, order change, alert, daily time, timer. Actions: buy, sell, sell
+  all, stop/take-profit/trailing/limit orders, cancel orders, apply template, alert,
+  watch/unwatch, notify, log, disable. "Copy AI prompt" gives a generated, self-contained
+  prompt for any assistant; the Variables panel is the field guide. See
+  `docs/user-scripting.md`.
+
+- **Navigation speed** (`docs/nav-speed-2026-09-08.md`, measured with `npm run test:nav:e2e`):
+  Portfolio 6.9 s → ~50 ms, Trades 4.3 s → ~90 ms, Token page 1.0 s → 10 ms, Discover return
+  150 → 10 ms. The engine keeps its last portfolio build and holdings and pushes rebuilds as
+  `portfolio` / `holdings` events; `portfolio:summary { stale: true }` answers from the kept
+  copy (marked stale past 3 s or after a fill); pages seed from `src/state/routeCache.ts`
+  and show an age stamp; the build prices only open positions; "nothing" answers from
+  GeckoTerminal are cached; navigation is a `useTransition` with hover/idle chunk prefetch
+  (`src/routeLoaders.ts`); Discover stays mounted (`content-visibility: hidden`, polls off);
+  three.js scenes are their own chunk and create their context two frames after mount. The
+  chart fast path skips GeckoTerminal for pump curve tokens (its `poolAddress` is the curve —
+  the old check never fired) and answers a pending placeholder after 1.2 s instead of
+  blocking on the provider walk. **No trade path reads a kept copy** — sells, recovery,
+  scripts and the build itself read the chain fresh; a wallet switch clears everything.
+
+Not exercised in the live app: the Display switches, the Scripts page (type-checked, same `updateSettings`
+path as the other switches) and a real end-to-end copy sell (unit-tested through the host
+stub). Run one paper-mode copy session against an active wallet before relying on it live.
+
 ## beta.6 — chart speed and completeness (2026-08-31)
 
 User report: "doesn't show full chart and doesn't update on the ms". Three causes, fixed:

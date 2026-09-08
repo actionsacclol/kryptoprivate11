@@ -28,7 +28,17 @@ const COLUMNS: Array<{
   { id: 'trending', label: 'Trending', hint: 'Most traded in the selected window', icon: Zap, accent: 'text-krypt-pink' },
 ];
 
-export function Discover({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
+export function Discover({
+  onOpenToken,
+  active = true,
+}: {
+  onOpenToken: (mint: string) => void;
+  /** False while another route is on screen. App keeps this page mounted
+   *  (its ~10,000 row elements are what made a return visit slow); while
+   *  inactive it polls nothing, and it re-reads wallet, live state and
+   *  settings when it comes back. */
+  active?: boolean;
+}) {
   const term = useTerminal();
   const toast = useToast();
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -78,16 +88,17 @@ export function Discover({ onOpenToken }: { onOpenToken: (mint: string) => void 
   }, []);
 
   useEffect(() => {
-    void reloadWallet();
-  }, [reloadWallet]);
+    if (active) void reloadWallet();
+  }, [active, reloadWallet]);
 
   // The column polls run only while this page is on screen (see the
   // provider): off-route they spent provider budget on rows nobody could see.
   const setDiscoverActive = term.setDiscoverActive;
   useEffect(() => {
+    if (!active) return;
     setDiscoverActive(true);
     return () => setDiscoverActive(false);
-  }, [setDiscoverActive]);
+  }, [active, setDiscoverActive]);
 
   const canQuickBuy =
     !!settings?.execution.liveEnabled &&

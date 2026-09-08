@@ -45,7 +45,7 @@ export default {
         // fill-mode backwards: no retained transform/filter after the run —
         // a retained value would turn the page wrapper into a containing
         // block and break fixed-position drawers/modals inside it.
-        'ink': 'ink 0.3s ease-out backwards',
+        'ink': 'ink 0.12s ease-out backwards',
         'rune-pulse': 'rune-pulse 2.6s ease-in-out infinite',
       },
       keyframes: {

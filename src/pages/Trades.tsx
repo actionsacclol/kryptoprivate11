@@ -22,6 +22,7 @@ import { TradeReplay } from '../components/terminal/TradeReplay';
 import { SimulateTrade } from '../components/terminal/SimulateTrade';
 import { cls, fmtUsd, shortAddr } from '../utils/format';
 import { useToast } from '../state/ToastProvider';
+import { ageLabel, cachedPortfolio, rememberPortfolio } from '../state/routeCache';
 
 function holdLabel(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -144,8 +145,11 @@ function OpenRow({ p, onOpen, onShare }: { p: Position; onOpen: () => void; onSh
 
 export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const toast = useToast();
-  const [data, setData] = useState<PortfolioSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Open on the last portfolio this session saw (routeCache); the engine's
+  // kept build and then the fresh one follow. Loading only when there is
+  // nothing at all to show (2026-09-08: 4–10 s of empty page per visit).
+  const [data, setData] = useState<PortfolioSummary | null>(() => cachedPortfolio());
+  const [loading, setLoading] = useState(() => cachedPortfolio() === null);
   const [share, setShare] = useState<CardSubject | null>(null);
   const [replay, setReplay] = useState<ClosedTrade | null>(null);
   /** Candles for a simulated replay; a real one fetches its own. */
@@ -153,16 +157,21 @@ export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const [simOpen, setSimOpen] = useState(false);
   const [showOpen, setShowOpen] = useState(true);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await window.krypt.portfolio.summary();
-      if (r.ok && r.data) setData(r.data);
-      else toast.error(r.message || 'Could not read the portfolio');
-    } finally {
-      setLoading(false);
-    }
-  }, [toast]);
+  const load = useCallback(
+    async (opts: { stale?: boolean } = { stale: true }) => {
+      if (!cachedPortfolio()) setLoading(true);
+      try {
+        const r = await window.krypt.portfolio.summary(opts);
+        if (r.ok && r.data) {
+          setData(r.data);
+          rememberPortfolio(r.data);
+        } else toast.error(r.message || 'Could not read the portfolio');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [toast],
+  );
 
   useEffect(() => {
     void load();
@@ -170,7 +179,13 @@ export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
     // once on mount, so a paper round trip done a moment earlier was missing
     // until the user left and came back (2026-09-06).
     const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'fill' || ev.kind === 'paper') void load();
+      // Any rebuild, whoever asked for it, lands here at once.
+      if (ev.kind === 'portfolio') {
+        setData(ev.summary);
+        rememberPortfolio(ev.summary);
+      }
+      // A fill awaits the REAL rebuild, so a closed position is never shown open.
+      if (ev.kind === 'fill' || ev.kind === 'paper') void load({ stale: false });
     });
     return off;
   }, [load]);
@@ -223,7 +238,7 @@ export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
       }
     >
       <Section
-        title={`Closed (${rows.length})`}
+        title={`Closed (${rows.length})${data?.stale ? ` · updating${ageLabel(data.generatedAt) ? `, ${ageLabel(data.generatedAt)}` : '…'}` : ''}`}
         description="What actually left the wallet and what actually came back, read from the chain. Rows marked paper were modelled fills that never touched the chain and count toward nothing. Make a card from one, or replay it: the candles arrive as they happened, the PnL moves with them, and it ends on the realised number."
       >
         {rows.length === 0 ? (

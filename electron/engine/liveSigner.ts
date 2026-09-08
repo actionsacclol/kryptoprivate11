@@ -9,10 +9,11 @@
 import { VersionedTransaction } from '@solana/web3.js';
 import { buildTrade } from './relayer';
 import { buildLocalTrade, invalidateTemplates } from './txBuilder';
-import { simulateTransaction, getBalance, getLatestBlockhashInfo, getTokenBalanceRawForMint } from './rpcClient';
+import { simulateTransaction, getBalance, getLatestBlockhashInfo, getTokenBalanceRawForMint, getAccountInfo } from './rpcClient';
 import { isTransportFailureMessage } from '@shared/rpcErrors';
 import { buildJupiterSwap } from './jupiterRoute';
 import { ataFor, TOKEN_2022_PROGRAM } from './addresses';
+import { parseMintExtensions, mintWarning } from './mintExtensions';
 import { planTips, injectTransfersFit, broadcastAndConfirm, MAX_TX_BYTES, type PlannedTransfer, type TipPlan, type TipExecSettings } from './broadcast';
 import { splitFee, activeTreasury, treasuryIntegrity, feesEnabled, looksLikeSolAddress, type FeeSplit } from '@shared/fees';
 import { explainFeeFailure } from '@shared/exitBudget';
@@ -339,17 +340,27 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
   const timing: TradeTiming = {};
   let lastFail: LiveTradeResult = { ok: false, stage: 'relayer', message: 'no build source succeeded', timing };
 
-  // `buildLocalTrade` always sells the FULL token-account balance and closes
-  // the ATA (txBuilder.ts:346, :398). A partial sell routed through it would
-  // dump the whole position while reporting a partial fill, so the local
-  // source is withheld for anything that is not an explicit 100% sell. The
-  // caller pays the relayer's 0.5% for partials; that is the correct trade.
-  const isPartialSell = p.action === 'sell' && p.amount !== '100%' && p.amount !== 100;
+  // A sell is sized as a share of the token-account balance ("NN%"): the
+  // local builder sells exactly that share and closes the ATA only at 100%
+  // (txBuilder `sellAmountFor`, 2026-09-07 — before that it hardcoded the
+  // full balance and partials were withheld from it, which left every
+  // ladder step on a mayhem-mode coin to routes that cannot trade one). A
+  // token-DENOMINATED numeric sell has no decimals context here and still
+  // goes to the relayer.
+  const sellPct =
+    p.action === 'sell'
+      ? p.amount === 100 || p.amount === '100%'
+        ? 100
+        : typeof p.amount === 'string' && /^\d+(\.\d+)?%$/.test(p.amount)
+          ? Math.max(1, Math.min(100, Number(p.amount.slice(0, -1))))
+          : null
+      : null;
+  const localCannotSize = p.action === 'sell' && sellPct === null;
   // Corroded buys lose the fast local builder and fall to the relayer — which
   // charges its own 0.5%, so a stripped-fee build pays a fee regardless. Clean
   // build: denyLocalBuild() is false; sells are never denied.
   const canBuildLocally =
-    p.local !== undefined && !isPartialSell && !(p.action === 'buy' && denyLocalBuild());
+    p.local !== undefined && !localCannotSize && !(p.action === 'buy' && denyLocalBuild());
   // Build sources, in order: our own curve builder (no third party, no fee),
   // Jupiter (keyless, any DEX the signer allows — graduated pump tokens,
   // Raydium, Meteora, Orca), then the PumpPortal relayer as the last resort.
@@ -383,6 +394,7 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
         vSol: p.local.vSol,
         vTok: p.local.vTok,
         httpUrl: p.httpUrl,
+        sellPct: sellPct ?? undefined,
       });
       timing.build = Date.now() - buildStart;
       timing.buildSource = 'local';
@@ -476,11 +488,18 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
         // sent a user hunting through settings (2026-09-02). Every route was
         // tried by now; the reasons above are the ones that matter.
         const notCurve = /not an open pump curve|graduated/.test(localFail);
-        const hint = /Bad Request|HTTP 4\d\d/.test(built.message)
-          ? notCurve
-            ? ' — the local builder only builds open bonding curves, Jupiter found no route it may sign (see its reason), and the relayer refused the request (it has been answering 400 to everyone since 2026-09-02; VPN exits are also blocked).'
-            : ' — the relayer refused the request (400 to everyone since 2026-09-02; VPN exits are also blocked); the local and Jupiter reasons are above.'
-          : '';
+        // A token no route can price is usually not a coin at all: a
+        // Token-2022 airdrop with a permanent delegate and no market, wearing
+        // a vanity `pump` suffix. The mint's own bytes say so — one read,
+        // only on this dead end — and that beats three refusals (2026-09-07).
+        const airdrop = notCurve && /not tradable|no routes?/i.test(jupiterFail) ? await describeUntradeableMint(p.httpUrl, p.mint) : null;
+        const hint = airdrop
+          ? ` — ${airdrop}. There is no market to sell it into; burn it or close the account to reclaim the rent instead.`
+          : /Bad Request|HTTP 4\d\d/.test(built.message)
+            ? notCurve
+              ? ' — the local builder only builds open SOL bonding curves, Jupiter found no route it may sign (see its reason), and the relayer refused the request (it rejects VPN exits and some coins outright).'
+              : ' — the relayer refused the request (it rejects VPN exits and some coins outright); the local and Jupiter reasons are above.'
+            : '';
         return {
           ok: false,
           stage: 'relayer',
@@ -530,6 +549,24 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
     return res;
   }
   return lastFail;
+}
+
+/** The mint's own verdict on a token no route would price: a Token-2022
+ *  permanent delegate, transfer hook or non-transferable flag, with the
+ *  on-chain name when it carries one (spam airdrops advertise in it). Null
+ *  for a plain mint or an unreadable one — the routes' reasons then stand. */
+async function describeUntradeableMint(httpUrl: string, mint: string): Promise<string | null> {
+  try {
+    const acc = await getAccountInfo(httpUrl, mint);
+    if (!acc.ok || !acc.data || acc.data.owner !== TOKEN_2022_PROGRAM) return null;
+    const ext = parseMintExtensions(acc.data.data);
+    const warning = mintWarning(ext);
+    if (!warning) return null;
+    const name = ext?.name ? ` (on-chain name: "${ext.name.slice(0, 60)}${ext.name.length > 60 ? '…' : ''}")` : '';
+    return `${warning}${name}`;
+  } catch {
+    return null;
+  }
 }
 
 /** Pull the Anchor error name + message out of simulation logs, if any.

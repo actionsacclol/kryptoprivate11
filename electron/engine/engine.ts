@@ -47,7 +47,8 @@ import * as tradePrewarm from './prewarm';
 import * as randomLab from './randomLab';
 import { between as labBetween, DEFAULT_FOLLOW, type FollowSettings } from '@shared/lab';
 import { quoteSellLamports } from './jupiterRoute';
-import { prewarm, type PrewarmedAddresses } from './addresses';
+import { prewarm, TOKEN_2022_PROGRAM, type PrewarmedAddresses } from './addresses';
+import { parseMintExtensions, mintWarning } from './mintExtensions';
 import * as tape from '../data/tape';
 import * as market from '../data/market';
 import * as advOrders from './advOrders';
@@ -57,6 +58,9 @@ import * as walletWatcher from './walletWatcher';
 import { PAPER_FILL_MODEL, paperToPosition, modelledPaperFill, paperHistoryRows } from '@shared/paper';
 import * as alerts from './alerts';
 import * as copyTrade from './copyTrade';
+import * as automation from './automation';
+import * as scriptSandbox from '../system/scriptSandbox';
+import { positionPnl, type ScriptPosition } from '@shared/automation';
 import * as dbcWatcher from './dbcWatcher';
 import * as launchLabWatcher from './launchLabWatcher';
 import * as boopWatcher from './boopWatcher';
@@ -361,10 +365,23 @@ export class SniperEngine {
           isBuy: swap.isBuy,
           sol: swap.sol,
           priceSol: swap.priceSol,
+          soldFraction: swap.soldFraction,
           at,
           signature,
         });
-        this.log('info', `copy: ${leader.slice(0, 6)}… ${swap.isBuy ? 'bought' : 'sold'} ${swap.sol.toFixed(3)} SOL of ${symbol || swap.mint.slice(0, 8)} (via ${swap.programs.length ? swap.programs.map((p) => p.slice(0, 4)).join('/') : 'chain'})`);
+        // User scripts see the same trade (Automation → Scripts, "Followed wallet traded").
+        automation.onLeaderTrade({
+          mint: swap.mint,
+          symbol,
+          wallet: leader,
+          label: copyTrade.all().find((c) => c.wallet === leader)?.label ?? '',
+          side: swap.isBuy ? 'buy' : 'sell',
+          sol: swap.sol,
+          priceSol: swap.priceSol,
+          soldFraction: swap.soldFraction,
+        });
+        const share = swap.soldFraction !== null ? ` (${Math.round(swap.soldFraction * 100)}% of their bag)` : '';
+        this.log('info', `copy: ${leader.slice(0, 6)}… ${swap.isBuy ? 'bought' : 'sold'} ${swap.sol.toFixed(3)} SOL of ${symbol || swap.mint.slice(0, 8)}${share} (via ${swap.programs.length ? swap.programs.map((p) => p.slice(0, 4)).join('/') : 'chain'})`);
       },
       log: (level, line) => this.log(level, line),
     });
@@ -517,6 +534,20 @@ export class SniperEngine {
         const r = await this.testTrade(mint, sol, false);
         return { ok: r.ok, message: r.message, signature: r.signature };
       },
+      // A mirrored sell is the same order a user places by hand: the full
+      // pipeline, sized as a share of what THIS wallet holds now. It is only
+      // reported done when it confirmed — a broadcast that is still pending
+      // is not a fill, and calling it one is how the history came to say
+      // "closed" over a bag that was still there (2026-09-08).
+      sell: async (mint, pct) => {
+        const r = await this.manualSell(mint, pct);
+        if (r.ok) return { ok: true, message: r.message, signature: r.signature };
+        return {
+          ok: false,
+          message: r.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${r.message})` : r.message,
+          signature: r.signature,
+        };
+      },
       liveBlockedReason: () => this.executionBlockedReason(),
       priceSol: (mint) => this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null,
       tokenFacts: async (mint) => {
@@ -543,6 +574,106 @@ export class SniperEngine {
       toast: (level, message) => this.emit({ kind: 'toast', level, message }),
       changed: () => this.emit({ kind: 'copy', snapshot: copyTrade.snapshot() }),
       watchStatus: () => walletWatcher.status(),
+    });
+
+    // User scripts and rules. Same pipeline as a hand-placed order — a
+    // script's buy IS testTrade, its sell IS manualSell — under the
+    // script's own budget (checked in automation.ts, never here).
+    scriptSandbox.install({
+      onMessage: (id, msg) => automation.onSandboxMessage(id, msg),
+      onGone: (id, reason) => automation.onSandboxGone(id, reason),
+      log: (level, line) => this.log(level, line),
+    });
+    automation.attach({
+      buy: async (mint, sol, mode) => {
+        // Paper = the same simulation a paper buy by hand runs, booked into
+        // the paper book from the simulated fill. Live = the real thing.
+        const r = await this.testTrade(mint, sol, mode === 'paper');
+        return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
+      },
+      sell: async (mint, pct, mode) => {
+        if (mode === 'paper') {
+          const pos = paperBook.get(mint);
+          if (!pos) return { ok: false, message: 'no paper position in this token' };
+          const priceSol = pos.decimalsKnown ? await this.paperFillPrice(mint) : null;
+          const r = paperBook.sell(mint, pct, priceSol);
+          recorder.record('paper_sell', { mint, pct, ok: r.ok, priceSol, proceedsSol: r.proceedsSol, realizedSol: r.realizedSol, note: r.message.slice(0, 220), by: 'script' });
+          if (r.ok) this.emit({ kind: 'paper', mint, side: 'sell' });
+          return { ok: r.ok, message: r.message, realizedSol: typeof r.realizedSol === 'number' ? r.realizedSol : null };
+        }
+        const r = await this.manualSell(mint, pct);
+        return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending', realizedSol: null };
+      },
+      liveBlockedReason: () => this.executionBlockedReason(),
+      buyBlockedReason: () => {
+        const pause = this.running ? this.entriesPauseReason() : null;
+        return pause ? `entries are paused (${pause})` : null;
+      },
+      maxLiveSol: () => this.getSettings().execution.maxLiveSol,
+      priceSol: (mint) => this.cheapPriceSol(mint),
+      launch: (mint) => this.tokens.get(mint)?.row ?? null,
+      marketCached: (mint) => {
+        const s = market.summaryIfCached(mint);
+        return s ? { priceSol: s.priceSol, priceUsd: s.priceUsd, marketCapUsd: s.marketCapUsd, liquidityUsd: s.liquidityUsd, holders: s.holders, launchpad: s.launchpad ?? null, symbol: s.symbol, name: s.name } : null;
+      },
+      market: async (mint) => {
+        try {
+          const s = await market.summary(mint);
+          return { priceSol: s.priceSol, priceUsd: s.priceUsd, marketCapUsd: s.marketCapUsd, liquidityUsd: s.liquidityUsd, holders: s.holders, launchpad: s.launchpad ?? null, symbol: s.symbol, name: s.name };
+        } catch {
+          return null;
+        }
+      },
+      positions: (mode) => this.scriptPositions(mode),
+      wallet: () => {
+        const info = wallet.info();
+        return { sol: info.balanceSol, address: wallet.publicKey() || null };
+      },
+      orders: (mint) =>
+        advOrders
+          .all()
+          .filter((o) => !mint || o.mint === mint)
+          .map((o) => ({ id: o.id, mint: o.mint, symbol: o.symbol, kind: o.kind, state: o.state, triggerBasis: o.triggerBasis, triggerValue: o.triggerValue, amount: o.amount })),
+      placeOrder: (req) => this.createOrder({ ...req, symbol: req.symbol || this.tokens.get(req.mint)?.row.symbol || market.summaryIfCached(req.mint)?.symbol || '' }),
+      cancelOrders: (mint) => {
+        let cancelled = 0;
+        for (const o of advOrders.all()) {
+          if (o.mint !== mint || !['armed', 'paused', 'triggered'].includes(o.state)) continue;
+          if (advOrders.cancel(o.id).ok) cancelled += 1;
+        }
+        if (cancelled) this.emit({ kind: 'orders', snapshot: this.ordersSnapshot() });
+        return { ok: true, message: cancelled ? `cancelled ${cancelled} order(s)` : 'no open orders on this token', cancelled };
+      },
+      templates: () => templateStore.list().map((t) => ({ id: t.id, name: t.name })),
+      applyTemplate: async (mint, templateId) => {
+        const t = templateStore.list().find((x) => x.id === templateId);
+        if (!t) return { ok: false, message: 'template not found' };
+        const symbol = this.tokens.get(mint)?.row.symbol || market.summaryIfCached(mint)?.symbol || '';
+        let placed = 0;
+        const problems: string[] = [];
+        for (const req of ordersForTemplate(t, mint, symbol)) {
+          const r = await this.createOrder(req);
+          if (r.ok) placed += 1;
+          else problems.push(r.message);
+        }
+        return { ok: placed > 0, message: `${describeTemplate(t)}: ${placed} order(s) armed${problems.length ? ` — ${problems.join('; ')}` : ''}` };
+      },
+      createAlert: (req) => this.createAlert(req),
+      subscribeTicks: (mint) => tape.subscribe(mint),
+      pin: (mint, on) => this.emit({ kind: 'pin', mint, on }),
+      runners: () => this.runnersSnapshot(),
+      leaders: () => copyTrade.all().map((c) => ({ wallet: c.wallet, label: c.label, enabled: c.enabled, mode: c.mode })),
+      notify: (title, body) => this.notify(title, body),
+      log: (level, line) => this.log(level, line),
+      toast: (level, message) => this.emit({ kind: 'toast', level, message }),
+      changed: () => this.emit({ kind: 'automation', snapshot: automation.snapshot() }),
+      sandbox: {
+        start: scriptSandbox.start,
+        dispatch: scriptSandbox.dispatch,
+        reply: scriptSandbox.reply,
+        stop: scriptSandbox.stop,
+        isRunning: scriptSandbox.isRunning,
+      },
     });
 
     // Meteora DBC (LetsBonk / Believe / Boop). Unlike pump.fun this cannot
@@ -1747,6 +1878,57 @@ export class SniperEngine {
 
   // ── Copy trading (term.txt §11) ──────────────────────────────────
 
+  /** The price the engine already knows for a mint, no lookups: the feed
+   *  row, the last-known map, or the tape. Null when nothing local knows. */
+  private cheapPriceSol(mint: string): number | null {
+    const p = this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? tape.lastPriceSol(mint) ?? null;
+    return typeof p === 'number' && p > 0 ? p : null;
+  }
+
+  /**
+   * What a script may act on, in its mode, priced cheaply. Paper = the
+   * paper book. Live = the wallet's holdings with the ledger's average
+   * cost; a holding the ledger never saw bought has no cost, no PnL, and
+   * a rule on either does not fire (honest null).
+   */
+  private async scriptPositions(mode: 'paper' | 'live'): Promise<ScriptPosition[]> {
+    if (mode === 'paper') {
+      return paperBook.list().map((p) => {
+        const tokens = p.decimalsKnown ? p.tokens : null;
+        const cur = tokens !== null ? this.cheapPriceSol(p.mint) : null;
+        const entry = tokens !== null && tokens > 0 ? p.costSol / tokens : null;
+        const { pnlSol, pnlPct } = positionPnl(p.costSol, tokens, cur);
+        return { mint: p.mint, symbol: p.symbol, name: '', openedAt: p.openedAt, costSol: p.costSol, tokens, entryPriceSol: entry, currentPriceSol: cur, peakPriceSol: null, pnlSol, pnlPct };
+      });
+    }
+    const h = await this.holdings();
+    if (!h.ok || !h.data) return [];
+    const basis = ledger.basisByMint(wallet.publicKey());
+    const out: ScriptPosition[] = [];
+    for (const x of h.data) {
+      if (x.mint === SniperEngine.WSOL_MINT || x.warning) continue;
+      const b = basis.get(x.mint);
+      const entry = b && b.tokensBought > 0 ? b.spentSol / b.tokensBought : null;
+      const costSol = entry !== null ? entry * x.uiAmount : 0;
+      const cur = this.cheapPriceSol(x.mint);
+      const { pnlSol, pnlPct } = entry !== null ? positionPnl(costSol, x.uiAmount, cur) : { pnlSol: null, pnlPct: null };
+      out.push({
+        mint: x.mint,
+        symbol: x.symbol ?? b?.symbol ?? '',
+        name: '',
+        openedAt: b?.firstAt ?? 0,
+        costSol,
+        tokens: x.uiAmount,
+        entryPriceSol: entry,
+        currentPriceSol: cur,
+        peakPriceSol: null,
+        pnlSol,
+        pnlPct,
+      });
+    }
+    return out;
+  }
+
   copySnapshot(): import('@shared/copytrade').CopySnapshot {
     return copyTrade.snapshot();
   }
@@ -1824,6 +2006,51 @@ export class SniperEngine {
    *  asked for their own, and every one re-priced every mint. */
   private portfolioShared: { at: number; p: Promise<import('@shared/portfolio').PortfolioSummary> } | null = null;
 
+  /** The last build, kept: a page opens on it at once and the fresh build
+   *  follows as a 'portfolio' event. Keyed by owner so a switched signer
+   *  never sees another wallet's numbers. Measured 2026-09-08: without this
+   *  Portfolio and Trades showed nothing for 5–7 s on every visit. */
+  private lastPortfolio: { at: number; owner: string; summary: import('@shared/portfolio').PortfolioSummary } | null = null;
+  /** Set on every fill and paper fill; the fast path reports stale past it. */
+  private portfolioDirtyAt = 0;
+  private portfolioRebuildTimer: NodeJS.Timeout | null = null;
+
+  /** The last build for the active wallet, or null — never a build. Marks
+   *  the copy stale when older than 3 s or dirtied by a fill, and starts the
+   *  rebuild that will replace it (shared with anyone else asking). */
+  portfolioSummaryFast(): { summary: import('@shared/portfolio').PortfolioSummary; stale: boolean; generatedAt: number } | null {
+    const lp = this.lastPortfolio;
+    const owner = wallet.publicKey() ?? '';
+    if (!lp || lp.owner !== owner) return null;
+    const stale = Date.now() - lp.at > 3_000 || this.portfolioDirtyAt > lp.at;
+    if (stale) this.schedulePortfolioRebuild(0);
+    return { summary: lp.summary, stale, generatedAt: lp.at };
+  }
+
+  /** A fill landed (real or paper): the kept build is out of date. One
+   *  rebuild follows after a short trailing delay, so a fan-out of five
+   *  buys does not start five builds. */
+  markPortfolioDirty(): void {
+    this.portfolioDirtyAt = Date.now();
+    if (this.lastPortfolio) this.schedulePortfolioRebuild(1_500);
+  }
+
+  private schedulePortfolioRebuild(delayMs: number): void {
+    if (this.portfolioRebuildTimer) return;
+    this.portfolioRebuildTimer = setTimeout(() => {
+      this.portfolioRebuildTimer = null;
+      void this.portfolioSummary().catch(() => undefined);
+    }, delayMs);
+  }
+
+  /** The active signer changed: nothing kept may outlive it. */
+  clearWalletCaches(): void {
+    this.lastPortfolio = null;
+    this.portfolioShared = null;
+    this.lastHoldings = null;
+    this.holdingsShared = null;
+  }
+
   async portfolioSummary(): Promise<import('@shared/portfolio').PortfolioSummary> {
     const now = Date.now();
     if (this.portfolioShared && now - this.portfolioShared.at < 3_000) return this.portfolioShared.p;
@@ -1839,12 +2066,12 @@ export class SniperEngine {
     const s = this.getSettings();
     const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
 
-    // Opportunistically retry fills whose reconciliation failed earlier —
-    // usually the RPC was rate-limited at the moment the trade landed.
-    void ledger.reconcilePending(httpUrl, wallet.publicKey()).catch(() => undefined);
-
     const held = await this.holdings();
     const holdings = held.ok && held.data ? held.data : [];
+    // Opportunistically retry fills whose reconciliation failed earlier —
+    // usually the RPC was rate-limited at the moment the trade landed. After
+    // the holdings read, so it does not compete with it for the RPC bucket.
+    void ledger.reconcilePending(httpUrl, wallet.publicKey()).catch(() => undefined);
     // Liquidation quotes run alongside the price lookups below.
     const liquidationP = this.liquidationQuotes(holdings);
 
@@ -1852,30 +2079,48 @@ export class SniperEngine {
       priceSol: number | null; priceUsd: number | null; marketCapUsd: number | null;
       name: string; symbol: string; imageUrl: string | null; circSupply: number | null;
     }>();
-    // Price every mint we hold OR have ever traded, so closed rows can still
-    // name their token. Capped so a large history cannot stall the page.
     const paperOpen = paperBook.list();
     const paperClosed = paperBook.closed();
-    const wanted = new Set<string>([
-      ...holdings.map((h) => h.mint),
-      ...ledger.basisByMint(wallet.publicKey()).keys(),
-      ...paperOpen.map((p) => p.mint),
-      // Closed paper round trips too, so one booked before its symbol was
-      // known can still be named (the batch makes this cheap).
-      ...paperClosed.map((c) => c.mint),
-    ]);
+    const basis = ledger.basisByMint(wallet.publicKey());
     const decimalsOf = new Map<string, number>();
-    // Batched: one Jupiter search and one Shield call warm the whole set,
-    // then the per-mint assembly runs four wide behind the per-host gate.
-    // This was sixty separate searches and shields per refresh.
-    const mints = [...wanted].slice(0, 60);
-    const sums = await market.summaryMany(mints, 4);
-    for (const [mint, sum] of sums) {
+    const take = (mint: string, sum: import('@shared/market').TokenSummary): void => {
       prices.set(mint, {
         priceSol: sum.priceSol, priceUsd: sum.priceUsd, marketCapUsd: sum.marketCapUsd,
         name: sum.name, symbol: sum.symbol, imageUrl: sum.imageUrl, circSupply: sum.circSupply,
       });
       decimalsOf.set(mint, sum.decimals);
+    };
+    // Only what is HELD is priced on the awaited path: open holdings and
+    // open paper positions, batched (one Jupiter search + one Shield call
+    // warm the set, then four lanes behind the per-host gate). Closed rows
+    // only need a NAME, and every mint ever traded used to be priced here —
+    // 22 mints, most of them dead, walking parked providers for 8–10 s on
+    // every Portfolio visit (measured 2026-09-08).
+    const open = [...new Set([...holdings.map((h) => h.mint), ...paperOpen.map((p) => p.mint)])].slice(0, 60);
+    const sums = await market.summaryMany(open, 4);
+    for (const [mint, sum] of sums) take(mint, sum);
+    // Closed rows: the ledger's own symbol, the paper book's, or a cached
+    // summary — free. Anything still nameless is named off the critical path
+    // and found in the cache by the next build.
+    const closedOnly = [...new Set([...basis.keys(), ...paperClosed.map((c) => c.mint)])].filter((m) => !prices.has(m));
+    const unnamed: string[] = [];
+    for (const m of closedOnly) {
+      const cachedSum = market.summaryIfCached(m);
+      if (cachedSum) {
+        take(m, cachedSum);
+        continue;
+      }
+      const sym = basis.get(m)?.symbol || paperClosed.find((c) => c.mint === m)?.symbol || '';
+      if (sym) prices.set(m, { priceSol: null, priceUsd: null, marketCapUsd: null, name: '', symbol: sym, imageUrl: null, circSupply: null });
+      else unnamed.push(m);
+    }
+    if (unnamed.length) {
+      void market
+        .summaryMany(unnamed.slice(0, 40), 2, { skipUnpriceable: true })
+        .then((named) => {
+          for (const [m, sum] of named) if (sum.symbol) paperBook.noteSymbol(m, sum.symbol);
+        })
+        .catch(() => undefined);
     }
 
     let solUsd: number | null = null;
@@ -1917,6 +2162,9 @@ export class SniperEngine {
       closed: paperBook.closed(),
       model: PAPER_FILL_MODEL,
     };
+    out.stale = false;
+    this.lastPortfolio = { at: Date.now(), owner: wallet.publicKey() ?? '', summary: out };
+    this.emit({ kind: 'portfolio', summary: out });
     return out;
   }
 
@@ -2167,13 +2415,12 @@ export class SniperEngine {
   /**
    * Sell a held mint. `percent` defaults to the whole position.
    *
-   * PARTIAL SELLS GO THROUGH THE RELAYER, ALWAYS. `txBuilder.buildLocalTrade`
-   * hardcodes sells to the full token-account balance (`txBuilder.ts:346`,
-   * `:398`) and closes the ATA afterwards to reclaim rent. Handing it a
-   * partial request would silently sell 100% — the single worst way to get
-   * this wrong, because the user would see a "sold 25%" toast over an empty
-   * bag. So anything under 100% never offers the local path, and pays the
-   * relayer's 0.5% instead. That cost is stated in the trade panel.
+   * Partial sells use the local builder too (since 2026-09-07): it sizes the
+   * sell as `sellPct` of the token-account balance and closes the ATA only at
+   * 100% (`txBuilder.sellAmountFor`, pinned by test). Before that it
+   * hardcoded the full balance, so partials were withheld from it — which
+   * left every take-profit step on a mayhem-mode coin to Jupiter (no route)
+   * and the relayer (reverts `Overflow`), i.e. unsellable.
    */
   /** Estimated proceeds of selling `pct`% of the held balance, lamports, for
    *  FEE billing on relayer-built sells (no quote exists there). Held balance
@@ -2216,7 +2463,7 @@ export class SniperEngine {
     if (this.paperMode()) return this.paperSell(mint, pct);
     if (!s.execution.liveEnabled) return { ok: false, stage: 'validate', message: 'Enable real broadcast before selling' };
     // Both lookups run concurrently; neither blocks the other.
-    const localParams = pct >= 100 ? await this.localBuildParamsForSell(mint) : undefined;
+    const localParams = await this.localBuildParamsForSell(mint);
     // NOT awaited: only a relayer-built sell is billed from this estimate,
     // and the local builder (the default since 09-01) prices itself from its
     // own quote. Awaiting it here put a token-balance RPC in front of every
@@ -2235,9 +2482,9 @@ export class SniperEngine {
       priorityFeeSol: exit.priorityFeeSol,
       httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
       simulateOnly: false,
-      // Full sells get the local builder (ATA close, no relayer fee, and the
+      // Every sell gets the local builder (ATA close at 100%, no relayer fee, and the
       // only route that builds on a bonding curve the relayer 400s on); the
-      // relayer stays as fallback. Partials never get it — see above.
+      // relayer stays as fallback; a partial is sized as its share of the balance.
       local: localParams,
       estProceedsLamports: estProceeds,
       exec: exit.exec,
@@ -2277,6 +2524,22 @@ export class SniperEngine {
    *  so a fill's reload still sees the new token. */
   private holdingsShared: { at: number; owner: string; p: Promise<{ ok: boolean; message: string; data?: WalletHolding[] }> } | null = null;
 
+  /** The last successful read, for the holdings panels to open on. Trade
+   *  paths never read it — they call holdings() and wait for the chain. */
+  private lastHoldings: { at: number; owner: string; data: WalletHolding[] } | null = null;
+
+  /** The last read for the active wallet, or null — never a read. Older
+   *  than 2 s = stale, and a fresh read is started; its result arrives as a
+   *  'holdings' event when anything changed. */
+  holdingsCached(): { data: WalletHolding[]; at: number; stale: boolean } | null {
+    const owner = wallet.publicKey();
+    const lh = this.lastHoldings;
+    if (!owner || !lh || lh.owner !== owner) return null;
+    const stale = Date.now() - lh.at > 2_000;
+    if (stale) void this.holdings().catch(() => undefined);
+    return { data: lh.data, at: lh.at, stale };
+  }
+
   async holdings(): Promise<{ ok: boolean; message: string; data?: WalletHolding[] }> {
     const owner = wallet.publicKey();
     if (!owner) return { ok: false, message: 'No trading wallet' };
@@ -2291,12 +2554,62 @@ export class SniperEngine {
 
   private async readHoldings(owner: string): Promise<{ ok: boolean; message: string; data?: WalletHolding[] }> {
     const s = this.getSettings();
-    const r = await getTokenAccountsByOwner(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner);
+    const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
+    const r = await getTokenAccountsByOwner(httpUrl, owner);
     if (!r.ok || !r.data) return { ok: false, message: r.message };
-    const data: WalletHolding[] = r.data
-      .filter((h) => h.uiAmount > 0)
-      .map((h) => ({ ...h, symbol: this.tokens.get(h.mint)?.row.symbol ?? null }));
+    const held = r.data.filter((h) => h.uiAmount > 0);
+    await this.annotateMintWarnings(httpUrl, held.map((h) => ({ mint: h.mint, programId: h.programId })));
+    const data: WalletHolding[] = held.map((h) => ({
+      ...h,
+      symbol: this.tokens.get(h.mint)?.row.symbol ?? null,
+      // undefined = the mint could not be read this time; null = read, clean.
+      warning: this.mintWarnings.get(h.mint),
+    }));
+    const at = Date.now();
+    const prev = this.lastHoldings;
+    const changed =
+      !prev || prev.owner !== owner || prev.data.length !== data.length || prev.data.some((h, i) => h.mint !== data[i].mint || h.amountRaw !== data[i].amountRaw);
+    this.lastHoldings = { at, owner, data };
+    if (changed) this.emit({ kind: 'holdings', data, at });
     return { ok: true, message: 'ok', data };
+  }
+
+  /** What a held mint's own bytes say about its sellability — a Token-2022
+   *  permanent delegate (spam airdrop), transfer hook, or non-transferable
+   *  flag. Extensions are fixed at mint creation, so a mint is read ONCE per
+   *  process; classic SPL mints have none and are never read. Airdropped
+   *  advertisements otherwise sit in the holdings list as "previous run"
+   *  with a Sell button that fails three routes deep (2026-09-07). */
+  private mintWarnings = new Map<string, string | null>();
+
+  private async annotateMintWarnings(httpUrl: string, held: Array<{ mint: string; programId: string }>): Promise<void> {
+    const unread: string[] = [];
+    for (const h of held) {
+      if (this.mintWarnings.has(h.mint)) continue;
+      if (h.programId !== TOKEN_2022_PROGRAM) this.mintWarnings.set(h.mint, null);
+      else if (!unread.includes(h.mint)) unread.push(h.mint);
+    }
+    if (unread.length === 0) return;
+    try {
+      for (let i = 0; i < unread.length; i += 100) {
+        const batch = unread.slice(i, i + 100);
+        const r = await getMultipleAccountInfo(httpUrl, batch);
+        if (!r.ok || !r.data) return; // unread stays unknown, never "clean"
+        batch.forEach((mint, j) => {
+          const acc = r.data?.[j];
+          if (!acc) return;
+          this.mintWarnings.set(mint, mintWarning(parseMintExtensions(acc.data)));
+        });
+      }
+    } catch {
+      /* unknown stays unknown */
+    }
+    // Bounded: the wallet lab can walk many wallets through here.
+    while (this.mintWarnings.size > 4_096) {
+      const oldest = this.mintWarnings.keys().next().value;
+      if (oldest === undefined) break;
+      this.mintWarnings.delete(oldest);
+    }
   }
 
   /** Sell 100% of every token the wallet actually holds (except wSOL).
@@ -2332,10 +2645,19 @@ export class SniperEngine {
         this.emit({ kind: 'toast', level: 'warn', message: `Sell-all could not read holdings: ${h.message}` });
         return;
       }
-      const sellable = h.data.filter((x) => x.mint !== SniperEngine.WSOL_MINT);
+      // Holdings the mint itself flags (permanent delegate, transfer hook,
+      // non-transferable) go LAST: each one that turns out to be a spam
+      // airdrop burns three build routes, and a real exit must never queue
+      // behind that.
+      const held = h.data.filter((x) => x.mint !== SniperEngine.WSOL_MINT);
+      const sellable = [...held.filter((x) => !x.warning), ...held.filter((x) => x.warning)];
       if (sellable.length === 0) {
         this.log('info', `sell-all (${reason}): wallet holds no tokens`);
         return;
+      }
+      const flagged = held.filter((x) => x.warning);
+      if (flagged.length > 0) {
+        this.log('info', `sell-all (${reason}): ${flagged.length} holding(s) look unsellable and go last — ${flagged.map((x) => `${x.symbol ?? `${x.mint.slice(0, 8)}…`}: ${x.warning}`).join('; ')}`);
       }
       this.log('warn', `sell-all (${reason}): liquidating ${sellable.length} held token(s)`);
       this.emit({ kind: 'toast', level: 'warn', message: `Selling ${sellable.length} held token(s) — ${reason.replace(/_/g, ' ')}` });

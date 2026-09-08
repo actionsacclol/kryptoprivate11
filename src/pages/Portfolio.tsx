@@ -7,6 +7,7 @@ import { Card, Empty, GhostButton, Page, Section } from '../components/common';
 import { AreaChart } from '../components/viz/AreaChart';
 import { PnlCard, type CardSubject } from '../components/terminal/PnlCard';
 import { useToast } from '../state/ToastProvider';
+import { cachedPortfolio, rememberPortfolio } from '../state/routeCache';
 import { cls, fmtDur, fmtNum, fmtPriceUsd, fmtUsd, shortAddr, toneFor } from '../utils/format';
 
 // Portfolio, trade history and PnL cards (term.txt §13, §14, §15).
@@ -134,7 +135,9 @@ function PositionRow({
 
 export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const toast = useToast();
-  const [data, setData] = useState<PortfolioSummary | null>(null);
+  // Opens on the last portfolio this session saw; the engine's kept build
+  // and then the fresh one follow (6.9 s of empty page per visit, 2026-09-08).
+  const [data, setData] = useState<PortfolioSummary | null>(() => cachedPortfolio());
   const [history, setHistory] = useState<TradeHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>('positions');
@@ -144,11 +147,13 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
   const [share, setShare] = useState<CardSubject | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts: { stale?: boolean } = { stale: true }) => {
     setLoading(true);
-    const [p, h] = await Promise.all([window.krypt.portfolio.summary(), window.krypt.portfolio.history()]);
-    if (p.ok && p.data) setData(p.data);
-    else if (!p.ok) toast.error(p.message);
+    const [p, h] = await Promise.all([window.krypt.portfolio.summary(opts), window.krypt.portfolio.history()]);
+    if (p.ok && p.data) {
+      setData(p.data);
+      rememberPortfolio(p.data);
+    } else if (!p.ok) toast.error(p.message);
     if (h.ok && h.data) setHistory(h.data);
     setLoading(false);
   }, [toast]);
@@ -162,7 +167,11 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
     // 30 s tick: a paper round trip done seconds before opening this page
     // used to be missing from the Trades tab until the poll came round.
     const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'fill' || ev.kind === 'paper') void load();
+      if (ev.kind === 'portfolio') {
+        setData(ev.summary);
+        rememberPortfolio(ev.summary);
+      }
+      if (ev.kind === 'fill' || ev.kind === 'paper') void load({ stale: false });
     });
     return () => {
       clearInterval(id);

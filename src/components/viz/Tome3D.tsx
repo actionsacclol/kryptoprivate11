@@ -51,7 +51,23 @@ export function Tome3D() {
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
+    // The context is created two frames after mount: the page's text paints first,
+    // and a visit that leaves within those frames never pays for a WebGL
+    // context it will not show.
+    let teardown: (() => void) | null = null;
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        teardown = buildScene(mount);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      teardown?.();
+    };
+  }, []);
 
+  // The whole scene, built once per mount; returns its own teardown.
+  function buildScene(mount: HTMLDivElement): () => void {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 50);
     camera.position.set(0, 0.35, 4.6);
@@ -251,7 +267,7 @@ export function Tome3D() {
       for (const d of disposables) d.dispose();
       mount.removeChild(renderer.domElement);
     };
-  }, []);
+  }
 
   return <div ref={mountRef} className="absolute inset-0" aria-hidden="true" />;
 }

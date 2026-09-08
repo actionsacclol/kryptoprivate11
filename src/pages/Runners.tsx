@@ -210,13 +210,20 @@ export function RunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => vo
     return () => clearInterval(id);
   }, []);
 
+  // Which runners are held decides the Sell button, nothing more — so the
+  // engine's kept build is enough. This used to start a full 5–10 s
+  // provider build on every visit (measured 2026-09-08).
   const loadHoldings = useCallback(async () => {
-    const r = await window.krypt.portfolio.summary();
+    const r = await window.krypt.portfolio.summary({ stale: true });
     if (r.ok && r.data) setHeldMints(new Set(r.data.positions.filter((p) => p.amount > 0).map((p) => p.mint)));
   }, []);
 
   useEffect(() => {
     void loadHoldings();
+    const off = window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'portfolio') setHeldMints(new Set(ev.summary.positions.filter((p) => p.amount > 0).map((p) => p.mint)));
+    });
+    return off;
   }, [loadHoldings]);
   const liveByMint = useMemo(() => {
     const m = new Map<string, LaunchRow>();

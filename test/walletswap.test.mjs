@@ -191,4 +191,30 @@ test("another owner's token accounts in the same transaction are not counted", (
   assert.equal(s.tokens, 1, 'only the wallet-owned account moved for it');
 });
 
-console.log(`walletswap: ${passed}/9 tests passed`);
+test('a sell reports the share of the holding that went out — what a copier mirrors', () => {
+  // Held 1,000 tokens across two accounts, sold 400 of them: 40 %.
+  const t = tx({
+    keys: [W, JUP, MINT_A],
+    pre: [SOL, 0, 0],
+    post: [SOL + 0.4 * SOL - 5000, 0, 0],
+    preTok: [
+      { mint: MINT_A, owner: W, amount: '700000000', decimals: 6 },
+      { mint: MINT_A, owner: W, amount: '300000000', decimals: 6 },
+    ],
+    postTok: [
+      { mint: MINT_A, owner: W, amount: '300000000', decimals: 6 },
+      { mint: MINT_A, owner: W, amount: '300000000', decimals: 6 },
+    ],
+  });
+  const s = decodeWalletSwap(t, W);
+  assert.ok(s && !s.isBuy);
+  assert.equal(s.heldBefore, 1000);
+  assert.equal(s.tokens, 400);
+  assert.ok(Math.abs(s.soldFraction - 0.4) < 1e-12, `sold 40 %, got ${s.soldFraction}`);
+  // A buy has no fraction; a sell with no pre-balance on record has none either.
+  const buy = tx({ keys: [W, JUP, MINT_A], pre: [SOL, 0, 0], post: [SOL - 0.4 * SOL - 5000, 0, 0], postTok: [{ mint: MINT_A, owner: W, amount: '1000000', decimals: 6 }] });
+  assert.equal(decodeWalletSwap(buy, W).soldFraction, null);
+  assert.equal(decodeWalletSwap(buy, W).heldBefore, 0);
+});
+
+console.log(`walletswap: ${passed}/10 tests passed`);

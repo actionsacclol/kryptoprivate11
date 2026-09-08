@@ -163,3 +163,9 @@
   }
   .animate-spark { animation: spark-run 1.8s linear infinite; }
 }
+
+/* The route fade is decorative: a viewer who asked for less motion gets the
+   page at once. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-ink { animation: none; }
+}

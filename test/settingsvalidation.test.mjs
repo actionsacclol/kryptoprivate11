@@ -181,3 +181,29 @@ console.log('settingsvalidation: all tests passed');
   assert.equal(good.ok, true, good.message);
   console.log('ok  list settings reject objects, null, wrong element types and unbounded length');
 }
+
+// Display settings (2026-09-08): two booleans a user reaches for after a
+// blue screen. Both must pass as booleans and nothing else, and the
+// hardware-acceleration one has to be read BEFORE Chromium is ready or the
+// switch does nothing — pinned against main.ts.
+{
+  const good = v({ reduceEffects: true, hardwareAcceleration: false });
+  assert.equal(good.ok, true, good.message);
+  assert.equal(good.patch.reduceEffects, true);
+  assert.equal(good.patch.hardwareAcceleration, false);
+  assert.equal(v({ reduceEffects: 'yes' }).ok, false, 'a string is not a switch');
+  assert.equal(v({ hardwareAcceleration: 0 }).ok, false, 'a number is not a switch');
+  console.log('ok  the display switches are booleans and nothing else');
+}
+
+{
+  const fs = await import('node:fs');
+  const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const gate = main.indexOf('app.disableHardwareAcceleration()');
+  const ready = main.indexOf('app.whenReady().then(bootstrap)');
+  assert.ok(gate > 0 && ready > gate, 'hardware acceleration is decided before the app is ready');
+  assert.match(main, /if \(!store\.load\(\)\.hardwareAcceleration\) \{\s*app\.disableHardwareAcceleration\(\)/, 'and only when the setting says so');
+  assert.match(main, /app\.on\('child-process-gone'/, 'a dying GPU process is handled');
+  assert.match(main, /store\.update\(\{ hardwareAcceleration: false \}\)/, 'and turns the setting off for the next start');
+  console.log('ok  main.ts reads the GPU setting before ready and falls back after GPU crashes');
+}

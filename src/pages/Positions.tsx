@@ -7,6 +7,7 @@ import { useModal } from '../state/ModalProvider';
 import { Sparkline } from '../components/viz/Sparkline';
 import { NumberTicker } from '../components/viz/NumberTicker';
 import type { PaperPosition, WalletHolding } from '@shared/types';
+import { cachedHoldings, rememberHoldings } from '../state/routeCache';
 import { cls, fmtAgo, fmtClock, fmtPct, fmtPrice, fmtSol, shortAddr } from '../utils/format';
 
 /** On-chain truth: every SPL token the trading wallet holds right now —
@@ -16,7 +17,9 @@ export function HoldingsSection() {
   const { settings } = useAppState();
   const toast = useToast();
   const modal = useModal();
-  const [holdings, setHoldings] = useState<WalletHolding[] | null>(null);
+  // Opens on the last read (routeCache / the engine's snapshot); the chain
+  // read that follows lands as a 'holdings' event when anything changed.
+  const [holdings, setHoldings] = useState<WalletHolding[] | null>(() => cachedHoldings()?.data ?? null);
   const [error, setError] = useState<string | null>(null);
   const [busyMint, setBusyMint] = useState<string | null>(null);
   const liveEnabled = settings.execution.liveEnabled;
@@ -25,6 +28,7 @@ export function HoldingsSection() {
     const r = await window.krypt.wallet.holdings();
     if (r.ok && r.data) {
       setHoldings(r.data);
+      rememberHoldings(r.data, Date.now());
       setError(null);
     } else {
       setError(r.message);
@@ -34,7 +38,16 @@ export function HoldingsSection() {
   useEffect(() => {
     void refresh();
     const t = setInterval(() => void refresh(), 30_000);
-    return () => clearInterval(t);
+    const off = window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'holdings') {
+        setHoldings(ev.data);
+        rememberHoldings(ev.data, ev.at);
+      }
+    });
+    return () => {
+      clearInterval(t);
+      off();
+    };
   }, [refresh]);
 
   const sellOne = async (h: WalletHolding): Promise<void> => {
@@ -123,9 +136,10 @@ export function HoldingsSection() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold text-white">{h.symbol ?? shortAddr(h.mint, 6)}</span>
-                  {!h.symbol && <Badge tone="warn">previous run</Badge>}
+                  {h.warning ? <Badge tone="warn">airdrop?</Badge> : !h.symbol && <Badge tone="warn">previous run</Badge>}
                 </div>
                 <div className="text-[11px] font-mono text-krypt-muted truncate mt-0.5">{h.mint}</div>
+                {h.warning && <div className="text-[11px] text-amber-300/90 mt-1">{h.warning}</div>}
               </div>
               <div className="flex items-center gap-4 flex-shrink-0">
                 <span className="text-sm font-mono tabular-nums text-white/90">

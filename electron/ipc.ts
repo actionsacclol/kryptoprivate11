@@ -80,6 +80,8 @@ import { validateOrder, type NewOrderRequest } from '@shared/orders';
 import { validateAlert, type NewAlertRequest } from '@shared/alerts';
 import { toCsv } from '@shared/portfolio';
 import { validateConfig, type CopyConfig } from '@shared/copytrade';
+import * as automation from './engine/automation';
+import { MAX_ACTIONS, MAX_CONDITIONS, type RuleAction, type RuleCondition, type RuleSet } from '@shared/automation';
 
 let engine: SniperEngine | null = null;
 
@@ -92,7 +94,13 @@ export function getEngine(): SniperEngine {
         const s = store.load();
         return { ...s, rpc: resolveRpc(s.rpc) };
       },
-      (ev) => broadcast(ev),
+      (ev) => {
+        broadcast(ev);
+        // A fill, real or paper, dates the kept portfolio build.
+        if ((ev.kind === 'fill' && ev.state !== 'failed') || ev.kind === 'paper') engine?.markPortfolioDirty();
+        // User scripts see the same events the UI does, after it.
+        automation.onEngineEvent(ev);
+      },
     );
   }
   return engine;
@@ -329,6 +337,11 @@ export function registerIpc(): void {
     const r = wallet.select(id);
     if (r.ok) logger.warn(`wallet:select — active wallet is now ${wallet.publicKey() ?? 'none'}`);
     if (r.ok) syncLiveMode();
+    if (r.ok) {
+      // Nothing kept for the old signer may show for the new one.
+      getEngine().clearWalletCaches();
+      broadcast({ kind: 'walletSwitched', publicKey: wallet.publicKey() ?? null });
+    }
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
@@ -443,6 +456,12 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle('wallet:holdings', async () => {
+    // The panels open on the last read; a fresh one follows as a 'holdings'
+    // event when anything changed. Only this handler answers from the
+    // snapshot — sell-all, recovery, scripts and the portfolio build call
+    // engine.holdings() and wait for the chain.
+    const fast = getEngine().holdingsCached();
+    if (fast) return ok('ok', fast.data);
     const r = await getEngine().holdings();
     return r.ok ? ok('ok', r.data) : fail(r.message);
   });
@@ -1257,8 +1276,16 @@ export function registerIpc(): void {
   });
 
   // ── portfolio (term.txt §13/§14) ─────────────────────────────────
-  ipcMain.handle('portfolio:summary', async () => {
+  ipcMain.handle('portfolio:summary', async (_e, opts: unknown) => {
     try {
+      // `stale: true` = the page wants to paint NOW: the last build for this
+      // wallet, marked, with the fresh one following as a 'portfolio' event.
+      // A fill-driven reload or the bots leave it off and await the rebuild.
+      const wantStale = typeof opts === 'object' && opts !== null && (opts as { stale?: unknown }).stale === true;
+      if (wantStale) {
+        const fast = getEngine().portfolioSummaryFast();
+        if (fast) return ok('ok', { ...fast.summary, stale: fast.stale, generatedAt: fast.generatedAt });
+      }
       return ok('ok', await getEngine().portfolioSummary());
     } catch (err) {
       return fail(`Portfolio failed: ${(err as Error).message}`);
@@ -1395,6 +1422,119 @@ export function registerIpc(): void {
     if (typeof id !== 'string' || !id) return fail('Invalid id');
     const r = getEngine().removeCopyConfig(id);
     return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
+  });
+
+  // ── user automation: rules and scripts ───────────────────────────
+  ipcMain.handle('automation:list', () => ok('ok', automation.snapshot()));
+
+  ipcMain.handle('automation:save', (_e, raw: unknown) => {
+    // The renderer's object is a claim. Rebuild it field by field so a
+    // script cannot arrive with a shape the validator never saw.
+    if (typeof raw !== 'object' || raw === null) return fail('Invalid script');
+    const r = raw as Record<string, unknown>;
+    const budgetIn = (typeof r.budget === 'object' && r.budget !== null ? r.budget : {}) as Record<string, unknown>;
+    const rulesIn = (typeof r.rules === 'object' && r.rules !== null ? r.rules : {}) as Record<string, unknown>;
+    const conditions = Array.isArray(rulesIn.conditions)
+      ? rulesIn.conditions.slice(0, MAX_CONDITIONS).map((c) => {
+          const x = (typeof c === 'object' && c !== null ? c : {}) as Record<string, unknown>;
+          return {
+            field: String(x.field ?? '') as RuleCondition['field'],
+            op: String(x.op ?? '') as RuleCondition['op'],
+            value: typeof x.value === 'number' ? x.value : String(x.value ?? '').slice(0, 80),
+          };
+        })
+      : [];
+    const actions: RuleAction[] = [];
+    if (Array.isArray(rulesIn.actions)) {
+      for (const a of rulesIn.actions.slice(0, MAX_ACTIONS)) {
+        const x = (typeof a === 'object' && a !== null ? a : {}) as Record<string, unknown>;
+        const basis = x.basis === 'price_sol' ? ('price_sol' as const) : ('mcap_usd' as const);
+        switch (x.type) {
+          case 'buy':
+            actions.push({ type: 'buy', sol: Number(x.sol) });
+            break;
+          case 'sell':
+            actions.push({ type: 'sell', pct: Number(x.pct) });
+            break;
+          case 'sell_all':
+          case 'cancel_orders':
+          case 'watch':
+          case 'unwatch':
+          case 'disable_self':
+            actions.push({ type: x.type });
+            break;
+          case 'stop_loss':
+          case 'trailing_stop':
+            actions.push({ type: x.type, pct: Number(x.pct) });
+            break;
+          case 'take_profit':
+            actions.push({ type: 'take_profit', gainPct: Number(x.gainPct), sellPct: Number(x.sellPct) });
+            break;
+          case 'limit_buy':
+            actions.push({ type: 'limit_buy', basis, value: Number(x.value), sol: Number(x.sol) });
+            break;
+          case 'limit_sell':
+            actions.push({ type: 'limit_sell', basis, value: Number(x.value), pct: Number(x.pct) });
+            break;
+          case 'apply_template':
+            actions.push({ type: 'apply_template', templateId: String(x.templateId ?? '').slice(0, 80) });
+            break;
+          case 'alert':
+            actions.push({ type: 'alert', kind: String(x.kind ?? '') as RuleAction extends { type: 'alert'; kind: infer K } ? K : never, threshold: Number(x.threshold) });
+            break;
+          case 'notify':
+          case 'log':
+            actions.push({ type: x.type, message: String(x.message ?? '').slice(0, 200) });
+            break;
+          default:
+            break;
+        }
+      }
+    }
+    const clean = {
+      id: typeof r.id === 'string' && r.id ? r.id : undefined,
+      name: String(r.name ?? '').trim().slice(0, 60),
+      kind: r.kind === 'code' ? ('code' as const) : ('rules' as const),
+      enabled: false, // arming is its own act (automation:setEnabled)
+      mode: r.mode === 'live' ? ('live' as const) : ('paper' as const),
+      code: typeof r.code === 'string' ? r.code : '',
+      rules: {
+        trigger: String(rulesIn.trigger ?? 'launch_update') as RuleSet['trigger'],
+        conditions,
+        actions,
+        oncePerMint: rulesIn.oncePerMint !== false,
+        cooldownSec: Number(rulesIn.cooldownSec) || 0,
+        atHHMM: typeof rulesIn.atHHMM === 'string' ? rulesIn.atHHMM.slice(0, 5) : undefined,
+      },
+      budget: {
+        maxSolPerTrade: Number(budgetIn.maxSolPerTrade),
+        maxBuysPerDay: Number(budgetIn.maxBuysPerDay),
+        maxLossSolPerDay: Number(budgetIn.maxLossSolPerDay),
+        maxOpenPositions: Number(budgetIn.maxOpenPositions),
+        maxActionsPerMinute: Number(budgetIn.maxActionsPerMinute),
+      },
+    };
+    // An edit keeps the script's current armed state; the store decides.
+    const existing = clean.id ? automation.all().find((s) => s.id === clean.id) : undefined;
+    const res = automation.upsert({ ...clean, enabled: existing?.enabled ?? false });
+    return res.ok ? ok(res.message, automation.snapshot()) : fail(res.message);
+  });
+
+  ipcMain.handle('automation:remove', (_e, id: unknown) => {
+    if (typeof id !== 'string' || !id) return fail('Invalid id');
+    const r = automation.remove(id);
+    return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
+  });
+
+  ipcMain.handle('automation:setEnabled', (_e, id: unknown, enabled: unknown) => {
+    if (typeof id !== 'string' || !id) return fail('Invalid id');
+    const r = automation.setEnabled(id, enabled === true);
+    return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
+  });
+
+  ipcMain.handle('automation:killSwitch', (_e, on: unknown) => {
+    const r = automation.setKillSwitch(on === true);
+    return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
   });
 
   // ── log ──────────────────────────────────────────────────────────

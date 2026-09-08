@@ -41,6 +41,12 @@ const COLOR_NEW = new THREE.Color('#B7A6FF');
 const COLOR_ENTERED = new THREE.Color('#D9B45B');
 const COLOR_REJECTED = new THREE.Color('#61141f');
 
+/** First sight of a launch: a flagged runner keeps its gold, as an opt-in
+ *  paper entry does; everything else is a fresh violet spark. */
+function firstSightPhase(phase: LaunchRow['phase']): 'new' | 'entered' {
+  return phase === 'entered' || phase === 'flagged' ? 'entered' : 'new';
+}
+
 export function Radar3D({
   launches,
   live,
@@ -58,15 +64,27 @@ export function Radar3D({
   const [hover, setHover] = useState<{ mint: string; x: number; y: number } | null>(null);
   const hoverMintRef = useRef<string | null>(null);
 
-  // Scene lifecycle — created once.
+  // Scene lifecycle — created once per mount.
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
-    // A fresh scene starts with zero particles, so the launches-diff effect
-    // must respawn everything it has already seen (StrictMode double-mount,
-    // Fast Refresh, and route remounts all hit this).
-    seenRef.current.clear();
+    // The context is created two frames after mount: the dashboard's cards and
+    // numbers paint first, and a visit that leaves within those frames never
+    // pays for a WebGL context it will not show.
+    let teardown: (() => void) | null = null;
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        teardown = buildScene(mount);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      teardown?.();
+    };
+  }, []);
 
+  // The whole scene, built once per mount; returns its own teardown.
+  function buildScene(mount: HTMLDivElement): () => void {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
     camera.position.set(0, 0.6, 5.4);
@@ -414,6 +432,17 @@ export function Radar3D({
       }
       raf = requestAnimationFrame(loop);
     };
+
+    // A fresh scene starts with zero particles, and the launches-diff effect
+    // has already run against the no-op spawn (the scene is built after it):
+    // replay what it recorded, so the first frame is not an empty orb.
+    // StrictMode double-mount, Fast Refresh and route remounts hit this too.
+    seenRef.current.clear();
+    for (const l of launchesRef.current.values()) {
+      seenRef.current.set(l.mint, l.phase);
+      spawnRef.current(firstSightPhase(l.phase), l.mint);
+    }
+
     raf = requestAnimationFrame(loop);
 
     return () => {
@@ -426,7 +455,7 @@ export function Radar3D({
       for (const d of disposables) d.dispose();
       mount.removeChild(renderer.domElement);
     };
-  }, []);
+  }
 
   // Diff incoming launches → spawn particles for new mints & phase changes.
   useEffect(() => {
@@ -441,7 +470,7 @@ export function Radar3D({
         seen.set(l.mint, l.phase);
         // First sight (or scene respawn): a flagged runner keeps its gold,
         // as an opt-in paper entry does.
-        spawnRef.current(l.phase === 'entered' || l.phase === 'flagged' ? 'entered' : 'new', l.mint);
+        spawnRef.current(firstSightPhase(l.phase), l.mint);
       } else if (prev !== l.phase) {
         seen.set(l.mint, l.phase);
         if (l.phase === 'entered' || l.phase === 'flagged') spawnRef.current('entered', l.mint);

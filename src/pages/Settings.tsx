@@ -386,6 +386,23 @@ export function SettingsPage() {
         </div>
       </Section>
 
+      <Section title="Display" description="For a machine whose graphics driver does not like the app: a blue screen mid-session, or a driver that keeps crashing.">
+        <div className="grid lg:grid-cols-2 gap-3">
+          <Switch
+            checked={settings.reduceEffects}
+            onChange={(v) => void updateSettings({ reduceEffects: v })}
+            label="Reduce effects"
+            description="Replaces the 3D observatory and vault scenes with a still. They render every frame through the GPU driver and are pure decoration. Takes effect on the next visit to the page."
+          />
+          <Switch
+            checked={settings.hardwareAcceleration}
+            onChange={(v) => void updateSettings({ hardwareAcceleration: v })}
+            label="Hardware acceleration"
+            description="Render through the GPU. Turn it off if the graphics driver has crashed under the app or a blue screen followed a session: software rendering is slower but never touches the driver. Turns itself off after the GPU process dies twice in one run. Applies on restart."
+          />
+        </div>
+      </Section>
+
       <Section title="Data collection" description="Where recordings are stored and how much of the chain we capture.">
         <Card className="space-y-3">
           <div>

@@ -37,8 +37,33 @@ export interface WalletSwap {
   decimals: number;
   /** SOL per token at this fill. */
   priceSol: number;
+  /** Tokens of `mint` the wallet held BEFORE this transaction, UI units. */
+  heldBefore: number;
+  /**
+   * Sell only: the share of its holding the wallet sold, 0–1. This is what
+   * a copier mirrors — "they sold 40 %" means "sell 40 % of ours", whatever
+   * the two positions' sizes. Null on a buy, or when the pre-balance is
+   * unknown (an old-format reply), which the copier reads as "all of it".
+   */
+  soldFraction: number | null;
   /** Top-level programs the transaction invoked, for the record ("via …"). */
   programs: string[];
+}
+
+/** Tokens of `mint` the wallet held before the transaction, UI units. */
+function heldBeforeOf(pre: TokenBalanceEntry[] | undefined, wallet: string, mint: string): number {
+  let raw = 0n;
+  let decimals = 0;
+  for (const e of pre ?? []) {
+    if (e.owner !== wallet || e.mint !== mint) continue;
+    try {
+      raw += BigInt(e.uiTokenAmount.amount);
+      decimals = e.uiTokenAmount.decimals;
+    } catch {
+      /* a malformed entry is not a balance */
+    }
+  }
+  return Number(raw) / 10 ** decimals;
 }
 
 function tokenDeltas(
@@ -124,5 +149,7 @@ export function decodeWalletSwap(tx: RawTransaction, wallet: string): WalletSwap
   if (!Number.isFinite(priceSol) || priceSol <= 0) return null;
 
   const programs = [...new Set((tx.transaction.message.instructions ?? []).map((ix) => keys[ix.programIdIndex]).filter(Boolean))];
-  return { mint: best.mint, isBuy, sol, tokens, decimals: best.decimals, priceSol, programs };
+  const heldBefore = heldBeforeOf(meta.preTokenBalances, wallet, best.mint);
+  const soldFraction = isSell && heldBefore > 0 ? Math.min(1, tokens / heldBefore) : null;
+  return { mint: best.mint, isBuy, sol, tokens, decimals: best.decimals, priceSol, heldBefore, soldFraction, programs };
 }

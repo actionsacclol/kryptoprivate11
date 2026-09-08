@@ -43,6 +43,7 @@ import {
   feeConfigFor,
   PUMP_FEE_RECIPIENT_FALLBACK,
   PUMP_FEE_VAULT_FALLBACK,
+  PUMP_RESERVED_FEE_RECIPIENT_FALLBACK,
   isOnCurve,
 } from './addresses';
 import { buyQuote, sellQuote } from './curve';
@@ -254,29 +255,43 @@ const CURVE_DISC = Buffer.from(sha256(new TextEncoder().encode('account:BondingC
 
 export interface GlobalConfig {
   feeRecipient: string;
+  /** `Global.reserved_fee_recipient` (@483) — what a MAYHEM-mode coin's
+   *  `fee_recipient` slot must carry; the normal one reverts `NotAuthorized`. */
+  reservedFeeRecipient: string;
   feeVault: string;
   /** False when a field fell back to a constant because the account did not
    *  carry it — a signal that pump reshaped Global, worth a diagnostic. */
   fromChain: boolean;
 }
 
-/** Parse the two per-trade accounts out of pump's Global account.
+/** Offset of `reserved_fee_recipient` in Global (pump IDL, 2026-09-07). */
+const GLOBAL_RESERVED_FEE_RECIPIENT_OFFSET = 483;
+
+/** Parse the per-trade accounts out of pump's Global account.
  *
  *  Layout (Anchor, 1045 bytes on 2026-08-29): disc 8 · initialized 1 ·
- *  authority 32 · fee_recipient 32 @41 · … · a fee-program-owned vault @965.
- *  The vault offset is the only "magic" number in this file, so it is
- *  checked rather than trusted: the 32 bytes must be non-zero and off the
- *  ed25519 curve (every fee-program account is a PDA), else the fallback is
- *  used and `fromChain` goes false. */
+ *  authority 32 · fee_recipient 32 @41 · … · reserved_fee_recipient @483 ·
+ *  … · a fee-program-owned vault @965. The vault offset is checked rather
+ *  than trusted: the 32 bytes must be non-zero and off the ed25519 curve
+ *  (every fee-program account is a PDA), else the fallback is used and
+ *  `fromChain` goes false. The reserved recipient falls back to pump's
+ *  published #0 when the account is too short or the slot is zero. */
 export function parseGlobal(data: Uint8Array): GlobalConfig {
   const d = Buffer.from(data);
-  const fallback: GlobalConfig = { feeRecipient: PUMP_FEE_RECIPIENT_FALLBACK, feeVault: PUMP_FEE_VAULT_FALLBACK, fromChain: false };
+  const fallback: GlobalConfig = {
+    feeRecipient: PUMP_FEE_RECIPIENT_FALLBACK,
+    reservedFeeRecipient: PUMP_RESERVED_FEE_RECIPIENT_FALLBACK,
+    feeVault: PUMP_FEE_VAULT_FALLBACK,
+    fromChain: false,
+  };
   if (d.length < 73 || !d.subarray(0, 8).equals(GLOBAL_DISC)) return fallback;
   const feeRecipient = base58Encode(d.subarray(41, 73));
-  if (d.length < 997) return { ...fallback, feeRecipient };
+  const reservedBytes = d.length >= GLOBAL_RESERVED_FEE_RECIPIENT_OFFSET + 32 ? d.subarray(GLOBAL_RESERVED_FEE_RECIPIENT_OFFSET, GLOBAL_RESERVED_FEE_RECIPIENT_OFFSET + 32) : null;
+  const reservedFeeRecipient = reservedBytes && !reservedBytes.every((b) => b === 0) ? base58Encode(reservedBytes) : PUMP_RESERVED_FEE_RECIPIENT_FALLBACK;
+  if (d.length < 997) return { ...fallback, feeRecipient, reservedFeeRecipient };
   const vault = d.subarray(965, 997);
-  if (vault.every((b) => b === 0) || isOnCurve(vault)) return { ...fallback, feeRecipient };
-  return { feeRecipient, feeVault: base58Encode(vault), fromChain: true };
+  if (vault.every((b) => b === 0) || isOnCurve(vault)) return { ...fallback, feeRecipient, reservedFeeRecipient };
+  return { feeRecipient, reservedFeeRecipient, feeVault: base58Encode(vault), fromChain: true };
 }
 
 export interface CurveState {
@@ -286,29 +301,62 @@ export interface CurveState {
   /** `bonding_curve.creator` — the seed of `creator_vault`. Null on a legacy
    *  curve that predates the field (49 bytes). */
   creator: string | null;
+  /** `is_mayhem_mode` @81. A mayhem coin trades against inflated virtual
+   *  reserves (hundreds of SOL, so it can run to a six-figure cap while
+   *  still on the curve) and its trades must name a RESERVED fee recipient. */
+  mayhem: boolean;
+  /** `is_cashback_coin` @82. The creator fee is routed to the trader's
+   *  volume accumulator, which the SELL must then pass — before
+   *  `bonding_curve_v2` — or the program reverts `InvalidCashbackAccumulator`. */
+  cashback: boolean;
+  /** `quote_mint` @83. Null = SOL (the field is zero on every SOL-paired
+   *  curve). A non-null value is a stable-quoted curve the derived layout
+   *  does not model. */
+  quoteMint: string | null;
 }
 
 /** Parse a bonding-curve account: disc 8 · virtual_token 8 · virtual_sol 8 ·
- *  real_token 8 · real_sol 8 · supply 8 · complete 1 @48 · creator 32 @49. */
+ *  real_token 8 · real_sol 8 · supply 8 · complete 1 @48 · creator 32 @49 ·
+ *  is_mayhem_mode 1 @81 · is_cashback_coin 1 @82 · quote_mint 32 @83.
+ *  Accounts are 115 bytes at creation and grow to 151 on the first trade
+ *  (the tail is unassigned today); short legacy curves parse with the flags
+ *  off, which is what they mean. */
 export function parseCurve(data: Uint8Array): CurveState | null {
   const d = Buffer.from(data);
   if (d.length < 49 || !d.subarray(0, 8).equals(CURVE_DISC)) return null;
   const creatorBytes = d.length >= 81 ? d.subarray(49, 81) : null;
+  const quoteBytes = d.length >= 115 ? d.subarray(83, 115) : null;
   return {
     vTok: d.readBigUInt64LE(8),
     vSol: d.readBigUInt64LE(16),
     complete: d[48] !== 0,
     creator: creatorBytes && !creatorBytes.every((b) => b === 0) ? base58Encode(creatorBytes) : null,
+    mayhem: d.length > 81 && d[81] !== 0,
+    cashback: d.length > 82 && d[82] !== 0,
+    quoteMint: quoteBytes && !quoteBytes.every((b) => b === 0) ? base58Encode(quoteBytes) : null,
   };
 }
 
 
 
+/** Per-coin variations of the derived layout, read from the curve. */
+export interface LayoutOptions {
+  /** Cashback coin: the sell carries the user's volume accumulator as the
+   *  first remaining account, before `bonding_curve_v2`. The program checks
+   *  the order both ways — the accumulator on a non-cashback coin reverts
+   *  `InvalidBondingCurveV2 (6074)`, its absence on a cashback coin reverts
+   *  `InvalidCashbackAccumulator (6073)` (both measured 2026-09-07). Buys
+   *  carry it on every coin already. */
+  cashback?: boolean;
+}
+
 /** The current pump trade layouts, as slot roles. Buy = 18 accounts, sell =
- *  16 — the sell drops the two volume accumulators and swaps the order of
- *  creator_vault / token_program. Writable flags are the ones the program
- *  demands (a read-only flag on an account it mutates is a revert). */
-export function derivedTemplate(action: 'buy' | 'sell'): TradeTemplate {
+ *  16 (17 on a cashback coin) — the sell drops the global volume accumulator
+ *  and swaps the order of creator_vault / token_program. Writable flags are
+ *  the ones the program demands (a read-only flag on an account it mutates
+ *  is a revert). The last slot is a buyback fee recipient from Global; the
+ *  program rejects a sell without it (`BuybackFeeRecipientMissing`). */
+export function derivedTemplate(action: 'buy' | 'sell', opts: LayoutOptions = {}): TradeTemplate {
   const fixed = (pubkey: string): SlotRole => ({ kind: 'fixed', pubkey });
   const common = {
     global: fixed(globalFor()),
@@ -355,6 +403,7 @@ export function derivedTemplate(action: 'buy' | 'sell'): TradeTemplate {
           [common.program, false],
           [common.feeConfig, false],
           [common.feeProgram, false],
+          ...(opts.cashback ? [[{ kind: 'uva' }, true] as [SlotRole, boolean]] : []),
           [{ kind: 'bondingCurveV2' }, true],
           [{ kind: 'feeVault' }, true],
         ];
@@ -1158,8 +1207,14 @@ export interface LocalBuildParams {
   mint: string;
   creator: string;
   owner: string;
-  /** Buy: lamports to spend. Sell: ignored (sells are always 100%). */
+  /** Buy: lamports to spend. Sell: ignored (the sell is sized from the
+   *  token-account balance and `sellPct`). */
   solLamports: bigint;
+  /** Sell only: share of the token-account balance to sell, 1–100 (default
+   *  100). Below 100 the token account is left open — the remainder stays.
+   *  Added 2026-09-07 so partial sells (take-profit ladders) of coins only
+   *  this builder can trade — mayhem-mode — are not left to the relayer. */
+  sellPct?: number;
   slippagePct: number;
   priorityFeeSol: number;
   computeUnitLimit: number;
@@ -1193,6 +1248,20 @@ function u64le(v: bigint): Buffer {
   const b = Buffer.alloc(8);
   b.writeBigUInt64LE(v < 0n ? 0n : v);
   return b;
+}
+
+/** The share a sell asks for, clamped to 1–100 and whole; absent = all. */
+export function sellPctOf(pct: number | undefined): number {
+  if (pct === undefined || !Number.isFinite(pct)) return 100;
+  return Math.max(1, Math.min(100, Math.round(pct)));
+}
+
+/** Raw tokens a `pct`% sell moves out of a balance: everything at 100,
+ *  otherwise floor(balance × pct / 100) — the same rounding the Jupiter route
+ *  uses, so a ladder step sells the same amount whichever route builds it. */
+export function sellAmountFor(balance: bigint, pct: number | undefined): bigint {
+  const share = sellPctOf(pct);
+  return share >= 100 ? balance : (balance * BigInt(share)) / 100n;
 }
 
 /**
@@ -1330,6 +1399,12 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
   const curve = curveInfo ? parseCurve(curveInfo.data) : null;
   if (!curve) return { ok: false, message: 'bonding curve account is missing or unrecognised — not an open pump curve' };
   if (curve.complete) return { ok: false, message: 'bonding curve is complete (graduated) — not a curve trade' };
+  // A curve quoted in something other than SOL needs the 26-account
+  // `sell_v2` / `buy_v2` with quote-side ATAs this layout does not model.
+  // Refuse before building so the order falls straight to Jupiter.
+  if (curve.quoteMint) {
+    return { ok: false, message: `bonding curve is quoted in ${curve.quoteMint.slice(0, 6)}…, not SOL — the local builder only builds SOL curves` };
+  }
   // A legacy curve without a creator field seeds the vault with the default
   // pubkey. Trusting the API creator there is exactly the ConstraintSeeds
   // revert; the caller's creator is only used when the chain has none.
@@ -1356,7 +1431,8 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
     const bal = await getTokenBalanceRaw(p.httpUrl, userAta);
     if (!bal.ok || bal.data === undefined) return { ok: false, message: `token balance: ${bal.message}` };
     if (bal.data <= 0n) return { ok: false, message: 'nothing to sell (zero token balance)' };
-    amount = bal.data;
+    amount = sellAmountFor(bal.data, p.sellPct);
+    if (amount <= 0n) return { ok: false, message: `nothing to sell (${sellPctOf(p.sellPct)}% of ${bal.data} is zero)` };
     const q = sellQuote(amount, vSol, vTok);
     limit = (q.solOutLamports * BigInt(Math.round((1 - p.slippagePct / 100) * 10_000))) / 10_000n;
     solValueLamports = Number(q.solOutLamports);
@@ -1367,7 +1443,7 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
   let tpl: TradeTemplate;
   let observed: string[] | null = null;
   if (!derivedLayoutSuspended()) {
-    tpl = derivedTemplate(p.action);
+    tpl = derivedTemplate(p.action, { cashback: curve.cashback });
     lastBuildPath = 'derived';
   } else {
     const learned = await getTemplate(p.httpUrl, p.action);
@@ -1387,12 +1463,17 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
     observed = await observeRecentTrade(p.httpUrl, p.mint, tpl);
   }
   const global = await readGlobal(p.httpUrl);
+  // A mayhem-mode coin's trades must name one of pump's RESERVED fee
+  // recipients; the normal one reverts `NotAuthorized (6000)` on buy and
+  // sell alike (measured 2026-09-07 — the "previous runner" a user could
+  // not exit, because every fallback route was blind to the flag too).
+  const feeRecipient = curve.mayhem ? global.reservedFeeRecipient : global.feeRecipient;
 
   let keys;
   try {
     const filled = fillSlots(
       tpl,
-      { mint: p.mint, owner: p.owner, creator, tokenProgram, feeRecipient: global.feeRecipient, feeVault: global.feeVault },
+      { mint: p.mint, owner: p.owner, creator, tokenProgram, feeRecipient, feeVault: global.feeVault },
       observed,
     );
     keys = filled.map((pubkey, j) => ({
@@ -1433,11 +1514,12 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
     );
   }
   instructions.push(tradeIx);
-  if (p.action === 'sell') {
-    // Sells are always 100%, so the ATA is empty afterwards — close it in the
-    // same tx and reclaim the ~0.00203 SOL rent (2026-07-24 swarm: the leak
-    // exceeds pump fees at live sizes). If anything would leave dust, the
-    // close fails simulation and liveSigner falls back to the relayer path.
+  if (p.action === 'sell' && sellPctOf(p.sellPct) >= 100) {
+    // A 100% sell empties the ATA — close it in the same tx and reclaim the
+    // ~0.00203 SOL rent (2026-07-24 swarm: the leak exceeds pump fees at
+    // live sizes). If anything would leave dust, the close fails simulation
+    // and liveSigner falls back to the next route. A partial sell keeps the
+    // account: the remainder lives there.
     instructions.push(
       new TransactionInstruction({
         programId: new PublicKey(tokenProgram),
@@ -1463,9 +1545,10 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
       instructions,
       recentBlockhash: cachedBlockhash.value,
     });
+    const coinClass = `${curve.mayhem ? ', mayhem' : ''}${curve.cashback ? ', cashback' : ''}`;
     return {
       ok: true,
-      message: `local ${p.action} built (${tpl.slots.length}-slot ${lastBuildPath} layout)`,
+      message: `local ${p.action} built (${tpl.slots.length}-slot ${lastBuildPath} layout${coinClass})`,
       tx: new VersionedTransaction(message).serialize(),
       solValueLamports,
       lastValidBlockHeight: cachedBlockhash.lastValidBlockHeight,

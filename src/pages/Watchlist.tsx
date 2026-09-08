@@ -4,6 +4,7 @@ import type { TokenSummary } from '@shared/market';
 import { Empty, Page } from '../components/common';
 import { TokenCard } from '../components/terminal/TokenCard';
 import { useTerminal } from '../state/TerminalProvider';
+import { lastRows, rememberRows } from '../state/routeCache';
 
 // Watchlist — the pinned tokens from term.txt section 19.
 //
@@ -15,7 +16,19 @@ import { useTerminal } from '../state/TerminalProvider';
 
 export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const term = useTerminal();
-  const [rows, setRows] = useState<Record<string, TokenSummary>>({});
+  // Paint the last rows this session saw for each pin — the previous visit,
+  // or Discover's own feed — on the first frame; the batch below refreshes
+  // them in place. Rows started empty on every mount and the page showed
+  // spinner plates for 1–2 s under a rate limit (measured 2026-09-08).
+  const [rows, setRows] = useState<Record<string, TokenSummary>>(() => {
+    const out: Record<string, TokenSummary> = {};
+    for (const m of term.watchlist) {
+      let hit: TokenSummary | null = lastRows.get(m) ?? null;
+      if (!hit) for (const c of Object.values(term.columns)) hit = hit ?? c.rows.find((r) => r.mint === m) ?? null;
+      if (hit) out[m] = hit;
+    }
+    return out;
+  });
   const [loading, setLoading] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
@@ -29,6 +42,7 @@ export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string) => 
       const r = await window.krypt.market.summaries(term.watchlist);
       if (r.ok && r.data) {
         // A parked provider leaves the previous rows on screen with a note.
+        rememberRows(Object.values(r.data));
         setRows((prev) => ({ ...prev, ...r.data }));
         setNote(r.message !== 'ok' ? r.message : null);
       } else {

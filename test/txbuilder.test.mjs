@@ -31,6 +31,8 @@ import {
   derivedLayoutSuspended,
   resetDerivedState,
   markLastBuildPath,
+  sellAmountFor,
+  sellPctOf,
 } from './.txbuilder.mjs';
 
 let passed = 0;
@@ -395,6 +397,104 @@ test('three derived-layout simulation failures inside ten minutes suspend it; le
   assert.match(templateInfo(), /derived: suspended/);
   resetDerivedState();
   assert.equal(derivedLayoutSuspended(), false);
+});
+
+// ── Coin classes: mayhem-mode and cashback (2026-09-07) ─────────────
+//
+// Pump's curves now come in three classes and the program checks the trade
+// against the class. GROUND TRUTH, measured by simulating real holders'
+// trades on 2026-09-07:
+//   • mayhem (curve byte 81): buy AND sell revert `NotAuthorized (6000)`
+//     with the normal fee recipient; a RESERVED one (Global @483) passes.
+//     Jupiter has no route for these, and the relayer's build reverted
+//     `Overflow (6024)` — the user-visible failure that started this.
+//   • cashback (curve byte 82): the sell must pass the user's volume
+//     accumulator BEFORE bonding_curve_v2 or it reverts
+//     `InvalidCashbackAccumulator (6073)`; the same slot on a non-cashback
+//     coin reverts `InvalidBondingCurveV2 (6074)`; dropping the last
+//     (buyback) slot reverts `BuybackFeeRecipientMissing (6062)`.
+// The fixture holds the three real curve accounts and Global at capture.
+const CLASSES = JSON.parse(fs.readFileSync(new URL('./fixtures/pump-curve-classes.json', import.meta.url), 'utf8'));
+const RESERVED_FEE_RECIPIENT_0 = 'GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS';
+
+test('parseCurve reads the mayhem and cashback flags off real curves, and SOL as a null quote mint', () => {
+  const mayhem = parseCurve(b64(CLASSES.mayhem.dataB64));
+  const cashback = parseCurve(b64(CLASSES.cashback.dataB64));
+  const normal = parseCurve(b64(CLASSES.normal.dataB64));
+  assert.deepEqual([mayhem.mayhem, mayhem.cashback], [true, false]);
+  assert.deepEqual([cashback.mayhem, cashback.cashback], [false, true]);
+  assert.deepEqual([normal.mayhem, normal.cashback], [false, false]);
+  for (const c of [mayhem, cashback, normal]) {
+    assert.equal(c.complete, false);
+    assert.equal(c.quoteMint, null, 'SOL-paired: the quote_mint field is zero');
+    assert.ok(c.creator, 'creator still parses');
+  }
+  assert.ok(mayhem.vSol > 100_000_000_000n, 'a mayhem curve trades against inflated virtual SOL');
+});
+
+test('parseCurve: a legacy short curve has the flags OFF, and a non-SOL quote mint is surfaced', () => {
+  const full = Buffer.from(b64(CLASSES.normal.dataB64));
+  const legacy = parseCurve(full.subarray(0, 81));
+  assert.deepEqual([legacy.mayhem, legacy.cashback, legacy.quoteMint], [false, false, null]);
+  const usdc = Buffer.from(full);
+  Buffer.from(new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v').toBytes()).copy(usdc, 83);
+  assert.equal(parseCurve(usdc).quoteMint, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+});
+
+test('parseGlobal reads the reserved (mayhem) fee recipient at offset 483 — pump\'s published #0', () => {
+  const g = parseGlobal(b64(CLASSES.global.dataB64));
+  assert.equal(g.reservedFeeRecipient, RESERVED_FEE_RECIPIENT_0);
+  assert.notEqual(g.reservedFeeRecipient, g.feeRecipient, 'a different account from the normal recipient');
+  assert.equal(g.fromChain, true);
+  // Too short for the field: the documented #0 stands in, never the normal one.
+  const short = parseGlobal(b64(CLASSES.global.dataB64).subarray(0, 200));
+  assert.equal(short.reservedFeeRecipient, RESERVED_FEE_RECIPIENT_0);
+});
+
+test('a cashback SELL carries the user volume accumulator right before bonding_curve_v2, buyback last', () => {
+  const tpl = derivedTemplate('sell', { cashback: true });
+  assert.equal(tpl.slots.length, 17);
+  assert.equal(tpl.slots[14].kind, 'uva');
+  assert.equal(tpl.writable[14], true, 'the accumulator is mutated (creator fee lands in it)');
+  assert.equal(tpl.slots[15].kind, 'bondingCurveV2');
+  assert.equal(tpl.slots[16].kind, 'feeVault');
+  const filled = fillSlots(tpl, refFill);
+  assert.equal(filled[14], REF_BUY[13], 'the same accumulator PDA the buy already carries');
+  assert.deepEqual([...filled.slice(0, 14), ...filled.slice(15)], REF_SELL, 'every other slot is the plain sell');
+});
+
+test('a non-cashback SELL and every BUY are byte-for-byte what they were', () => {
+  assert.deepEqual(fillSlots(derivedTemplate('sell', { cashback: false }), refFill), REF_SELL);
+  assert.deepEqual(fillSlots(derivedTemplate('sell'), refFill), REF_SELL);
+  assert.deepEqual(fillSlots(derivedTemplate('buy', { cashback: true }), refFill), REF_BUY, 'buys already carry the accumulator');
+});
+
+test('a mayhem coin fills slot 1 with the reserved recipient and nothing else moves', () => {
+  const g = parseGlobal(b64(CLASSES.global.dataB64));
+  for (const action of ['buy', 'sell']) {
+    const filled = fillSlots(derivedTemplate(action), { ...refFill, feeRecipient: g.reservedFeeRecipient });
+    const plain = fillSlots(derivedTemplate(action), refFill);
+    assert.equal(filled[1], RESERVED_FEE_RECIPIENT_0);
+    assert.deepEqual(filled.slice(2), plain.slice(2));
+    assert.equal(filled[0], plain[0]);
+  }
+});
+
+test('a partial sell moves exactly floor(balance × pct / 100); 100% and "absent" move everything', () => {
+  // Before 2026-09-07 the local builder hardcoded the full balance, so a
+  // partial request had to be withheld from it or it would have emptied the
+  // bag under a "sold 25%" toast. Now it sizes like the Jupiter route does.
+  const bal = 34_199_203_154_141n;
+  assert.equal(sellAmountFor(bal, undefined), bal);
+  assert.equal(sellAmountFor(bal, 100), bal);
+  assert.equal(sellAmountFor(bal, 150), bal, 'clamped to 100');
+  assert.equal(sellAmountFor(bal, 50), bal / 2n);
+  assert.equal(sellAmountFor(bal, 25), (bal * 25n) / 100n);
+  assert.equal(sellAmountFor(bal, 1), bal / 100n);
+  assert.equal(sellAmountFor(bal, 0), bal / 100n, 'never zero: the floor is 1%');
+  assert.equal(sellAmountFor(bal, 33.4), (bal * 33n) / 100n, 'whole percent');
+  assert.equal(sellAmountFor(3n, 50), 1n, 'floors, never rounds up past what is held');
+  assert.equal(sellPctOf(NaN), 100);
 });
 
 async function run() {

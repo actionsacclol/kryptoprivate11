@@ -11,8 +11,17 @@
 // live tape when the engine is tracking the mint, and otherwise returns 1m
 // with `note` set so the UI can say so instead of pretending.
 
-import { getJson, memo } from '../http';
+import { cached, getJson, memo, putCache } from '../http';
 import { normaliseCandles, type Candle, type CandleInterval, type TokenPool } from '@shared/market';
+
+// "Nothing here" is an answer worth remembering. memo() never stores null,
+// so a token GeckoTerminal has no pool or no candles for was re-asked on
+// every chart poll — two calls on a 2.1 s-gap host, 3–4 s per candle load
+// for every bonding-curve token (measured 2026-09-08). These markers are
+// written ONLY for a real empty reply, never for a 429, a park or a failed
+// request, so a rate limit can never poison them.
+const NONE_POOLS_MS = 45_000;
+const NONE_OHLCV_MS = 30_000;
 
 interface OhlcvResponse {
   data?: { attributes?: { ohlcv_list?: number[][] } };
@@ -42,6 +51,7 @@ export async function ohlcv(
   const spec = TIMEFRAME[interval];
   if (!spec) return null;
   const key = `gt:ohlcv:${pool}:${interval}:${limit}`;
+  if (cached<boolean>(`gt:ohlcv:none:${pool}:${interval}`)) return null;
   // A 1m candle is only interesting once it closes; caching for a third of
   // the bucket keeps the chart live without spending the rate budget.
   const ttl = spec.tf === 'minute' ? spec.agg * 20_000 : 60_000;
@@ -60,6 +70,7 @@ export async function ohlcv(
       { priority: opts.priority },
     );
     const list = r.ok ? r.data?.data?.attributes?.ohlcv_list : null;
+    if (r.ok && Array.isArray(list) && !list.length) putCache(`gt:ohlcv:none:${pool}:${interval}`, true, NONE_OHLCV_MS);
     if (!Array.isArray(list) || !list.length) return null;
     const candles: Candle[] = [];
     for (const row of list) {
@@ -88,14 +99,18 @@ interface PoolsResponse {
   }>;
 }
 
-/** Pools for a mint — the fallback when DexScreener has not indexed it. */
-export async function poolsForToken(mint: string): Promise<TokenPool[]> {
+/** Pools for a mint — the fallback when DexScreener has not indexed it.
+ *  `priority` puts the visible chart's lookup ahead of background polls. */
+export async function poolsForToken(mint: string, opts: { priority?: boolean } = {}): Promise<TokenPool[]> {
+  if (cached<boolean>(`gt:pools:none:${mint}`)) return [];
   const hit = await memo<TokenPool[]>(`gt:pools:${mint}`, 60_000, async () => {
     const r = await getJson<PoolsResponse>(
       'geckoterminal',
       `/api/v2/networks/solana/tokens/${encodeURIComponent(mint)}/pools?page=1`,
+      { priority: opts.priority },
     );
     if (!r.ok || !Array.isArray(r.data?.data)) return null;
+    if (!r.data.data.length) putCache(`gt:pools:none:${mint}`, true, NONE_POOLS_MS);
     const pools: TokenPool[] = [];
     for (const p of r.data.data) {
       const address = p.attributes?.address;

@@ -761,12 +761,15 @@ export async function getTokenAccountsByOwner(
     };
   }
   const out: TokenAccountHolding[] = [];
-  for (const programId of TOKEN_PROGRAMS) {
-    const r = await call<{ value: ParsedTokenAccount[] }>(httpUrl, 'getTokenAccountsByOwner', [
-      owner,
-      { programId },
-      { encoding: 'jsonParsed', commitment: 'confirmed' },
-    ]);
+  // Both token programs at once: the two reads were sequential, so every
+  // holdings refresh paid two RPC round trips end to end (2026-09-08). Still
+  // through call() — its park fallback and 401/403 failover — not the batch.
+  const results = await Promise.all(
+    TOKEN_PROGRAMS.map((programId) =>
+      call<{ value: ParsedTokenAccount[] }>(httpUrl, 'getTokenAccountsByOwner', [owner, { programId }, { encoding: 'jsonParsed', commitment: 'confirmed' }]).then((r) => ({ programId, r })),
+    ),
+  );
+  for (const { programId, r } of results) {
     if (!r.ok) return { ok: false, message: r.message };
     for (const acc of r.data?.value ?? []) {
       const info = acc.account?.data?.parsed?.info;

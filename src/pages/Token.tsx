@@ -30,6 +30,7 @@ import { PositionPanel } from '../components/terminal/PositionPanel';
 import { AlertsPanel } from '../components/terminal/AlertsPanel';
 import { AiPanel } from '../components/terminal/AiPanel';
 import { useTerminal } from '../state/TerminalProvider';
+import { lastRows } from '../state/routeCache';
 import { useToast } from '../state/ToastProvider';
 import { cls, fmtAge, fmtChange, fmtNum, fmtPriceUsd, fmtUsd, scoreTone, shortAddr, toneFor } from '../utils/format';
 
@@ -70,8 +71,20 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
 
   const [detail, setDetail] = useState<TokenDetail | null>(null);
   /** Header data, fetched separately so the page paints before the slow
-   *  parts finish. See loadDetail. */
-  const [quick, setQuick] = useState<TokenSummary | null>(null);
+   *  parts finish. See loadDetail. Seeded from the row the user clicked —
+   *  Discover's columns or the last rows any panel painted — so the page
+   *  has a header on its first frame instead of a spinner for the 0.3–1 s
+   *  the provider assembly takes (measured 2026-09-08). Keyed on the mint
+   *  only: the columns' identity changes on every poll. */
+  const seeded = useMemo(() => {
+    for (const c of Object.values(term.columns)) {
+      const hit = c.rows.find((r) => r.mint === mint);
+      if (hit) return hit;
+    }
+    return lastRows.get(mint) ?? null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mint]);
+  const [quick, setQuick] = useState<TokenSummary | null>(seeded);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -116,7 +129,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
-  const [solUsd, setSolUsd] = useState<number | null>(null);
+  const [solUsd, setSolUsd] = useState<number | null>(() => (seeded?.priceUsd && seeded.priceSol ? seeded.priceUsd / seeded.priceSol : null));
   // Bumped after every trade so the position panel re-reads the chain.
   const [posKey, setPosKey] = useState(0);
 
@@ -181,17 +194,19 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   const liveActiveRef = useRef<boolean | null>(null);
 
   const loadWalletState = useCallback(async () => {
-    const [s, w, l] = await Promise.all([
-      window.krypt.settings.get(),
-      // One chain read on open (same shape as info()); the cached info is the
-      // fallback. Without this a token opened before the Wallet page showed
-      // an unknown balance, which the panel read as "no SOL".
-      window.krypt.wallet.refreshBalance().then((r) => (r.ok && r.data ? r : window.krypt.wallet.info())),
-      window.krypt.live.state(),
-    ]);
+    // The three synchronous main-side reads first, so the trade panel exists
+    // one IPC round trip after open; the chain balance read follows as a
+    // patch. It used to gate all three (177–262 ms, up to 8 s under a park).
+    const [s, w, l] = await Promise.all([window.krypt.settings.get(), window.krypt.wallet.info(), window.krypt.live.state()]);
     if (s.ok && s.data) setSettings(s.data);
     if (w.ok && w.data) setWallet(w.data);
     if (l.ok && l.data) setLive(l.data);
+    // One chain read on open (same shape as info()). Without it a token
+    // opened before the Wallet page showed an unknown balance, which the
+    // panel read as "no SOL". onTraded relies on this refresh too.
+    void window.krypt.wallet.refreshBalance().then((r) => {
+      if (r.ok && r.data) setWallet(r.data);
+    });
   }, []);
 
   const loadAlerts = useCallback(async () => {

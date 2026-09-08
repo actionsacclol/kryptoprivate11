@@ -51,7 +51,7 @@ import {
   type TradeRow,
   type TraderScanRow,
 } from '@shared/market';
-import { cached, cooldownRemainingMs, memo, providerHost, queueDepth, telemetry } from './http';
+import { cached, cooldownRemainingMs, memo, providerHost, putCache, queueDepth, telemetry } from './http';
 import * as jup from './providers/jupiter';
 import * as ds from './providers/dexscreener';
 import * as pf from './providers/pumpfun';
@@ -1061,6 +1061,10 @@ export function summaryIfCached(mint: string): TokenSummary | null {
 
 export async function summary(mint: string): Promise<TokenSummary> {
   const hit = await memo<TokenSummary>(`market:summary:${mint}`, SUMMARY_TTL_MS, () => buildSummary(mint));
+  // A mint no provider can price is remembered as such for five minutes —
+  // ONLY read by callers that opt in (`summaryMany(…, { skipUnpriceable })`,
+  // the portfolio's off-path naming). The trade path never sees the marker.
+  if (!hit || (hit.priceSol === null && hit.priceUsd === null)) putCache(`market:nopx:${mint}`, true, 300_000);
   return hit ?? emptySummary(mint);
 }
 
@@ -1080,10 +1084,13 @@ export async function summary(mint: string): Promise<TokenSummary> {
 export async function summaryMany(
   mints: string[],
   concurrency = 4,
-  opts: { priority?: boolean } = {},
+  opts: { priority?: boolean; skipUnpriceable?: boolean } = {},
 ): Promise<Map<string, TokenSummary>> {
   const out = new Map<string, TokenSummary>();
-  const unique = [...new Set(mints.filter(Boolean))];
+  const all = [...new Set(mints.filter(Boolean))];
+  // Opt-in: leave out mints marked unpriceable in the last five minutes
+  // (dead launches re-walking parked providers). Never on the trade path.
+  const unique = opts.skipUnpriceable ? all.filter((m) => !cached<boolean>(`market:nopx:${m}`)) : all;
   if (!unique.length) return out;
   const cold = unique.filter((m) => summaryIfCached(m) === null);
   if (cold.length && usable('jupiter')) {
@@ -1209,13 +1216,13 @@ export async function tokenDetail(mint: string): Promise<TokenDetail> {
   return { summary: s, security, pools, liveTrades, warnings };
 }
 
-async function poolsFor(mint: string, s: TokenSummary): Promise<TokenPool[]> {
+async function poolsFor(mint: string, s: TokenSummary, opts: { priority?: boolean } = {}): Promise<TokenPool[]> {
   if (usable('dexscreener')) {
     const info = await ds.tokenInfo(mint);
     if (info?.pools.length) return info.pools;
   }
   if (usable('geckoterminal')) {
-    const pools = await gt.poolsForToken(mint);
+    const pools = await gt.poolsForToken(mint, opts);
     if (pools.length) return pools;
   }
   if (s.poolAddress) {
@@ -1341,6 +1348,16 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
         : 'Built from this app’s own live feed.',
   });
 
+  // A pump token still on its launch curve has no pool for GeckoTerminal to
+  // know about (`poolAddress` is the curve itself before migration); the
+  // tape IS its chart, and Birdeye (keyed, step 1) still gets its say.
+  // Asking GeckoTerminal anyway cost 3–4 s per candle load on every
+  // bonding-curve token (measured 2026-09-08; 7–9 s once the host was
+  // parked): two calls on a 2.1 s-gap host, re-paid on each poll because
+  // "nothing" is never cached. Migrated tokens keep the walk.
+  const stillOnCurve = s.launchpad === 'pumpfun' && s.bondingCurvePct !== null && s.bondingCurvePct < 100;
+  const skipProviderWalk = stillOnCurve;
+
   // 1. Provider history at the REQUESTED interval. Precedence unchanged:
   //    Birdeye when the user brought a key, else GeckoTerminal.
   let history: Candle[] | null = null;
@@ -1352,8 +1369,8 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       historySource = 'birdeye';
     }
   }
-  if (!history && !subMinute && usable('geckoterminal') && gt.supports(interval)) {
-    const pools = await poolsFor(mint, s);
+  if (!history && !subMinute && !skipProviderWalk && usable('geckoterminal') && gt.supports(interval)) {
+    const pools = await poolsFor(mint, s, { priority: true });
     const pool = pools[0]?.address ?? s.poolAddress;
     if (pool) {
       const rows = await gt.ohlcv(pool, interval, limit, { priority: true });
@@ -1393,8 +1410,8 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
   //    GeckoTerminal chart with a note, exactly as before. A tape that can
   //    already draw the real interval skips this — real 1s beats degraded 1m.
   const TAPE_CAN_LEAD_AT = 30;
-  if (subMinute && tapeSol.length < TAPE_CAN_LEAD_AT && usable('geckoterminal')) {
-    const pools = await poolsFor(mint, s);
+  if (subMinute && tapeSol.length < TAPE_CAN_LEAD_AT && !skipProviderWalk && usable('geckoterminal')) {
+    const pools = await poolsFor(mint, s, { priority: true });
     const pool = pools[0]?.address ?? s.poolAddress;
     if (pool) {
       const rows = await gt.ohlcv(pool, '1m', limit, { priority: true });
@@ -1607,21 +1624,80 @@ function quickSeries(mint: string, interval: CandleInterval, limit: number): Can
   return null;
 }
 
+/** How long the fast path waits on a full load when it holds nothing at
+ *  all: enough for a token with a cached summary to answer, short enough
+ *  that the page never sits on a spinner for a provider walk (7–9 s measured
+ *  2026-09-08 on fresh curve tokens with the chart host parked). */
+const FAST_BUDGET_MS = 1_200;
+
+/** The honest "nothing yet" answer: no candles, marked pending, so the page
+ *  keeps its spinner until the push below replaces it. */
+function placeholderSeries(mint: string, interval: CandleInterval): CandleSeries {
+  return {
+    mint,
+    interval,
+    unit: 'usd',
+    candles: [],
+    source: 'none',
+    supplyForMcap: cached<TokenSummary>(`market:summary:${mint}`)?.circSupply ?? null,
+    note: 'Loading history…',
+    pending: true,
+  };
+}
+
+/** One push per landed load, however many fast answers were handed out
+ *  while it ran. A load that answered a placeholder pushes even an empty
+ *  series (the page is waiting on it to drop the spinner and show the
+ *  note); one that upgraded a real quick answer pushes only when it has
+ *  candles to add. */
+const pushing = new Set<string>();
+function pushWhenLanded(key: string, full: Promise<CandleSeries>, afterPlaceholder: boolean): void {
+  if (pushing.has(key)) return;
+  pushing.add(key);
+  full
+    .then((f) => {
+      if (f.candles.length || afterPlaceholder) onSeriesReady?.(f);
+    })
+    .catch((err: unknown) => {
+      if (!afterPlaceholder) return; // the quick answer stands; the tail poll retries
+      const [mint, interval] = key.split(':') as [string, CandleInterval];
+      onSeriesReady?.({ ...placeholderSeries(mint, interval), pending: false, note: `Chart load failed: ${(err as Error).message}` });
+    })
+    .finally(() => pushing.delete(key));
+}
+
 /**
- * Instant answer when one exists, full load otherwise. Either way the full
- * merged series is (re)loaded and pushed via onCandlesReady when it lands.
+ * Instant answer when one exists, full load otherwise — but never a long
+ * one: past FAST_BUDGET_MS the caller gets a pending placeholder. Either way
+ * the full merged series is (re)loaded and pushed via onCandlesReady when
+ * it lands.
  */
 export async function candlesFast(mint: string, interval: CandleInterval, limit = 500): Promise<CandleSeries> {
+  const key = `${mint}:${interval}`;
   const quick = quickSeries(mint, interval, limit);
-  if (!quick) return candlesShared(mint, interval, limit);
-  void candlesShared(mint, interval, limit)
-    .then((full) => {
-      if (full.candles.length) onSeriesReady?.(full);
-    })
-    .catch(() => {
-      /* the fast answer stands; the tail poll retries the provider */
-    });
-  return quick;
+  const full = candlesShared(mint, interval, limit);
+  if (quick) {
+    pushWhenLanded(key, full, false);
+    return quick;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const budget = new Promise<'budget'>((res) => {
+    timer = setTimeout(() => res('budget'), FAST_BUDGET_MS);
+  });
+  const settled = await Promise.race([
+    full.then(
+      (f) => ({ f }),
+      (err: unknown) => ({ err }),
+    ),
+    budget,
+  ]);
+  clearTimeout(timer);
+  if (settled !== 'budget') {
+    if ('f' in settled) return settled.f;
+    throw settled.err;
+  }
+  pushWhenLanded(key, full, true);
+  return placeholderSeries(mint, interval);
 }
 
 // ── Holders ───────────────────────────────────────────────────────────

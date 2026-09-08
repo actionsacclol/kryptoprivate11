@@ -346,6 +346,13 @@ export interface WalletHolding {
   decimals: number;
   /** Symbol if this session's engine has metadata for the mint. */
   symbol: string | null;
+  /** Token program that owns the account (classic SPL or Token-2022). */
+  programId?: string;
+  /** Why this holding may not be sellable — a Token-2022 mint with a
+   *  permanent delegate (spam airdrop), a transfer hook, or no transfers at
+   *  all. Null when the mint carries nothing suspicious; absent when the
+   *  mint could not be read (honest-null: unknown is not "fine"). */
+  warning?: string | null;
 }
 
 /** Bump when a persisted setting must be force-corrected on existing installs.
@@ -392,6 +399,21 @@ export interface AppSettings {
   watchOnBuy: boolean;
   /** Record every decoded event + decision to JSONL for replay. */
   recorderEnabled: boolean;
+  /**
+   * Replace the WebGL scenes (the Dashboard observatory, the Wallet tome)
+   * with a still. They are decoration that renders every frame through the
+   * GPU driver — the one thing a user-mode app can do that provokes a bad
+   * driver into a blue screen (a user's BSOD, 2026-09-08). Off by default;
+   * takes effect on the next page visit, no restart.
+   */
+  reduceEffects: boolean;
+  /**
+   * Let Chromium render through the GPU. Off = software rendering: slower,
+   * but it never touches the graphics driver. Read before the app is ready
+   * (main.ts), so it applies on the next start. Turned off automatically
+   * after the GPU process dies twice in one run.
+   */
+  hardwareAcceleration: boolean;
   /**
    * Ceiling in GB for the recordings directory; oldest day files are pruned
    * to stay under it. 0 = no cap (deliberate, for a dedicated drive).
@@ -752,6 +774,18 @@ export type EngineEvent =
   | { kind: 'alerts'; alerts: import('./alerts').Alert[] }
   /** Copy-trade configs or results changed. */
   | { kind: 'copy'; snapshot: import('./copytrade').CopySnapshot }
+  /** User scripts and rules changed — a save, a fire, a refusal, a log line. */
+  | { kind: 'automation'; snapshot: import('./automation').ScriptSnapshot }
+  /** A script asked to pin (or unpin) a token on the renderer's Watchlist. */
+  | { kind: 'pin'; mint: string; on: boolean }
+  /** The portfolio was rebuilt (by any caller). Pages paint from it instead
+   *  of each asking for their own build (2026-09-08: Portfolio took 5–7 s to
+   *  show anything, every visit). */
+  | { kind: 'portfolio'; summary: import('./portfolio').PortfolioSummary }
+  /** The wallet's token accounts were re-read and differ from the last snapshot. */
+  | { kind: 'holdings'; data: WalletHolding[]; at: number }
+  /** The active signer changed — every renderer cache keyed by wallet is void. */
+  | { kind: 'walletSwitched'; publicKey: string | null }
   /**
    * A live trade on a mint the terminal has open (tape-subscribed). Priced
    * in SOL per token — the renderer converts to the chart's unit, and drops
@@ -879,6 +913,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   onboarded: false,
   watchOnBuy: true,
   recorderEnabled: false,
+  reduceEffects: false,
+  hardwareAcceleration: true,
   recorderDir: '',
   recorderMaxGb: 2,
   recordFirehose: false,

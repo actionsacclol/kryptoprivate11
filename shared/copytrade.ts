@@ -101,6 +101,24 @@ export interface CopyTrade {
   state: CopyTradeState;
   /** Why it was skipped, when it was. */
   reason: string | null;
+  /**
+   * `exit` = one sell mirrored from the leader (2026-09-08): a slice of a
+   * copy, where `ourSol` is the cost basis of the share sold and `pnlSol`
+   * its realised result. Absent = a copy (a buy). Until this existed a
+   * leader's sell only marked the copy closed — no sell was placed, and the
+   * history said "closed" over a wallet that still held every token.
+   */
+  kind?: 'exit';
+  /** Exit: the copy it came out of. */
+  parentId?: string;
+  /** Exit: share of what we HELD that was sold, 1–100 — the leader's own fraction. */
+  soldPct?: number;
+  /** Copy: how much of it is still held, 0–100. Absent = all of it. */
+  remainingPct?: number;
+  /** Copy: realised across its exits so far, SOL. */
+  realizedSol?: number;
+  /** Transaction of a live fill, when there was one. */
+  signature?: string | null;
 }
 
 /**

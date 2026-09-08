@@ -66,6 +66,19 @@ export default defineConfig(({ mode }) => {
             },
           },
         },
+        {
+          // The script sandbox's preload: one message channel, nothing else.
+          // Built as its own entry so the sandbox window never loads the
+          // main preload (which exposes the whole app API).
+          entry: 'electron/scriptPreload.ts',
+          vite: {
+            build: {
+              outDir: 'dist-electron',
+              sourcemap,
+              rollupOptions: { output: stableNames },
+            },
+          },
+        },
       ]),
       rendererPlugin(),
     ],

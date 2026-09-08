@@ -263,7 +263,12 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
 
   const refreshProviders = useCallback(async () => {
     const r = await window.krypt.market.providers();
-    if (r.ok && r.data) setProviders(r.data);
+    // Same status → same array. Every column load asks for this, and a new
+    // identity for unchanged data re-rendered every consumer of the context.
+    if (r.ok && r.data) {
+      const next = r.data;
+      setProviders((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    }
   }, []);
 
   useEffect(() => {
@@ -460,6 +465,22 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
   // land here the same way. Never removes anything.
   useEffect(() => {
     const off = window.krypt.engine.onEvent((ev) => {
+      // A user script's watch / unwatch (Automation → Scripts). The list is
+      // the renderer's, so main asks; this is the only writer besides clicks.
+      if (ev.kind === 'pin') {
+        setWatchlist((cur) => {
+          const has = cur.includes(ev.mint);
+          if (ev.on === has) return cur;
+          const next = ev.on ? [ev.mint, ...cur] : cur.filter((m) => m !== ev.mint);
+          try {
+            localStorage.setItem(WATCH_KEY, JSON.stringify(next));
+          } catch {
+            /* non-fatal */
+          }
+          return next;
+        });
+        return;
+      }
       if (ev.kind !== 'fill' || ev.side !== 'buy' || ev.state === 'failed') return;
       void window.krypt.settings.get().then((s) => {
         if (!s.ok || !s.data?.watchOnBuy) return;

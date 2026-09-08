@@ -38,6 +38,9 @@ let saveTimer: NodeJS.Timeout | null = null;
 export interface CopyHost {
   /** Fire a real buy. Only called for a `live` config. */
   buy(mint: string, sol: number): Promise<{ ok: boolean; message: string; signature?: string }>;
+  /** Sell `pct`% of what THIS wallet holds of `mint`. Only called for a
+   *  `live` config, and only a confirmed fill may answer `ok`. */
+  sell(mint: string, pct: number): Promise<{ ok: boolean; message: string; signature?: string }>;
   /** Why a LIVE copy cannot execute, or null. Paper ignores this. */
   liveBlockedReason(): string | null;
   /** Current spot price in SOL for a mint, if known. */
@@ -151,19 +154,23 @@ export function activeWallets(): Set<string> {
 
 function statsFor(c: CopyConfig): CopyStats {
   const mine = trades.filter((t) => t.configId === c.id);
+  // A copy is a buy; its exits are slices of it. Realised PnL lives on the
+  // slices (and on copies closed whole before slices existed) — a copy
+  // closed through its slices carries none itself, so nothing counts twice.
+  const copies = mine.filter((t) => t.kind !== 'exit');
   const closed = mine.filter((t) => t.state === 'closed' && t.pnlSol !== null);
-  const open = mine.filter((t) => t.state === 'open');
+  const open = copies.filter((t) => t.state === 'open');
   return {
     configId: c.id,
     mode: c.mode,
-    trades: mine.filter((t) => t.state !== 'skipped').length,
+    trades: copies.filter((t) => t.state !== 'skipped').length,
     wins: closed.filter((t) => (t.pnlSol as number) > 0).length,
     losses: closed.filter((t) => (t.pnlSol as number) < 0).length,
     realizedPnlSol: closed.reduce((a, t) => a + (t.pnlSol as number), 0),
     openCount: open.length,
-    openCostSol: open.reduce((a, t) => a + t.ourSol, 0),
-    skipped: mine.filter((t) => t.state === 'skipped' && t.reason !== null && !t.reason.startsWith('limit')).length,
-    blocked: mine.filter((t) => t.state === 'skipped' && t.reason?.startsWith('limit')).length,
+    openCostSol: open.reduce((a, t) => a + t.ourSol * ((t.remainingPct ?? 100) / 100), 0),
+    skipped: copies.filter((t) => t.state === 'skipped' && t.reason !== null && !t.reason.startsWith('limit')).length,
+    blocked: copies.filter((t) => t.state === 'skipped' && t.reason?.startsWith('limit')).length,
     firstAt: mine.length ? Math.min(...mine.map((t) => t.at)) : null,
     lastAt: mine.length ? Math.max(...mine.map((t) => t.at)) : null,
   };
@@ -198,7 +205,9 @@ function todayFor(configId: string): CopyTrade[] {
 
 function limitHit(c: CopyConfig): string | null {
   const today = todayFor(c.id);
-  if (today.length >= c.dailyTradeLimit) return `limit: ${c.dailyTradeLimit} copies today`;
+  // Exits are not copies: a leader who scales out in four sells has not
+  // used four of the day's copies. Their realised losses DO count below.
+  if (today.filter((t) => t.kind !== 'exit').length >= c.dailyTradeLimit) return `limit: ${c.dailyTradeLimit} copies today`;
   const realized = today
     .filter((t) => t.state === 'closed' && t.pnlSol !== null)
     .reduce((a, t) => a + (t.pnlSol as number), 0);
@@ -227,6 +236,9 @@ export interface WalletTrade {
    *  from the curve firehose and from the wallet watcher — and must be
    *  evaluated once. */
   signature?: string;
+  /** Sell: the share of their holding they sold, 0–1 (walletSwap). Null or
+   *  absent = unknown, mirrored as "all of it". */
+  soldFraction?: number | null;
 }
 
 /** Signatures already evaluated, newest last; bounded. */
@@ -265,38 +277,176 @@ export function onWalletTrade(t: WalletTrade): void {
 
   for (const c of matching) {
     if (!t.isBuy) {
-      if (c.copySells) closeOpen(c, t);
+      if (c.copySells) queueExit(c, t);
       continue;
     }
     void evaluateBuy(c, t);
   }
 }
 
-function closeOpen(c: CopyConfig, t: WalletTrade): void {
-  const open = trades.filter((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open');
-  if (!open.length) return;
-  for (const x of open) {
-    const exit = t.priceSol > 0 ? t.priceSol : (host?.priceSol(t.mint) ?? null);
-    if (exit === null || x.entryPriceSol === null || x.entryPriceSol <= 0) {
-      x.state = 'closed';
-      x.closedAt = t.at;
-      x.pnlSol = null;
-      continue;
-    }
-    x.exitPriceSol = exit;
-    x.closedAt = t.at;
-    // A paper round trip pays what a real one would: pump's 1 % on each
-    // side, and Krypt's own fee on each side. Charging one side only (which
-    // is what a single 0.99 did) reports a profit the identical real trades
-    // would not have made.
-    const sideCost = 0.01 + FEE_BPS / 10_000;
-    const gross = x.ourSol * (exit / x.entryPriceSol);
-    x.pnlSol = gross * (1 - sideCost) - x.ourSol * (1 + sideCost);
+// ── Mirrored sells ────────────────────────────────────────────────────
+//
+// Until 2026-09-08 a leader's sell only marked the copy closed: no sell was
+// placed, and the history said "closed" over a wallet that still held every
+// token (a user's report — the one 40 % that DID leave was their own
+// take-profit ladder). Now a live copy mirrors the sell as a share of what
+// THIS wallet holds — "they sold 40 %" is "sell 40 % of ours" — through the
+// same pipeline a manual sell uses, and the record moves only when the sell
+// confirmed. Paper copies keep the same bookkeeping without the order.
+
+/** A paper round trip pays what a real one would: pump's 1 % on each side,
+ *  and Krypt's own fee on each side. Charging one side only (which is what
+ *  a single 0.99 did) reports a profit the identical real trades would not
+ *  have made. */
+const SIDE_COST = 0.01 + FEE_BPS / 10_000;
+
+/** One exit at a time per copy, in the order the leader sold. Two sells a
+ *  second apart (a ladder) must not both size from the same remainder. */
+const exitChains = new Map<string, Promise<void>>();
+
+function queueExit(c: CopyConfig, t: WalletTrade): void {
+  const key = `${c.id}:${t.mint}`;
+  const prev = exitChains.get(key) ?? Promise.resolve();
+  const next = prev.then(() => closeOpen(c, t)).catch((err) => host?.log('error', `copy exit failed: ${(err as Error).message}`));
+  exitChains.set(key, next);
+  void next.then(() => {
+    if (exitChains.get(key) === next) exitChains.delete(key);
+  });
+}
+
+/** The leader's fraction, clamped to (0, 1]; null when it is not known. An
+ *  unknown fraction is NOT "all of it": a leader trimming 10 % must never
+ *  turn into us dumping the whole bag because one RPC reply lacked owners. */
+function fractionOf(t: WalletTrade): number | null {
+  const f = t.soldFraction;
+  if (f === null || f === undefined || !Number.isFinite(f) || f <= 0) return null;
+  return Math.min(1, f);
+}
+
+/** One sell of `fraction` of what is left of copy `x`: the slice record,
+ *  and the copy itself moved on (remainder, realised, closed when spent). */
+function applyExit(x: CopyTrade, fraction: number, exit: number | null, t: WalletTrade, signature: string | null): CopyTrade {
+  const remaining = x.remainingPct ?? 100;
+  const slicePct = fraction >= 1 ? remaining : remaining * fraction;
+  const cost = x.ourSol * (slicePct / 100);
+  const pnl =
+    exit !== null && x.entryPriceSol !== null && x.entryPriceSol > 0
+      ? cost * ((exit / x.entryPriceSol) * (1 - SIDE_COST) - (1 + SIDE_COST))
+      : null;
+  const slice: CopyTrade = {
+    id: nextId('cx'),
+    configId: x.configId,
+    mode: x.mode,
+    wallet: x.wallet,
+    mint: x.mint,
+    symbol: x.symbol || t.symbol,
+    at: t.at,
+    theirSol: t.sol,
+    ourSol: cost,
+    entryPriceSol: x.entryPriceSol,
+    exitPriceSol: exit,
+    closedAt: t.at,
+    pnlSol: pnl,
+    state: 'closed',
+    reason: null,
+    kind: 'exit',
+    parentId: x.id,
+    soldPct: Math.round(fraction * 100),
+    signature,
+  };
+  x.remainingPct = Math.max(0, remaining - slicePct);
+  if (pnl !== null) x.realizedSol = (x.realizedSol ?? 0) + pnl;
+  if (exit !== null) x.exitPriceSol = exit;
+  if (x.remainingPct <= 0.5) {
+    x.remainingPct = 0;
     x.state = 'closed';
+    x.closedAt = t.at;
   }
+  return slice;
+}
+
+/** The exit that did NOT happen, kept in the history with its reason. */
+function exitSkipped(x: CopyTrade, t: WalletTrade, pct: number, reason: string): CopyTrade {
+  return {
+    id: nextId('cx'),
+    configId: x.configId,
+    mode: x.mode,
+    wallet: x.wallet,
+    mint: x.mint,
+    symbol: x.symbol || t.symbol,
+    at: t.at,
+    theirSol: t.sol,
+    ourSol: x.ourSol * ((x.remainingPct ?? 100) / 100) * (pct / 100),
+    entryPriceSol: x.entryPriceSol,
+    exitPriceSol: null,
+    closedAt: null,
+    pnlSol: null,
+    state: 'skipped',
+    reason,
+    kind: 'exit',
+    parentId: x.id,
+    soldPct: pct,
+    signature: null,
+  };
+}
+
+async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
+  const h = host;
+  if (!h) return;
+  const open = trades.filter((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open' && x.kind !== 'exit');
+  if (!open.length) return;
+  const who = c.label || c.wallet.slice(0, 6);
+  const what = t.symbol || t.mint.slice(0, 8);
+  const fraction = fractionOf(t);
+  if (fraction === null) {
+    record(exitSkipped(open[0], t, 100, 'not executed — could not tell how much of their holding they sold'));
+    h.toast('warn', `Copy sell skipped — ${who} sold ${what}, but the share they sold could not be read`);
+    return;
+  }
+  const pct = Math.max(1, Math.min(100, Math.round(fraction * 100)));
+  const exit = t.priceSol > 0 ? t.priceSol : (h.priceSol(t.mint) ?? null);
+  let signature: string | null = null;
+
+  if (c.mode === 'live') {
+    const blocked = h.liveBlockedReason();
+    if (blocked) {
+      record(exitSkipped(open[0], t, pct, `not executed — ${blocked}`));
+      h.toast('warn', `Copy sell skipped — ${who} sold ${pct}% of ${what}, but ${blocked}`);
+      return;
+    }
+    const res = await h.sell(t.mint, pct);
+    if (!res.ok) {
+      if (/nothing to sell|zero token balance/i.test(res.message)) {
+        // Our own orders already emptied the bag. Nothing to mirror — say
+        // so on the record rather than invent a fill or leave it "open".
+        for (const x of open) {
+          x.state = 'closed';
+          x.closedAt = t.at;
+          x.remainingPct = 0;
+          x.reason = 'nothing left to sell — your own orders had already sold it';
+        }
+        persist();
+        h.changed();
+        h.log('info', `copy: ${who} sold ${what} but this wallet holds none — record closed`);
+        return;
+      }
+      record(exitSkipped(open[0], t, pct, res.message.slice(0, 160)));
+      h.log('warn', `copy sell FAILED (${who} sold ${pct}% of ${what}): ${res.message}`);
+      h.toast('error', `Copy sell failed — ${pct}% of ${what}: ${res.message}`);
+      return;
+    }
+    signature = res.signature ?? null;
+    h.toast('success', `Copied sell: ${pct}% of ${what} with ${who}`);
+  }
+
+  for (const x of open) {
+    const slice = applyExit(x, fraction, exit, t, signature);
+    trades.unshift(slice);
+  }
+  if (trades.length > MAX_TRADES) trades.length = MAX_TRADES;
   persist();
-  host?.changed();
-  recorder.record('copy_close', { configId: c.id, mint: t.mint, mode: c.mode });
+  h.changed();
+  recorder.record('copy_close', { configId: c.id, mint: t.mint, mode: c.mode, pct, signature });
 }
 
 async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {

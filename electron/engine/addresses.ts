@@ -178,6 +178,10 @@ export function feeConfigFor(): string {
  */
 export const PUMP_FEE_RECIPIENT_FALLBACK = '62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV';
 export const PUMP_FEE_VAULT_FALLBACK = 'A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW';
+/** Global.reserved_fee_recipient (offset 483) — the fee recipient a MAYHEM-mode
+ *  coin demands; a normal recipient reverts `NotAuthorized (6000)` on both buy
+ *  and sell (measured 2026-09-07). #0 of pump's published reserved list. */
+export const PUMP_RESERVED_FEE_RECIPIENT_FALLBACK = 'GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS';
 
 /** Derive and cache the buy-path PDAs for a freshly detected launch. */
 export function prewarm(mint: string, creator: string): PrewarmedAddresses {

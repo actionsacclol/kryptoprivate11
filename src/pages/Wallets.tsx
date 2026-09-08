@@ -464,15 +464,25 @@ export function WalletsPage() {
               >
                 <span className="text-krypt-muted/60 w-14">{fmtAgo(t.at)}</span>
                 <span className={cls('w-16 font-bold', t.state === 'skipped' ? 'text-krypt-muted/50' : t.state === 'open' ? 'text-krypt-pink' : 'text-white/80')}>
-                  {t.state}
+                  {t.kind === 'exit' ? (t.state === 'skipped' ? 'no sell' : 'sold') : t.state}
                 </span>
                 <span className="w-24 truncate text-white/85">{t.symbol || shortAddr(t.mint, 4)}</span>
                 <span className="w-24 text-krypt-muted">they {t.theirSol.toFixed(2)}</span>
                 <span className="w-24 text-white/85">us {t.ourSol.toFixed(3)}</span>
-                <span className={cls('w-20 text-right', toneFor(t.pnlSol))}>
-                  {t.pnlSol === null ? '—' : `${t.pnlSol >= 0 ? '+' : ''}${t.pnlSol.toFixed(3)}`}
+                <span className={cls('w-20 text-right', toneFor(t.pnlSol ?? t.realizedSol ?? null))}>
+                  {(() => {
+                    const v = t.pnlSol ?? t.realizedSol ?? null;
+                    return v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(3)}`;
+                  })()}
                 </span>
-                <span className="flex-1 text-krypt-muted/55 truncate text-right">{t.reason ?? ''}</span>
+                <span className="flex-1 text-krypt-muted/55 truncate text-right">
+                  {t.reason ??
+                    (t.kind === 'exit'
+                      ? `sold ${t.soldPct ?? 100}% with them${t.signature ? '' : t.mode === 'live' ? '' : ' (paper)'}`
+                      : t.state === 'open' && t.remainingPct !== undefined && t.remainingPct < 100
+                        ? `${Math.round(t.remainingPct)}% still held`
+                        : '')}
+                </span>
               </div>
             ))}
           </div>

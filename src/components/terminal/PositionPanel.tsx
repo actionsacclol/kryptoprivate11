@@ -53,19 +53,29 @@ export function PositionPanel({
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState<number | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const r = await window.krypt.portfolio.summary();
-      if (r.ok && r.data) {
-        setRealPos(r.data.positions.find((p) => p.mint === mint) ?? null);
-        setPaperPos(r.data.paper.positions.find((p) => p.mint === mint) ?? null);
-        setPaperModel(r.data.paper.model);
-        setPending(r.data.pendingFills);
+  const apply = useCallback(
+    (d: import('@shared/portfolio').PortfolioSummary) => {
+      setRealPos(d.positions.find((p) => p.mint === mint) ?? null);
+      setPaperPos(d.paper.positions.find((p) => p.mint === mint) ?? null);
+      setPaperModel(d.paper.model);
+      setPending(d.pendingFills);
+    },
+    [mint],
+  );
+
+  // Mount opens on the engine's kept build (stale, instant); a fill awaits
+  // the real rebuild; every rebuild lands here as a 'portfolio' event.
+  const load = useCallback(
+    async (opts: { stale?: boolean } = { stale: true }) => {
+      try {
+        const r = await window.krypt.portfolio.summary(opts);
+        if (r.ok && r.data) apply(r.data);
+      } finally {
+        setLoaded(true);
       }
-    } finally {
-      setLoaded(true);
-    }
-  }, [mint]);
+    },
+    [apply],
+  );
 
   useEffect(() => {
     void load();
@@ -84,15 +94,16 @@ export function PositionPanel({
     // wallet) and again reconciled (cost basis is known) — so the panel
     // never sits up to 20 s behind the toast that said the trade landed.
     const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'fill' && ev.mint === mint && ev.state !== 'failed') void load();
-      if (ev.kind === 'paper' && ev.mint === mint) void load();
+      if (ev.kind === 'portfolio') apply(ev.summary);
+      if (ev.kind === 'fill' && ev.mint === mint && ev.state !== 'failed') void load({ stale: false });
+      if (ev.kind === 'paper' && ev.mint === mint) void load({ stale: false });
     });
     return () => {
       clearInterval(id);
       document.removeEventListener('visibilitychange', onVisible);
       off();
     };
-  }, [load, refreshKey, mint]);
+  }, [load, apply, refreshKey, mint]);
 
   const sell = async (pct: number): Promise<void> => {
     setBusy(pct);

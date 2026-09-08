@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 
 import { AlertTriangle, ArrowUpRight, Copy, Download, ExternalLink, FlaskConical, KeyRound, RefreshCw, ShieldAlert, Trash2, Wallet as WalletIcon, Zap } from 'lucide-react';
 import { Badge, Card, GhostButton, NumberInput, Page, PrimaryButton, Section, Switch } from '../components/common';
-import { Tome3D } from '../components/viz/Tome3D';
+import { useReduceEffects, EffectsOff } from '../components/viz/useReduceEffects';
 import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
@@ -11,6 +11,10 @@ import { FanoutPanel } from '../components/terminal/FanoutPanel';
 import { HoldingsSection } from './Positions';
 import type { LiveState, WalletInfo, WalletSummary } from '@shared/types';
 import { cls, fmtClock } from '../utils/format';
+
+// three.js rides with the tome alone: the page's text and buttons paint
+// first and the scene follows from its own chunk.
+const Tome3D = lazy(() => import('../components/viz/Tome3D').then((m) => ({ default: m.Tome3D })));
 
 function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol: number | null }) {
   const { settings, updateSettings } = useAppState();
@@ -299,6 +303,7 @@ export function WalletPage() {
   const toast = useToast();
   const modal = useModal();
   const { settings, updateSettings } = useAppState();
+  const reduceEffects = useReduceEffects();
   const [info, setInfo] = useState<WalletInfo | null>(null);
   const [wallets, setWallets] = useState<WalletSummary[]>([]);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -428,7 +433,13 @@ export function WalletPage() {
       {/* The Vault Tome — the wallet's beating heart */}
       <div className="plate relative h-[260px] rounded-lg !bg-black/45 overflow-hidden mb-6">
         <div className="absolute inset-0 grid-backdrop animate-dust pointer-events-none" aria-hidden="true" />
-        <Tome3D />
+        {reduceEffects === false ? (
+          <Suspense fallback={<EffectsOff label="" />}>
+            <Tome3D />
+          </Suspense>
+        ) : (
+          <EffectsOff label={reduceEffects === null ? '' : 'Effects reduced · Settings › Display'} />
+        )}
         <div className="pointer-events-none absolute top-4 left-5">
           <div className="font-display text-[10px] uppercase tracking-[0.34em] text-arc-gold/75">The Vault</div>
           {info?.exists ? (

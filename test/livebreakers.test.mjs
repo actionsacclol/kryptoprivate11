@@ -149,9 +149,22 @@ test('engine: sellWithRetry uses the shared retry rule', () => {
 
 // ── 5: user sells offer the local builder ─────────────────────────────
 
-test('engine: manualSell passes `local` for 100% sells only (relayer fallback kept)', () => {
+test('engine: manualSell passes `local` for EVERY sell, and the builder sizes partials itself', () => {
+  // Until 2026-09-07 partials were withheld from the local builder because
+  // it hardcoded the full balance — a "sold 25%" toast over an empty bag was
+  // the failure being avoided. Now the builder takes `sellPct`, sells exactly
+  // that share (pinned in txbuilder.test.mjs) and closes the ATA only at
+  // 100%. The pin here is the whole chain: the engine offers `local` to every
+  // sell, the signer forwards the share, and the builder gates the close.
   const body = between(/async manualSell\(/, /\n  private static readonly WSOL_MINT/);
-  assert.match(body, /pct >= 100 \? await this\.localBuildParamsForSell\(mint\) : undefined/);
+  assert.match(body, /const localParams = await this\.localBuildParamsForSell\(mint\)/);
+  assert.doesNotMatch(body, /pct >= 100 \?/, 'no percent gate in front of the local builder any more');
+  const signer = fs.readFileSync(new URL('../electron/engine/liveSigner.ts', import.meta.url), 'utf8');
+  assert.match(signer, /sellPct: sellPct \?\? undefined,/, 'the signer forwards the share to buildLocalTrade');
+  assert.match(signer, /localCannotSize = p\.action === 'sell' && sellPct === null/, 'a token-denominated numeric sell still skips the local builder');
+  const builder = fs.readFileSync(new URL('../electron/engine/txBuilder.ts', import.meta.url), 'utf8');
+  assert.match(builder, /amount = sellAmountFor\(bal\.data, p\.sellPct\)/, 'the builder sizes the sell from the share');
+  assert.match(builder, /p\.action === 'sell' && sellPctOf\(p\.sellPct\) >= 100\) \{/, 'the ATA close is gated on a 100% sell');
 });
 
 test('engine: the sell fee estimate never blocks the build', () => {
