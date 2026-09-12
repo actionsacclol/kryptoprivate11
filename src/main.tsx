@@ -6,6 +6,8 @@ import { ModalProvider } from './state/ModalProvider';
 import { AppStateProvider } from './state/AppStateProvider';
 import { TerminalProvider } from './state/TerminalProvider';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { LiteMotion } from './components/LiteModeHost';
+import { initLite } from './state/liteMode';
 
 // Self-hosted fonts (2026-08-16). These were loaded from fonts.googleapis.com,
 // which made "No telemetry" false on every launch — Google saw the IP and
@@ -75,6 +77,11 @@ if (!window.krypt) {
 // A clean boot clears the retry mark so a later failure gets its own quiet retry.
 sessionStorage.removeItem('krypt.bridgeRetryAt');
 
+// Lite mode's class goes on <html> BEFORE React mounts, from this machine's
+// mirror of the setting — a lite user should not see one animated boot per
+// launch while settings are still on their way over IPC.
+initLite();
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
@@ -82,7 +89,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <ModalProvider>
           <AppStateProvider>
             <TerminalProvider>
-              <App />
+              <LiteMotion>
+                <App />
+              </LiteMotion>
             </TerminalProvider>
           </AppStateProvider>
         </ModalProvider>

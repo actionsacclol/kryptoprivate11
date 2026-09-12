@@ -14,6 +14,7 @@
 // money-critical numbers are bounded explicitly below.
 
 import { BLOCK_FEED_WSS_URLS, DEFAULT_SETTINGS, type AppSettings } from '@shared/types';
+import { evmRpcUrlProblem } from '@shared/evm';
 
 export interface Validated {
   ok: boolean;
@@ -66,6 +67,9 @@ const BOUNDS: Record<string, { min: number; max: number; int?: boolean }> = {
   'strategy.maxSessionLossSol': { min: 0, max: 1000 },
   'strategy.maxConsecutiveLosses': { min: 1, max: 100, int: true },
   'strategy.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
+  // Per chain, because the chains are separate everywhere else too.
+  'evm.robinhood.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
+  'evm.bnb.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
   // Chat trading spends real SOL on a typed command.
   'bots.trading.maxBuySol': { min: 0.000001, max: 25 },
   // Terminal data settings. A refresh interval of 0 would hammer four
@@ -74,7 +78,42 @@ const BOUNDS: Record<string, { min: number; max: number; int?: boolean }> = {
   'data.discoverRefreshSec': { min: 2, max: 300, int: true },
   'data.discoverLimit': { min: 5, max: 80, int: true },
   'alerts.repeatCooldownSec': { min: 5, max: 3600, int: true },
+  // Robinhood Chain. Pons charges 1 % + a creator tax per fill, so a few
+  // percent is the working floor; 50 matches the Solana cap.
+  'evm.slippagePct': { min: 0, max: 50 },
 };
+
+/**
+ * Fields whose value is a CREDENTIAL that this app puts into an outbound HTTP
+ * header or URL.
+ *
+ * A header value is terminated by CRLF, so a key carrying `\r\n` is header
+ * injection — the boundary is the place to refuse it, not the fetch call that
+ * happens to throw today. Whitespace is refused wholesale because no provider
+ * issues a key containing any (and a pasted key with a stray newline is the
+ * common case: it fails confusingly rather than being trimmed into working
+ * order — `.trim()` at each save site handles the ends, this catches the
+ * middle). The empty string is always allowed: every one of these is optional
+ * and ships empty, and a default must pass its own rule.
+ *
+ * 2026-09-09: added with the Jupiter key, which rides in an `x-api-key`
+ * header on every Jupiter call including the trade path's quote and swap.
+ */
+const SECRET_FIELDS = new Set([
+  'data.birdeyeApiKey',
+  'data.jupiterApiKey',
+  'data.giphyApiKey',
+  'data.tenorApiKey',
+  'rpc.heliusApiKey',
+  'evm.robinhood.apiKey',
+  'evm.bnb.apiKey',
+  'ai.openaiKey',
+  'ai.anthropicKey',
+]);
+
+/** Long enough for the longest key any of these providers issues (Anthropic's
+ *  `sk-ant-api03-…` is the outlier at ~110 chars) with room to spare. */
+const MAX_SECRET_CHARS = 400;
 
 /** Fields that may only take one of a fixed set of values. */
 const ENUMS: Record<string, readonly unknown[]> = {
@@ -82,6 +121,11 @@ const ENUMS: Record<string, readonly unknown[]> = {
   'execution.mevMode': ['off', 'fast', 'private'],
   'execution.jitoTipPercentile': [50, 75, 95],
   'strategy.runnerAlerts.minBucket': ['top1', 'top1_5', 'top5_10'],
+  // Buyer-count bucket edges (shared/evmRunners.ts BUYER_BUCKETS). Numbers,
+  // not labels: the bucket IS its lower bound, and storing the label would
+  // mean two things to keep in step.
+  'evm.robinhood.runnerAlerts.minBucket': [0, 1, 3, 6, 11, 21],
+  'evm.bnb.runnerAlerts.minBucket': [0, 1, 3, 6, 11, 21],
   // The block-feed host is a pick from a hardcoded list, never free text:
   // no IPC channel accepts a URL (terminal-data-providers rule), and a
   // blockSubscribe socket pulls whole blocks from whatever it is pointed at.
@@ -169,11 +213,53 @@ function checkLeaf(path: string, value: unknown, def: unknown): string | null {
   if (typeof value === 'string' && value.length > 2_000) {
     return `${path}: string too long`;
   }
+  if (typeof value === 'string' && SECRET_FIELDS.has(path) && value !== '') {
+    if (value.length > MAX_SECRET_CHARS) return `${path}: that does not look like an API key (too long)`;
+    // eslint-disable-next-line no-control-regex
+    if (/[\s\u0000-\u001f\u007f]/.test(value)) {
+      return `${path}: an API key cannot contain spaces or line breaks`;
+    }
+  }
   const e = ENUMS[path];
   if (e && !e.includes(value)) {
     return `${path}: must be one of ${e.join(', ')}`;
   }
+  // An EVM endpoint is https or it is ignored — and until 2026-09-11 only
+  // the settings page said so; main saved `http://…` and then silently fell
+  // back to the public endpoint. The same rule the renderer applies, here.
+  if (/^evm\.(robinhood|bnb)\.rpcUrl$/.test(path) && typeof value === 'string' && value.trim()) {
+    const why = evmRpcUrlProblem(value);
+    if (why) return `${path}: ${why}`;
+  }
   return null;
+}
+
+/**
+ * Clean one nested object against its default, to any depth: unknown keys
+ * dropped, every scalar through `checkLeaf` under its full dotted path so
+ * the BOUNDS and ENUMS tables apply wherever a value actually lives.
+ */
+function validateObject(
+  path: string,
+  def: Record<string, unknown>,
+  value: unknown,
+): { ok: true; value: Record<string, unknown> } | { ok: false; message: string } {
+  if (!isPlainObject(value)) return { ok: false, message: `${path}: expected an object` };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (!(k in def)) continue;
+    const d = def[k];
+    if (isPlainObject(d)) {
+      const r = validateObject(`${path}.${k}`, d as Record<string, unknown>, v);
+      if (!r.ok) return r;
+      out[k] = r.value;
+      continue;
+    }
+    const err = checkLeaf(`${path}.${k}`, v, d);
+    if (err) return { ok: false, message: err };
+    out[k] = v;
+  }
+  return { ok: true, value: out };
 }
 
 /**
@@ -218,19 +304,15 @@ export function validateSettingsPatch(raw: unknown): Validated {
           continue;
         }
         if (isPlainObject(defLeaf)) {
-          if (!isPlainObject(v2)) return { ok: false, message: `${key}.${k2}: expected an object` };
-          const inner: Record<string, unknown> = {};
-          // Same leaf rules as one level up: until 2026-09-08 this loop only
+          // Same leaf rules at EVERY depth. Until 2026-09-08 this loop only
           // compared types, so the runner-alert and chat-trading bounds and
-          // enums above were dead — 0 alerts an hour, a bogus bucket and a
-          // NaN chat buy cap all saved.
-          for (const [k3, v3] of Object.entries(v2)) {
-            if (!(k3 in defLeaf)) continue;
-            const err3 = checkLeaf(`${key}.${k2}.${k3}`, v3, (defLeaf as Record<string, unknown>)[k3]);
-            if (err3) return { ok: false, message: `Rejected settings update — ${err3}` };
-            inner[k3] = v3;
-          }
-          nested[k2] = inner;
+          // enums above were dead; until 2026-09-11 it went exactly one level
+          // further and stopped, so `evm.bnb.runnerAlerts.maxPerHour: 0` and
+          // `minBucket: 'top1'` — four levels deep — saved unchecked. Found
+          // by audit; it recurses now, and the test walks every bounded path.
+          const r = validateObject(`${key}.${k2}`, defLeaf as Record<string, unknown>, v2);
+          if (!r.ok) return { ok: false, message: `Rejected settings update — ${r.message}` };
+          nested[k2] = r.value;
           continue;
         }
         const err = checkLeaf(`${key}.${k2}`, v2, defLeaf);

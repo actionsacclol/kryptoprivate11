@@ -8,7 +8,9 @@ import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
 import { SwitchToPaper } from '../components/SwitchToPaper';
 import { FanoutPanel } from '../components/terminal/FanoutPanel';
+import { EvmWalletPanel } from '../components/terminal/EvmWalletPanel';
 import { HoldingsSection } from './Positions';
+import { EVM_CHAIN_META, type EvmChainKind } from '@shared/evm';
 import type { LiveState, WalletInfo, WalletSummary } from '@shared/types';
 import { cls, fmtClock } from '../utils/format';
 
@@ -106,7 +108,7 @@ function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol:
               warn={(n) => (n < 0 ? 'Must be 0 or more' : n > 100 ? 'Max 100 SOL' : null)}
             />
             <p className="mt-1.5 text-[11px] text-krypt-muted leading-relaxed">
-              Realised losses this session (from confirmed sells) past this pause live trading. 0 = off.
+              Realised losses this session (from confirmed sells) past this pause live trading. 0 = off. Solana only — the EVM chains have no loss breaker yet.
             </p>
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
@@ -117,7 +119,7 @@ function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol:
               warn={(n) => (n < 0 ? 'Must be 0 or more' : n > 50 ? 'Max 50' : null)}
             />
             <p className="mt-1.5 text-[11px] text-krypt-muted leading-relaxed">
-              Consecutive realised losses that pause live trading. Whole number, 0 = off.
+              Consecutive realised losses that pause live trading. Whole number, 0 = off. Solana only — the EVM chains have no loss breaker yet.
             </p>
           </div>
         </div>
@@ -326,6 +328,27 @@ function WithdrawPanel({
   );
 }
 
+/**
+ * Where each wallet panel sits in the 12-column grid by default.
+ *
+ * Solana is the busiest surface by a wide margin (wallet switcher, balance,
+ * deposit, safety rails, withdraw, auto-profit rites, quick buy/sell, fan-out,
+ * backup, on-chain holdings) so it takes the wide left column and the full
+ * height. The two EVM panels are secondary and stack on the right: Robinhood
+ * is taller because it carries the shared key block by default, BNB shorter
+ * because it does not. When only one EVM chain is enabled it takes the whole
+ * right column; with none, Solana takes the full width.
+ *
+ * `minW`/`minH` stop a drag leaving a panel too small to read: the EVM panels
+ * need room for a balance strip, the Paper/Live pills and a couple of rows.
+ */
+// Row height is 34 px with a 10 px margin, so h rows ≈ 44h − 10 pixels. 20
+// rows ≈ 870 px: about a screenful under the vault header, with the Solana
+// column scrolling the rest of its (much taller) content internally. The two
+// EVM panels split the same 20 rows — 12 for the one carrying the key block,
+// 8 for the one that does not, measured against the real content.
+
+
 export function WalletPage() {
   const toast = useToast();
   const modal = useModal();
@@ -439,6 +462,10 @@ export function WalletPage() {
     if (!yes) return;
     const r = await window.krypt.wallet.remove();
     if (r.ok && r.data) { setInfo(r.data); void refresh(); toast.info('Wallet removed'); }
+    // Main refuses a removal that would destroy the key to a wallet still
+    // holding Wallet Lab bags, and names them. Swallowing that message left
+    // the button looking broken.
+    else toast.error(r.message);
   };
 
   const saveHome = async (): Promise<void> => {
@@ -456,7 +483,7 @@ export function WalletPage() {
   const overCap = info?.balanceSol != null && info.balanceSol > info.maxBalanceSol;
 
   return (
-    <Page title="Wallet" subtitle="A dedicated hot wallet for sniping — generated here, encrypted by your OS, funded with lunch money.">
+    <Page title="Sol Wallet" subtitle="A dedicated hot Solana wallet for sniping — generated here, encrypted by your OS, funded with lunch money.">
       {/* The Vault Tome — the wallet's beating heart */}
       <div className="plate relative h-[260px] rounded-lg !bg-black/45 overflow-hidden mb-6">
         <div className="absolute inset-0 grid-backdrop animate-dust pointer-events-none" aria-hidden="true" />
@@ -808,6 +835,28 @@ export function WalletPage() {
           <HoldingsSection />
         </>
       )}
+    </Page>
+  );
+}
+
+/**
+ * One page per EVM chain — Robinhood Wallet and BNB Wallet are their own
+ * sidebar entries, not panels sharing a screen.
+ *
+ * The shared key block renders on BOTH pages on purpose. One EVM key is the
+ * same address on every EVM chain, so the controls are identical and
+ * idempotent; making a user leave the BNB page to generate a wallet, or to
+ * find where their address is, would be the opposite of simple. The panel's
+ * own header says the key is shared, which is the honest way to carry it.
+ */
+export function EvmWalletPage({ chain }: { chain: EvmChainKind }) {
+  const meta = EVM_CHAIN_META[chain];
+  return (
+    <Page
+      title={`${meta.shortName} Wallet`}
+      subtitle={`One hot wallet for the EVM chains — the same key is the same address on each. Balances, Paper/Live, holdings and fills below are ${meta.shortName}'s.`}
+    >
+      <EvmWalletPanel only={chain} />
     </Page>
   );
 }

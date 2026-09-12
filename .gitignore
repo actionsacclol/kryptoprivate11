@@ -10,3 +10,18 @@ dist-electron-dev/
 # repo root. It is byte-identical to the one in dist-electron and is only a
 # hazard because `git add -A` would happily commit 7 MB of it.
 /*.jsc
+
+# Scratch artefacts from probes and recovery — never shipped, never committed.
+mints.json
+v4mod.json
+recover.tmp.json
+test/.sandbox/
+contracts/build/
+
+# Python bytecode from the analysis scripts
+__pycache__/
+*.pyc
+
+# Local environment files — keys never belong in the repo
+.env
+.env.*

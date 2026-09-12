@@ -46,7 +46,8 @@ function ok(name, fn) {
 
 ok('a genuine build trips ZERO canaries', () => {
   // Runs against the REAL compiled constants — this is the false-positive guard.
-  assert.deepEqual(tamperFlags(), new Array(12).fill(false));
+  // 12 Solana + attribution canaries, 6 Robinhood Chain fee canaries.
+  assert.deepEqual(tamperFlags(), new Array(18).fill(false));
   assert.equal(tamperCount(), 0);
   assert.equal(isIntact(), true);
 });
@@ -219,6 +220,16 @@ ok('the seize is applied to buys only — the source proves it, not just the nam
   const beforeBuy = src.slice(0, src.indexOf("if (p.action === 'buy') {"));
   assert.ok(!/seized\(\)/.test(beforeBuy), 'no seize check runs before the action is known to be a buy');
   assert.equal((src.match(/seized\(\)/g) ?? []).length, 1, 'exactly one seize gate in the trade path');
+});
+
+ok('the Robinhood Chain trade path gates buys only, the same way — the source proves it', () => {
+  const src = fs.readFileSync(new URL('../electron/evm/trade.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const buyStart = src.indexOf("if (req.side === 'buy') {\n    if (seized())");
+  assert.ok(buyStart > 0, 'the seize gate sits directly inside the buy branch');
+  const beforeBuy = src.slice(0, buyStart);
+  assert.ok(!/seized\(\)/.test(beforeBuy), 'no seize check runs before the side is known to be a buy');
+  assert.equal((src.match(/seized\(\)/g) ?? []).length, 1, 'exactly one seize gate in the EVM trade path');
+  assert.ok(!/buySizeFactor\(\)[\s\S]{0,400}side === 'sell'/.test(src), 'no corrosion helper is applied on the sell side');
 });
 
 ok('self-heal: if tampering stops being detected, corrosion resets to zero', () => {

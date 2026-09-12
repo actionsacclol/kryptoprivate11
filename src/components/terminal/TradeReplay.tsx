@@ -16,7 +16,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Image as ImageIcon, Loader2, Play, RotateCcw, Sparkles, Video, X } from 'lucide-react';
-import type { Candle, CandleInterval } from '@shared/market';
+import type { Candle, CandleInterval, CandleSeries } from '@shared/market';
+import type { IpcResult } from '@shared/types';
 import type { ClosedTrade } from '@shared/portfolio';
 import { cls } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
@@ -63,11 +64,21 @@ function fmtPrice(p: number): string {
 export function TradeReplay({
   trade,
   candles: given,
+  candleSource,
+  nativeSymbol = 'SOL',
   onClose,
 }: {
   trade: ClosedTrade;
   /** Candles to animate instead of fetching — the simulator supplies these. */
   candles?: Candle[];
+  /**
+   * Where history comes from when it is fetched: Solana's market feed by
+   * default, an EVM chain's own candles when the Trades page is on one
+   * (2026-09-11). Same window, same USD-to-entry anchoring, same frame.
+   */
+  candleSource?: (interval: CandleInterval, limit: number) => Promise<IpcResult<CandleSeries>>;
+  /** What the coin is called on the frame: SOL, or ETH / BNB. */
+  nativeSymbol?: string;
   onClose: () => void;
 }) {
   const toast = useToast();
@@ -164,7 +175,7 @@ export function TradeReplay({
         // The FULL series: market.candles is the token page's fast answer and
         // hands back an empty pending placeholder after 1.2 s, which a
         // one-shot caller would read as "no history".
-        const r = await window.krypt.market.candlesFull(trade.mint, iv, REPLAY_CANDLE_LIMIT);
+        const r = await (candleSource ?? ((i: CandleInterval, n: number) => window.krypt.market.candlesFull(trade.mint, i, n)))(iv, REPLAY_CANDLE_LIMIT);
         if (!live) return;
         if (!r.ok || !r.data) {
           if (!useSyntheticPath()) setProblem(r.message || 'No chart data came back for this token.');
@@ -361,7 +372,7 @@ export function TradeReplay({
       // The SOL figure and its OPEN / REALISED tag. The tag is placed from
       // the width of the figure measured IN THE FIGURE'S OWN FONT —
       // measuring it in the small font is what dropped OPEN on the number.
-      const solText = `${up ? '+' : ''}${sol.toFixed(3)} SOL`;
+      const solText = `${up ? '+' : ''}${sol.toFixed(3)} ${nativeSymbol}`;
       ctx.font = `500 ${L.solSize}px "JetBrains Mono", ui-monospace, monospace`;
       const solWidth = ctx.measureText(solText).width;
       ctx.fillText(solText, padX, L.sol);
@@ -373,12 +384,12 @@ export function TradeReplay({
       // known is left out rather than printed as an empty word.
       ctx.fillStyle = 'rgba(240,237,226,0.55)';
       ctx.font = `500 ${L.footerSize}px "JetBrains Mono", ui-monospace, monospace`;
-      const parts = [`in ${trade.costSol.toFixed(3)}`, `out ${trade.proceedsSol.toFixed(3)} SOL`];
+      const parts = [`in ${trade.costSol.toFixed(3)}`, `out ${trade.proceedsSol.toFixed(3)} ${nativeSymbol}`];
       if (interval) parts.push(`${interval} candles${unit === 'usd' ? ' (USD)' : ''}`);
       // The frame says what the path is. A synthetic path is never passed
       // off as history: entry and exit are the real fills, the rest is not.
       if (path === 'illustrative') parts.push('path illustrative · entry & exit real');
-      else if (path === 'scaled') parts.push('USD history scaled to SOL at entry');
+      else if (path === 'scaled') parts.push(`USD history scaled to ${nativeSymbol} at entry`);
       ctx.fillText(parts.join('  ·  '), padX, L.footer);
 
       ctx.fillStyle = ACCENT;
@@ -611,8 +622,8 @@ export function TradeReplay({
         )}
         {!loading && !problem && path === 'scaled' && (
           <div className="mt-2 text-[10px] leading-relaxed text-krypt-muted/60">
-            The provider&rsquo;s history is in USD; it is scaled to SOL at your entry fill so the running PnL compares like
-            with like. The realised figure at the end is from the fills themselves.
+            The provider&rsquo;s history is in USD; it is scaled to {nativeSymbol} at your entry fill so the running PnL compares
+            like with like. The realised figure at the end is from the fills themselves.
           </div>
         )}
 

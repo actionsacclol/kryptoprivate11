@@ -235,6 +235,19 @@ ok('helius api-key, telegram bot tokens and sk- keys never reach disk', () => {
   assert.ok(line.includes('sk-***'));
 });
 
+ok('header-borne and query-borne keys are redacted too', () => {
+  // The api-key= rule missed both shapes (API swarm, 2026-09-09): Birdeye and
+  // Jupiter send the key as a HEADER, and several providers take api_key= or
+  // a bare key= in the query string.
+  const line = redactSecrets(
+    'GET /defi/token_overview X-API-KEY: bd9f8e7a6c5d4e3f2a1b0c9d8e7f6a5b | x-api-key=jup_live_9f8e7a6c5d4e | ?api_key=abcdef0123456789&key=zyxwvu9876543210',
+  );
+  assert.ok(!line.includes('bd9f8e7a6c5d'), line);
+  assert.ok(!line.includes('jup_live_9f8e'), line);
+  assert.ok(!line.includes('abcdef0123456789'), line);
+  assert.ok(!line.includes('zyxwvu9876543210'), line);
+});
+
 ok('ordinary lines survive redaction untouched', () => {
   const s = 'buy 0.05 SOL of 2NWQUKUgryz5fWenCntyxLadKNgVuFHfercV7wYSPSce at 12:34:56 sig 5abc';
   assert.equal(redactSecrets(s), s);

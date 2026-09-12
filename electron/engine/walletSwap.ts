@@ -18,7 +18,8 @@
 //   3. SOL out + one token in = buy; one token out + SOL in = sell. Wrapped
 //      SOL counts as SOL. The network fee is not part of the price;
 //   4. token-for-token, or a move with no SOL leg, is not a copyable swap;
-//   5. dust is ignored.
+//   5. dust is ignored;
+//   6. a BUY must be big enough to be a trade rather than a receipt.
 
 import { resolveAccountKeys, type RawTransaction, type TokenBalanceEntry } from './rpcClient';
 
@@ -26,6 +27,20 @@ export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const LAMPORTS = 1_000_000_000;
 /** Below this the "swap" is rent, a fee or a rounding artefact. */
 const MIN_SOL = 0.0005;
+/**
+ * A BUY must clear this to be a trade at all (2026-09-09).
+ *
+ * The SOL a wallet spends creating one token account is 0.00203928 — above
+ * MIN_SOL — so a claim, an LP or staking receipt, an NFT mint or a pump.fun
+ * token creation decodes as "paid SOL, received a token", i.e. a buy. The
+ * leader SIGNS those, so the signer rule does not catch them, and a copier
+ * with `fixed` sizing then buys its full configured size of a token nobody
+ * traded. A real buy is orders of magnitude larger than an account rent.
+ *
+ * This is a floor CHECK only — it is never subtracted from the reported
+ * amount — and it does not apply to SELLS: an exit must never be missed.
+ */
+const MIN_BUY_SOL = 0.005;
 
 export interface WalletSwap {
   mint: string;
@@ -43,7 +58,8 @@ export interface WalletSwap {
    * Sell only: the share of its holding the wallet sold, 0–1. This is what
    * a copier mirrors — "they sold 40 %" means "sell 40 % of ours", whatever
    * the two positions' sizes. Null on a buy, or when the pre-balance is
-   * unknown (an old-format reply), which the copier reads as "all of it".
+   * unknown (an old-format reply). Null is NOT "all of it": the copier
+   * refuses to mirror a sell it cannot size and records the skip.
    */
   soldFraction: number | null;
   /** Top-level programs the transaction invoked, for the record ("via …"). */
@@ -142,9 +158,31 @@ export function decodeWalletSwap(tx: RawTransaction, wallet: string): WalletSwap
   // A material opposite move in another mint with a small SOL leg is a
   // token-for-token route where SOL was only the hop; skip it.
   if (second > 0 && Math.abs(solDelta) < MIN_SOL * 10) return null;
+  // Rule 6: a buy under the floor is a receipt, not a trade. Checked, never
+  // subtracted; sells are deliberately exempt.
+  if (isBuy && Math.abs(solDelta) < MIN_BUY_SOL) return null;
 
   const sol = Math.abs(solDelta);
   const tokens = Math.abs(best.tokens);
+  // A one-sided LIQUIDITY ADD looks exactly like a buy from balance deltas:
+  // SOL leaves, one token arrives. That token is a position NFT — zero
+  // decimals, quantity one — and it has no market. Copied live, the follower
+  // would try to buy an untradeable mint, and `trackLeader` would open a
+  // leader round trip that can never close.
+  //
+  // MIN_BUY_SOL does not catch it: its comment already names "an LP receipt",
+  // but it only stops rent-sized amounts, and a real liquidity add is orders
+  // of magnitude above the floor.
+  //
+  // Both directions. The WITHDRAW side matters too: pulling liquidity sends
+  // the position NFT out and SOL in, which decodes as a SELL — and sells are
+  // deliberately ungated so an exit is never missed. That exemption is about
+  // real holdings; a follower cannot be holding the leader's position NFT, so
+  // there is no exit here to miss, only a phantom one to mirror.
+  //
+  // The test is exactly "one indivisible unit", not "zero decimals": a real
+  // 0-decimal token trade of any other size still decodes.
+  if (best.decimals === 0 && tokens === 1) return null;
   const priceSol = sol / tokens;
   if (!Number.isFinite(priceSol) || priceSol <= 0) return null;
 

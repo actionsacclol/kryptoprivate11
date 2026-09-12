@@ -44,6 +44,381 @@ in `STATUS.md` and the auto-memory notes under
 
 ---
 
+## Layout: a Hub, workspaces, and multi-panelling (2026-09-09)
+
+The app had grown to twenty-five routes in one flat sidebar, so "Warmer" sat
+four rows from "Orders" and a page that trades on its own initiative sat beside
+one that only moves when you click. It now opens on a **Hub** and the sidebar
+lists only the workspace you picked.
+
+- `src/workspaces.ts` is the map. Each workspace owns routes, may borrow one
+  (`extraRoutes` — Wallet is listed under Terminal for arming but lives in
+  Wallet Utilities), and names its own sidebar sections. **One home per route**,
+  derived from declaration order.
+- **Workspaces:** Terminal (find and trade by hand), Copy Trading, Main Engine
+  (the scanner, scripts, everything autonomous), Wallet Utilities (your keys and
+  the Wallet Lab), Settings & Legal.
+- **Hub buttons** in the sidebar and the top bar. Cards show what is true now —
+  the engine says "Scanning, N launches seen" or "Stopped"; unknown is an em
+  dash, never 0.
+- `src/components/PanelGrid.tsx` is the multi-panel container:
+  `react-grid-layout`, drag by the panel header so content stays clickable,
+  resize from the corner, arrangement saved per grid id in localStorage with
+  every read and write wrapped. A saved layout that predates a new panel
+  re-seeds that panel rather than leaving it invisible.
+- **Wallets are three separate pages**, not one page with a chain switch:
+  **Sol Wallet**, **Robinhood Wallet**, **BNB Wallet**, each its own sidebar
+  entry under "Your wallets". Someone looking for their BNB balance finds "BNB
+  Wallet" in the menu instead of discovering that "Wallet" means something
+  different depending on a control in the top bar. A first attempt put all
+  three on ONE page as a panel grid — it was cluttered, and separate pages are
+  what "clean and simple" actually meant.
+- `PanelGrid` is built and tested but currently has **no caller**. It is the
+  seam for a surface that genuinely wants several live things at once (a
+  trading screen, an engine dashboard) — not for a page that just has three
+  subjects.
+
+**The EVM subtlety, because it will bite anyone who touches this.** The EVM
+wallet is ONE key with the same address on both chains — only balances,
+Paper/Live, holdings and fills are per chain. `EvmWalletPanel` gained `only`
+(narrow every per-chain surface to one chain) and `showWallet` (render the
+shared key block). On separate PAGES the key block shows on both, because the
+controls are identical and idempotent and making someone leave the BNB page to
+find their address would be the opposite of simple; the panel header says the
+key is shared. `showWallet` remains for a future surface that shows two chains
+side by side, where duplicate "Remove wallet" buttons WOULD be dangerous.
+
+A chain disabled in Settings gets no menu entry at all (`hiddenRoutes` on the
+sidebar). That was deliberate in the original panel — its strip could arm a
+chain with no other surface, and its balance poll kept hitting an RPC the user
+turned off. A menu entry opening an armable page is the same hazard one click
+further away.
+
+**Reachability is the thing that can silently break here.** The sidebar now
+filters, so a route no workspace lists becomes unreachable while still
+compiling and rendering no error. `test/workspaces.test.mjs` pins it: every
+route has a home (`paper` excepted, delisted on purpose in 09-06), no route is
+owned twice, sections cover every listed route exactly once, and every
+workspace opens on a page it actually lists.
+
+## API, rate-limit and capacity swarm — and every fix from it (2026-09-09)
+
+Six researchers over Solana RPC, EVM RPC on both chains, market providers,
+request efficiency, failover and live feeds, under one rule: never invent a
+number, cite a source you fetched or a header you observed. Write-up in
+`docs/api-swarm-2026-09-09.md`. Everything found was then fixed and is green:
+**90 suites, both typechecks clean, build and the live sandbox test pass.**
+
+**The pattern worth remembering: a refusal that does not look like a refusal
+defeats everything built to handle refusals.** Five P1s from four independent
+researchers were the same bug — GeckoTerminal refusing with HTTP 200 and a JSON
+body, the Solana RPC refusing with a JSON-RPC error, a Cloudflare challenge read
+as a bad key, an Ankr 200 auth error. The fetch layer branched on status alone,
+and its success path ran `blockedUntil.delete(id)`, so a polite refusal actively
+UN-parked a provider an honest 429 had parked. Fixed with a body validator that
+runs before the status branch.
+
+**The public Solana RPC meters PER METHOD and publishes it on every reply.** The
+app's limiter assumed a flat 40 for everything: 30× too slow on cheap methods,
+4× too fast on the three the trade path hammers, and `getTokenLargestAccounts`
+has a budget of **0** — closed, not throttled, refused on the first call. Worse,
+the park was keyed by host, so that one guaranteed refusal blinded every other
+RPC read for ten seconds. Now server-driven, seeded with measured floors, and
+parked per `host#method`.
+
+**Idle Discover made 230 requests a minute, 89 of them to pump.fun against a
+published 60.** Rows were bought back individually after a list route had
+already returned them, and a per-row creator history duplicated a number
+Jupiter already puts on every row for free. Now 26/min to pump.fun, and the New
+column got back its configured refresh, which the per-row traffic had been
+halving.
+
+**An unreadable mint scored SAFE.** "Account not found" was marked `checked`,
+and downstream a null authority on a checked mint reads as positively-observed
+absent — the safe state in SPL. So a lagging node on a seconds-old mint rendered
+"Mint authority: Disabled" on the two heaviest security gates. One word.
+
+**`x-ratelimit-pubsub-limit: 10` counts CONNECTIONS per IP, not subscriptions
+per socket** (16 acked on one socket, connections 11–13 refused at handshake).
+Both feed modules encoded the wrong reading, silently unwatching copy leaders
+past ten and telling the user to buy a key for a limit that does not exist.
+
+**BNB has no single free endpoint that does everything**, and the config modelled
+it as if one nearly did. `receiptRpc` is replaced by a six-capability endpoint
+map — receipts, state, logs, simulate, broadcast, ws. That lifted the launch
+index off a ~67-minute ceiling that was the endpoint's archive wall, not the
+chain's, and stopped fills being priced from a 50-second state window against a
+60-second receipt timeout.
+
+Also: `powerMonitor` suspend/resume with staggered redial (a lid opening used to
+stampede ten sockets into a ten-connection budget); both key-redaction gaps
+closed; Jupiter moved off a retiring host (**note: a key makes it slower, 1 rps
+vs 8 — the reason is retirement, not throughput**); "Powered by Jupiter"
+attribution added, which their terms require; and the privacy policy's host list
+corrected — it was three hosts short, so `TERMS_VERSION` is now `2026-09-09.2`
+and users will be re-prompted to accept.
+
+**One decision left for you:** the `blockFeed` standby defaults ON, measured at
+5.51 GB/h, with no UI to disable it, and produces nothing while pump still emits
+logs. Three options are written up in §8b of the doc. It is a bandwidth-versus-
+insurance tradeoff, not a defect, so I did not pick one.
+
+**Recurring wrong claim, now warned about in the doc:** three separate agents
+reported GeckoTerminal as "documented 10/min" and recommended lowering the app's
+28/min. It is 30/min for the public API; the 10 is a marketing page for a paid
+CoinGecko product on another host. Do not act on it.
+
+## Scripting and automation audit — the widest one yet (2026-09-09)
+
+Six dimensions, an auditor and an adversarial skeptic each, over everything
+that can spend money with no human at the button: user scripts, the sandbox,
+advanced orders, copy trading, the Wallet Lab, and the renderer that arms them.
+Full write-up in `docs/automation-audit-2026-09-09.md`. Everything below is
+fixed and pinned; `npm test` is 86 suites, `npm run test:sandbox` is 17 checks.
+
+The ones that would have cost real money:
+
+- **A script could sell bags it never opened.** `sell_all` meant "every
+  position in the wallet". The shipped "Daily housekeeping" example, which the
+  Scripts page offers by default the moment you pick the schedule trigger,
+  would at 23:55 market-sell every hand-bought hold and report success. A
+  script now sells only what it opened; `held` and `bot.positions()` mean this
+  script's positions; a position rule never fires on a foreign bag.
+- **The budget walls had no lock.** `act()` was fire-and-forget from a
+  synchronous engine event, so eight swaps in one slot each read the same
+  pre-buy counters and eight buys landed against a limit of three. Actions now
+  run one at a time per script, and the kill switch is re-read after every
+  await.
+- **A leader trimming 40% of their bag sold 40% of ours** — hand-bought size
+  and ladder-held size included. The mirror is now scaled by the copy's share
+  of our on-chain basis. It was also DEAD on the pump rail: the curve log feed
+  delivered the sell first with no fraction and the signature dedupe threw away
+  the watcher's later, fraction-bearing copy.
+- **The Warmer's realised-loss cap could read a losing run as 0.000 SOL**,
+  because it counted only reconciled fills and *pending* is the normal state of
+  a fresh one. Unknown is now a stop, and an em dash.
+- **WebRTC was reachable from inside the script sandbox.** A control probe
+  reached Google's STUN server and got back this machine's public IP. CSP3's
+  `webrtc 'block'` is not implemented in Electron 43 and deleting the
+  constructor is defeated by `window[0]`; the fix is
+  `setWebRTCIPHandlingPolicy('disable_non_proxied_udp')` plus a direct proxy on
+  the partition.
+- **Every code script was dead in a packaged build.** The bytecode step
+  compiled the sandbox preload, which has no Node `require`, so the stub threw
+  on line 1 and scripts failed with nothing but a start timeout. The harden
+  step now fails the build if any preload contains `bytenode`.
+- **A take-profit ladder over-sold.** Two rungs sized off the same build-time
+  balance and both landed: 40/50 sold 90% where it meant 70%. Orders also
+  carried no wallet, so a stop written on wallet A could fire against wallet B
+  or be destroyed permanently.
+- **Five modules treated an unreadable state file as an empty one** and the
+  next save overwrote it: orders, copy configs, scripts, lab runs and the copy
+  store. All now follow `ledger.ts` — ENOENT is a fresh start, anything else
+  refuses to persist and is named in the startup dialog.
+- **The app never quit while a code script was running.** Sandboxes are hidden
+  windows, so `window-all-closed` never fired: on Windows, closing the terminal
+  left it running headless with no `before-quit`, no drain, and a LIVE-armed
+  script still spending.
+
+**The `no ready within 8000 ms` stall users reported is fixed and pinned.** It
+had one message and two unrelated causes, which is why it was undiagnosable.
+The sandbox now signals `alive` (the harness's first statement, before the
+user's code compiles) separately from `ready` (after the user's top-level code
+finishes), and `preload-error` is subscribed — nothing listened to it before,
+so every preload failure was silent and looked like a plain timeout. A missing
+preload is now named as a broken install in about 4 s. A slow top-level
+`await`, which is documented and promised by the AI prompt pack, is no longer
+mistaken for a dead sandbox: on the 8 s deadline the renderer is probed for
+liveness and a live one is given up to 30 s, while one that has stopped
+answering is killed at once. A stalled start is retried three times with
+backoff instead of disarming the script, and a script whose body throws still
+disarms immediately. `npm run test:sandbox` is 20 checks now: an 11 s top-level
+await starts, and a deliberately missing preload reports as an install fault.
+
+Also: `before-quit` now stops the Wallet Lab first and flushes advanced orders;
+a copy follower can no longer be created or flipped to live while armed; a
+`pct` trigger basis on a limit order is refused instead of arming at $20 market
+cap; per-mint cooldowns survive a restart; and `tokenFacts` fills liquidity and
+market cap for feed tokens, without which the now-fail-closed copy filters
+would have refused every copy on the pump rail.
+
+## BNB rail audit — five P1s fixed (2026-09-09, after the Robinhood one)
+
+Five-lens swarm over BNB (four.meme execution, PancakeSwap routing, data/PnL,
+renderer+settings+parity, a live read-only probe), each finding refuted by a
+skeptic and every P1 re-proved on chain. Everything: `docs/bnb-audit-2026-09-09.md`.
+
+- **P1 — a dust v2 pair beat the real pool and the trade FILLED.** `resolveBnb`
+  accepted any non-zero `getPair` without reading reserves or comparing v3; the
+  quote came from the same dead pair, so nothing reverted. A 0.1 BNB buy
+  returned 0.025 tokens where v3 returned 172.73 (6,792×; others 945×, 1,252×,
+  25,689×). Venues are now chosen by what they actually QUOTE.
+- **P1 — USD1/USDT-quoted four.meme tokens were tradeable once graduated:** the
+  quote guard sat after the `liquidityAdded` branch. Hoisted, as Robinhood's is.
+- **P1 — no BNB fill could ever reconcile.** publicnode refuses
+  `eth_getTransactionReceipt` at every depth and historical balances past ~50
+  blocks, so every trade timed out unconfirmed and every position had no basis.
+  `CHAINS.bnb.receiptRpc` + `client.receiptClient()` now serve receipts and the
+  balances that price a fill; a refusal is recognised, not retried for a minute.
+- **P1 — the rail simulated `minAmount: 0` and signed a real minimum**, while
+  four.meme's `tryBuy` ignores a per-token CREATOR BUY TAX (1/2/3/10 % tiers, up
+  to 9.8 %): 18 of 38 fresh-curve buys reverted at the shipped 5 % slippage. The
+  quote now comes from the simulated fill and names the tax.
+- **P1 — partial sells were broken on every four.meme token:** the contract only
+  accepts amounts that are whole multiples of 1e9 (`GW` otherwise), so 25 % and
+  75 % failed in every case (24 of 28 measured) after the user paid for an
+  approval. Amounts are floored to the quantum and the sell is simulated first.
+- **P2s:** Migrated was structurally empty (built from a 1-hour launch index
+  while graduation takes far longer) — now seeded from PancakeSwap's pool
+  listings and priced from the pool; New served ~12 rows whatever was asked
+  (filter ran after the slice); the graduating scan collapsed silently on one
+  oversized log query; the sold-out curve window was offered as tradeable; a
+  fabricated all-zero deployer; the shared platform contract listed as each
+  token's pool; curve fees billed on the requested not the filled amount; the
+  sell floor ~1.5 % looser than displayed; a disabled chain still polled; wallet
+  IPC answered for Robinhood whatever chain asked.
+- After: `npm test` 86 suites, typecheck 0, live smoke both chains, build 0.
+
+## EVM rail audit — two P1s and a dozen P2s fixed (2026-09-09)
+
+Eight-lens audit swarm over the Robinhood rail (execution, keys/signer, fees and
+anti-tamper, data/PnL, renderer parity, lifecycle, a live read-only probe, and a
+Solana parity matrix), each finding then handed to a skeptic told to refute it.
+51 findings survived. Everything: `docs/evm-audit-2026-09-09.md`.
+
+- **P1 — a Pons curve position could not be sold.** The curve pulls tokens with
+  `transferFrom`; the sell plan sent no approval, so every curve exit reverted
+  `ERC20InsufficientAllowance` in both modes and the quote silently fell back to
+  the formula. `plan()` now queues a `token→curve` approval (policy pinned to
+  that curve, like the four.meme branch) and `simulateSell` takes an allowance
+  state override so the quote stays real. Pinned live in `npm run test:evm`.
+- **P1 — a wallet could exist only in memory.** `evmWallet.persist` set the
+  cache before writing; a failed write left an auto-active wallet whose key was
+  never on disk. Cache is assigned after `renameSync`, `persist` throws while a
+  load failure is set, and the wallet IPC handlers catch.
+- **P2s:** stock/USDG-paired Pons launches were routed as tradeable and priced
+  as ETH (a 20× market cap); Robinhood's Universal Router needs an extra per-hop
+  field so every v3 trade reverted `SliceOutOfBounds`; a referrer that cannot
+  receive native reverted every pool trade (a fee must never block an exit); the
+  Alchemy key reached `app.log`, the Console page and toasts; the EVM ledger
+  (and Solana's) overwrote itself when unreadable; a landed fill could vanish
+  between send and receipt (now recorded pending from the locally derived hash,
+  with a bounded drain at quit); `/status` said "disarmed" while a chain was
+  live; the legal documents omitted every EVM host and misstated the curve fee
+  (TERMS_VERSION bumped); `rail.state()` blocked on the RPC so the UI said "no
+  wallet"; a bad RPC key looked like an outage (now a 15-minute fallback with
+  `rpcStatus`, and a Cloudflare 403 challenge is parked, not mistaken for a bad
+  key); BNB's index could die for the session; BNB's Graduating column was
+  structurally empty (700-block lookback → 0 rows while 9 tokens were above 3 %).
+- **Still open by decision:** position value is spot × amount, not a sell quote
+  (labelled); the renderer bundle carries the treasury constants (cosmetic, same
+  as Solana); a curve fee is still dropped on a receipt timeout or a quit; EVM
+  has no loss breakers, caps, withdraw, Trades rows or hotkeys — all now
+  labelled Solana-only rather than silently missing.
+- After: `npm test` 86 suites, typecheck 0, live smoke on both chains, build 0.
+
+## Three chains: the EVM rail generalised, BNB added, chain switch in the top bar (2026-09-09)
+
+User's ask (with a screenshot of the Discover toggle): move the Solana | Robinhood switch
+to the top bar, make balance and wallet follow it, isolate each chain, and add BNB
+memecoins. Research + probes: `docs/bnb-chain-2026-09-09.md`.
+
+- **One EVM rail, per-chain config.** `electron/evm/chains.ts` (`CHAINS[chain]`: viem
+  chain, shared addresses, `feeRule 'base2x' | 'gasPrice'`, public rate gate), `client.ts`
+  (per-chain batched + unbatched clients, per-host 429 gate), `evmWallet.ts` (ONE wallet
+  list for both chains — same key ⇒ same address; balances keyed `chain:address`;
+  `signTransaction(chain, …)` refuses a policy for another chain id), `ledger.ts` v2
+  (`chain` on fills, `nativeDeltaWei`), `venue.ts` dispatch, `trade.ts` / `market.ts` /
+  `discover.ts` / `rail.ts` take `chain`; IPC `evm:*` take `chain` FIRST. Arm state is per
+  chain; switching the shared wallet is refused while ANY EVM chain is armed. Contract:
+  `shared/evm.ts` (`ChainKind` + 'bnb', `EVM_CHAIN_META`, `*Native` field names,
+  `VENUE_LABEL`); settings `evm = { slippagePct, referrer, robinhood:{enabled,rpcUrl,
+  apiKey}, bnb:{…} }` (deep-merged in settings-store).
+- **BNB Smart Chain (56)** via **four.meme**: `bsc.ts` + `fourmeme.ts`. Quotes come from
+  the platform's Helper3 (`tryBuy`/`trySell`/`getTokenInfo`), buys are `buyTokenAMAP`
+  (403k gas simulated), sells use the platform's native third-party fee (whole 0.5 % to the
+  treasury; no referrer split), graduation at 18 BNB into a PancakeSwap v2 pair (Universal
+  Router 2 + Pancake's OWN Permit2 `0x31c2…`); only BNB-quoted launches (~10 %) trade,
+  USDT/stock-quoted ones are shown. Fee rule: priority = gasPrice (0.05 gwei floor, base
+  fee 0). **publicnode's free `eth_getLogs` reaches only ~10,000 blocks back** (5,000-block
+  range cap; bnbchain dataseed says "limit exceeded"), so the BNB index covers the last hour.
+- **Renderer** (fork): `ChainSwitch` in the TopBar, readouts + Paper/Live per chain,
+  Discover follows `term.chain`, `EvmTokenPage({ chain, address })` (was RobinhoodToken),
+  EVM watchlist pins stored as `chain:address`, wallet panel shows both chains' balances,
+  settings card per chain, portfolio card per chain.
+- Live check: `npm run test:evm` (both chains; `-- bnb` for one). Verified 2026-09-09:
+  every column on both chains, four.meme curve quote, CAKE on pancake-v2, per-chain arming.
+
+## Robinhood Chain — a second chain as a parallel rail (2026-09-08)
+
+Robinhood Chain (Arbitrum Orbit L2, chain id **4663**, ETH gas, mainnet since
+2026-07-01) is in the terminal beside Solana. Its pump.fun is **Pons V2**: 1 B tokens
+on a constant-product curve, 1 % fee + creator tax, graduates at **4.2 ETH** into a
+locked Uniswap v4 pool with the Pons hook (~400 launches per half hour measured).
+Research, every verified address and the probe answers: `docs/robinhood-chain-2026-09-08.md`.
+
+- **Not a chain abstraction.** The Solana engine is untouched. `electron/evm/` is
+  the rail: `chain.ts` (addresses/ABIs/topics/selectors, pinned by tests),
+  `client.ts` (viem; batched reads, an unbatched log client, a gated fetch — the
+  public RPC 429s bursts with a single JSON object that viem cannot map onto a
+  batch), `evmWalletStore.ts` + `evmWallet.ts` (`evm-wallets.json`, safeStorage,
+  ONE active signer, switch refused while armed), `policy.ts` (pure last gate before
+  a signature), `pons.ts` / `uniswap.ts` / `venue.ts` / `trade.ts` (route → quote →
+  build → estimateGas → policy → sign → send → receipt → ledger, one trade at a
+  time), `ledger.ts` (`evm-fills.json`; basis from the receipt block's balance diff),
+  `discover.ts` (rolling TokenLaunched index + multicall curve states), `market.ts`,
+  `rail.ts`. Contract `shared/evm.ts`; IPC `evm:*`; preload `krypt.evm.*`.
+- **Same panels, tagged rows.** `TokenSummary.chain = 'robinhood'` (`mint` = 0x
+  address, `priceSol` = ETH); the renderer routes a token page by address shape
+  (`isEvmAddress`). Discover has a Solana | Robinhood toggle; new pages/components:
+  `RobinhoodToken.tsx`, `EvmTradePanel`, `EvmPositionPanel`, `EvmWalletPanel`,
+  `EvmSettingsCard`, `EvmPortfolioCard`, `useEvmState`.
+- **Execution is our own builder.** Curve trades call `buy`/`sell` directly; pool
+  trades go through the Universal Router (v4 with the Pons pool key from the factory
+  record; v3 by probing the four fee tiers). Quotes are eth_call simulations of the
+  exact calldata — the documented Pons formula over-estimates by ~3.7 %. Paper =
+  simulation with a pretend balance, nothing broadcast, no paper positions.
+- **Fees:** inside the router call on pool trades; a follow-up transfer after a
+  curve fill that never blocks it. Treasury `0xDCBad4133961664D3F7E05f2D310A56Dc3eA483a`
+  (`EVM_TREASURY_ADDRESS`, set 2026-09-08, a plain account; pinned exactly by
+  `test/evmshared.test.mjs`). Not yet verified collecting on chain — the first
+  live buy is the check. Referrer = `settings.evm.referrer` (an EVM address).
+- **Anti-tamper, same layers as Solana (2026-09-08):** `shared/evmFeeIntegrity.ts`
+  carries the treasury as an obfuscated blob + SHA-256 with its own keystream seed;
+  `activeEvmTreasury()` always resolves the canonical address (editing the readable
+  constant redirects nothing; a corrupt blob turns fees off). `shared/canary.ts`
+  grew six EVM canaries (18 total) feeding the SAME `integrityGuard` level; `trade.ts`
+  applies the corrosion (size, slippage, delay, seize) to EVM BUYS only. The
+  buy-side interlock is `EvmPolicy.requireFeeLeg`: a router buy planned with a fee
+  must carry a `TRANSFER(ETH, treasury, ≥ planned)` command or the signer refuses;
+  set only for pool buys with a fee, never on sells, never on curve buys (no in-tx
+  fee there — the corrosion covers them). `node scripts/gen-fee-integrity.mjs`
+  regenerates BOTH blobs (in `npm run build`). Tests: `evmfeeintegrity`,
+  `evmfeeleg`, `canary` (18 flags, plus a source-proof that the EVM seize gate sits
+  inside the buy branch).
+- **Krypt curve router (2026-09-08, built + verified, NOT DEPLOYED):**
+  `contracts/KryptCurveRouter.sol` — 1,168 bytes of runtime, unowned, no storage
+  of funds, treasury a compile-time constant, 2 % fee ceiling, reentrancy lock.
+  `buy(curve, quoteIn, minOut, feeWei, referrer, referrerWei)` forwards the buy
+  (tokens to the buyer, snipe tax computed on the buyer), pays treasury +
+  referrer in the SAME transaction, and forwards a partial-fill refund to the
+  buyer. Verified on the live chain WITHOUT deploying, by injecting the runtime
+  bytecode with an eth_call state override and `eth_simulateV1` transfer traces
+  (`npm run test:router`): fills, exact fee legs, 18.4 ETH refund on an
+  over-sized buy, router ends at 0, custom-error reverts. Deploy with
+  `KRYPT_DEPLOYER_KEY=0x… npm run deploy:router -- --write` (needs a funded
+  account; cost is cents) — that fills `ADDR.kryptRouter` and the test pin, and
+  the rail then routes curve buys with a fee through it with
+  `requireFeeLeg.via = 'curve-router'` (the interlock now covers curve buys;
+  a direct curve buy under the interlock is refused). Until deployed, curve
+  buys go direct and bill with the follow-up transfer. Sells stay direct.
+- Settings: `settings.evm` (enabled, Alchemy key, own RPC URL, slippage, referrer);
+  the Alchemy key is the steady-feed upgrade over the rate-limited public endpoint.
+- Tests: `npm test -- evm` (10 suites, 184 cases since the BNB rail on 2026-09-09; full suite 84); live: `npm run test:evm`.
+- Not built: own tape from the sequencer feed (1 s candles), sell-quote position
+  values, other v4 hook pools (Pools.trade/Bags/Clanker), USDG-quoted execution,
+  1inch BYO route, 0x pins on the Solana watchlist. Gas subsidy ends 2026-09-29.
+
 ## Wallet Lab — fund, follow, random trading on own wallets (2026-09-03)
 
 Four pages under **Automation** (after Copy Trading): **Group Wallets** (`creator` — make a

@@ -127,7 +127,13 @@ export async function insiderNetworks(mint: string): Promise<InsiderNetwork[] | 
     );
     if (!r.ok) return null;
     const body = r.data;
-    const list: WireNetwork[] = Array.isArray(body) ? body : Array.isArray(body?.networks) ? body.networks : [];
+    // An empty ARRAY is a real answer — "no clusters". A body that is neither
+    // an array nor `{networks: [...]}` is not an answer at all, and defaulting
+    // it to `[]` scored a weight-10 PASS ("No transfer clusters detected among
+    // holders", sourced rugcheck) out of a shape we did not recognise, then
+    // cached it for five minutes. Unknown is an em dash, never a pass.
+    const list: WireNetwork[] | null = Array.isArray(body) ? body : Array.isArray(body?.networks) ? body.networks : null;
+    if (!list) return null;
     return list
       .filter((n) => n && typeof n === 'object')
       .map((n) => {

@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Maximize2, Pause, Play, RefreshCw, Sprout, TrendingUp, Trophy, X, Zap } from 'lucide-react';
 import type { DiscoverColumn, Launchpad } from '@shared/market';
 import type { AppSettings, LiveState, WalletInfo } from '@shared/types';
+import { isEvmChain, nativeSymbolOf, type ChainKind, type EvmChainKind } from '@shared/evm';
 import { FilterBar } from '../components/terminal/FilterBar';
 import { TokenCard } from '../components/terminal/TokenCard';
 import { SortBar, sortRows, type SortState } from '../components/terminal/SortBar';
 import { useTerminal } from '../state/TerminalProvider';
+import { useEvmState } from '../state/useEvmState';
 import { useToast } from '../state/ToastProvider';
 import { cls, fmtAgo } from '../utils/format';
+import { isPendingResult, PENDING_TOAST } from '../utils/evm';
 
 // Discover — the Pulse-equivalent, and the screen this app now opens on.
 //
@@ -28,11 +31,41 @@ const COLUMNS: Array<{
   { id: 'trending', label: 'Trending', hint: 'Most traded in the selected window', icon: Zap, accent: 'text-krypt-pink' },
 ];
 
+/** The same four columns mean slightly different things on an EVM chain:
+ *  the curve is the launchpad's (Pons / four.meme), the line is its
+ *  graduation threshold, and trending is GeckoTerminal's ranking for the
+ *  network rather than a windowed volume sort. */
+const EVM_HINTS: Record<EvmChainKind, Record<DiscoverColumn, string>> = {
+  robinhood: {
+    new: 'Just launched on Pons, still on the bonding curve',
+    graduating: 'Closest to 4.2 ETH — the Pons graduation line',
+    migrated: 'Swept into a locked Uniswap v4 pool',
+    trending: 'Trending pools on Robinhood Chain right now',
+  },
+  bnb: {
+    // ~85 % of four.meme launches are quoted in USDT, USD1 or a tokenised
+    // stock; this version settles BNB only, so those are not listed at all.
+    new: 'Just launched on four.meme, still on the bonding curve — BNB-quoted launches only',
+    graduating: 'Closest to 18 BNB — the four.meme graduation line. BNB-quoted launches only; USDT- and stock-quoted ones are not tradeable here',
+    migrated: 'Graduated into a PancakeSwap v2 pair',
+    trending: 'Trending pools on BNB Smart Chain right now',
+  },
+};
+
+const SUBTITLE: Record<ChainKind, string> = {
+  solana: 'Every Solana memecoin as it launches, graduates and trends — with the numbers that decide a trade.',
+  robinhood: 'Every Pons launch on Robinhood Chain as it launches, graduates and trends — priced in ETH.',
+  bnb: 'Every four.meme launch on BNB Smart Chain as it launches, graduates and trends — priced in BNB.',
+};
+
+/** The quick-buy seed per EVM chain: a small real bet in that chain's coin. */
+const DEFAULT_QUICK_BUY: Record<EvmChainKind, number> = { robinhood: 0.01, bnb: 0.02 };
+
 export function Discover({
   onOpenToken,
   active = true,
 }: {
-  onOpenToken: (mint: string) => void;
+  onOpenToken: (mint: string, chain?: ChainKind) => void;
   /** False while another route is on screen. App keeps this page mounted
    *  (its ~10,000 row elements are what made a return visit slow); while
    *  inactive it polls nothing, and it re-reads wallet, live state and
@@ -44,7 +77,16 @@ export function Discover({
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [live, setLive] = useState<LiveState | null>(null);
+  // The quick-buy size: SOL on Solana, ETH on Robinhood, BNB on BNB. One
+  // field, re-seeded when the chain switches — 0.1 SOL, 0.1 ETH and 0.1 BNB
+  // are not the same bet.
   const [quickBuySol, setQuickBuySol] = useState(0.1);
+  const chain = term.chain;
+  const evmChain: EvmChainKind | null = isEvmChain(chain) ? chain : null;
+  const isEvm = evmChain !== null;
+  const unit = nativeSymbolOf(chain);
+  // The selected EVM chain's wallet + arm state, kept live by its own pushes.
+  const { evm } = useEvmState(evmChain);
   // Which column is expanded to fill the page, if any. Four narrow columns is
   // the right default for watching everything at once; it is the wrong shape
   // for actually reading one of them.
@@ -81,15 +123,21 @@ export function Discover({
     ]);
     if (s.ok && s.data) {
       setSettings(s.data);
-      setQuickBuySol(Math.min(0.1, s.data.execution.maxLiveSol));
+      if (!isEvm) setQuickBuySol(Math.min(0.1, s.data.execution.maxLiveSol));
     }
     if (w.ok && w.data) setWallet(w.data);
     if (l.ok && l.data) setLive(l.data);
-  }, []);
+  }, [isEvm]);
 
   useEffect(() => {
     if (active) void reloadWallet();
   }, [active, reloadWallet]);
+
+  useEffect(() => {
+    setQuickBuySol(evmChain ? DEFAULT_QUICK_BUY[evmChain] : Math.min(0.1, settings?.execution.maxLiveSol ?? 0.1));
+    // Re-seed on the chain switch only; the settings read above handles the rest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [evmChain]);
 
   // The column polls run only while this page is on screen (see the
   // provider): off-route they spent provider budget on rows nobody could see.
@@ -100,24 +148,54 @@ export function Discover({
     return () => setDiscoverActive(false);
   }, [active, setDiscoverActive]);
 
-  const canQuickBuy =
-    !!settings?.execution.liveEnabled &&
-    live?.armed === true &&
-    !!wallet?.exists &&
-    (wallet?.balanceSol ?? 0) > 0;
+  // EVM: the button works whenever a wallet exists — disarmed it simulates
+  // the real bytes (the result says so), armed it spends ETH / BNB.
+  const evmLoading = evmChain !== null && evm === null;
+  const evmArmed = evm?.live.armed === true;
+  const canQuickBuy = evmChain
+    ? !evmLoading && evm?.wallet.exists === true && (!evmArmed || (evm?.wallet.balanceNative ?? 0) > 0)
+    : !!settings?.execution.liveEnabled &&
+      live?.armed === true &&
+      !!wallet?.exists &&
+      (wallet?.balanceSol ?? 0) > 0;
+  const quickBuyHint = evmChain
+    ? evmLoading
+      ? 'Reading the EVM wallet…'
+      : evm?.wallet.exists !== true
+        ? 'Quick buy needs an EVM wallet — create one on the Wallet page'
+        : `Live with an empty ${nativeSymbolOf(evmChain)} balance — send some in, or switch to Paper`
+    : undefined;
+
+  // The cards are memoised and this closure is not part of the comparison, so
+  // a card rendered before you armed would keep the OLD arm bit and simulate
+  // a trade you meant to be live. Read the volatile parts through refs.
+  const quickRef = useRef({ evmChain, evmArmed, quickBuySol, canQuickBuy });
+  quickRef.current = { evmChain, evmArmed, quickBuySol, canQuickBuy };
 
   const quickBuy = async (mint: string, symbol: string): Promise<void> => {
-    if (!canQuickBuy) {
+    const { evmChain: qChain, evmArmed: qArmed, quickBuySol: qSol, canQuickBuy: qCan } = quickRef.current;
+    if (qChain) {
+      if (!qCan) {
+        toast.warn('Quick buy needs an EVM wallet — create one on the Wallet page.');
+        return;
+      }
+      const r = await window.krypt.evm.buy(qChain, mint, qSol, !qArmed);
+      if (r.ok) (qArmed ? toast.success : toast.info)(`${symbol}: ${qArmed ? r.message : `Paper — ${r.message}`}`);
+      else if (isPendingResult(r)) toast.warn(`${symbol}: ${PENDING_TOAST}`);
+      else toast.error(`${symbol}: ${r.message}`);
+      return;
+    }
+    if (!qCan) {
       toast.warn('Quick buy needs a funded wallet, live execution on, and the engine armed.');
       return;
     }
     // Quick buy from a discovery table is a REAL broadcast by definition —
+    // (Solana path; the EVM path returned above.)
     // there is no interstitial to confirm in. It is gated on the same arm +
     // liveEnabled the trade panel uses. It is a manual click, so the
     // per-trade cap (orders / copy / fan-out) does not clamp it; the amount
     // is exactly what the user set in the quick-buy field.
-    const sol = quickBuySol;
-    const r = await window.krypt.live.testTrade(mint, sol, false);
+    const r = await window.krypt.live.testTrade(mint, quickRef.current.quickBuySol, false);
     if (r.ok) toast.success(`${symbol}: ${r.message}`);
     else toast.error(`${symbol}: ${r.message}`);
   };
@@ -143,17 +221,17 @@ export function Discover({
       <div className="px-6 pt-5 pb-3 flex items-end justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-[0.06em] text-white">Discover</h1>
-          <p className="mt-1 text-sm text-krypt-muted">
-            Every Solana memecoin as it launches, graduates and trends — with the numbers that decide a trade.
-          </p>
+          <p className="mt-1 text-sm text-krypt-muted">{SUBTITLE[chain]}</p>
         </div>
         <div className="flex items-center gap-2">
+          {/* The chain switch lives in the top bar: it is app-wide, not a
+              Discover setting. */}
           <div className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5">
             <span className="text-[10px] uppercase tracking-[0.14em] text-krypt-muted">Quick buy</span>
             <input
               type="number"
               min={0}
-              step={0.05}
+              step={isEvm ? 0.005 : 0.05}
               value={quickBuySol}
               onChange={(e) => {
                 const n = Number(e.target.value);
@@ -161,7 +239,7 @@ export function Discover({
               }}
               className="w-14 bg-transparent text-[12px] font-mono text-white outline-none text-right"
             />
-            <span className="text-[10px] text-krypt-muted">SOL</span>
+            <span className="text-[10px] text-krypt-muted">{unit}</span>
           </div>
           <button
             onClick={() => term.setPaused(!term.paused)}
@@ -215,7 +293,8 @@ export function Discover({
             expanded ? 'flex flex-col' : 'grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-4',
           )}
         >
-          {COLUMNS.filter((c) => !expanded || c.id === expanded).map((col) => {
+          {COLUMNS.filter((c) => !expanded || c.id === expanded).map((raw) => {
+            const col = evmChain ? { ...raw, hint: EVM_HINTS[evmChain][raw.id] } : raw;
             const state = term.columns[col.id];
             const rows = sortRows(term.visible(col.id), sort[col.id], term.filters.window);
             const Icon = col.icon;
@@ -237,7 +316,7 @@ export function Discover({
                   </button>
                   {/* Only Trending is window-scoped; showing the window on it
                       is what tells you the buttons above did something. */}
-                  {col.id === 'trending' && (
+                  {col.id === 'trending' && !isEvm && (
                     <span
                       className="rounded border border-white/10 px-1 py-px text-[9px] font-mono text-krypt-muted"
                       title="Ranked by traded volume in this window"
@@ -301,12 +380,13 @@ export function Discover({
                         key={t.mint}
                         token={t}
                         window={term.filters.window}
-                        onOpen={() => onOpenToken(t.mint)}
+                        onOpen={() => onOpenToken(t.mint, t.chain ?? chain)}
                         onQuickBuy={() => void quickBuy(t.mint, t.symbol || t.mint.slice(0, 6))}
                         quickBuySol={quickBuySol}
-                        watched={term.isWatched(t.mint)}
-                        onToggleWatch={() => term.toggleWatch(t.mint)}
+                        watched={term.isWatched(t.mint, t.chain ?? chain)}
+                        onToggleWatch={() => term.toggleWatch(t.mint, t.chain ?? chain)}
                         canQuickBuy={canQuickBuy}
+                        quickBuyHint={quickBuyHint}
                         layout={expanded === col.id ? 'row' : 'card'}
                       />
                     ))

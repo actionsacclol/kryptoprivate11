@@ -1,7 +1,9 @@
 // The wallet watcher (walletWatcher.ts) against a local websocket server:
 // one subscription per followed wallet, the leader's transaction read once
-// and decoded into a swap, replays deduped, unsubscribed on unfollow, and
-// the public socket's ten-wallet cap made visible rather than silent.
+// and decoded into a swap, replays deduped, unsubscribed on unfollow,
+// fourteen leaders all watched on ONE public connection (the pubsub limit is
+// 10 connections per IP, not 10 subscriptions per socket), and 'over-cap'
+// reached only when the host itself refuses.
 import assert from 'node:assert';
 import { WebSocketServer } from 'ws';
 import * as watcher from './.walletwatcher.mjs';
@@ -127,27 +129,81 @@ const notification = (sub, sig) =>
   console.log('ok  unfollowing unsubscribes and closes the socket');
 }
 
-// ── the public socket's ten-wallet cap is visible, not silent ────────────
+// ── fourteen leaders are fourteen leaders ────────────────────────────────
+//
+// 2026-09-09: this used to assert the opposite — that the eleventh followed
+// wallet went unwatched, because `x-ratelimit-pubsub-limit: 10` was read as
+// ten subscriptions per connection. It is ten pubsub CONNECTIONS per IP: the
+// header decrements once per socket, 16 `logsSubscribe` on one socket were
+// all acked, and connections 11-13 were refused at the handshake. A user
+// following 14 leaders was losing four of them, and being told to buy a key
+// for a limit that is not there.
 {
   let subId = 100;
+  let conns = 0;
+  const asked = [];
   const s = await server((ws) => {
+    conns += 1;
     ws.on('message', (raw) => {
       const req = JSON.parse(String(raw));
-      if (req.method === 'logsSubscribe') ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: ++subId }));
+      if (req.method !== 'logsSubscribe') return;
+      asked.push(req.params[0].mentions[0]);
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: ++subId }));
     });
   });
   const logs = [];
   watcher._reset();
   watcher.attach({ wssUrl: () => s.url, httpUrl: () => 'https://rpc.test/', onSwap: () => {}, log: (level, line) => logs.push(line) });
-  const wallets = Array.from({ length: 11 }, (_, i) => `W${String(i).padStart(43, '0')}`);
+  const wallets = Array.from({ length: 14 }, (_, i) => `W${String(i).padStart(43, '0')}`);
   watcher.setWallets(wallets);
-  assert.ok(await waitFor(() => Object.values(watcher.status()).filter((w) => w.state === 'watching').length === 10), 'ten are watched');
-  const over = Object.entries(watcher.status()).filter(([, w]) => w.state === 'over-cap');
-  assert.equal(over.length, 1, 'the eleventh is marked over-cap');
-  assert.ok(logs.some((l) => /allows 10 followed wallets/.test(l)), 'and the log says why');
+  assert.ok(await waitFor(() => Object.values(watcher.status()).filter((w) => w.state === 'watching').length === 14), 'all fourteen are watched');
+  assert.equal(Object.values(watcher.status()).filter((w) => w.state === 'over-cap').length, 0, 'none is marked over-cap');
+  assert.equal(asked.length, 14, 'fourteen subscribe frames went out — none was withheld');
+  assert.equal(conns, 1, 'over ONE connection: the connection is the scarce resource, not the subscription');
+  assert.equal(logs.filter((l) => /helius|api key|lifts this|allows \d+ followed wallets/i.test(l)).length, 0, 'and nothing tells the user to buy a key');
   watcher._reset();
   await s.close();
-  console.log('ok  the public socket cap is reported per wallet');
+  console.log('ok  fourteen followed wallets are all watched on one public socket');
+}
+
+// ── a refusal from the HOST is learned, and only then is a wallet over-cap ──
+{
+  let subId = 700;
+  let acked = 0;
+  const s = await server((ws) => {
+    ws.on('message', (raw) => {
+      const req = JSON.parse(String(raw));
+      if (req.method !== 'logsSubscribe') return;
+      // This host really does stop at three; nothing knows until it happens.
+      if (acked >= 3) {
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32600, message: 'Too many subscriptions' } }));
+        return;
+      }
+      acked += 1;
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: ++subId }));
+    });
+  });
+  const logs = [];
+  watcher._reset();
+  watcher.attach({ wssUrl: () => s.url, httpUrl: () => 'https://rpc.test/', onSwap: () => {}, log: (level, line) => logs.push(line) });
+  const wallets = Array.from({ length: 5 }, (_, i) => `X${String(i).padStart(43, '0')}`);
+  watcher.setWallets(wallets);
+  assert.ok(await waitFor(() => Object.values(watcher.status()).filter((w) => w.state === 'over-cap').length >= 1), 'the refused wallet is marked over-cap');
+  assert.equal(Object.values(watcher.status()).filter((w) => w.state === 'watching').length, 3, 'the three the host accepted are watching');
+  assert.ok(logs.some((l) => /subscribe rejected/.test(l)), 'the refusal is reported, not swallowed');
+
+  // The ceiling is now a measured 3, so a sixth wallet is not even asked for.
+  const before = acked + logs.length;
+  watcher.setWallets([...wallets, `X${String(9).padStart(43, '0')}`]);
+  await sleep(150);
+  const held = logs.filter((l) => /refused a subscribe past 3 followed wallets/.test(l));
+  assert.equal(held.length, 1, 'the log names the number the HOST refused at');
+  assert.ok(/16 were verified to work/.test(held[0]), 'quoting what was actually measured');
+  assert.equal(logs.filter((l) => /helius|api key|lifts this/i.test(l)).length, 0, 'still no key upsell');
+  assert.ok(before >= 0);
+  watcher._reset();
+  await s.close();
+  console.log('ok  over-cap comes from the host refusing, not from an invented limit');
 }
 
 console.log('\nwalletwatcher: all tests passed');

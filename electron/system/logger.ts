@@ -36,13 +36,28 @@ const FLUSH_MS = 250;
 /**
  * Scrub the secrets this app handles from a line before it touches disk:
  * Helius `api-key=` query params, Telegram bot tokens (`123456:AbC…`, with
- * or without the `bot` URL prefix) and `sk-…` style API keys.
+ * or without the `bot` URL prefix), `sk-…` style API keys, and keys that
+ * ride in a URL PATH — Alchemy's `/v2/<key>` (the EVM rail; viem puts the
+ * full URL into every transport error message) and any `/vN/<long token>`.
  */
 export function redactSecrets(s: string): string {
   return s
     .replace(/api-key=[^&\s"'`]+/gi, 'api-key=***')
+    // Two shapes the api-key= rule misses, found by the 2026-09-09 API swarm.
+    // Birdeye and Jupiter send their keys as a HEADER, and several providers
+    // accept `api_key=` or a bare `key=` in the query string.
+    .replace(/\b(x-api-key|api[-_]?key)\s*[:=]\s*["']?[A-Za-z0-9_.-]{8,}["']?/gi, '$1: ***')
+    .replace(/\b(api_key|key|token|access[-_]?token)=[^&\s"'`]{8,}/gi, '$1=***')
     .replace(/(\b|bot)(\d{6,}):[A-Za-z0-9_-]{20,}/g, '$1$2:***')
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, 'sk-***');
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, 'sk-***')
+    .replace(/(alchemy\.com\/v2\/)[A-Za-z0-9_-]+/gi, '$1***')
+    .replace(/(\/v[0-9]\/)[A-Za-z0-9_-]{20,}(?=[\s"'&?#/]|$)/g, '$1***')
+    // Found by the 2026-09-11 audit: QuickNode puts the key in `/rpc/<key>`
+    // (any long path segment after a known keyword), dRPC uses `dkey=`, and
+    // a header echoed as JSON is `"x-api-key":"…"` — none matched above.
+    .replace(/(\/(?:rpc|api|key|token|auth)\/)[A-Za-z0-9_-]{24,}(?=[\s"'&?#/]|$)/gi, '$1***')
+    .replace(/\b(dkey|apikey|api-token|auth|access_key|secret)=[^&\s"'`]{8,}/gi, '$1=***')
+    .replace(/"(x-api-key|api-key|api_key|authorization|x-auth-token)"\s*:\s*"[^"]*"/gi, '"$1":"***"');
 }
 
 export function formatLine(l: LogLine): string {
@@ -160,7 +175,10 @@ function flushSync(): void {
   }
 }
 
-function push(level: Level, line: string): void {
+function push(level: Level, rawLine: string): void {
+  // Redact BEFORE the in-memory feed: the Console page and every listener
+  // read `recent`, not the disk file, so a key must never be stored raw.
+  const line = redactSecrets(rawLine);
   const entry: LogLine = { at: Date.now(), level, line };
   recent.push(entry);
   if (recent.length > CAP) recent.splice(0, recent.length - CAP);

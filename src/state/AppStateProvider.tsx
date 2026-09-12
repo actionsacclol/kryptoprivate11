@@ -173,6 +173,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           break;
         case 'log':
           break; // Console page reads the log channel directly
+        case 'evmFill':
+        case 'evmState':
+          break; // The Robinhood surfaces subscribe themselves (useEvmState)
       }
     });
     return () => {

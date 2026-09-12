@@ -60,8 +60,8 @@ export function setRpcFallback(
 // burst crossed the free tier's rate for a second). A rate limit is exactly
 // the case where a short pause and then the other endpoint answers.
 const isTransportFailure = (r: { ok: boolean; message: string }): boolean =>
-  !r.ok && (classifyRpcFailure(r.message) === 'transient' || classifyRpcFailure(r.message) === 'rate-limited');
-const isRateLimited = (r: { ok: boolean; message: string }): boolean => !r.ok && classifyRpcFailure(r.message) === 'rate-limited';
+  !r.ok && (classify(r.message) === 'transient' || classify(r.message) === 'rate-limited');
+const isRateLimited = (r: { ok: boolean; message: string }): boolean => !r.ok && classify(r.message) === 'rate-limited';
 
 // ── Rejected credentials ──────────────────────────────────────────────
 //
@@ -144,7 +144,7 @@ function billIfHelius(httpUrl: string): void {
   }
 }
 
-// ── Rate-limit memory per host ────────────────────────────────────────
+// ── Rate-limit memory per host, and per METHOD ────────────────────────
 //
 // 2026-09-06 (rate-limit swarm): nothing in this file remembered a 429. N
 // concurrent callers each paused 400 ms and re-hit the same host, then
@@ -156,14 +156,31 @@ function billIfHelius(httpUrl: string): void {
 //      reads go to the other endpoint while it lasts, and when there is no
 //      other endpoint the caller waits it out (bounded) instead of firing
 //      into it. A trade is delayed by at most PARK_WAIT_CAP_MS, never lost.
-//   2. A token bucket per host paces bursts BEFORE they 429: public 10/s
-//      with a 4/s per-method window (documented 100 and 40 per 10 s),
-//      Helius free 9/s. Ordinary traffic never touches the bucket; a
-//      fan-out of ten wallets is spread over ~3 s instead of dying at t=0.
-//      `sendTransaction` is never delayed — it has its own lanes and its
-//      own resend cadence, and a late send is worse than a refused one.
+//   2. A token bucket per host paces bursts BEFORE they 429. Ordinary
+//      traffic never touches the bucket; a fan-out of ten wallets is spread
+//      over ~3 s instead of dying at t=0. `sendTransaction` is never
+//      delayed — it has its own lanes and its own resend cadence, and a
+//      late send is worse than a refused one.
 //
-// Both are keyed by HOST, never URL, so a keyed URL never reaches a log.
+// 2026-09-09 (API swarm): both of those were keyed by HOST alone, and the
+// public endpoint does not meter by host — it meters PER METHOD and says so
+// in an `x-ratelimit-*` header set on every reply. Two consequences:
+//
+//   * `getTokenLargestAccounts` has a method limit of ZERO on the free tier.
+//     Its first call from a cold IP is a 429 with `retry-after: 10`, so a
+//     single holder lookup — guaranteed on a default install — parked the
+//     whole host for the maximum 10 s and blinded balances, blockhash,
+//     account reads and fill detection. A refusal that names a method now
+//     parks `host#method`; only a host-level 429 parks the host.
+//   * The flat 4/s-per-method guess was wrong in both directions: 4× over
+//     budget on the three indexed methods, and a third of the real budget
+//     on the cheap ones. Budgets are now read from the server's own headers
+//     and seeded from the measured floors below, so a cold start is safe
+//     before any header has been seen, and a method the server closes is
+//     refused locally rather than spending a round trip to be refused.
+//
+// Everything is keyed by HOST (plus method), never URL, so a keyed URL never
+// reaches a log.
 
 const parkedUntil = new Map<string, number>();
 const parkStrikes = new Map<string, { count: number; lastAt: number }>();
@@ -175,29 +192,46 @@ const PARK_WAIT_CAP_MS = 2_500;
 
 const sleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
 
-function noteRateLimit(httpUrl: string, retryAfter: string | null): number {
-  const host = safeHost(httpUrl);
+/** A park key is the host, or `host#method` when the server refused ONE
+ *  method rather than the endpoint. */
+const parkKey = (host: string, method?: string | null): string => (method ? `${host}#${method}` : host);
+
+/**
+ * Remember a refusal. `method` is passed only when the refusal is
+ * method-scoped (the server said so); otherwise the whole host is parked,
+ * exactly as before.
+ */
+function noteRateLimit(httpUrl: string, retryAfter: string | null, method?: string | null): number {
+  const key = parkKey(safeHost(httpUrl), method);
   const now = Date.now();
-  const prev = parkStrikes.get(host);
+  const prev = parkStrikes.get(key);
   const count = prev && now - prev.lastAt < PARK_STRIKE_DECAY_MS ? prev.count + 1 : 1;
-  parkStrikes.set(host, { count, lastAt: now });
+  parkStrikes.set(key, { count, lastAt: now });
   let length = Math.min(PARK_MAX_MS, PARK_BASE_MS * 2 ** (count - 1));
   const ra = retryAfter ? Number(retryAfter) : NaN;
   if (Number.isFinite(ra) && ra > 0) length = Math.min(PARK_MAX_MS, Math.max(length, ra * 1000));
   const until = now + length;
-  if (until > (parkedUntil.get(host) ?? 0)) parkedUntil.set(host, until);
+  if (until > (parkedUntil.get(key) ?? 0)) parkedUntil.set(key, until);
   return length;
 }
 
-/** Milliseconds until this endpoint's host stops being rate limited, or 0. */
-export function rpcParkRemainingMs(httpUrl: string): number {
-  return Math.max(0, (parkedUntil.get(safeHost(httpUrl)) ?? 0) - Date.now());
+/**
+ * Milliseconds until this endpoint stops being rate limited, or 0. With a
+ * method, the longer of the host park and that method's own park — a park on
+ * one method never speaks for the rest of the endpoint.
+ */
+export function rpcParkRemainingMs(httpUrl: string, method?: string | null): number {
+  const host = safeHost(httpUrl);
+  const now = Date.now();
+  const hostPark = (parkedUntil.get(host) ?? 0) - now;
+  const methodPark = method ? (parkedUntil.get(parkKey(host, method)) ?? 0) - now : 0;
+  return Math.max(0, hostPark, methodPark);
 }
 
 /** Wait out a park when there is nowhere else to go — bounded, jittered so
  *  the callers that piled up do not all fire in the same millisecond. */
-async function awaitPark(httpUrl: string): Promise<void> {
-  const parked = rpcParkRemainingMs(httpUrl);
+async function awaitPark(httpUrl: string, method?: string | null): Promise<void> {
+  const parked = rpcParkRemainingMs(httpUrl, method);
   if (parked > 0) await sleep(Math.min(parked, PARK_WAIT_CAP_MS) + Math.random() * 250);
 }
 
@@ -231,15 +265,153 @@ const PUBLIC_HOSTS = new Set(['api.mainnet-beta.solana.com', 'api.mainnet.solana
 /** Deepest pacing delay handed out: past this the backlog is a bug, not a burst. */
 const BUCKET_WAIT_CAP_MS = 8_000;
 
-function bucketSpecs(host: string, method: string): Array<{ key: string; rate: number; burst: number }> {
-  if (/helius/i.test(host)) return [{ key: host, rate: 9, burst: 9 }];
-  if (PUBLIC_HOSTS.has(host)) {
-    return [
-      { key: host, rate: 10, burst: 10 },
-      { key: `${host}#${method}`, rate: 4, burst: 8 },
-    ];
+// ── What the server says its budgets are ──────────────────────────────
+//
+// `api.mainnet-beta.solana.com` publishes, on EVERY reply:
+//     x-ratelimit-tier / -method-limit / -method-remaining / -rps-limit
+//     x-ratelimit-endpoint-limit / -conn-limit / -connrate-limit
+// The method limit is a count per ten-second window (the window Solana's own
+// docs describe its free tier in). These are the floors measured from those
+// headers on 2026-09-09, used until this run has seen a header of its own —
+// a cold start must be safe, not optimistic.
+const METHOD_WINDOW_S = 10;
+const PUBLIC_METHOD_BUDGET: Record<string, number> = {
+  getBalance: 150,
+  getHealth: 150,
+  getTokenSupply: 150,
+  getLatestBlockhash: 100,
+  getAccountInfo: 50,
+  getMultipleAccounts: 50,
+  // Indexed reads. The old flat guess allowed 40 per window here — four
+  // times what the endpoint actually grants.
+  getSignatureStatuses: 10,
+  getSignaturesForAddress: 10,
+  getTokenAccountsByOwner: 10,
+  // Not throttled: CLOSED. `x-ratelimit-method-limit: 0`, 429 on the first
+  // call from a cold IP. Spending a request on it only earns a park.
+  getTokenLargestAccounts: 0,
+};
+/** Methods with no measured floor keep the pre-2026-09-09 pacing (4/s). */
+const PUBLIC_DEFAULT_BUDGET = 4 * METHOD_WINDOW_S;
+/** Host-wide seed before a `x-ratelimit-rps-limit` header is seen. */
+const PUBLIC_HOST_RATE = 10;
+/** However high the server's rps allowance is, one desktop app pacing itself
+ *  above this is a bug in us, not headroom (conn-limit is 40). */
+const HOST_RATE_CEILING = 50;
+
+/** Per `host#method`, the budget the SERVER last stated for this window. */
+const observedMethodBudget = new Map<string, number>();
+/** Per host, the `x-ratelimit-rps-limit` the server last stated. */
+const observedHostRps = new Map<string, number>();
+
+const headerNumber = (
+  res: { headers?: { get?: (name: string) => string | null } },
+  name: string,
+): number | null => {
+  try {
+    const raw = res.headers?.get?.(name);
+    if (raw === null || raw === undefined) return null;
+    const n = Number(String(raw).trim());
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
   }
-  return [{ key: host, rate: 20, burst: 20 }];
+};
+
+/**
+ * Read the endpoint's own rate-limit headers off any reply, success or
+ * refusal, and let them drive the buckets. A keyed endpoint (Helius,
+ * Alchemy) sends none of these, so nothing is recorded for it and it keeps
+ * its own seeded budget — the public endpoint's tiny per-method allowances
+ * are never inherited by a host that never claimed them.
+ */
+function noteRateLimitHeaders(
+  httpUrl: string,
+  method: string,
+  res: { headers?: { get?: (name: string) => string | null } },
+): void {
+  const host = safeHost(httpUrl);
+  const limit = headerNumber(res, 'x-ratelimit-method-limit');
+  if (limit !== null) {
+    observedMethodBudget.set(parkKey(host, method), limit);
+    // A budget the server has just revised down must not be spendable from
+    // tokens accrued under the old one.
+    const b = buckets.get(parkKey(host, method));
+    if (b) applySpec(b, methodSpec(host, method));
+  }
+  const remaining = headerNumber(res, 'x-ratelimit-method-remaining');
+  if (remaining !== null && remaining <= 0) {
+    // The next call in this window is the one that gets refused. Drain the
+    // bucket rather than park: pacing resumes on its own as the window
+    // refills, and no other method is touched.
+    const b = buckets.get(parkKey(host, method));
+    if (b) b.tokens = Math.min(b.tokens, 0);
+  }
+  const rps = headerNumber(res, 'x-ratelimit-rps-limit');
+  if (rps !== null && rps > 0) observedHostRps.set(host, rps);
+}
+
+/** The budget this host grants this method per window, or null when the
+ *  host publishes nothing and we have no measured floor for it. */
+function methodBudget(host: string, method: string): number | null {
+  const seen = observedMethodBudget.get(parkKey(host, method));
+  if (seen !== undefined) return seen;
+  if (PUBLIC_HOSTS.has(host)) return PUBLIC_METHOD_BUDGET[method] ?? PUBLIC_DEFAULT_BUDGET;
+  return null;
+}
+
+/**
+ * What this client currently believes an endpoint grants a method per
+ * ten-second window: the server's own header if one has been seen, else the
+ * measured floor, else null for a host that publishes nothing. Exported for
+ * the tests, which must be able to pin the seeds and the header handling
+ * without touching the live endpoint.
+ */
+export function rpcMethodBudget(httpUrl: string, method: string): number | null {
+  return methodBudget(safeHost(httpUrl), method);
+}
+
+/** True when this endpoint does not serve this method at all (budget 0). */
+function methodIsClosed(httpUrl: string, method: string): boolean {
+  return methodBudget(safeHost(httpUrl), method) === 0;
+}
+
+function closedMethodMessage(httpUrl: string, method: string): string {
+  return (
+    `RPC HTTP 429 — ${safeHost(httpUrl)} sets a method limit of 0 for ${method} on this tier, ` +
+    'so the request was not sent. Too many requests would be the only possible answer.'
+  );
+}
+
+function methodSpec(host: string, method: string): { key: string; rate: number; burst: number } {
+  const budget = methodBudget(host, method) ?? PUBLIC_DEFAULT_BUDGET;
+  const rate = Math.max(0.1, budget / METHOD_WINDOW_S);
+  // Burst stays at two seconds' worth, as the old 4/s + burst 8 did, so the
+  // first calls of a page load still go out together.
+  return { key: parkKey(host, method), rate, burst: Math.max(1, Math.min(budget, rate * 2)) };
+}
+
+function bucketSpecs(host: string, method: string): Array<{ key: string; rate: number; burst: number }> {
+  const rps = observedHostRps.get(host);
+  if (rps !== undefined) {
+    const rate = Math.min(HOST_RATE_CEILING, rps);
+    const specs = [{ key: host, rate, burst: rate }];
+    if (methodBudget(host, method) !== null) specs.push(methodSpec(host, method));
+    return specs;
+  }
+  if (/helius/i.test(host)) return [{ key: host, rate: 9, burst: 9 }];
+  if (PUBLIC_HOSTS.has(host)) return [{ key: host, rate: PUBLIC_HOST_RATE, burst: PUBLIC_HOST_RATE }, methodSpec(host, method)];
+  const specs: Array<{ key: string; rate: number; burst: number }> = [{ key: host, rate: 20, burst: 20 }];
+  if (methodBudget(host, method) !== null) specs.push(methodSpec(host, method));
+  return specs;
+}
+
+/** Re-rate a live bucket when the server revises the budget, without letting
+ *  it keep tokens the new budget never granted. */
+function applySpec(b: Bucket, spec: { rate: number; burst: number }): void {
+  b.rate = spec.rate;
+  b.burst = spec.burst;
+  b.tokens = Math.min(b.tokens, spec.burst);
 }
 
 /** Reserve `cost` tokens; returns how long the caller must wait first. A
@@ -250,6 +422,8 @@ function reserve(spec: { key: string; rate: number; burst: number }, cost: numbe
   if (!b) {
     b = { tokens: spec.burst, last: now, rate: spec.rate, burst: spec.burst };
     buckets.set(spec.key, b);
+  } else if (b.rate !== spec.rate || b.burst !== spec.burst) {
+    applySpec(b, spec);
   }
   b.tokens = Math.min(b.burst, b.tokens + ((now - b.last) / 1000) * b.rate);
   b.last = now;
@@ -276,6 +450,107 @@ function retryAfterOf(res: { headers?: { get?: (name: string) => string | null }
   }
 }
 
+// ── Refusals that do not look like refusals ───────────────────────────
+//
+// 2026-09-09 (API swarm). Two shapes were invisible to the classifier, and
+// a refusal the machinery cannot see defeats all of the machinery:
+//
+//   * A rate limit delivered as a JSON-RPC error inside HTTP 200. A harness
+//     fired 60 calls in 2 s into a host answering "Too many requests" and
+//     got no park, no failover, and a healthy fallback left untouched. The
+//     text also failed `mentionsRateLimit`, so the sell retry and the order
+//     re-arm never fired either.
+//   * A Cloudflare 403 challenge, which is an HTML page saying "prove you
+//     are a browser", read as "your key is rejected": the host was banned
+//     for fifteen minutes and the user told to replace a key that works.
+//     The EVM rail already solves this (evm/client.ts peekIsChallenge).
+
+const RATE_LIMIT_PHRASE =
+  /too many requests|rate.?limit(?:ed|ing|s)?|slow down|request rate exceeded|quota exceeded|exceeded (?:your|the|its) (?:request|rate|call)/i;
+
+/** Does this text say "you are asking too often", in any of the wordings a
+ *  Solana RPC front end uses? Bare "429" counts only alongside a word that
+ *  makes it a limit, so "behind by 429 slots" can never park a host. */
+function looksRateLimited(text: string): boolean {
+  const t = text ?? '';
+  if (RATE_LIMIT_PHRASE.test(t)) return true;
+  return /(?:^|\D)429(?:\D|$)/.test(t) && /limit|too many|request|throttl/i.test(t);
+}
+
+/** The server naming ONE method ("Too many requests for a specific RPC
+ *  call") — the difference between parking a method and blinding a host. */
+const methodScopedText = (text: string): boolean =>
+  /for a specific rpc call|specific method|per[- ]method|this method|method limit/i.test(text ?? '');
+
+const CHALLENGE_MARK = 'served a bot challenge page';
+
+function challengeMessage(httpUrl: string): string {
+  return (
+    `RPC HTTP 403 — ${safeHost(httpUrl)} ${CHALLENGE_MARK} instead of an answer. ` +
+    'That is the front door refusing the connection, not the endpoint refusing a key.'
+  );
+}
+
+const isChallengeMessage = (message: string): boolean => (message ?? '').includes(CHALLENGE_MARK);
+
+/**
+ * The file's own view of a failure: everything `classifyRpcFailure` knows,
+ * plus the two shapes above. Used everywhere in this file so a polite
+ * refusal reaches the same park, failover and retry as an honest 429.
+ */
+function classify(message: string): ReturnType<typeof classifyRpcFailure> {
+  const base = classifyRpcFailure(message);
+  if (base !== 'other') return base;
+  if (isChallengeMessage(message)) return 'transient';
+  if (looksRateLimited(message)) return 'rate-limited';
+  return 'other';
+}
+
+/** First 600 bytes of a refusal's body, on a clone where there is one, so
+ *  nothing the caller still needs is consumed. Never throws. */
+async function peekBody(res: {
+  clone?: () => { text?: () => Promise<string> };
+  text?: () => Promise<string>;
+}): Promise<string> {
+  try {
+    const src = typeof res.clone === 'function' ? res.clone() : res;
+    const t = typeof src?.text === 'function' ? await src.text() : '';
+    return typeof t === 'string' ? t.slice(0, 600) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** A 403 that is an HTML bot challenge rather than a JSON "no". */
+function isChallenge(res: { headers?: { get?: (n: string) => string | null } }, body: string): boolean {
+  const t = (body ?? '').toLowerCase();
+  if (t.includes('<!doctype html') || t.includes('<html') || t.includes('cf_chl') || t.includes('just a moment')) return true;
+  if (t.includes('cf-browser-verification') || t.includes('attention required') || t.includes('enable javascript and cookies')) return true;
+  try {
+    const mitigated = res.headers?.get?.('cf-mitigated');
+    if (mitigated && /challenge/i.test(mitigated)) return true;
+    const ctype = res.headers?.get?.('content-type');
+    if (ctype && /text\/html/i.test(ctype)) return true;
+  } catch {
+    /* a stubbed response with no headers is not a challenge */
+  }
+  return false;
+}
+
+/**
+ * For the other rails that read a status code straight off a `fetch` (the
+ * send lanes in broadcast.ts): is this 401/403 a bot challenge rather than a
+ * rejected key? Reads a clone, so the caller's body is untouched, and never
+ * throws.
+ */
+export async function isChallengeResponse(res: {
+  headers?: { get?: (n: string) => string | null };
+  clone?: () => { text?: () => Promise<string> };
+  text?: () => Promise<string>;
+}): Promise<boolean> {
+  return isChallenge(res, await peekBody(res));
+}
+
 async function callOnce<T>(httpUrl: string, method: string, params: unknown[]): Promise<RpcResult<T>> {
   await acquire(httpUrl, method);
   billIfHelius(httpUrl);
@@ -286,12 +561,39 @@ async function callOnce<T>(httpUrl: string, method: string, params: unknown[]): 
       body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
       signal: AbortSignal.timeout(8000),
     });
+    noteRateLimitHeaders(httpUrl, method, res);
     if (!res.ok) {
-      if (res.status === 429) noteRateLimit(httpUrl, retryAfterOf(res));
+      if (res.status === 429) {
+        // Method-scoped when the server says so — either by publishing a
+        // limit of 0 for this method or by naming the method in the body.
+        const body = await peekBody(res);
+        const scoped = headerNumber(res, 'x-ratelimit-method-limit') === 0 || methodScopedText(body);
+        noteRateLimit(httpUrl, retryAfterOf(res), scoped ? method : null);
+        return { ok: false, message: 'RPC HTTP 429' };
+      }
+      if (res.status === 403) {
+        const body = await peekBody(res);
+        if (isChallenge(res, body)) {
+          // Not a credentials problem: never remember the key as rejected.
+          // Park the host so every other caller uses the other endpoint
+          // while the front door is closed.
+          noteRateLimit(httpUrl, retryAfterOf(res), null);
+          return { ok: false, message: challengeMessage(httpUrl) };
+        }
+      }
       return { ok: false, message: `RPC HTTP ${res.status}` };
     }
     const body = (await res.json()) as { result?: T; error?: { message?: string } };
-    if (body.error) return { ok: false, message: body.error.message ?? 'RPC error' };
+    if (body.error) {
+      const raw = body.error.message ?? 'RPC error';
+      if (looksRateLimited(raw)) {
+        noteRateLimit(httpUrl, retryAfterOf(res), methodScopedText(raw) ? method : null);
+        // Kept verbatim behind a phrase every downstream reader already
+        // recognises (`mentionsRateLimit`, and onchain's holder note).
+        return { ok: false, message: `RPC rate limited: ${raw}` };
+      }
+      return { ok: false, message: raw };
+    }
     return { ok: true, message: 'ok', data: body.result };
   } catch (err) {
     return { ok: false, message: (err as Error)?.message ?? 'RPC request failed' };
@@ -317,23 +619,37 @@ async function call<T>(httpUrl: string, method: string, params: unknown[]): Prom
     if (alt) return callOnce<T>(alt, method, params);
   }
 
-  // A host that just said 429: use the other endpoint while the park lasts;
-  // with no other endpoint, wait it out rather than fire into it.
-  if (rpcParkRemainingMs(httpUrl) > 0) {
+  // A method this endpoint does not serve at all (the public endpoint
+  // publishes `x-ratelimit-method-limit: 0` for getTokenLargestAccounts).
+  // Ask the other endpoint if there is one; otherwise refuse locally rather
+  // than spend a request on a guaranteed 429 — which is what used to park
+  // the whole host and blind every other read.
+  if (methodIsClosed(httpUrl, method)) {
     const alt = otherEndpoint();
-    if (alt && rpcParkRemainingMs(alt) === 0) {
+    if (alt && !methodIsClosed(alt, method)) return callOnce<T>(alt, method, params);
+    return { ok: false, message: closedMethodMessage(httpUrl, method) };
+  }
+
+  // A host that just said 429: use the other endpoint while the park lasts;
+  // with no other endpoint, wait it out rather than fire into it. The park
+  // is consulted per method, so one refused method never diverts the rest.
+  if (rpcParkRemainingMs(httpUrl, method) > 0) {
+    const alt = otherEndpoint();
+    if (alt && rpcParkRemainingMs(alt, method) === 0) {
       const viaAlt = await callOnce<T>(alt, method, params);
       if (viaAlt.ok || !isTransportFailure(viaAlt)) return viaAlt;
     } else {
-      await awaitPark(httpUrl);
+      await awaitPark(httpUrl, method);
     }
   }
 
   let r = await callOnce<T>(httpUrl, method, params);
 
   // Bad credentials: retrying cannot help, so fail over immediately, and if
-  // there is nowhere to fail over to, at least say what is wrong.
-  if (classifyRpcFailure(r.message) === 'unauthorized' && !r.ok) {
+  // there is nowhere to fail over to, at least say what is wrong. A
+  // Cloudflare challenge is deliberately NOT in here — `classify` calls it
+  // transient, so it is retried and failed over like the outage it is.
+  if (classify(r.message) === 'unauthorized' && !r.ok) {
     const code = r.message.endsWith('403') ? 403 : 401;
     noteRpcRejection(httpUrl, code);
     const spoken = credentialsMessage(safeHost(httpUrl), String(code) as '401' | '403');
@@ -349,14 +665,16 @@ async function call<T>(httpUrl: string, method: string, params: unknown[]): Prom
     // The host just refused us. The other endpoint answers now if it can;
     // this one is asked again only once its park has passed.
     const alt = otherEndpoint();
-    if (alt && rpcParkRemainingMs(alt) === 0) {
+    if (alt && rpcParkRemainingMs(alt, method) === 0 && !methodIsClosed(alt, method)) {
       const viaAlt = await callOnce<T>(alt, method, params);
       if (viaAlt.ok) {
         noteFallback(httpUrl, method, 'is rate limited (HTTP 429)', viaAlt);
         return viaAlt;
       }
     }
-    await awaitPark(httpUrl);
+    // If that refusal closed the method here, a second attempt is pointless.
+    if (methodIsClosed(httpUrl, method)) return { ok: false, message: closedMethodMessage(httpUrl, method) };
+    await awaitPark(httpUrl, method);
     return callOnce<T>(httpUrl, method, params);
   }
 
@@ -427,8 +745,8 @@ export async function getSlot(httpUrl: string): Promise<RpcResult<number>> {
 }
 
 /** Balance in lamports for a base58 address. */
-export async function getBalance(httpUrl: string, pubkey: string): Promise<RpcResult<number>> {
-  const r = await call<{ value: number }>(httpUrl, 'getBalance', [pubkey, { commitment: 'confirmed' }]);
+export async function getBalance(httpUrl: string, pubkey: string, commitment: 'processed' | 'confirmed' = 'confirmed'): Promise<RpcResult<number>> {
+  const r = await call<{ value: number }>(httpUrl, 'getBalance', [pubkey, { commitment }]);
   if (!r.ok) return { ok: false, message: r.message };
   return { ok: true, message: 'ok', data: r.data?.value ?? 0 };
 }
@@ -443,13 +761,27 @@ export interface SignatureStatus {
 export async function getSignatureStatuses(
   httpUrl: string,
   signatures: string[],
+  opts: { searchTransactionHistory?: boolean } = {},
 ): Promise<RpcResult<Array<SignatureStatus | null>>> {
   const r = await call<{ value: Array<SignatureStatus | null> }>(httpUrl, 'getSignatureStatuses', [
     signatures,
-    { searchTransactionHistory: false },
+    // The recent cache covers ~150 blocks; a bridge asking about a signature
+    // minutes old has to say so, or "not found" means nothing.
+    { searchTransactionHistory: opts.searchTransactionHistory === true },
   ]);
   if (!r.ok) return { ok: false, message: r.message };
   return { ok: true, message: 'ok', data: r.data?.value ?? [] };
+}
+
+/**
+ * Can a transaction carrying this blockhash still land? False once the
+ * hash has aged out (~60–90 s), after which the bytes can never be included
+ * — broadcasting them returns a signature and nothing else.
+ */
+export async function isBlockhashValid(httpUrl: string, blockhash: string): Promise<RpcResult<boolean>> {
+  const r = await call<{ value: boolean }>(httpUrl, 'isBlockhashValid', [blockhash, { commitment: 'processed' }]);
+  if (!r.ok) return { ok: false, message: r.message };
+  return { ok: true, message: 'ok', data: r.data?.value === true };
 }
 
 export async function getHealth(httpUrl: string): Promise<RpcResult<string>> {
@@ -670,7 +1002,7 @@ export async function getTransactions(httpUrl: string, signatures: string[]): Pr
     params: [sig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }],
   }));
   // Same park and bucket as a single call, at the batch's real cost.
-  await awaitPark(httpUrl);
+  await awaitPark(httpUrl, 'getTransaction');
   await acquire(httpUrl, 'getTransaction', signatures.length);
   try {
     const res = await fetch(httpUrl, {
@@ -679,8 +1011,13 @@ export async function getTransactions(httpUrl: string, signatures: string[]): Pr
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(8000),
     });
+    noteRateLimitHeaders(httpUrl, 'getTransaction', res);
     if (!res.ok) {
-      if (res.status === 429) noteRateLimit(httpUrl, retryAfterOf(res));
+      if (res.status === 429) {
+        const text = await peekBody(res);
+        const scoped = headerNumber(res, 'x-ratelimit-method-limit') === 0 || methodScopedText(text);
+        noteRateLimit(httpUrl, retryAfterOf(res), scoped ? 'getTransaction' : null);
+      }
       return { ok: false, message: `RPC HTTP ${res.status}` };
     }
     const replies = (await res.json()) as Array<{ id?: number; result?: RawTransaction | null; error?: unknown }>;

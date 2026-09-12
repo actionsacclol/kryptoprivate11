@@ -12,7 +12,7 @@
 // token with several pools reports several different numbers; Jupiter's
 // aggregate is the honest one.
 
-import { getJson, memo } from '../http';
+import { cached, getJson, memo, putCache } from '../http';
 import type { TokenPool, TokenSocials } from '@shared/market';
 
 interface DsToken {
@@ -67,71 +67,181 @@ const num = (v: unknown): number | null => {
   return typeof n === 'number' && Number.isFinite(n) ? n : null;
 };
 
+const TTL_TOKEN_MS = 15_000;
+
+/**
+ * "DexScreener indexes no pair for this mint" is an ANSWER, and `memo` never
+ * stores null, so a token still on its bonding curve — which by definition
+ * has no AMM pair — was re-asked on every poll of every surface showing it:
+ * 12 DexScreener calls a minute against 4 for a migrated token (rate-limit
+ * swarm A5, still open on this half as of 2026-09-09).
+ *
+ * Written ONLY for a real 200 carrying an empty pair list, never for a
+ * failure, a 429 or a park, so a rate limit can never poison it. Short
+ * enough that a token migrating mid-session is picked up within half a
+ * minute.
+ */
+const NONE_TOKEN_MS = 30_000;
+const noneKey = (mint: string): string => `ds:token:none:${mint}`;
+const tokenKey = (mint: string): string => `ds:token:${mint}`;
+
+/** Assemble one token's answer from the pairs DexScreener returned for it.
+ *  Shared by the per-mint route and the batch route below, which the swarm
+ *  verified return BYTE-IDENTICAL pair objects. */
+function buildInfo(pairs: DsPair[]): DsTokenInfo | null {
+  if (!pairs.length) return null;
+
+  // The pool with the most recent VOLUME is the one the market uses; pure
+  // liquidity ranking picked a dead $1 Meteora pool over a token's live DBC
+  // curve (which reports no liquidity figure) and priced a holding at −90 %
+  // (2026-09-02). Liquidity breaks ties.
+  const vol = (p: DsPair): number => num(p.volume?.h1) ?? num(p.volume?.h6) ?? 0;
+  const sorted = [...pairs].sort(
+    (a, b) => vol(b) - vol(a) || (num(b.liquidity?.usd) ?? 0) - (num(a.liquidity?.usd) ?? 0),
+  );
+  const best = sorted[0];
+
+  const pools: TokenPool[] = sorted.slice(0, 8).map((p) => ({
+    address: p.pairAddress as string,
+    dexId: p.dexId ?? 'unknown',
+    label: `${p.baseToken?.symbol ?? '?'}/${p.quoteToken?.symbol ?? '?'}`,
+    liquidityUsd: num(p.liquidity?.usd),
+    quoteMint: p.quoteToken?.address ?? null,
+  }));
+
+  // Socials can appear on any pair; take the first non-empty across all.
+  let twitter: string | null = null;
+  let telegram: string | null = null;
+  let website: string | null = null;
+  let dexPaid = false;
+  let imageUrl: string | null = null;
+  for (const p of sorted) {
+    // `info` is only populated when the creator submitted (paid for)
+    // enhanced token info — which is exactly what the DEX-paid filter is.
+    if (p.info) dexPaid = true;
+    imageUrl = imageUrl ?? p.info?.imageUrl ?? null;
+    for (const s of p.info?.socials ?? []) {
+      const t = (s.type ?? '').toLowerCase();
+      const u = typeof s.url === 'string' && s.url.startsWith('https://') ? s.url : null;
+      if (!u) continue;
+      if (!twitter && (t === 'twitter' || u.includes('x.com') || u.includes('twitter.com'))) twitter = u;
+      if (!telegram && (t === 'telegram' || u.includes('t.me'))) telegram = u;
+    }
+    for (const w of p.info?.websites ?? []) {
+      if (!website && typeof w.url === 'string' && w.url.startsWith('https://')) website = w.url;
+    }
+  }
+
+  const created = sorted.map((p) => num(p.pairCreatedAt)).filter((n): n is number => n !== null);
+
+  const t24 = best.txns?.h24;
+  return {
+    pools,
+    socials: { twitter, telegram, website, dexPaid },
+    imageUrl,
+    pairCreatedAt: created.length ? Math.min(...created) : null,
+    priceUsd: num(best.priceUsd),
+    // priceNative is the price in the pair's QUOTE token. Reading a
+    // USDC-quoted pair's value as SOL would misprice the holding, the
+    // position value and the sell-side fee basis by the SOL price itself.
+    priceNative: best.quoteToken?.address === WSOL_MINT ? num(best.priceNative) : null,
+    liquidityUsd: num(best.liquidity?.usd),
+    txns24h: t24 ? { buys: t24.buys ?? 0, sells: t24.sells ?? 0 } : null,
+  };
+}
+
 /** Pools this token trades in, richest first, plus socials and image. */
 export async function tokenInfo(mint: string): Promise<DsTokenInfo | null> {
-  return memo<DsTokenInfo>(`ds:token:${mint}`, 15_000, async () => {
+  if (cached<boolean>(noneKey(mint))) return null;
+  return memo<DsTokenInfo>(tokenKey(mint), TTL_TOKEN_MS, async () => {
     const r = await getJson<{ pairs?: DsPair[] | null }>('dexscreener', `/latest/dex/tokens/${encodeURIComponent(mint)}`);
     if (!r.ok) return null;
     const pairs = (r.data?.pairs ?? []).filter((p) => p?.chainId === 'solana' && p.pairAddress);
-    if (!pairs.length) return null;
-
-    // The pool with the most recent VOLUME is the one the market uses; pure
-    // liquidity ranking picked a dead $1 Meteora pool over a token's live DBC
-    // curve (which reports no liquidity figure) and priced a holding at −90 %
-    // (2026-09-02). Liquidity breaks ties.
-    const vol = (p: DsPair): number => num(p.volume?.h1) ?? num(p.volume?.h6) ?? 0;
-    pairs.sort((a, b) => vol(b) - vol(a) || (num(b.liquidity?.usd) ?? 0) - (num(a.liquidity?.usd) ?? 0));
-    const best = pairs[0];
-
-    const pools: TokenPool[] = pairs.slice(0, 8).map((p) => ({
-      address: p.pairAddress as string,
-      dexId: p.dexId ?? 'unknown',
-      label: `${p.baseToken?.symbol ?? '?'}/${p.quoteToken?.symbol ?? '?'}`,
-      liquidityUsd: num(p.liquidity?.usd),
-    }));
-
-    // Socials can appear on any pair; take the first non-empty across all.
-    let twitter: string | null = null;
-    let telegram: string | null = null;
-    let website: string | null = null;
-    let dexPaid = false;
-    let imageUrl: string | null = null;
-    for (const p of pairs) {
-      // `info` is only populated when the creator submitted (paid for)
-      // enhanced token info — which is exactly what the DEX-paid filter is.
-      if (p.info) dexPaid = true;
-      imageUrl = imageUrl ?? p.info?.imageUrl ?? null;
-      for (const s of p.info?.socials ?? []) {
-        const t = (s.type ?? '').toLowerCase();
-        const u = typeof s.url === 'string' && s.url.startsWith('https://') ? s.url : null;
-        if (!u) continue;
-        if (!twitter && (t === 'twitter' || u.includes('x.com') || u.includes('twitter.com'))) twitter = u;
-        if (!telegram && (t === 'telegram' || u.includes('t.me'))) telegram = u;
-      }
-      for (const w of p.info?.websites ?? []) {
-        if (!website && typeof w.url === 'string' && w.url.startsWith('https://')) website = w.url;
-      }
+    if (!pairs.length) {
+      putCache(noneKey(mint), true, NONE_TOKEN_MS);
+      return null;
     }
-
-    const created = pairs
-      .map((p) => num(p.pairCreatedAt))
-      .filter((n): n is number => n !== null);
-
-    const t24 = best.txns?.h24;
-    return {
-      pools,
-      socials: { twitter, telegram, website, dexPaid },
-      imageUrl,
-      pairCreatedAt: created.length ? Math.min(...created) : null,
-      priceUsd: num(best.priceUsd),
-      // priceNative is the price in the pair's QUOTE token. Reading a
-      // USDC-quoted pair's value as SOL would misprice the holding, the
-      // position value and the sell-side fee basis by the SOL price itself.
-      priceNative: best.quoteToken?.address === WSOL_MINT ? num(best.priceNative) : null,
-      liquidityUsd: num(best.liquidity?.usd),
-      txns24h: t24 ? { buys: t24.buys ?? 0, sells: t24.sells ?? 0 } : null,
-    };
+    return buildInfo(pairs);
   });
+}
+
+// ── The batch route ───────────────────────────────────────────────────
+//
+// `/tokens/v1/solana/{comma-separated mints}` returns the same pair objects
+// as the per-mint route for up to THIRTY mints in one request — a ~30×
+// saving on the portfolio path, which was making sixty individual calls
+// (api swarm 2026-09-09 §4).
+//
+// The cap is enforced here, client-side, and that is not politeness: the
+// route SILENTLY DROPS everything past the thirtieth address rather than
+// erroring, so a chunk of 60 would come back looking like a complete answer
+// in which half the portfolio simply has no pools. That would be a
+// correctness bug — a missing pool reads as "not tradeable yet" — not just
+// waste. `test/dexscreener.test.mjs` pins the chunking.
+
+/** Hard cap on one `/tokens/v1/solana/…` request. Verified 2026-09-09. */
+export const BATCH_MAX = 30;
+
+/** Split into chunks no larger than the route's real cap. Exported for the test
+ *  that proves a 60-mint ask never becomes one truncated request. */
+export function chunkMints(mints: string[], size = BATCH_MAX): string[][] {
+  const unique = [...new Set(mints.filter((m) => typeof m === 'string' && m))];
+  const n = Math.max(1, Math.min(BATCH_MAX, size));
+  const out: string[][] = [];
+  for (let i = 0; i < unique.length; i += n) out.push(unique.slice(i, i + n));
+  return out;
+}
+
+/**
+ * Token info for MANY mints, batched 30 at a time, warming the very cache
+ * `tokenInfo` reads — so a caller can batch first and then call `tokenInfo`
+ * per mint without a single extra request.
+ *
+ * A mint the batch returned no BASE-side pair for is left alone rather than
+ * marked absent: it may simply be somebody else's quote token (wSOL, USDC),
+ * and the per-mint route is the honest place to find that out.
+ */
+export async function tokenInfoMany(
+  mints: string[],
+  opts: { priority?: boolean } = {},
+): Promise<Map<string, DsTokenInfo>> {
+  const out = new Map<string, DsTokenInfo>();
+  const wanted: string[] = [];
+  for (const m of [...new Set(mints.filter(Boolean))]) {
+    const hit = cached<DsTokenInfo>(tokenKey(m));
+    if (hit) out.set(m, hit);
+    else if (!cached<boolean>(noneKey(m))) wanted.push(m);
+  }
+  if (!wanted.length) return out;
+
+  for (const chunk of chunkMints(wanted)) {
+    const rows = await memo<DsPair[]>(`ds:batch:${chunk.join(',')}`, TTL_TOKEN_MS, async () => {
+      const r = await getJson<DsPair[]>(
+        'dexscreener',
+        `/tokens/v1/solana/${chunk.map(encodeURIComponent).join(',')}`,
+        { priority: opts.priority },
+      );
+      return r.ok && Array.isArray(r.data) ? r.data : null;
+    });
+    if (!rows) continue;
+
+    const byMint = new Map<string, DsPair[]>();
+    for (const p of rows) {
+      if (p?.chainId !== 'solana' || !p.pairAddress) continue;
+      const base = p.baseToken?.address;
+      if (!base) continue;
+      const list = byMint.get(base);
+      if (list) list.push(p);
+      else byMint.set(base, [p]);
+    }
+    for (const [mint, pairs] of byMint) {
+      const info = buildInfo(pairs);
+      if (!info) continue;
+      putCache(tokenKey(mint), info, TTL_TOKEN_MS);
+      out.set(mint, info);
+    }
+  }
+  return out;
 }
 
 
@@ -194,4 +304,77 @@ export async function orders(mint: string): Promise<DsOrders> {
     };
   });
   return hit ?? silent;
+}
+
+// ── Any chain: the token-pairs route ──────────────────────────────────
+//
+// `/token-pairs/v1/{chain}/{address}` answers with the same pair objects
+// as the Solana route, for every chain DexScreener indexes ('robinhood'
+// verified 2026-09-08). Kept as a separate export with the chain in its
+// cache key so the Solana callers above never see another chain's pools.
+
+export interface DsPairLite {
+  pairAddress: string;
+  dexId: string;
+  labels: string[];
+  baseToken: { address: string; symbol: string; name: string };
+  quoteToken: { address: string; symbol: string };
+  priceUsd: number | null;
+  priceNative: number | null;
+  liquidityUsd: number | null;
+  fdv: number | null;
+  marketCap: number | null;
+  pairCreatedAt: number | null;
+  volume: Record<string, number>;
+  priceChange: Record<string, number>;
+  txns: Record<string, { buys: number; sells: number }>;
+  imageUrl: string | null;
+  socials: TokenSocials;
+}
+
+export async function tokenPairsOn(chain: string, address: string, opts: { priority?: boolean } = {}): Promise<DsPairLite[]> {
+  const hit = await memo<DsPairLite[]>(`ds:pairs:${chain}:${address.toLowerCase()}`, 15_000, async () => {
+    const r = await getJson<DsPair[]>('dexscreener', `/token-pairs/v1/${encodeURIComponent(chain)}/${encodeURIComponent(address)}`, { priority: opts.priority });
+    if (!r.ok || !Array.isArray(r.data)) return null;
+    const pairs = r.data.filter((p) => p?.chainId === chain && p.pairAddress);
+    const vol = (p: DsPair): number => num(p.volume?.h1) ?? num(p.volume?.h6) ?? 0;
+    pairs.sort((a, b) => vol(b) - vol(a) || (num(b.liquidity?.usd) ?? 0) - (num(a.liquidity?.usd) ?? 0));
+    const out: DsPairLite[] = pairs.slice(0, 8).map((p) => {
+      let twitter: string | null = null;
+      let telegram: string | null = null;
+      let website: string | null = null;
+      for (const s of p.info?.socials ?? []) {
+        const t = (s.type ?? '').toLowerCase();
+        const u = typeof s.url === 'string' && s.url.startsWith('https://') ? s.url : null;
+        if (!u) continue;
+        if (!twitter && (t === 'twitter' || u.includes('x.com') || u.includes('twitter.com'))) twitter = u;
+        if (!telegram && (t === 'telegram' || u.includes('t.me'))) telegram = u;
+      }
+      for (const w of p.info?.websites ?? []) {
+        if (!website && typeof w.url === 'string' && w.url.startsWith('https://')) website = w.url;
+      }
+      const txns: Record<string, { buys: number; sells: number }> = {};
+      for (const [k, v] of Object.entries(p.txns ?? {})) txns[k] = { buys: v?.buys ?? 0, sells: v?.sells ?? 0 };
+      return {
+        pairAddress: p.pairAddress as string,
+        dexId: p.dexId ?? 'unknown',
+        labels: Array.isArray(p.labels) ? p.labels : [],
+        baseToken: { address: p.baseToken?.address ?? '', symbol: p.baseToken?.symbol ?? '', name: p.baseToken?.name ?? '' },
+        quoteToken: { address: p.quoteToken?.address ?? '', symbol: p.quoteToken?.symbol ?? '' },
+        priceUsd: num(p.priceUsd),
+        priceNative: num(p.priceNative),
+        liquidityUsd: num(p.liquidity?.usd),
+        fdv: num(p.fdv),
+        marketCap: num(p.marketCap),
+        pairCreatedAt: num(p.pairCreatedAt),
+        volume: Object.fromEntries(Object.entries(p.volume ?? {}).map(([k, v]) => [k, num(v) ?? 0])),
+        priceChange: Object.fromEntries(Object.entries(p.priceChange ?? {}).map(([k, v]) => [k, num(v) ?? 0])),
+        txns,
+        imageUrl: typeof p.info?.imageUrl === 'string' && p.info.imageUrl.startsWith('https://') ? p.info.imageUrl : null,
+        socials: { twitter, telegram, website, dexPaid: !!p.info },
+      };
+    });
+    return out.length ? out : null;
+  });
+  return hit ?? [];
 }

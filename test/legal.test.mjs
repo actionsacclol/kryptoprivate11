@@ -278,24 +278,64 @@ ok('the fee is disclosed in the terms, not only in the UI', () => {
 // ─── Privacy specifics ────────────────────────────────────────────────
 
 ok('every outbound third-party host is disclosed in the privacy policy', () => {
-  // If the app talks to it, the policy has to name it. This list is the audit
-  // of the actual code, not a guess.
+  // If the app talks to it, the policy has to name it. The market-data table
+  // (electron/data/http.ts HOSTS) is read from SOURCE so a provider added
+  // there without a privacy line fails here; the hosts reached outside that
+  // table are listed by hand, from an audit of the code on 2026-09-11.
   const privacy = documentText(documentById('privacy'));
-  for (const host of [
+  const http = fs.readFileSync(new URL('../electron/data/http.ts', import.meta.url), 'utf8');
+  const table = http.slice(http.indexOf('HOSTS'), http.indexOf('};', http.indexOf('HOSTS')));
+  const fromTable = [...table.matchAll(/:\s*'([a-z0-9.-]+\.[a-z]+)'/g)].map((m) => m[1]);
+  assert.ok(fromTable.length >= 10, `read ${fromTable.length} hosts from http.ts — the table moved?`);
+  const byHand = [
+    // Solana RPC and submission
     'api.mainnet-beta.solana.com',
+    'solana-rpc.publicnode.com',
     'mainnet.helius-rpc.com',
-    'api.dexscreener.com',
-    'api.geckoterminal.com',
-    'public-api.birdeye.so',
-    'frontend-api-v3.pump.fun',
-    'pumpportal.fun',
+    'sender.helius-rpc.com',
     'bundles.jito.wtf',
+    'mainnet.block-engine.jito.wtf',
+    'pumpportal.fun',
+    // EVM RPC
+    'rpc.mainnet.chain.robinhood.com',
+    'robinhood-rpc.publicnode.com',
+    'rpc.ordofi.network',
+    'robinhood-mainnet.g.alchemy.com',
+    'bsc-rpc.publicnode.com',
+    'bsc-dataseed.bnbchain.org',
+    'rpc-bnb.blockmachine.io',
+    // launcher upload, update check, images
+    'pump.fun',
+    'krypt.cc',
     'ipfs.io',
+    'cloudflare-ipfs.com',
+    // opt-in
     'api.telegram.org',
     'discord.com',
-  ]) {
+    'api.openai.com',
+    'api.anthropic.com',
+    'api.giphy.com',
+    'tenor.googleapis.com',
+    // explorers opened on click
+    'robinhoodchain.blockscout.com',
+    'bscscan.com',
+    'solscan.io',
+  ];
+  for (const host of [...new Set([...fromTable, ...byHand])]) {
     assert.ok(privacy.includes(host), `privacy policy never mentions ${host}`);
   }
+});
+
+ok('the policy says what the update check is, and that it is the only automatic request to us', () => {
+  const privacy = documentText(documentById('privacy'));
+  assert.match(privacy, /update check/i);
+  assert.match(privacy, /krypt\.cc/);
+  assert.match(privacy, /Nothing is downloaded or installed automatically/);
+  assert.doesNotMatch(privacy, /operate no server that could/, 'the old "no server, so no IP" claim is gone');
+  const tos = documentText(documentById('terms'));
+  assert.match(tos, /li\.quest/);
+  assert.match(tos, /cannot recover a transfer/);
+  assert.match(tos, /act of issuance/);
 });
 
 ok('retention periods are stated for everything kept', () => {

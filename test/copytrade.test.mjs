@@ -9,6 +9,9 @@
 //   • letting a LIVE config resume armed after a restart.
 
 import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import * as copy from './.copytrade.mjs';
 import { copySize, defaultConfig, emptyLeaderStats, leaderWinRate, rankLeaders, validateConfig, winRate } from './.copyshared.mjs';
 
@@ -16,31 +19,41 @@ let passed = 0;
 const cases = [];
 const test = (name, fn) => cases.push({ name, fn });
 
-const WALLET = 'Whale111111111111111111111111111111111111';
+// Base58 has no lowercase L, and validateConfig now checks the real
+// alphabet rather than a bare length, so "Whale" is not a valid address.
+const WALLET = 'Whae1111111111111111111111111111111111111';
 const MINT = 'CopyMint111111111111111111111111111111111';
 
 function makeHost(over = {}) {
-  const calls = { buys: [], sells: [], toasts: [] };
-  return {
-    calls,
-    host: {
-      buy: async (mint, sol) => {
-        calls.buys.push({ mint, sol });
-        return over.buyResult ?? { ok: true, message: 'bought', signature: 'sig' };
-      },
-      sell: async (mint, pct) => {
-        calls.sells.push({ mint, pct });
-        return over.sellResult ?? { ok: true, message: 'sold', signature: 'sellsig' };
-      },
-      liveBlockedReason: () => over.liveBlockedReason ?? null,
-      priceSol: () => (over.priceSol === undefined ? 0.001 : over.priceSol),
-      tokenFacts: async () =>
-        over.facts ?? { liquidityUsd: 50_000, marketCapUsd: 100_000, kryptScore: 80, isPumpfun: true },
-      log: () => {},
-      toast: (level, message) => calls.toasts.push({ level, message }),
-      changed: () => {},
+  // `opts` is recorded SEPARATELY: the pinned sell assertion is a deepEqual
+  // on { mint, pct } and must stay exactly that shape.
+  const calls = { buys: [], sells: [], toasts: [], buyOpts: [], sellOpts: [] };
+  const host = {
+    buy: async (mint, sol, opts) => {
+      calls.buys.push({ mint, sol });
+      calls.buyOpts.push(opts);
+      if (over.buyMs) await new Promise((r) => setTimeout(r, over.buyMs));
+      return over.buyResult ?? { ok: true, message: 'bought', signature: 'sig' };
     },
+    sell: async (mint, pct, opts) => {
+      calls.sells.push({ mint, pct });
+      calls.sellOpts.push(opts);
+      return over.sellResult ?? { ok: true, message: 'sold', signature: 'sellsig' };
+    },
+    liveBlockedReason: () => over.liveBlockedReason ?? null,
+    priceSol: () => (over.priceSol === undefined ? 0.001 : over.priceSol),
+    tokenFacts: async () =>
+      over.facts ?? { liquidityUsd: 50_000, marketCapUsd: 100_000, kryptScore: 80, isPumpfun: true },
+    log: () => {},
+    toast: (level, message) => calls.toasts.push({ level, message }),
+    changed: () => {},
   };
+  // The optional methods exist only when a test asks for them — the module
+  // must work against a host that implements none of them.
+  if (over.ourCostBasisSol !== undefined) host.ourCostBasisSol = () => over.ourCostBasisSol;
+  if (over.buyBlockedReason !== undefined) host.buyBlockedReason = () => over.buyBlockedReason;
+  if (over.maxLiveSol !== undefined) host.maxLiveSol = () => over.maxLiveSol;
+  return { calls, host };
 }
 
 function setup(over = {}) {
@@ -51,6 +64,18 @@ function setup(over = {}) {
 }
 
 const cfg = (over = {}) => ({ ...defaultConfig(WALLET, 'Sharky'), enabled: true, ...over });
+
+// Creating a LIVE follower never arms it — one `copy:save` must not be able to
+// start spending real SOL — so a test that wants an armed live config saves
+// twice, which is exactly what the user does.
+const save = (over = {}) => {
+  const c = cfg(over);
+  const r = copy.upsert(c);
+  if (!r.ok) return r;
+  const made = copy.all().find((x) => x.wallet === c.wallet);
+  if (made && c.enabled && !made.enabled) return copy.upsert({ ...c, id: made.id });
+  return r;
+};
 
 const trade = (over = {}) => ({
   wallet: WALLET,
@@ -96,7 +121,7 @@ test('a paper fill uses the price AFTER the configured delay, not theirs', async
   // Their trade prints at 0.001. By the time our delay elapses the tape is
   // at 0.0015 — that is what we would actually have paid.
   const h = setup({ priceSol: 0.0015 });
-  copy.upsert(cfg({ delayMs: 5 }));
+  save({ delayMs: 5 });
   copy.onWalletTrade(trade({ priceSol: 0.001 }));
   await new Promise((r) => setTimeout(r, 60));
 
@@ -107,7 +132,7 @@ test('a paper fill uses the price AFTER the configured delay, not theirs', async
 
 test('a paper round trip pays BOTH sides of every fee a real one would', async () => {
   const h = setup({ priceSol: 0.001 });
-  copy.upsert(cfg({ sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 }));
+  save({ sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
   copy.onWalletTrade(trade({ isBuy: true, priceSol: 0.001 }));
   await new Promise((r) => setTimeout(r, 20));
   // They sell at exactly the entry price: a fee-free model would show 0.
@@ -125,7 +150,7 @@ test('a paper round trip pays BOTH sides of every fee a real one would', async (
 
 test('filtered-out trades are RECORDED as skips with a reason', async () => {
   const h = setup({ facts: { liquidityUsd: 100, marketCapUsd: 1000, kryptScore: 10, isPumpfun: true } });
-  copy.upsert(cfg({ minLiquidityUsd: 5000 }));
+  save({ minLiquidityUsd: 5000 });
   copy.onWalletTrade(trade());
   await new Promise((r) => setTimeout(r, 30));
 
@@ -146,7 +171,7 @@ test('each filter rejects for its own stated reason', async () => {
   ];
   for (const [over, facts, re] of checks) {
     setup({ facts });
-    copy.upsert(cfg({ minLiquidityUsd: null, ...over }));
+    save({ minLiquidityUsd: null, ...over });
     copy.onWalletTrade(trade());
     await new Promise((r) => setTimeout(r, 30));
     const rows = copy.snapshot().recent;
@@ -157,7 +182,7 @@ test('each filter rejects for its own stated reason', async () => {
 
 test('paper mode never calls the live buy path', async () => {
   const h = setup();
-  copy.upsert(cfg({ mode: 'paper' }));
+  save({ mode: 'paper' });
   copy.onWalletTrade(trade());
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(h.calls.buys.length, 0, 'paper must not touch the signer');
@@ -168,7 +193,7 @@ test('paper mode never calls the live buy path', async () => {
 
 test('live mode calls the buy path and records the fill', async () => {
   const h = setup();
-  copy.upsert(cfg({ mode: 'live', sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 }));
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
   copy.onWalletTrade(trade({ sol: 5 }));
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(h.calls.buys.length, 1);
@@ -178,7 +203,7 @@ test('live mode calls the buy path and records the fill', async () => {
 
 test('a blocked live copy is skipped with the reason, and does not buy', async () => {
   const h = setup({ liveBlockedReason: 'the engine is not armed' });
-  copy.upsert(cfg({ mode: 'live' }));
+  save({ mode: 'live' });
   copy.onWalletTrade(trade());
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(h.calls.buys.length, 0);
@@ -187,7 +212,7 @@ test('a blocked live copy is skipped with the reason, and does not buy', async (
 
 test('a failed live buy is recorded, not silently dropped', async () => {
   const h = setup({ buyResult: { ok: false, message: 'relayer rejected' } });
-  copy.upsert(cfg({ mode: 'live' }));
+  save({ mode: 'live' });
   copy.onWalletTrade(trade());
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(copy.snapshot().recent[0].state, 'skipped');
@@ -198,7 +223,7 @@ test('a failed live buy is recorded, not silently dropped', async () => {
 
 test('the daily trade limit stops further copies', async () => {
   setup();
-  copy.upsert(cfg({ dailyTradeLimit: 2 }));
+  save({ dailyTradeLimit: 2 });
   for (let i = 0; i < 4; i++) {
     copy.onWalletTrade(trade({ mint: `Mint${i}${'1'.repeat(36)}` }));
     await new Promise((r) => setTimeout(r, 15));
@@ -210,7 +235,7 @@ test('the daily trade limit stops further copies', async () => {
 
 test('other wallets are ignored', async () => {
   const h = setup();
-  copy.upsert(cfg());
+  save();
   copy.onWalletTrade(trade({ wallet: 'Someone1111111111111111111111111111111111' }));
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(copy.snapshot().recent.length, 0);
@@ -218,7 +243,7 @@ test('other wallets are ignored', async () => {
 
 test('a disabled config copies nothing', async () => {
   setup();
-  copy.upsert(cfg({ enabled: false }));
+  save({ enabled: false });
   copy.onWalletTrade(trade());
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(copy.snapshot().recent.length, 0);
@@ -237,7 +262,7 @@ const tick = () => new Promise((r) => setTimeout(r, 25));
 
 async function openLiveCopy(over = {}) {
   const h = setup({ priceSol: 0.001, ...over });
-  copy.upsert(cfg({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 }));
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
   copy.onWalletTrade(trade({ isBuy: true, signature: 'buy1' }));
   await tick();
   assert.equal(h.calls.buys.length, 1, 'the copy bought');
@@ -337,7 +362,7 @@ test('LIVE: an unknown fraction is NOT mirrored — a trim must never become a d
 
 test('PAPER: a partial sell is bookkeeping only — same slices, no order', async () => {
   const h = setup({ priceSol: 0.001 });
-  copy.upsert(cfg({ sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 }));
+  save({ sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
   copy.onWalletTrade(trade({ isBuy: true, signature: 'b' }));
   await tick();
   copy.onWalletTrade(trade({ isBuy: false, sol: 0.5, priceSol: 0.002, soldFraction: 0.25, signature: 's' }));
@@ -354,7 +379,7 @@ test('PAPER: a partial sell is bookkeeping only — same slices, no order', asyn
 
 test('exits do not spend the daily copy limit, but their losses count toward the daily loss limit', async () => {
   const h = setup({ priceSol: 0.001 });
-  copy.upsert(cfg({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0, dailyTradeLimit: 2, dailyLossLimitSol: 0.5 }));
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0, dailyTradeLimit: 2, dailyLossLimitSol: 0.5 });
   copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
   await tick();
   // They scale out in three sells at a quarter of entry — three exits, one copy.
@@ -375,7 +400,7 @@ test('exits do not spend the daily copy limit, but their losses count toward the
 
 test('copySells off leaves the position open when they sell', async () => {
   setup();
-  copy.upsert(cfg({ copySells: false, delayMs: 0 }));
+  save({ copySells: false, delayMs: 0 });
   copy.onWalletTrade(trade({ isBuy: true }));
   await new Promise((r) => setTimeout(r, 20));
   copy.onWalletTrade(trade({ isBuy: false, priceSol: 0.002 }));
@@ -392,8 +417,8 @@ test('win rate is null until something closes', () => {
 
 test('activeWallets lists only enabled configs', () => {
   setup();
-  copy.upsert(cfg({ enabled: true }));
-  copy.upsert(cfg({ wallet: 'Other111111111111111111111111111111111111', enabled: false }));
+  save({ enabled: true });
+  save({ wallet: 'Other111111111111111111111111111111111111', enabled: false });
   const active = copy.activeWallets();
   assert.equal(active.has(WALLET), true);
   assert.equal(active.size, 1);
@@ -401,8 +426,77 @@ test('activeWallets lists only enabled configs', () => {
 
 test('following the same wallet twice is refused', () => {
   setup();
-  assert.equal(copy.upsert(cfg()).ok, true);
-  assert.equal(copy.upsert(cfg()).ok, false);
+  assert.equal(save().ok, true);
+  assert.equal(save().ok, false);
+});
+
+test('a copy config carries the wallet it signs with, and refuses a wallet that is not one', () => {
+  // A config names the wallet it signs with (2026-09-11), or leaves it on
+  // the active one. A blank or a non-string is refused — a wallet id that
+  // is not a wallet is not "the active wallet by accident".
+  assert.equal(validateConfig(cfg({})).ok, true, 'absent means the active wallet');
+  assert.equal(validateConfig(cfg({ walletId: null })).ok, true, 'null means the active wallet');
+  assert.equal(validateConfig(cfg({ walletId: 'w_abc' })).ok, true, 'a wallet id is accepted here; main checks it is ours');
+  assert.equal(validateConfig(cfg({ walletId: '' })).ok, false, 'a blank is not a wallet');
+  assert.equal(validateConfig(cfg({ walletId: 42 })).ok, false, 'nor is a number');
+  assert.equal(defaultConfig('', '').walletId, null, 'a new config starts on the active wallet');
+});
+
+// ── Every chain (2026-09-11) ────────────────────────────────────────────
+//
+// A config lives on a chain. Robinhood Chain and BNB leaders arrive from the
+// Observatory's trade feed with `chain` set and 0x addresses; the engine's
+// math is the same, the units are that chain's coin, and the host is told
+// which chain every buy, sell, price and fact is for.
+
+const EVM_LEADER = '0xAbCdEf0123456789aBcDeF0123456789AbCdEf01';
+const EVM_MINT = '0x9C4C60cEEa0000000000000000000000000000AA';
+
+test('a config on an EVM chain wants a 0x address; a Solana one wants base58', () => {
+  assert.equal(validateConfig(cfg({ chain: 'robinhood', wallet: EVM_LEADER })).ok, true);
+  assert.equal(validateConfig(cfg({ chain: 'bnb', wallet: EVM_LEADER })).ok, true);
+  assert.equal(validateConfig(cfg({ chain: 'robinhood', wallet: WALLET })).ok, false, 'a Solana address is not a Robinhood one');
+  assert.equal(validateConfig(cfg({ chain: 'solana', wallet: EVM_LEADER })).ok, false, 'nor the other way');
+  assert.equal(validateConfig(cfg({ wallet: WALLET })).ok, true, 'no chain means Solana, as every saved config did');
+  assert.equal(defaultConfig('', '', 'bnb').chain, 'bnb');
+  assert.equal(defaultConfig('', '').chain, 'solana');
+});
+
+test('an EVM leader is matched by chain and case-insensitively, and the host is told the chain', async () => {
+  const h = setup();
+  // The address is stored lower-cased; the helper re-finds it by that.
+  save({ chain: 'robinhood', wallet: EVM_LEADER.toLowerCase(), mode: 'live' });
+  // The same address string on BNB is a different leader: nothing fires.
+  copy.onWalletTrade(trade({ chain: 'bnb', wallet: EVM_LEADER.toLowerCase(), mint: EVM_MINT, sol: 0.5, priceSol: 0.001 }));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(h.calls.buys.length, 0, 'a BNB trade does not fire a Robinhood config');
+  // On the right chain, in any case, it does — and the buy is told the chain.
+  copy.onWalletTrade(trade({ chain: 'robinhood', wallet: EVM_LEADER.toUpperCase().replace('0X', '0x'), mint: EVM_MINT, sol: 0.5, priceSol: 0.001, signature: '0xaa' }));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(h.calls.buys.length, 1, 'a Robinhood trade fires it');
+  assert.equal(h.calls.buys[0].mint, EVM_MINT.toLowerCase(), 'the mint is lower-cased on entry');
+  assert.equal(h.calls.buyOpts[0].chain, 'robinhood', 'the host knows which rail to buy on');
+  const open = copy.snapshot().recent.find((t) => t.state === 'open');
+  assert.ok(open, 'the copy is recorded');
+  assert.equal(open.chain, 'robinhood', 'and remembers its chain');
+});
+
+test('a mark-to-market for one chain leaves the same mint on another alone', () => {
+  const h = setup();
+  copy._load(
+    [{ ...cfg({ id: 'r', chain: 'robinhood', wallet: EVM_LEADER.toLowerCase(), mode: 'paper' }), id: 'r', createdAt: 1 }],
+    [
+      { id: 'a', configId: 'r', mode: 'paper', chain: 'robinhood', wallet: EVM_LEADER.toLowerCase(), mint: EVM_MINT.toLowerCase(), symbol: 'X', at: 1, theirSol: 1, ourSol: 0.1, entryPriceSol: 0.001, exitPriceSol: null, closedAt: null, pnlSol: null, state: 'open', reason: null },
+      { id: 'b', configId: 'r', mode: 'paper', chain: 'bnb', wallet: EVM_LEADER.toLowerCase(), mint: EVM_MINT.toLowerCase(), symbol: 'X', at: 1, theirSol: 1, ourSol: 0.1, entryPriceSol: 0.001, exitPriceSol: null, closedAt: null, pnlSol: null, state: 'open', reason: null },
+    ],
+  );
+  copy.markToMarket(EVM_MINT.toLowerCase(), 0.002, 'robinhood');
+  const rows = copy.snapshot().recent;
+  assert.equal(rows.find((t) => t.id === 'a').exitPriceSol, 0.002, 'the Robinhood copy is marked');
+  assert.equal(rows.find((t) => t.id === 'b').exitPriceSol, null, 'the BNB copy of the same address is not');
+  assert.deepEqual(copy.openMints('bnb'), [EVM_MINT.toLowerCase()]);
+  assert.deepEqual([...copy.activeWallets('bnb')], [], 'no BNB config is enabled');
+  void h;
 });
 
 async function run() {
@@ -424,7 +518,7 @@ async function run() {
 // wallet watcher's own subscription; the signature dedupes the pair.
 test('a signature seen twice is evaluated once', async () => {
   const h = setup({ priceSol: 0.001 });
-  copy.upsert(cfg());
+  save();
   copy.onWalletTrade(trade({ signature: 'sigSame' }));
   copy.onWalletTrade(trade({ signature: 'sigSame' }));
   await new Promise((r) => setTimeout(r, 40));
@@ -449,7 +543,7 @@ const near = (a, b) => Math.abs(a - b) < 1e-9;
 
 test('LEADER: a buy and a full sell make one scored round trip with THEIR result, copied or not', async () => {
   setup();
-  copy.upsert(cfg({ minKryptScore: 99 })); // the copy itself is filtered out…
+  save({ minKryptScore: 99 }); // the copy itself is filtered out…
   const t0 = Date.now() - 60_000;
   copy.onWalletTrade(trade({ at: t0 })); // 1 SOL → 1000 tokens
   copy.onWalletTrade(sell({ sol: 1.5, priceSol: 0.0015, soldFraction: 1, at: t0 + 30_000 }));
@@ -474,7 +568,7 @@ test('LEADER: a buy and a full sell make one scored round trip with THEIR result
 
 test('LEADER: a partial sell scores its share; the rest stays open and marks to the last price', async () => {
   setup();
-  copy.upsert(cfg());
+  save();
   copy.onWalletTrade(trade()); // 1 SOL, 1000 tokens
   copy.onWalletTrade(sell({ sol: 0.6, priceSol: 0.0015, soldFraction: 0.4 })); // 400 tokens for 0.6
   await new Promise((r) => setTimeout(r, 40));
@@ -498,7 +592,7 @@ test('LEADER: a partial sell scores its share; the rest stays open and marks to 
 
 test('LEADER: a sell of tokens bought before we watched is counted, never scored', async () => {
   setup();
-  copy.upsert(cfg());
+  save();
   copy.onWalletTrade(sell({ sol: 3, priceSol: 0.003, soldFraction: 1 }));
   await new Promise((r) => setTimeout(r, 40));
   const L = copy.snapshot().leaders[WALLET];
@@ -511,7 +605,7 @@ test('LEADER: a sell of tokens bought before we watched is counted, never scored
 
 test('LEADER: a sell bigger than the tracked position scores only the tracked share', async () => {
   setup();
-  copy.upsert(cfg());
+  save();
   copy.onWalletTrade(trade()); // 1000 tracked
   copy.onWalletTrade(sell({ sol: 4, priceSol: 0.002, tokens: 2000, soldFraction: 1 })); // they sold 2000
   await new Promise((r) => setTimeout(r, 40));
@@ -523,7 +617,7 @@ test('LEADER: a sell bigger than the tracked position scores only the tracked sh
 
 test('LEADER: a losing trip is a loss; best/worst, rate and order follow', async () => {
   setup();
-  copy.upsert(cfg());
+  save();
   const M2 = 'CopyMint222222222222222222222222222222222';
   copy.onWalletTrade(trade());
   copy.onWalletTrade(sell({ sol: 0.5, priceSol: 0.0005, soldFraction: 1 })); // −0.5
@@ -543,7 +637,7 @@ test('LEADER: a losing trip is a loss; best/worst, rate and order follow', async
 
 test('LEADER: the record survives a reload, resets on request, and goes with the last config', async () => {
   setup();
-  copy.upsert(cfg());
+  save();
   copy.onWalletTrade(trade());
   await new Promise((r) => setTimeout(r, 40));
   const book = JSON.parse(JSON.stringify(copy._leaders()));
@@ -574,6 +668,292 @@ test('rankLeaders: the chosen key, small samples last, unknowns after everything
   assert.deepEqual(rankLeaders(list, 'winRatePct').map((l) => l.wallet), ['steady', 'unknown', 'loser', 'small-but-huge']);
   assert.equal(leaderWinRate(list[0]), 100);
   assert.equal(leaderWinRate(emptyLeaderStats('x')), null);
+});
+
+// ── The pump rail's mirrored sell (copy-13, 2026-09-09) ───────────────
+//
+// A leader's pump.fun sell arrives twice. The curve firehose reads a LOG,
+// which has no pre-balance, so its delivery carries no soldFraction; the
+// wallet watcher has the fraction but must fetch the transaction first and
+// therefore always arrives second. Deduping on the signature alone threw
+// away the only delivery that could be mirrored, so the mirrored sell was
+// dead for every pump.fun leader — the exact bug it was written to fix.
+
+test('a sell delivered firehose-then-watcher sells exactly ONCE, on the delivery that knows the share', async () => {
+  const h = await openLiveCopy();
+  // 1. The firehose: same signature, no fraction.
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, signature: 'sellDup' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 0, 'nothing can be sized from a log-only delivery');
+  assert.equal(copy.snapshot().recent.filter((x) => x.kind === 'exit').length, 1, 'the skip is on the record');
+
+  // 2. The watcher: SAME signature, now with the share they sold.
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'sellDup' }));
+  await tick();
+  assert.deepEqual(h.calls.sells, [{ mint: MINT, pct: 40 }], 'exactly one sell, of the share they sold');
+
+  const snap = copy.snapshot();
+  const parent = snap.recent.find((x) => x.kind !== 'exit');
+  const exits = snap.recent.filter((x) => x.kind === 'exit');
+  assert.equal(parent.remainingPct, 60, 'and only that share is closed');
+  assert.equal(exits.length, 1, 'the superseded "could not tell" row is withdrawn');
+  assert.equal(exits[0].state, 'closed');
+  assert.equal(exits[0].soldPct, 40);
+});
+
+test('a third delivery of the same sell changes nothing, in either order', async () => {
+  const h = await openLiveCopy();
+  // Watcher first this time, then the firehose's fraction-less duplicate.
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'sellOnce' }));
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, signature: 'sellOnce' }));
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'sellOnce' }));
+  await tick();
+  assert.deepEqual(h.calls.sells, [{ mint: MINT, pct: 40 }], 'still one sell');
+  assert.equal(copy.snapshot().recent.filter((x) => x.kind === 'exit').length, 1, 'and one exit row');
+});
+
+// ── Budgets are checked against copies in flight (copy-1) ─────────────
+
+test('a burst of trades in one slot cannot out-run the daily limit', async () => {
+  // Every check used to read a counter that only moved after the buy came
+  // back, so eight swaps delivered together passed the same check eight
+  // times. A slot is taken before the first await now.
+  const h = setup({ buyMs: 40 });
+  save({ mode: 'live', dailyTradeLimit: 2, sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+  for (let i = 0; i < 8; i++) copy.onWalletTrade(trade({ mint: `Burst${i}${'1'.repeat(35)}`, signature: `b${i}` }));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(h.calls.buys.length, 2, `two buys, not eight: ${h.calls.buys.length}`);
+  const st = Object.values(copy.snapshot().stats)[0];
+  assert.equal(st.trades, 2);
+  assert.equal(st.blocked, 6, 'the other six are recorded as limit-blocked');
+});
+
+test('the per-minute wall refuses a burst even when the day has room', async () => {
+  const h = setup({ buyMs: 20 });
+  save({ mode: 'live', dailyTradeLimit: 50, maxCopiesPerMinute: 3, sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+  for (let i = 0; i < 7; i++) copy.onWalletTrade(trade({ mint: `Fast${i}${'1'.repeat(36)}`, signature: `f${i}` }));
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(h.calls.buys.length, 3, `three copies a minute: ${h.calls.buys.length}`);
+  const blocked = copy.snapshot().recent.filter((x) => /per minute/.test(x.reason ?? ''));
+  assert.equal(blocked.length, 4, 'and the rest say why');
+});
+
+test('validation accepts a config with no per-minute field, and rejects a silly one', () => {
+  const { maxCopiesPerMinute, ...without } = cfg();
+  assert.equal(validateConfig(without).ok, true, 'an older saved config still loads');
+  assert.equal(validateConfig(cfg({ maxCopiesPerMinute: 0 })).ok, false);
+  assert.equal(validateConfig(cfg({ maxCopiesPerMinute: 500 })).ok, false);
+  assert.equal(validateConfig(cfg({ maxCopiesPerMinute: 5 })).ok, true);
+});
+
+// ── A sell is a share of the WALLET, not of the copy (copy-2) ─────────
+
+test('the mirrored percentage is scaled by the copy share of what we paid for the bag', async () => {
+  // h.sell sells a percentage of the whole token account. We paid 1 SOL
+  // through this copy but hold 5 SOL of the same token, so mirroring "they
+  // sold 40 %" as 40 % would sell 2 SOL — 1.6 of it hand-bought.
+  const h = await openLiveCopy({ ourCostBasisSol: 5 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'sc' }));
+  await tick();
+  assert.deepEqual(h.calls.sells, [{ mint: MINT, pct: 8 }], '40 % of our fifth of the bag');
+  const parent = copy.snapshot().recent.find((x) => x.kind !== 'exit');
+  assert.equal(parent.remainingPct, 60, 'the RECORD still moves by the share they sold');
+});
+
+test('a host that cannot say what we paid mirrors the share unscaled', async () => {
+  const h = await openLiveCopy({ ourCostBasisSol: null });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'sc2' }));
+  await tick();
+  assert.deepEqual(h.calls.sells, [{ mint: MINT, pct: 40 }]);
+});
+
+test('one save can never create an ARMED live follower', () => {
+  setup();
+  const r = copy.upsert(cfg({ mode: 'live', enabled: true }));
+  assert.equal(r.ok, true);
+  assert.equal(copy.all()[0].enabled, false, 'born live means born disarmed');
+  assert.match(r.message, /disarmed/i, 'and it says so');
+});
+
+// ── A paper row can never cause a real sell (copy-3) ──────────────────
+
+test('flipping a config to live does not sell the paper position it opened', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ sizing: 'fixed', sizeValue: 1, maxTradeSol: 1 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'pb' }));
+  await tick();
+  const id = copy.snapshot().configs[0].id;
+  // The flip to live disarms it; arming again is a second, deliberate save.
+  copy.upsert({ ...cfg({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1 }), id });
+  assert.equal(copy.all()[0].enabled, false, 'paper to live never stays armed');
+  copy.upsert({ ...cfg({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1 }), id });
+
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.5, priceSol: 0.002, soldFraction: 0.5, signature: 'ps' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 0, 'a paper row is not a reason to broadcast');
+  const exits = copy.snapshot().recent.filter((x) => x.kind === 'exit');
+  assert.equal(exits.length, 1);
+  assert.equal(exits[0].mode, 'paper', 'and the exit is labelled for what it was');
+  assert.equal(exits[0].signature, null, 'with no transaction against it');
+});
+
+test('flipping a LIVE config back to paper leaves the real position open and says so', async () => {
+  const h = await openLiveCopy();
+  const id = copy.snapshot().configs[0].id;
+  copy.upsert({ ...cfg({ mode: 'paper', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1 }), id });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'lp' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 0, 'paper mode places no order');
+  const snap = copy.snapshot();
+  assert.equal(snap.recent.find((x) => x.kind !== 'exit').state, 'open', 'the wallet still holds it');
+  assert.match(snap.recent.find((x) => x.kind === 'exit').reason, /still held/);
+});
+
+// ── Filters refuse what they cannot check (copy-4) ────────────────────
+
+test('a filter set against a fact the app cannot read REFUSES the copy', async () => {
+  const h = setup({ facts: { liquidityUsd: null, marketCapUsd: null, kryptScore: null, isPumpfun: true } });
+  save({ mode: 'live', minLiquidityUsd: 5_000 });
+  copy.onWalletTrade(trade({ signature: 'unk1' }));
+  await tick();
+  assert.equal(h.calls.buys.length, 0, 'unknown is not "fine"');
+  assert.match(copy.snapshot().recent[0].reason, /liquidity unknown/);
+});
+
+test('an unset filter still lets an unknown fact through', async () => {
+  const h = setup({ facts: { liquidityUsd: null, marketCapUsd: null, kryptScore: null, isPumpfun: true } });
+  save({ mode: 'live', minLiquidityUsd: null, maxMarketCapUsd: null, minKryptScore: null });
+  copy.onWalletTrade(trade({ signature: 'unk2' }));
+  await tick();
+  assert.equal(h.calls.buys.length, 1, 'a filter you did not set cannot refuse anything');
+});
+
+// ── Size, price and caps come from the host (copy-5, copy-8) ──────────
+
+test('a broadcast that has not confirmed opens the position, with that ON the record', async () => {
+  const h = setup({ priceSol: 0.001, buyResult: { ok: false, pending: true, message: 'broadcast', signature: 'psig' } });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+  copy.onWalletTrade(trade({ signature: 'pend' }));
+  await tick();
+  const row = copy.snapshot().recent[0];
+  assert.equal(row.state, 'open', 'the token was bought; the record must be able to close it');
+  assert.match(row.reason, /not confirmed/);
+});
+
+test('the size and price on the record are what the host actually spent and filled', async () => {
+  const h = setup({
+    priceSol: 0.001,
+    buyResult: { ok: true, message: 'bought', signature: 'sig', spentSol: 0.037, fillPriceSol: 0.0012 },
+  });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+  copy.onWalletTrade(trade({ signature: 'spent' }));
+  await tick();
+  const row = copy.snapshot().recent[0];
+  assert.equal(row.ourSol, 0.037, 'not the 0.05 we asked for');
+  assert.equal(row.entryPriceSol, 0.0012, 'and not the spot price we guessed');
+});
+
+test('a copy above the live per-trade cap is REFUSED, never quietly shrunk', async () => {
+  const h = setup({ priceSol: 0.001, maxLiveSol: 0.02 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+  copy.onWalletTrade(trade({ signature: 'cap' }));
+  await tick();
+  assert.equal(h.calls.buys.length, 0);
+  assert.match(copy.snapshot().recent[0].reason, /above your live cap/);
+});
+
+// ── The rest of the gates (copy-7, copy-9, copy-11) ───────────────────
+
+test('the configured slippage reaches the host on both sides', async () => {
+  const h = await openLiveCopy();
+  assert.equal(h.calls.buyOpts[0].slippagePct, 15, 'the buy carries it');
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'sl' }));
+  await tick();
+  assert.equal(h.calls.sellOpts[0].slippagePct, 15, 'and so does the sell');
+});
+
+test('a buy-side block stops a live copy even when selling is still allowed', async () => {
+  const h = setup({ buyBlockedReason: 'the launch feed is stale' });
+  save({ mode: 'live' });
+  copy.onWalletTrade(trade({ signature: 'bb' }));
+  await tick();
+  assert.equal(h.calls.buys.length, 0);
+  assert.match(copy.snapshot().recent[0].reason, /launch feed is stale/);
+});
+
+test('unfollowing a wallet mid-copy stops the copy that was in flight', async () => {
+  const h = setup({ priceSol: 0.001, buyMs: 60 });
+  save({ mode: 'live', delayMs: 30 });
+  const id = copy.snapshot().configs[0].id;
+  copy.onWalletTrade(trade({ signature: 'gone' }));
+  await new Promise((r) => setTimeout(r, 10));
+  copy.remove(id);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(h.calls.buys.length, 0, 'the delay had not elapsed, and the config is gone');
+  assert.equal(copy.snapshot().recent.length, 0, 'no orphan row against a config that no longer exists');
+});
+
+// ── The store on disk (copy-6, copy-10) ───────────────────────────────
+
+function tempStore(contents) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'krypt-copytest-'));
+  if (contents !== undefined) fs.writeFileSync(path.join(dir, 'copytrade.json'), contents, 'utf8');
+  return dir;
+}
+
+test('a LIVE config does not resume armed after a restart; a paper one does', () => {
+  copy._reset();
+  const dir = tempStore(
+    JSON.stringify({
+      version: 1,
+      configs: [
+        { ...defaultConfig(WALLET, 'Live one'), id: 'c1', createdAt: 1, mode: 'live', enabled: true },
+        { ...defaultConfig('Paper11111111111111111111111111111111111', 'Paper one'), id: 'c2', createdAt: 1, mode: 'paper', enabled: true },
+      ],
+      trades: [],
+    }),
+  );
+  copy.init(dir);
+  const [live, paper] = copy.all();
+  assert.equal(live.enabled, false, 'an app closed for a week must not wake up spending');
+  assert.equal(paper.enabled, true, 'paper costs nothing, and an interrupted experiment is useless');
+  assert.equal(copy.failure(), null);
+});
+
+test('an unreadable store is NOT an empty one — nothing is overwritten', () => {
+  copy._reset();
+  const dir = tempStore(JSON.stringify({ version: 1, configs: [{ ...defaultConfig(WALLET, 'MY WHALE'), id: 'c1', createdAt: 1 }], trades: [] }));
+  const file = path.join(dir, 'copytrade.json');
+  fs.writeFileSync(file, '{"version":1,"configs":[{"wal', 'utf8'); // truncated write
+  copy.init(dir);
+  assert.equal(copy.all().length, 0, 'nothing could be loaded');
+  assert.ok(copy.failure(), 'and the module knows it');
+  assert.match(copy.snapshot().loadFailure, /corrupt/);
+
+  // The proof: a save now must not blow away what is still on disk.
+  save({ label: 'A NEW ONE' });
+  return new Promise((r) =>
+    setTimeout(() => {
+      assert.equal(fs.readFileSync(file, 'utf8'), '{"version":1,"configs":[{"wal', 'the file is untouched');
+      r();
+    }, 400),
+  );
+});
+
+test('a first run writes normally — a missing file is not a failure', () => {
+  copy._reset();
+  const dir = tempStore();
+  copy.init(dir);
+  assert.equal(copy.failure(), null);
+  save();
+  return new Promise((r) =>
+    setTimeout(() => {
+      const raw = JSON.parse(fs.readFileSync(path.join(dir, 'copytrade.json'), 'utf8'));
+      assert.equal(raw.configs.length, 1);
+      r();
+    }, 400),
+  );
 });
 
 await run();

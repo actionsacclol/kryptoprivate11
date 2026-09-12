@@ -101,6 +101,57 @@ async function page(mint: string, cursor: string | null): Promise<{
   };
 }
 
+export interface RecentScan {
+  /** OLDEST-FIRST, the order a position book has to be fed in. */
+  trades: LaunchTrade[];
+  /** True when the pages reached `sinceMs` or the token's first trade. */
+  complete: boolean;
+  calls: number;
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * A token's trades from now back to `sinceMs`, at most `maxPages` pages.
+ *
+ * This is the Wallet Scout's manual scan: the newest page first, then older
+ * ones until a trade predates `sinceMs` or the token runs out of history. The
+ * API is newest-first and so is each page, so the result is reversed once at
+ * the end — a sell fed before its buy scores nothing.
+ */
+export async function recentTrades(mint: string, sinceMs: number, maxPages = 3): Promise<RecentScan> {
+  const all: LaunchTrade[] = [];
+  let cursor: string | null = null;
+  let calls = 0;
+  let complete = false;
+  let ok = true;
+  let message = 'ok';
+  while (calls < maxPages) {
+    calls += 1;
+    const p = await page(mint, cursor);
+    if (!p || !p.ok) {
+      ok = false;
+      message = p?.message ?? 'request failed';
+      break;
+    }
+    let reached = false;
+    for (const t of p.trades) {
+      if (t.ts < sinceMs) {
+        reached = true;
+        break;
+      }
+      all.push(t);
+    }
+    if (reached || !p.hasMore || !p.nextCursor) {
+      complete = true;
+      break;
+    }
+    cursor = p.nextCursor;
+  }
+  all.reverse();
+  return { trades: all, complete, calls, ok, message };
+}
+
 export interface LaunchScan {
   trades: LaunchTrade[];
   /** True when the scan is certain it reached the token's FIRST ever trade. */

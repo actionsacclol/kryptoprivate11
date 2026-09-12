@@ -169,3 +169,107 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-ink { animation: none; }
 }
+
+/* ── Lite mode ──────────────────────────────────────────────────────────
+   `html.lite` is set by src/state/liteMode.ts from Settings › Display
+   "Reduce effects" — also the Hub's "Laggy?" button. Everything decorative
+   goes: transitions, the drifting/scrolling/pulsing animations, blur, glows,
+   the big soft shadows, the star and dust backdrops and the corner runes.
+   The spinner and the thin "pending" bar stay — a frozen spinner reads as a
+   hang, and both are a few pixels of compositor work.
+
+   Why a class and not JS per element: Chromium's cost here is paint and
+   composite, and a stylesheet rule reaches every element at once, including
+   Discover's ~10,000, with no React work at all. */
+html.lite *,
+html.lite *::before,
+html.lite *::after {
+  transition: none !important;
+}
+html.lite .animate-dust,
+html.lite .animate-tape,
+html.lite .animate-spark,
+html.lite .animate-ink,
+html.lite .animate-fade-in,
+html.lite .animate-pop-in,
+html.lite .animate-rune-pulse,
+html.lite .animate-gradient-x,
+html.lite .animate-pulse-slow {
+  animation: none !important;
+}
+html.lite .stars-backdrop,
+html.lite .grid-backdrop,
+html.lite .scanlines,
+html.lite .bg-krypt-radial {
+  background-image: none !important;
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+}
+html.lite [class*='backdrop-blur'] {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.lite [class*='shadow-'],
+html.lite .plate,
+html.lite .card {
+  box-shadow: none !important;
+}
+/* The corner runes: eight gradient layers per plate. */
+html.lite .plate::after {
+  display: none;
+}
+html.lite [class^='blur-'],
+html.lite [class*=' blur-'] {
+  filter: none !important;
+}
+
+/* ── Panel grid (My Layout) ──────────────────────────────────────────────
+   react-grid-layout ships light-theme chrome: the resize grip is a dark SVG
+   on a transparent background (invisible here) in a 20px corner, and the drop
+   placeholder is bright red. Both are restyled rather than overridden inline
+   so the grid component stays free of styling for a library it only hosts. */
+
+/* The grab area. Bigger than the default 20px — a 20px corner on a dense dark
+   UI is findable only if you already know it is there. */
+.react-grid-item > .react-resizable-handle {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.react-grid-item:hover > .react-resizable-handle,
+.react-grid-item.resizing > .react-resizable-handle {
+  opacity: 1;
+}
+/* Two short strokes in the corner: legible on the panel background without
+   drawing the eye when you are reading the panel rather than moving it. */
+.react-grid-item > .react-resizable-handle::after {
+  content: '';
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid rgba(255, 255, 255, 0.45);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.45);
+  border-bottom-right-radius: 2px;
+}
+.react-grid-item > .react-resizable-handle:hover::after {
+  border-color: rgb(139, 124, 232);
+}
+
+/* Where the panel will land. Default is red. */
+.react-grid-item.react-grid-placeholder {
+  background: rgba(139, 124, 232, 0.18);
+  border: 1px dashed rgba(139, 124, 232, 0.55);
+  border-radius: 0.75rem;
+  opacity: 1;
+}
+
+/* The panel being dragged sits above its neighbours. */
+.react-grid-item.react-draggable-dragging {
+  z-index: 20;
+  cursor: grabbing;
+}

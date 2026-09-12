@@ -111,6 +111,13 @@ const LAUNCHPADS: Array<{ id: Launchpad; label: string; hint: string }> = [
   { id: 'moonshot', label: 'Moonshot', hint: 'Listed by providers; no dedicated decoder' },
   { id: 'believe', label: 'Believe', hint: 'Runs on Meteora DBC' },
   { id: 'raydium', label: 'Raydium', hint: 'Post-migration AMM pools' },
+  { id: 'pons', label: 'Pons', hint: 'Robinhood Chain — bonding curve, graduates to Uniswap v4 at 4.2 ETH; on-chain progress and execution' },
+  { id: 'fourmeme', label: 'four.meme', hint: 'BNB Smart Chain — bonding curve, graduates to PancakeSwap v2 at 18 BNB; on-chain progress and execution' },
+  // Every EVM row that did NOT come from a launchpad decoder is tagged with
+  // its chain, so without these chips ticking a launchpad silently empties
+  // the Trending column with no way to bring those rows back.
+  { id: 'robinhood', label: 'Robinhood pools', hint: 'Robinhood Chain — Uniswap pools with no launchpad decoder' },
+  { id: 'bnb', label: 'BNB pools', hint: 'BNB Smart Chain — PancakeSwap and other pools with no launchpad decoder' },
 ];
 
 /** How many filter fields are actually doing something. */

@@ -70,7 +70,9 @@ export function planFanout(wallets: string[], opts: FanoutOptions, rand: () => n
   if (!Number.isFinite(opts.amountSol) || opts.amountSol <= 0) {
     return { ...EMPTY, message: 'Amount must be greater than zero.' };
   }
-  const minLamports = toLamports(Math.max(0, opts.minSol ?? 0));
+  // Same rule as the jitter below: a non-finite floor would make every
+  // comparison against it false, i.e. silently no floor at all.
+  const minLamports = toLamports(Math.max(0, Number.isFinite(opts.minSol) ? (opts.minSol as number) : 0));
 
   if (opts.mode === 'same') {
     const each = toLamports(opts.amountSol);
@@ -90,7 +92,13 @@ export function planFanout(wallets: string[], opts: FanoutOptions, rand: () => n
     };
   }
 
-  const jitter = Math.max(0, Math.min(0.9, opts.jitter ?? 0));
+  // A non-finite jitter must become 0, not survive the clamp: Math.max/min
+  // pass NaN straight through, every weight would then be NaN, and because
+  // the remainder loop (`NaN > 0`) and the floor check (`NaN < min`) are both
+  // false a plan of NaN shares would be returned as ok. A plan is either
+  // arithmetic or a refusal — never a row of NaNs.
+  const asked = Number.isFinite(opts.jitter) ? (opts.jitter as number) : 0;
+  const jitter = Math.max(0, Math.min(0.9, asked));
 
   // Weights: 1 (even) or 1±jitter (randomised). Shares are proportional to
   // weight, then rounded to lamports, then the rounding remainder is settled on

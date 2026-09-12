@@ -178,11 +178,22 @@ export function groupBalance(g: WalletGroupView, balanceOf: Map<string, number |
   return known ? sum : null;
 }
 
-export function RealMoneyBanner({ armed, what }: { armed: boolean; what: string }) {
+/**
+ * `kind` says what the page actually does, because the closing sentence used
+ * to promise "the same trade pipeline, platform fee included" on EVERY lab
+ * page — and that is false on Funder, where fund and collect are bare
+ * SystemProgram transfers with intent 'fund': the signer policy applies, the
+ * trade pipeline and the platform fee do not. Telling someone they paid a
+ * platform fee they did not pay is the same class of lie as telling them they
+ * did not pay one they did.
+ */
+export function RealMoneyBanner({ armed, what, kind = 'trade' }: { armed: boolean; what: string; kind?: 'trade' | 'transfer' }) {
   return (
     <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200 leading-relaxed mb-4">
-      <span className="font-semibold">Everything on this page moves real SOL between and from your own wallets.</span> {what} Every
-      action goes through the same signer policy and trade pipeline as a manual trade, platform fee included.
+      <span className="font-semibold">Everything on this page moves real SOL between and from your own wallets.</span> {what}{' '}
+      {kind === 'trade'
+        ? 'Every action goes through the same signer policy and trade pipeline as a manual trade, platform fee included.'
+        : 'Every action goes through the same signer policy as a manual trade. These are plain SOL transfers, not trades — no trade pipeline, no platform fee, only the network fee and rent.'}
       {!armed && <span className="block mt-1 text-arc-gold">Live execution is not armed — the actions here are disabled until it is.</span>}
     </div>
   );

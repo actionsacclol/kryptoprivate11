@@ -2,9 +2,11 @@
 // the greppable contract between main and renderer. Handlers never throw
 // across IPC; they return { ok, message, data? }.
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from 'electron';
 import fs from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { resolveRpc, type AppSettings, type EngineEvent, type IpcResult } from '@shared/types';
 import * as store from './system/settings-store';
 import { validateSettingsPatch } from './system/settingsValidation';
@@ -17,6 +19,27 @@ import { getBalance } from './engine/rpcClient';
 import * as bots from './system/bots';
 import * as heliusBudget from './system/heliusBudget';
 import * as integrityGuard from './system/integrityGuard';
+import * as evmRail from './evm/rail';
+import * as evmScanner from './evm/scanner';
+import * as walletScout from './engine/walletScout';
+import * as scoutScan from './engine/scoutScan';
+import { sourceFor as scoutSourceFor } from './engine/scoutScanSources';
+import * as evmWallet from './evm/evmWallet';
+import { SCOUT_CHAINS, SCOUT_SCAN_HOURS, rankScout, summarise, type ScoutChain, type ScoutScanHours, type ScoutSort, type ScoutWindow } from '@shared/walletScout';
+import * as evmDiscover from './evm/discover';
+import * as merkl from './data/providers/merkl';
+import { clearRpcRejection } from './evm/client';
+import { EVM_CHAINS, EVM_CHAIN_META, isEvmAddress, isEvmChain, type EvmChainKind, type ChainKind } from '@shared/evm';
+import * as launcher from './engine/launcher';
+import type { LaunchDeps } from './engine/launcher';
+import { MAX_DESCRIPTION, MAX_NAME, MAX_SYMBOL, type LaunchDraft } from '@shared/launch';
+import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, uploadLaunchMetadata, type MetadataFields } from './system/launchMeta';
+import * as updateCheck from './system/updateCheck';
+import * as pumpFees from './engine/pumpFees';
+import * as swap from './engine/swap';
+import * as bridge from './engine/bridge';
+import type { BridgeDraft } from '@shared/bridge';
+import type { SwapDraft } from '@shared/swap';
 
 /** Chat replies are plain text; a named constant keeps the join sites tidy. */
 const NL = String.fromCharCode(10);
@@ -76,7 +99,7 @@ import {
   type CandleInterval,
   type DiscoverColumn,
   type StatsWindow, imageSrc } from '@shared/market';
-import { validateOrder, type NewOrderRequest } from '@shared/orders';
+import { TRIGGER_BASES, validateOrder, type NewOrderRequest, type TriggerBasis } from '@shared/orders';
 import { validateAlert, type NewAlertRequest } from '@shared/alerts';
 import { toCsv } from '@shared/portfolio';
 import { validateConfig, type CopyConfig } from '@shared/copytrade';
@@ -106,7 +129,11 @@ export function getEngine(): SniperEngine {
   return engine;
 }
 
-function broadcast(ev: EngineEvent): void {
+/**
+ * Push an event to every real window. Extracted from `broadcast` so the log
+ * feed can reach the renderer without going back through it — see below.
+ */
+function sendToWindows(ev: EngineEvent): void {
   // Broadcast to every window (guidelines §6) — never a hardcoded recipient.
   //
   // `win.isDestroyed()` is NOT sufficient: when the render process dies the
@@ -120,17 +147,74 @@ function broadcast(ev: EngineEvent): void {
     if (win.isDestroyed()) continue;
     const wc = win.webContents;
     if (!wc || wc.isDestroyed() || wc.isCrashed()) continue;
+    // Script sandboxes are hidden BrowserWindows too (system/scriptSandbox.ts,
+    // partition 'script-sandbox'), so "every window" was also every sandbox.
+    // The automation event carries snapshot(), which spreads each script
+    // including its full `code` — ten 40 KB scripts measured at 418,011 bytes,
+    // structured-cloned into a renderer that is deliberately hostile
+    // territory, on every script log line. Not a disclosure (the sandbox
+    // preload exposes only its own channel, and contextIsolation keeps
+    // ipcRenderer out of the page realm) but pure waste, and defence in depth
+    // besides. Sandboxes are told apart by their session: the main window
+    // declares no `partition`, so it is the only window on the default one.
+    if (wc.session !== session.defaultSession) continue;
     try {
       wc.send('engine:event', ev);
     } catch {
       /* frame disposed between the check and the send — drop this event */
     }
   }
-  if (ev.kind === 'log') logger[ev.level](ev.line);
+}
+
+/**
+ * Everything the app says, in one place.
+ *
+ * Until 2026-09-11 this was one-directional and half the app was missing from
+ * the Grimoire. `broadcast({kind:'log'})` sent a line to the renderer AND
+ * wrote it to the logger — but a direct `logger.info(...)` call, which is what
+ * every module outside the engine and the EVM scanner uses, only reached the
+ * file and the in-memory buffer. The Console page loads that buffer on mount,
+ * so those lines appeared if you OPENED the page and never if you were
+ * already watching it. A user sitting on the live log while a launch, a swap,
+ * a fee claim or a bridge failed saw nothing at all.
+ *
+ * So there is now one path. `logger.*` is the only way a line is produced, and
+ * this subscription is the only thing that puts one on screen. `broadcast`
+ * hands log events to the logger instead of sending them itself, which is why
+ * this cannot recurse: the subscriber calls `sendToWindows`, never `broadcast`.
+ *
+ * Redaction is already done — `push()` in logger.ts redacts BEFORE the feed
+ * precisely so that every listener, including this one, is safe.
+ */
+logger.subscribe((l) => sendToWindows({ kind: 'log', level: l.level, line: l.line, at: l.at }));
+
+function broadcast(ev: EngineEvent): void {
+  // A log event goes to the logger, and the subscription above puts it on
+  // screen. Sending it here as well would show it twice.
+  if (ev.kind === 'log') {
+    logger[ev.level](ev.line);
+    return;
+  }
+  sendToWindows(ev);
 }
 
 const ok = <T>(message: string, data?: T): IpcResult<T> => ({ ok: true, message, data });
 const fail = (message: string): IpcResult<never> => ({ ok: false, message });
+
+/**
+ * A Solana address, exactly. `length < 32` alone let a 10,000-character
+ * non-base58 string through several handlers — accepted, persisted, and in
+ * one case handed to the wallet watcher to subscribe on. Same expression as
+ * `copy:resetStats`, data/market.ts and engine/automation.ts.
+ */
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const isAddress = (v: unknown): v is string => typeof v === 'string' && BASE58_ADDRESS.test(v);
+
+/** The Solana endpoint a bridge reads and sends on — the same one trades use. */
+export function bridgeDeps(): bridge.BridgeDeps {
+  const s = store.load();
+  return { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl };
+}
 
 export function registerIpc(): void {
   // Construct the engine eagerly. It is otherwise built on first use, and
@@ -138,12 +222,66 @@ export function registerIpc(): void {
   // a Discover call before the engine existed would throw "context not
   // attached" on a cold start with the engine stopped.
   getEngine();
+  // The Robinhood Chain rail beside it: its own wallet file, ledger and arm
+  // state, sharing only the settings and the event stream.
+  evmRail.init({ userData: app.getPath('userData'), getSettings: () => store.load(), emit: broadcast });
+  // One Observatory per EVM chain. They are started by the user, not on boot:
+  // a scanner polls RPC, and a chain nobody is looking at should not.
+  /**
+   * Keep the Wallet Scout's idea of "your wallets" current.
+   *
+   * Called at boot and after anything that can add or remove one. The Scout
+   * ranks wallets by round trips, and the Warmer manufactures round trips on
+   * the user's OWN wallets — so without this, warming activity comes back to
+   * the user as if it were somebody else's measured record.
+   */
+  const refreshScoutOwnership = (): void => {
+    try {
+      walletScout.setOwnAddresses('solana', wallet.list().map((w) => w.publicKey));
+    } catch {
+      /* no wallet file yet — nothing to exclude */
+    }
+    for (const c of EVM_CHAINS) {
+      try {
+        walletScout.setOwnAddresses(c, evmWallet.list(c).map((w) => w.address));
+      } catch {
+        /* same */
+      }
+    }
+  };
+  refreshScoutOwnership();
+
+  evmScanner.attach({
+    enabled: (chain) => store.load().evm[chain].enabled,
+    emit: (chain) => broadcast({ kind: 'evmScan', status: evmScanner.status(chain) }),
+    log: (level, line) => broadcast({ kind: 'log', level, line, at: Date.now() }),
+    // Read fresh on every call, so changing the floor in Settings takes
+    // effect on the next launch rather than the next restart.
+    runnerAlerts: (chain) => store.load().evm[chain].runnerAlerts,
+    // Through the engine, so the desktop-notification switch and the chat
+    // push mean the same thing here as they do for a Solana runner.
+    notify: (title, body) => getEngine().pushNotification(title, body),
+  });
   // Recorder mode follows the firehose switch: off = launch tape (creates,
   // first 30 min of trades per mint, completions, health), on = everything.
   recorder.setMode(store.load().recordFirehose ? 'firehose' : 'launch');
 
   // ── app ──────────────────────────────────────────────────────────
   ipcMain.handle('app:version', () => ok('ok', app.getVersion()));
+
+  // Is there a newer build? `status` is free and answers from memory;
+  // `check` may leave the machine, and is rate-limited inside the module.
+  // Neither downloads or installs anything — see shared/version.ts.
+  ipcMain.handle('app:updateStatus', () => ok('ok', updateCheck.status()));
+  ipcMain.handle('app:checkForUpdate', async () => {
+    try {
+      return ok('ok', await updateCheck.check(true));
+    } catch (err) {
+      // The module is written not to throw; if it ever does, the UI still
+      // gets a state rather than a rejected invoke.
+      return fail(`Could not check for updates: ${safeErr(err)}`);
+    }
+  });
 
   ipcMain.handle('app:openExternal', (_e, url: string) => {
     if (typeof url !== 'string' || !url.startsWith('https://')) {
@@ -217,6 +355,24 @@ export function registerIpc(): void {
       if (next.rpc.heliusApiKey !== before.rpc.heliusApiKey || next.rpc.httpUrl !== before.rpc.httpUrl) {
         void import('./engine/rpcClient').then((m) => m.clearRpcRejections());
       }
+      // Same for the EVM chains: a corrected Alchemy key or RPC URL gets a
+      // fresh try, and a chain switched on at runtime warms its launch
+      // index now instead of paying the first scan on the first Discover paint.
+      for (const c of EVM_CHAINS) {
+        const was = before.evm[c];
+        const now = next.evm[c];
+        if (now.apiKey !== was.apiKey || now.rpcUrl !== was.rpcUrl) clearRpcRejection(c);
+        if (now.enabled && !was.enabled) evmDiscover.prewarm(c);
+        // Off means off: a chain hidden from the app used to stay ARMED
+        // (trades were refused by `enabled()`, but re-enabling returned it
+        // live without a hand on the switch) and its scanner kept polling
+        // the RPC for a page nobody could open. Found by audit 2026-09-11;
+        // 'chain_disabled' had been declared as a reason with no producer.
+        if (was.enabled && !now.enabled) {
+          evmRail.disarm(c, 'chain_disabled');
+          evmScanner.stop(c);
+        }
+      }
       // The fee split reads this on every trade; applying it here means the
       // engine's six trade call sites never have to remember to pass it.
       void import('./engine/liveSigner').then((m) => m.setReferrer(next.referrer));
@@ -257,7 +413,17 @@ export function registerIpc(): void {
 
   ipcMain.handle('engine:kill', () => {
     const r = getEngine().killSwitch();
-    return r.ok ? ok(r.message) : fail(r.message);
+    // The kill switch is the "stop everything" button: it must also take
+    // every EVM chain back to Paper, or the reply "live execution disarmed"
+    // would be false for a user who is live on Robinhood or BNB.
+    const evmDisarmed = EVM_CHAINS.filter((c) => evmRail.armed(c));
+    for (const c of evmDisarmed) evmRail.disarm(c, 'kill_switch');
+    // ...and stop the per-chain scanners. "Stop everything" that leaves two
+    // pollers running is a button that lied, even though a scanner spends
+    // nothing — someone reaching for the kill switch wants it all to stop.
+    evmScanner.stopAll();
+    const message = evmDisarmed.length ? `${r.message} ${evmDisarmed.map((c) => EVM_CHAIN_META[c].shortName).join('/')} disarmed too.` : r.message;
+    return r.ok ? ok(message) : fail(message);
   });
 
   // The engine's copy of the settings is the RESOLVED form (Helius key
@@ -316,14 +482,14 @@ export function registerIpc(): void {
 
   ipcMain.handle('wallet:generate', (_e, label: unknown) => {
     const r = wallet.generate(typeof label === 'string' ? label : '');
-    if (r.ok) syncLiveMode();
+    if (r.ok) { syncLiveMode(); refreshScoutOwnership(); }
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
   ipcMain.handle('wallet:import', (_e, secret: string, label: unknown) => {
     if (typeof secret !== 'string') return fail('Invalid key');
     const r = wallet.importSecret(secret, typeof label === 'string' ? label : '');
-    if (r.ok) syncLiveMode();
+    if (r.ok) { syncLiveMode(); refreshScoutOwnership(); }
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
@@ -475,6 +641,28 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle('wallet:remove', (_e, id: unknown) => {
+    const targetId = typeof id === 'string' && id ? id : wallet.info().id;
+    // A Wallet Lab bag lives in ONE wallet, and only that wallet's key can
+    // sell it. `wallet.remove` drops the wallet, its group membership AND
+    // the encrypted secret, with no backup — so removing a wallet that is
+    // holding leaves tokens no key on this machine can ever reach, while
+    // the lab's own message tells the user to "collect from the group
+    // first", naming a group the wallet is no longer in. Refuse instead,
+    // and name what is actually in there. `randomLab.status()` reports the
+    // open bags per run; a bag survives a Stop, so this is not gated on the
+    // run still being armed.
+    if (targetId) {
+      const holding = randomLab
+        .status()
+        .flatMap((run) => run.open.filter((o) => o.walletId === targetId).map((o) => ({ run, open: o })));
+      if (holding.length) {
+        const what = holding.map(({ open }) => open.symbol || `${open.mint.slice(0, 8)}…`).join(', ');
+        const groups = [...new Set(holding.map(({ run }) => run.groupId))].join(', ');
+        return fail(
+          `This wallet still holds ${holding.length} Wallet Lab bag(s): ${what}. Removing it would destroy the only key that can sell them. Sell or collect from the Warmer first (group ${groups}), then remove the wallet.`,
+        );
+      }
+    }
     // Disarm FIRST and unconditionally. Removing any wallet can promote a
     // different one to active, and staying armed across that change is the
     // same hazard `wallet:select` refuses outright.
@@ -499,10 +687,14 @@ export function registerIpc(): void {
     statusText: () => {
       const live = getEngine().liveState();
       const st = getEngine().snapshot().status;
+      // The EVM chains arm separately from the Solana signer; a phone check
+      // of /status must say so, or "disarmed" reads as "nothing can spend".
+      const evm = EVM_CHAINS.filter((c) => evmRail.enabled(c)).map((c) => `${EVM_CHAIN_META[c].shortName}: ${evmRail.armed(c) ? 'LIVE' : 'Paper'}`);
       return [
         `Engine: ${st.running ? 'running' : 'stopped'}`,
         `Feed: ${st.feed}`,
-        `Live trading: ${live.armed ? 'ARMED' : 'disarmed'}`,
+        `Live trading (Solana): ${live.armed ? 'ARMED' : 'disarmed'}`,
+        ...evm,
         `Launches seen: ${st.launchesSeen}`,
       ].join(NL);
     },
@@ -666,6 +858,731 @@ export function registerIpc(): void {
     return ok('Sent — check your chat');
   });
 
+  // ── EVM rail: Robinhood Chain + BNB Smart Chain (electron/evm) ────
+  // One wallet file shared by both chains; arm state, balances, fills and
+  // positions per chain. Every handler names the chain first and takes an
+  // address, a column or a number — the endpoint is a setting.
+  const chainOf = (raw: unknown): EvmChainKind | null => (isEvmChain(raw) ? raw : null);
+  // A viem transport error carries the FULL RPC URL in .message — with the
+  // user's Alchemy key in its path. Prefer the short fields and strip any
+  // URL that slips through to its host before it reaches a toast or a log.
+  const safeErr = (err: unknown): string => {
+    const e = err as { details?: string; shortMessage?: string; message?: string };
+    const s = String(e?.details || e?.shortMessage || e?.message || 'error');
+    return s.replace(/https?:\/\/([^\s/"']+)[^\s"']*/gi, '$1').replace(/\s+/g, ' ').slice(0, 200);
+  };
+
+  // ── Wallet Scout ─────────────────────────────────────────────────────
+  // A data tool: what wallets on a chain actually did over a window. Ranking
+  // and windowing happen HERE rather than in the renderer, so the page never
+  // holds thousands of wallet books.
+  ipcMain.handle('scout:top', (_e, chain: unknown, window: unknown, sort: unknown, limit: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    const w = (['day', 'week', 'month', 'all'] as ScoutWindow[]).includes(window as ScoutWindow) ? (window as ScoutWindow) : 'day';
+    const by = (['pnl', 'returnPct', 'winRatePct', 'roundTrips', 'volume'] as ScoutSort[]).includes(sort as ScoutSort)
+      ? (sort as ScoutSort)
+      : 'pnl';
+    const cap = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(200, Math.floor(limit))) : 50;
+    const rows = walletScout.wallets(chain as ScoutChain).map((x) => summarise(x, w));
+    // A wallet that did nothing in the window is not a row — it is absence.
+    const active = rows.filter((r) => r.buys + r.sells > 0);
+    return ok('ok', {
+      rows: rankScout(active, by).slice(0, cap),
+      counts: walletScout.counts(chain as ScoutChain),
+      failure: walletScout.failure(),
+    });
+  });
+
+  ipcMain.handle('scout:saved', (_e, chain: unknown, window: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    const w = (['day', 'week', 'month', 'all'] as ScoutWindow[]).includes(window as ScoutWindow) ? (window as ScoutWindow) : 'day';
+    const marks = new Set(walletScout.savedList(chain as ScoutChain));
+    // A saved wallet with no record yet still appears, as a row of em dashes:
+    // it was saved on purpose, and hiding it would read as "we lost it".
+    const known = new Map(walletScout.wallets(chain as ScoutChain).map((x) => [x.address, x]));
+    const rows = [...marks].map((address) => {
+      const rec = known.get(address);
+      return rec
+        ? summarise(rec, w)
+        : {
+            chain: chain as ScoutChain,
+            address,
+            window: w,
+            buys: 0,
+            sells: 0,
+            roundTrips: 0,
+            wins: 0,
+            losses: 0,
+            pnl: 0,
+            volume: 0,
+            returnPct: null,
+            winRatePct: null,
+            medianHoldMs: null,
+            lastSeen: 0,
+            ranked: false,
+            looksAutomated: false,
+          };
+    });
+    return ok('ok', { rows, saved: [...marks] });
+  });
+
+  ipcMain.handle('scout:save', (_e, chain: unknown, address: unknown, on: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    if (typeof address !== 'string' || !address) return fail('No wallet given');
+    const r = walletScout.setSaved(chain as ScoutChain, address, on !== false);
+    return r.ok ? ok(r.message, walletScout.savedList(chain as ScoutChain)) : fail(r.message);
+  });
+
+  // The manual scan: the last N hours of trades read from a historical
+  // source and fed through the same `note` as the live feed. Spends nothing;
+  // one job per chain; the status is polled, never pushed.
+  ipcMain.handle('scout:scan', (_e, chain: unknown, hours: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    const h: ScoutScanHours = SCOUT_SCAN_HOURS.includes(hours as ScoutScanHours) ? (hours as ScoutScanHours) : 6;
+    const r = scoutScan.start(chain as ScoutChain, h, scoutSourceFor(chain as ScoutChain));
+    return r.ok ? ok(r.message, scoutScan.status(chain as ScoutChain)) : fail(r.message);
+  });
+
+  ipcMain.handle('scout:scanStatus', (_e, chain: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    return ok('ok', scoutScan.status(chain as ScoutChain));
+  });
+
+  ipcMain.handle('scout:scanCancel', (_e, chain: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    const asked = scoutScan.cancel(chain as ScoutChain);
+    return ok(asked ? 'Stopping after the current step' : 'No scan running', scoutScan.status(chain as ScoutChain));
+  });
+
+  // ── Per-chain Observatory ────────────────────────────────────────────
+  // One scanner per chain, isolated. `scan:*` never takes a "current chain":
+  // the chain is always an argument, so a Robinhood number cannot be served
+  // to a page showing BNB.
+  ipcMain.handle('evm:scan:status', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    return ok('ok', evmScanner.status(c));
+  });
+
+  ipcMain.handle('evm:scan:model', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    return ok('ok', evmScanner.modelOf(c));
+  });
+
+  // ── Launching a token ──────────────────────────────────────────────
+  //
+  // Four handlers, and the only one that spends anything is the last. The
+  // gate lives in `launcher.refuse` — main-process code, checking the same
+  // shared rules the form checks, because the form is the renderer and the
+  // renderer does not get to decide what gets signed.
+
+  /** The draft, rebuilt field by field from whatever the renderer sent. */
+  const draftOf = (raw: unknown): LaunchDraft | null => {
+    const d = raw as Partial<LaunchDraft> | null;
+    if (!d || (d.chain !== 'solana' && d.chain !== 'robinhood')) return null;
+    const str = (v: unknown, cap: number): string => (typeof v === 'string' ? v.slice(0, cap) : '');
+    return {
+      chain: d.chain,
+      name: str(d.name, 200),
+      symbol: str(d.symbol, 64),
+      description: str(d.description, 2_000),
+      imageUrl: str(d.imageUrl, 500),
+      metadataUri: str(d.metadataUri, 500),
+      twitter: str(d.twitter, 300),
+      telegram: str(d.telegram, 300),
+      website: str(d.website, 300),
+      devBuy: Number(d.devBuy),
+      mayhem: d.mayhem === true,
+      cashback: d.cashback === true,
+      creatorTaxBps: Math.round(Number(d.creatorTaxBps)),
+    };
+  };
+
+  const launchDeps = (): LaunchDeps => {
+    const s = store.load();
+    return {
+      cfg: s.launch,
+      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      activeSolanaWalletId: wallet.list().find((w) => w.active)?.id ?? null,
+      activeEvmWalletId: evmWallet.list('robinhood').find((w) => w.active)?.id ?? null,
+      // The EVM referrer, not the Solana one: this only reaches
+      // `chargeLaunchFee` on Robinhood, and every EVM trade pays
+      // `settings.evm.referrer`. Found by audit 2026-09-11 — the Solana field
+      // was being read, so an EVM referrer was never paid on a launch.
+      referrer: s.evm.referrer,
+      // Read from the engine, not from settings alone: `liveEnabled` is the
+      // switch, `armed` is whether it is actually running, and the buy needs
+      // both. Checked before the token exists rather than after.
+      liveReady: getEngine().liveState().armed && s.execution.liveEnabled,
+      // The creator's first buy is an ordinary fan-out of one: same arming,
+      // same live cap, same breakers, same fee, same position record. There
+      // is no launch-shaped shortcut into the spending path.
+      devBuy: async (mint, walletId, sol) => {
+        const r = await getEngine().fanoutBuy(mint, [walletId], { mode: 'same', amountSol: sol });
+        return { ok: r.ok, message: r.message };
+      },
+      canBuy: (walletId, sol) => getEngine().fanoutPreflight([walletId], { mode: 'same', amountSol: sol }),
+    };
+  };
+
+  // ── Swap (Wallet Utilities) ────────────────────────────────────────
+  //
+  // A utility, not a trade: no position, no PnL, no strategy. `balance` and
+  // `quote` touch no key; `execute` is the only one that signs, and it
+  // re-checks the draft against what the wallet actually holds rather than
+  // against what the card believed.
+
+  const swapDeps = (): swap.SwapDeps => {
+    const s = store.load();
+    return {
+      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      referrer: s.referrer,
+      live: getEngine().liveState().armed && s.execution.liveEnabled,
+    };
+  };
+
+  const swapDraftOf = (raw: unknown): SwapDraft | null => {
+    const d = raw as Partial<SwapDraft> | null;
+    if (!d || typeof d.inputMint !== 'string' || typeof d.outputMint !== 'string') return null;
+    const chain = d.chain === 'robinhood' || d.chain === 'bnb' ? d.chain : 'solana';
+    return {
+      chain,
+      inputMint: d.inputMint.trim().slice(0, 64),
+      outputMint: d.outputMint.trim().slice(0, 64),
+      amount: Number(d.amount),
+      slippagePct: Number(d.slippagePct),
+      // An unknown speed falls back to the middle one rather than being
+      // refused: the preset decides what the transaction BIDS, never what it
+      // does, so a bad value is a default, not a hazard.
+      speed: d.speed === 'cheap' || d.speed === 'fast' ? d.speed : 'normal',
+    };
+  };
+
+  ipcMain.handle('swap:balance', async (_e, mint: unknown, chain: unknown) => {
+    if (typeof mint !== 'string' || !mint) return fail('Invalid mint');
+    // Refused, not defaulted: a chain this handler does not know is not
+    // Solana, and a Solana balance under a BNB label would be a wrong number.
+    const c = chain === 'solana' || chain === 'robinhood' || chain === 'bnb' ? chain : null;
+    if (!c) return fail('Unknown chain');
+    try {
+      return ok('ok', await swap.balanceOf(swapDeps(), mint.trim(), c));
+    } catch (err) {
+      return fail(`Could not read that balance: ${safeErr(err)}`);
+    }
+  });
+
+  ipcMain.handle('swap:quote', async (_e, raw: unknown) => {
+    const draft = swapDraftOf(raw);
+    if (!draft) return fail('That is not a swap');
+    try {
+      const r = await swap.quote(draft, swapDeps());
+      return r.ok ? ok(r.message, r.quote) : fail(r.message);
+    } catch (err) {
+      return fail(`Could not price that swap: ${safeErr(err)}`);
+    }
+  });
+
+  ipcMain.handle('swap:execute', async (_e, raw: unknown, simulateOnly: unknown) => {
+    const draft = swapDraftOf(raw);
+    if (!draft) return fail('That is not a swap');
+    try {
+      const r = await swap.execute(draft, swapDeps(), simulateOnly === true);
+      return r.ok ? ok(r.message, r) : fail(r.message);
+    } catch (err) {
+      return fail(`Swap error: ${safeErr(err)}`);
+    }
+  });
+
+  // ── Bridging between chains ────────────────────────────────────────
+  //
+  // `routes` and `inflight` are free. `quote` spends one of 75 tokens that
+  // refill over two hours, so it is only ever called when a user asks. `send`
+  // is the one that puts money in somebody else's hands.
+
+
+  const bridgeDraftOf = (raw: unknown): BridgeDraft | null => {
+    const d = raw as Partial<BridgeDraft> | null;
+    const ok = (c: unknown): c is BridgeDraft['from'] => c === 'solana' || c === 'robinhood' || c === 'bnb';
+    if (!d || !ok(d.from) || !ok(d.to)) return null;
+    return { from: d.from, to: d.to, amount: Number(d.amount) };
+  };
+
+  /** Which directions this build will sign for, and what is in flight. */
+  ipcMain.handle('bridge:state', () => {
+    const s = store.load();
+    return ok('ok', {
+      enabled: s.bridge.enabled,
+      routes: [...bridge.ENABLED_ROUTES],
+      inFlight: bridge.inFlight(),
+      history: bridge.history().slice(0, 40),
+      // Never "none in flight" when the truth is "could not read the record".
+      failure: bridge.recordFailure(),
+    });
+  });
+
+  ipcMain.handle('bridge:quote', async (_e, raw: unknown) => {
+    if (!store.load().bridge.enabled) return fail('Bridging is switched off for this install.');
+    const draft = bridgeDraftOf(raw);
+    if (!draft) return fail('That is not a transfer');
+    try {
+      const r = await bridge.quote(draft, bridgeDeps());
+      // `_raw` carries the unsigned transaction and never crosses IPC.
+      return r.ok && r.quote ? ok(r.message, r.quote) : fail(r.message);
+    } catch (err) {
+      return fail(`Could not price that transfer: ${safeErr(err)}`);
+    }
+  });
+
+  ipcMain.handle('bridge:send', async (_e, raw: unknown, simulateOnly: unknown) => {
+    if (!store.load().bridge.enabled) return fail('Bridging is switched off for this install.');
+    const draft = bridgeDraftOf(raw);
+    if (!draft) return fail('That is not a transfer');
+    try {
+      const r = await bridge.send(draft, bridgeDeps(), simulateOnly === true);
+      if (r.ok && simulateOnly !== true) logger.warn(`bridge: ${draft.amount} sent ${draft.from} to ${draft.to} (${r.txHash ?? 'no hash'})`);
+      return r.ok ? ok(r.message, r) : fail(r.message);
+    } catch (err) {
+      return fail(`Transfer error: ${safeErr(err)}`);
+    }
+  });
+
+  /** Ask the aggregator where everything in flight got to. */
+  ipcMain.handle('bridge:refresh', async () => {
+    try {
+      const changed = await bridge.poll();
+      return ok(changed ? `${changed} transfer(s) updated` : 'No change', bridge.inFlight());
+    } catch (err) {
+      return fail(`Could not check: ${safeErr(err)}`);
+    }
+  });
+
+  /** Images picked this session, by handle. The renderer never sees a path. */
+  const pickedImages = new Map<string, string>();
+
+  /** Pick an image off disk. The renderer never names a path; this does. */
+  ipcMain.handle('launch:pickImage', async () => {
+    const owner = BrowserWindow.getFocusedWindow();
+    const res = await dialog.showOpenDialog(owner!, {
+      title: 'Choose your token image',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: [...IMAGE_EXTENSIONS] }],
+    });
+    const file = res.canceled ? null : res.filePaths[0] ?? null;
+    if (!file) return ok('cancelled', null);
+    try {
+      const bytes = await readFile(file);
+      if (bytes.length > MAX_IMAGE_BYTES) return fail(`That image is ${(bytes.length / 1024 / 1024).toFixed(1)} MB; ${MAX_IMAGE_BYTES / 1024 / 1024} MB is the maximum.`);
+      const ext = path.extname(file).toLowerCase().replace('.', '');
+      // The preview is a data URL so the renderer never gets a filesystem
+      // path and the page needs no file:// access to show what was picked.
+      // The PATH stays here too, behind a handle: until 2026-09-11 it went to
+      // the renderer and came back as the upload's argument, so a compromised
+      // page could have pinned any image on the disk. Found by audit.
+      const mime = ext === 'jpg' ? 'jpeg' : ext;
+      const handle = randomBytes(12).toString('hex');
+      pickedImages.set(handle, file);
+      if (pickedImages.size > 8) pickedImages.delete(pickedImages.keys().next().value!);
+      return ok('picked', { handle, name: path.basename(file), dataUrl: `data:image/${mime};base64,${bytes.toString('base64')}` });
+    } catch (err) {
+      return fail(`Could not read that image: ${safeErr(err)}`);
+    }
+  });
+
+  /** Pin the image and its metadata. Creates nothing on any chain. */
+  ipcMain.handle('launch:upload', async (_e, handle: unknown, fields: unknown) => {
+    const filePath = typeof handle === 'string' ? pickedImages.get(handle) : undefined;
+    if (!filePath) return fail('No image chosen — pick one first');
+    if (!store.load().launch.enabled) return fail('Launching is switched off for this install.');
+    const f = fields as Partial<MetadataFields> | null;
+    const str = (v: unknown, cap: number): string => (typeof v === 'string' ? v.slice(0, cap) : '');
+    // The same caps the form enforces (shared/launch.ts), not looser ones.
+    const r = await uploadLaunchMetadata(filePath, {
+      name: str(f?.name, MAX_NAME),
+      symbol: str(f?.symbol, MAX_SYMBOL),
+      description: str(f?.description, MAX_DESCRIPTION),
+      twitter: str(f?.twitter, 300),
+      telegram: str(f?.telegram, 300),
+      website: str(f?.website, 300),
+    });
+    return 'error' in r ? fail(r.error) : ok('pinned', r);
+  });
+
+  /**
+   * What this install's launch wallet has earned as a creator, and claiming
+   * it. The vault is per creator, so one read and one claim cover every coin
+   * that wallet ever launched.
+   */
+  ipcMain.handle('launch:fees', async () => {
+    const s = store.load();
+    const id = s.launch.walletId;
+    if (!id) return fail('No Solana launch wallet is set.');
+    const key = wallet.publicKeyOf(id);
+    if (!key) return fail('The launch wallet no longer exists.');
+    try {
+      return ok('ok', await pumpFees.readCreatorFees(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, key));
+    } catch (err) {
+      return fail(`Could not read creator fees: ${safeErr(err)}`);
+    }
+  });
+
+  ipcMain.handle('launch:claimFees', async () => {
+    const s = store.load();
+    // The switch gates the claim as well as the launch: an install that has
+    // never opted in has nothing to claim and no business signing for pump.
+    if (!s.launch.enabled) return fail('Launching is switched off for this install.');
+    const id = s.launch.walletId;
+    if (!id) return fail('No Solana launch wallet is set.');
+    try {
+      const r = await pumpFees.claimCreatorFees(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, id);
+      return r.ok ? ok(r.message, r) : fail(r.message);
+    } catch (err) {
+      return fail(`Claim error: ${safeErr(err)}`);
+    }
+  });
+
+  /** Ask the chain whether this launch would work. Broadcasts nothing. */
+  ipcMain.handle('launch:preview', async (_e, raw: unknown) => {
+    const draft = draftOf(raw);
+    if (!draft) return fail('That is not a launch');
+    try {
+      const r = await launcher.launch(draft, launchDeps(), true);
+      return r.ok ? ok(r.message, r) : fail(r.message);
+    } catch (err) {
+      return fail(`Could not check the launch: ${safeErr(err)}`);
+    }
+  });
+
+  /** Create the token. The one irreversible handler in this file. */
+  ipcMain.handle('launch:send', async (_e, raw: unknown) => {
+    const draft = draftOf(raw);
+    if (!draft) return fail('That is not a launch');
+    try {
+      const r = await launcher.launch(draft, launchDeps(), false);
+      if (r.ok) logger.warn(`launch: created ${r.token ?? '?'} on ${draft.chain}`);
+      // A failure still carries the outcome: a hash on a timed-out receipt
+      // is the one thing the user needs, and `fail()` would throw it away.
+      return r.ok ? ok(r.message, r) : { ok: false, message: r.message, data: r };
+    } catch (err) {
+      return fail(`Launch error: ${safeErr(err)}`);
+    }
+  });
+
+  ipcMain.handle('evm:scan:launches', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    return ok('ok', evmScanner.launches(c));
+  });
+
+  ipcMain.handle('evm:scan:start', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    const r = evmScanner.start(c);
+    return r.ok ? ok(r.message, evmScanner.status(c)) : fail(r.message);
+  });
+
+  ipcMain.handle('evm:scan:stop', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    const r = evmScanner.stop(c);
+    return r.ok ? ok(r.message, evmScanner.status(c)) : fail(r.message);
+  });
+
+  ipcMain.handle('evm:state', async (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    return ok('ok', await evmRail.state(c));
+  });
+  ipcMain.handle('evm:arm', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    const r = evmRail.arm(c);
+    return r.ok ? ok(r.message, evmRail.liveState(c)) : fail(r.message);
+  });
+  ipcMain.handle('evm:disarm', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    const r = evmRail.disarm(c, 'user');
+    return ok(r.message, evmRail.liveState(c));
+  });
+
+  ipcMain.handle('evm:wallet:info', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    return c ? ok('ok', evmRail.wallet.info(c)) : fail('Unknown chain');
+  });
+  ipcMain.handle('evm:wallet:list', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    return c ? ok('ok', evmRail.wallet.list(c)) : fail('Unknown chain');
+  });
+  // Every wallet mutation is try/caught: a write failure (disk full, AV lock)
+  // must come back as a plain refusal the panel can show, never a rejected
+  // invoke that leaves the renderer believing the wallet was saved.
+  //
+  // Every one of these takes the CHAIN first, because that is what preload
+  // sends (electron/preload.ts, `wallet.generate(chain, label)` etc.). Until
+  // 2026-09-11 four of the five read their arguments one slot to the left —
+  // `generate` took the chain name as the label, `import` took it as the
+  // secret and always failed the hex check, `rename` and `remove` took it as
+  // the wallet id and always answered "No such wallet". Only `select` had
+  // been corrected. A contract test now pins the order for all five.
+  ipcMain.handle('evm:wallet:generate', (_e, chain: unknown, label: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    try {
+      // Made FOR the chain whose page asked — see evmWalletStore.addWalletFor.
+      const r = evmRail.wallet.generate(typeof label === 'string' ? label : '', c);
+      if (r.ok) { logger.warn(`evm wallet: generated ${r.address} for ${c}`); refreshScoutOwnership(); }
+      return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
+    } catch (err) {
+      return fail(`Wallet not saved: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:wallet:import', (_e, chain: unknown, secret: unknown, label: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (typeof secret !== 'string' || !secret.trim()) return fail('Paste a private key');
+    try {
+      const r = evmRail.wallet.importSecret(secret, typeof label === 'string' ? label : '', c);
+      if (r.ok) { logger.warn(`evm wallet: imported ${r.address} for ${c}`); refreshScoutOwnership(); }
+      return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
+    } catch (err) {
+      return fail(`Wallet not saved: ${safeErr(err)}`);
+    }
+  });
+  // Per chain: the wallet LIST is shared (an EVM key is the same address on
+  // both chains), but which of them signs is each chain's own choice.
+  ipcMain.handle('evm:wallet:select', (_e, chain: unknown, id: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (typeof id !== 'string' || !id) return fail('Invalid wallet id');
+    try {
+      const r = evmRail.wallet.select(c, id);
+      if (r.ok) logger.warn(`evm wallet: ${c} now signs with ${evmRail.wallet.info(c).address ?? 'none'}`);
+      return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
+    } catch (err) {
+      return fail(`Wallet not switched: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:wallet:assign', (_e, chain: unknown, id: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (typeof id !== 'string' || !id) return fail('Invalid wallet id');
+    try {
+      const r = evmRail.wallet.assign(c, id);
+      return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
+    } catch (err) {
+      return fail(`Wallet not assigned: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:wallet:rename', (_e, chain: unknown, id: unknown, label: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (typeof id !== 'string' || !id) return fail('Invalid wallet id');
+    if (typeof label !== 'string') return fail('Invalid label');
+    try {
+      const r = evmRail.wallet.rename(id, label);
+      return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
+    } catch (err) {
+      return fail(`Wallet not renamed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:wallet:remove', (_e, chain: unknown, id: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    try {
+      const r = evmRail.wallet.remove(typeof id === 'string' && id ? id : undefined);
+      return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
+    } catch (err) {
+      return fail(`Wallet not removed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:wallet:export', async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    const res = await dialog.showSaveDialog(win!, {
+      title: 'Export EVM wallets (private keys, plaintext)',
+      defaultPath: 'krypt-evm-wallets-PRIVATE.txt',
+      filters: [{ name: 'Text file', extensions: ['txt'] }],
+    });
+    if (res.canceled || !res.filePath) return fail('Export cancelled');
+    const r = evmRail.wallet.exportAll(res.filePath);
+    return r.ok ? ok(r.message, { count: r.count }) : fail(r.message);
+  });
+  ipcMain.handle('evm:wallet:refreshBalance', async (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    const r = await evmRail.wallet.refreshBalance(c);
+    return r.ok ? ok('ok', evmRail.wallet.info(c)) : fail(r.message);
+  });
+  ipcMain.handle('evm:wallet:refreshAll', async (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    await evmRail.wallet.refreshAll(c);
+    return ok('ok', evmRail.wallet.list(c));
+  });
+
+  ipcMain.handle('evm:discover', async (_e, chain: unknown, column: unknown, limit: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!DISCOVER_COLUMNS.includes(column as DiscoverColumn)) return fail('Unknown column');
+    const n = typeof limit === 'number' && Number.isFinite(limit) ? limit : 40;
+    try {
+      const r = await evmRail.discover(c, column as DiscoverColumn, n);
+      return ok(r.message, r.rows);
+    } catch (err) {
+      return fail(`Discover failed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:summary', async (_e, chain: unknown, address: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!isEvmAddress(address)) return fail('Invalid token address');
+    try {
+      return ok('ok', await evmRail.summary(c, address));
+    } catch (err) {
+      return fail(`Summary failed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:token', async (_e, chain: unknown, address: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!isEvmAddress(address)) return fail('Invalid token address');
+    try {
+      return ok('ok', await evmRail.detail(c, address));
+    } catch (err) {
+      return fail(`Token lookup failed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:candles', async (_e, chain: unknown, address: unknown, interval: unknown, limit: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!isEvmAddress(address)) return fail('Invalid token address');
+    if (!CANDLE_INTERVALS.includes(interval as CandleInterval)) return fail('Unknown interval');
+    const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.min(1000, Math.max(10, limit)) : 500;
+    try {
+      return ok('ok', await evmRail.candles(c, address, interval as CandleInterval, n));
+    } catch (err) {
+      return fail(`Candles failed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:quote', async (_e, chain: unknown, side: unknown, address: unknown, amount: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (side !== 'buy' && side !== 'sell') return fail('Side must be buy or sell');
+    if (!isEvmAddress(address)) return fail('Invalid token address');
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) return fail('Amount must be positive');
+    try {
+      const q = await evmRail.quote(c, side, address, amount);
+      return 'error' in q ? fail(q.error) : ok('ok', q);
+    } catch (err) {
+      return fail(`Quote failed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:buy', async (_e, chain: unknown, address: unknown, amount: unknown, simulateOnly: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!isEvmAddress(address)) return fail('Invalid token address');
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) return fail('Amount must be positive');
+    if (amount > 50) return fail(`That is more than 50 ${EVM_CHAIN_META[c].nativeSymbol} in one trade — refusing`);
+    try {
+      const res = await evmRail.buy(c, address, amount, simulateOnly !== false);
+      return res.ok ? ok(res.message, res) : { ok: false, message: res.message, data: res };
+    } catch (err) {
+      return fail(`Buy error: ${safeErr(err)}`);
+    }
+  });
+  // Get out of everything on one chain. Never simulated: there is no such
+  // thing as a dry-run panic button, and a user pressing this wants the
+  // positions gone. The rail refuses it while the chain is disarmed, exactly
+  // as a single sell is refused.
+  ipcMain.handle('evm:sellAll', async (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    try {
+      const res = await evmRail.sellAll(c);
+      return res.ok ? ok(res.message, res) : { ok: false, message: res.message, data: res };
+    } catch (err) {
+      return fail(`Sell-all error: ${safeErr(err)}`);
+    }
+  });
+
+  ipcMain.handle('evm:sell', async (_e, chain: unknown, address: unknown, pct: unknown, simulateOnly: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!isEvmAddress(address)) return fail('Invalid token address');
+    const p = typeof pct === 'number' && Number.isFinite(pct) ? pct : 100;
+    if (p <= 0 || p > 100) return fail('Sell percent must be between 1 and 100');
+    try {
+      const res = await evmRail.sell(c, address, p, simulateOnly !== false);
+      return res.ok ? ok(res.message, res) : { ok: false, message: res.message, data: res };
+    } catch (err) {
+      return fail(`Sell error: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:holdings', async (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    try {
+      return ok('ok', await evmRail.holdings(c));
+    } catch (err) {
+      return fail(`Holdings failed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:portfolio', async (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    try {
+      return ok('ok', await evmRail.portfolio(c));
+    } catch (err) {
+      return fail(`Portfolio failed: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('evm:fills', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    return c ? ok('ok', evmRail.fills(c)) : fail('Unknown chain');
+  });
+  ipcMain.handle('evm:track', (_e, chain: unknown, address: unknown, on: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!isEvmAddress(address)) return fail('Invalid token address');
+    return ok('ok', evmRail.track(c, address, on !== false));
+  });
+
+  // ── rewards (Merkl) ──────────────────────────────────────────────
+  //
+  // Two channels, both keyed by CHAIN and nothing else. The renderer never
+  // passes an address here: `rewards:wallet` resolves this install's own EVM
+  // address from the wallet store main-side, the same rule that keeps URLs
+  // and addresses out of the market channels. A chain switched off in
+  // Settings answers nothing at all, exactly like its wallet page.
+  //
+  // Neither handler can throw across IPC: the provider returns
+  // `{ rows: null }` for every failure rather than rejecting, and `rows: null`
+  // is the renderer's contract for "unknown" — an em dash, never a zero.
+  const rewardsChain = (raw: unknown): { chain: EvmChainKind; chainId: number } | null => {
+    const c = chainOf(raw);
+    return c ? { chain: c, chainId: EVM_CHAIN_META[c].id } : null;
+  };
+
+  ipcMain.handle('rewards:opportunities', async (_e, chain: unknown) => {
+    const c = rewardsChain(chain);
+    if (!c) return fail('Unknown chain');
+    if (!evmRail.enabled(c.chain)) return fail(`${EVM_CHAIN_META[c.chain].name} is turned off in Settings`);
+    return ok('ok', await merkl.opportunities(c.chainId));
+  });
+
+  // The one call in this feature that discloses anything. It is reached only
+  // from a button the user presses, next to a sentence saying the address
+  // goes to Merkl.
+  ipcMain.handle('rewards:wallet', async (_e, chain: unknown) => {
+    const c = rewardsChain(chain);
+    if (!c) return fail('Unknown chain');
+    if (!evmRail.enabled(c.chain)) return fail(`${EVM_CHAIN_META[c.chain].name} is turned off in Settings`);
+    const info = evmRail.wallet.info(c.chain);
+    if (info.failure) return fail(info.failure);
+    if (!info.address) return fail('No EVM wallet on this install');
+    return ok('ok', await merkl.walletRewards(c.chainId, info.address));
+  });
+
   // ── live arming (gated behind LIVE_EXECUTION_AVAILABLE) ──────────
   ipcMain.handle('live:state', () => ok('ok', getEngine().liveState()));
 
@@ -773,10 +1690,14 @@ export function registerIpc(): void {
     const r = wallet.setGroupLab(groupId, { follow: g.lab?.follow ?? { ...lab.DEFAULT_FOLLOW }, random: next });
     return r.ok ? ok(r.message, wallet.groups()) : fail(r.message);
   });
-  ipcMain.handle('lab:fund', async (_e, targets: unknown) => {
+  ipcMain.handle('lab:fund', async (_e, targets: unknown, fromWalletId: unknown) => {
     if (!getEngine().liveState().armed || !store.load().execution.liveEnabled) return fail('Arm live execution first — funding moves real SOL');
     if (!Array.isArray(targets) || targets.length === 0 || targets.length > 20) return fail('Pick 1–20 wallets');
     const byId = new Map(wallet.list().map((w) => [w.id, w.publicKey]));
+    // The source is one of OURS or it is the active wallet — never an id the
+    // renderer made up.
+    const fromId = typeof fromWalletId === 'string' && fromWalletId ? fromWalletId : undefined;
+    if (fromId && !byId.has(fromId)) return fail('The wallet to send from is not one of yours');
     const resolved: Array<{ publicKey: string; lamports: number }> = [];
     const seen = new Set<string>();
     let totalLamports = 0;
@@ -793,17 +1714,19 @@ export function registerIpc(): void {
     }
     if (totalLamports > lab.MAX_FUND_BATCH_LAMPORTS) return fail(`Fund at most ${lab.MAX_FUND_BATCH_LAMPORTS / 1e9} SOL per batch`);
     const httpUrl = resolveRpc(store.load().rpc).heliusHttpUrl ?? store.load().rpc.httpUrl;
-    const r = await fund.fundWallets(httpUrl, resolved);
+    const r = await fund.fundWallets(httpUrl, resolved, fromId);
     logger.info(`lab fund: ${r.message}${r.signature ? ` ${r.signature.slice(0, 12)}…` : ''}`);
     const data = { signature: r.signature ?? '', sentSol: r.sentLamports / 1e9, count: r.count };
     // A partial outcome carries what DID leave the wallet, with its signature.
     return r.ok ? ok(r.message, data) : { ok: false as const, message: r.message, data };
   });
-  ipcMain.handle('lab:collect', async (_e, walletIds: unknown) => {
+  ipcMain.handle('lab:collect', async (_e, walletIds: unknown, toWalletId: unknown) => {
     if (!getEngine().liveState().armed || !store.load().execution.liveEnabled) return fail('Arm live execution first — collecting moves real SOL');
     if (!Array.isArray(walletIds) || walletIds.length === 0 || walletIds.length > 20 || !walletIds.every((x) => typeof x === 'string')) return fail('Pick 1–20 wallets');
     const httpUrl = resolveRpc(store.load().rpc).heliusHttpUrl ?? store.load().rpc.httpUrl;
-    const r = await fund.collectToActive(httpUrl, walletIds as string[]);
+    const toId = typeof toWalletId === 'string' && toWalletId ? toWalletId : undefined;
+    if (toId && !wallet.list().some((w) => w.id === toId)) return fail('The wallet to collect to is not one of yours');
+    const r = await fund.collectToActive(httpUrl, walletIds as string[], toId);
     const landed = r.filter((x) => x.ok).length;
     logger.info(`lab collect: ${landed}/${r.length} wallet(s) sent back`);
     return ok(`${landed}/${r.length} collected`, r.map((x) => ({ walletId: x.walletId, ok: x.ok, message: x.message, sol: x.lamports / 1e9, signature: x.signature })));
@@ -839,23 +1762,40 @@ export function registerIpc(): void {
     }
   });
 
+  // The same four bounds `live:fanoutSell` above already applies, plus a real
+  // base58 test on the mint. The blast radius is bounded downstream, so this
+  // is defence in depth — but a buy handler that trusts more than its own
+  // sell twin is exactly the asymmetry the EVM handlers were hardened away
+  // from, and this one spends SOL rather than returning it.
   ipcMain.handle('live:fanoutBuy', async (_e, mint: unknown, walletIds: unknown, sizing: unknown, opts: unknown) => {
-    if (typeof mint !== 'string' || mint.length < 32) return fail('Invalid mint address');
-    if (!Array.isArray(walletIds) || walletIds.length === 0 || walletIds.some((w) => typeof w !== 'string')) {
-      return fail('Select at least one wallet');
+    if (!isAddress(mint)) return fail('Invalid mint address');
+    if (!Array.isArray(walletIds) || walletIds.length === 0 || walletIds.length > 20 || !walletIds.every((x) => typeof x === 'string')) {
+      return fail('Pick 1–20 wallets');
     }
+    const own = new Set(wallet.list().map((w) => w.id));
+    if (!(walletIds as string[]).every((id) => own.has(id))) return fail('A wallet is not one of yours');
     const sz = sizing as { mode?: unknown; amountSol?: unknown; jitter?: unknown } | null;
     const mode = sz?.mode === 'total' ? 'total' : 'same';
     const amountSol = Number(sz?.amountSol);
     if (!Number.isFinite(amountSol) || amountSol <= 0) return fail('Amount must be positive');
-    const jitter = Number(sz?.jitter);
-    const staggerMaxMs = Number((opts as { staggerMaxMs?: unknown } | null)?.staggerMaxMs);
+    // Jitter is a FRACTION of each share (shared/fanout.ts: 0..0.9), which is
+    // exactly why it is checked here rather than left to the clamp down
+    // there: a caller that sent it as a percentage ("30") would be silently
+    // clamped to 0.9 and every share randomised ±90 %. Refuse, don't clamp.
+    const jitterRaw = Number(sz?.jitter);
+    const jitterGiven = sz?.jitter !== undefined && sz?.jitter !== null;
+    if (jitterGiven && (!Number.isFinite(jitterRaw) || jitterRaw < 0 || jitterRaw > 0.9)) {
+      return fail('Jitter must be a fraction between 0 and 0.9');
+    }
+    const jitter = jitterGiven ? jitterRaw : 0;
+    const staggerRaw = (opts as { staggerMaxMs?: unknown } | null)?.staggerMaxMs;
+    const staggerMaxMs = typeof staggerRaw === 'number' && Number.isFinite(staggerRaw) ? staggerRaw : 0;
     try {
       const res = await getEngine().fanoutBuy(
         mint,
         walletIds as string[],
-        { mode, amountSol, jitter: Number.isFinite(jitter) ? jitter : 0 },
-        { staggerMaxMs: Number.isFinite(staggerMaxMs) ? staggerMaxMs : 0 },
+        { mode, amountSol, jitter },
+        { staggerMaxMs },
       );
       return res.ok ? ok(res.message, res) : { ok: false, message: res.message, data: res };
     } catch (err) {
@@ -1231,15 +2171,31 @@ export function registerIpc(): void {
   ipcMain.handle('orders:create', async (_e, raw: unknown) => {
     if (typeof raw !== 'object' || raw === null) return fail('Invalid order');
     const req = raw as NewOrderRequest;
+    // `validateOrder` covers the kind, the amount and the trigger value; it
+    // has never covered these three, and each one is persisted:
+    //  · a mint passed on `length < 32` alone, so a 10,000-character
+    //    non-base58 string was stored and re-serialised on every save;
+    //  · an unknown basis was copied verbatim and then behaved as
+    //    `price_sol` — the order fires on a number the user never meant;
+    //  · `Number(req.expiresAt)` turned a non-numeric into NaN, which
+    //    `?? null` happily kept, and every expiry comparison against NaN is
+    //    false — the order simply never expired.
+    if (!isAddress(req.mint)) return fail('Invalid mint address');
+    if (!TRIGGER_BASES.includes(req.triggerBasis)) {
+      return fail(`Trigger basis must be one of ${TRIGGER_BASES.join(', ')}`);
+    }
+    const expiresAtRaw = req.expiresAt === null || req.expiresAt === undefined ? null : Number(req.expiresAt);
     const clean: NewOrderRequest = {
-      mint: String(req.mint ?? ''),
+      mint: req.mint,
       symbol: String(req.symbol ?? '').slice(0, 32),
       kind: req.kind,
       triggerValue: req.triggerValue === null || req.triggerValue === undefined ? null : Number(req.triggerValue),
       triggerBasis: req.triggerBasis,
       amount: Number(req.amount),
-      expiresAt: req.expiresAt === null || req.expiresAt === undefined ? null : Number(req.expiresAt),
+      // Unknown is null — never a NaN that quietly means "never expires".
+      expiresAt: expiresAtRaw !== null && Number.isFinite(expiresAtRaw) ? expiresAtRaw : null,
     };
+    if (expiresAtRaw !== null && !Number.isFinite(expiresAtRaw)) return fail('Expiry is not a valid time');
     const v = validateOrder(clean);
     if (!v.ok) return fail(v.message);
     const r = await getEngine().createOrder(clean);
@@ -1413,12 +2369,59 @@ export function registerIpc(): void {
   // re-validated main-side with the same function the form uses.
   ipcMain.handle('copy:list', () => ok('ok', getEngine().copySnapshot()));
 
+  // ── Copy trading on the EVM chains ─────────────────────────────────
+  //
+  // The engine stays free of the rail; this is the bridge it copies through
+  // on Robinhood Chain and BNB. Prices come from what the Observatory last
+  // saw (its feed is the leader watcher on these chains), facts from the
+  // rail's summary, and the gate is the chain's own arm switch.
+  getEngine().setEvmCopy({
+    buy: async (chain, token, amountNative, walletId) => {
+      const r = await evmRail.buy(chain, token, amountNative, false, { walletId });
+      return { ok: r.ok, message: r.message, signature: r.hash ?? undefined, pending: r.stage === 'pending', spentSol: r.amountIn ? Number(BigInt(r.amountIn)) / 1e18 : undefined };
+    },
+    sell: async (chain, token, pct, walletId) => {
+      const r = await evmRail.sell(chain, token, pct, false, { walletId });
+      return { ok: r.ok, message: r.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${r.message})` : r.message, signature: r.hash ?? undefined };
+    },
+    blocked: (chain) => {
+      const s = store.load();
+      if (!s.evm[chain].enabled) return `${EVM_CHAIN_META[chain].name} is switched off in Settings`;
+      if (!evmRail.armed(chain)) return `${EVM_CHAIN_META[chain].name} is in Paper — arm it on its wallet page`;
+      return null;
+    },
+    maxLive: () => null,
+    price: (chain, token) => evmScanner.lastPriceNative(chain, token),
+    facts: async (chain, token) => {
+      const sum = await evmRail.summary(chain, token);
+      return { liquidityUsd: sum.liquidityUsd, marketCapUsd: sum.marketCapUsd, kryptScore: null, isPumpfun: false };
+    },
+  });
+  evmScanner.setCurveLookup((chain, curve) => evmDiscover.tokenForCurve(chain, curve));
+
   ipcMain.handle('copy:save', (_e, raw: unknown) => {
     if (typeof raw !== 'object' || raw === null) return fail('Invalid config');
     const r = raw as CopyConfig;
+    // The chain decides which wallets are ours and what an address looks like.
+    const copyChain: ChainKind = r.chain === 'robinhood' || r.chain === 'bnb' ? r.chain : 'solana';
+    // The wallet the copies sign with: one of this install's ON THAT CHAIN,
+    // or null for the active one. Checked here, where the wallet lists live.
+    if (r.walletId !== undefined && r.walletId !== null) {
+      const ours = copyChain === 'solana' ? wallet.list().some((w) => w.id === r.walletId) : evmWallet.list(copyChain).some((w) => w.id === r.walletId);
+      if (typeof r.walletId !== 'string' || !ours) return fail('The wallet to copy with is not one of yours on that chain');
+    }
+    // The address is handed to the wallet watcher to open a live
+    // subscription on, so it has to BE an address — `validateConfig` only
+    // asks for 32 characters, and `copy:resetStats` 30 lines below has
+    // always tested the real thing. Checked here rather than in
+    // shared/copytrade.ts so the renderer's form and this handler cannot
+    // disagree about what an address is (see the report: validateConfig is
+    // the right long-term home).
+    const walletAddr = String(r.wallet ?? '').trim();
+    if (copyChain === 'solana' ? !isAddress(walletAddr) : !isEvmAddress(walletAddr)) return fail(`Enter a valid wallet address for ${copyChain === 'solana' ? 'Solana' : EVM_CHAIN_META[copyChain].name}`);
     const clean = {
       id: typeof r.id === 'string' && r.id ? r.id : undefined,
-      wallet: String(r.wallet ?? '').trim(),
+      wallet: walletAddr,
       label: String(r.label ?? '').slice(0, 40),
       enabled: r.enabled === true,
       mode: r.mode === 'live' ? ('live' as const) : ('paper' as const),
@@ -1434,6 +2437,13 @@ export function registerIpc(): void {
       copySells: r.copySells !== false,
       dailyLossLimitSol: Number(r.dailyLossLimitSol),
       dailyTradeLimit: Number(r.dailyTradeLimit),
+      // The per-minute burst wall (shared/copytrade.ts). It was NOT carried
+      // here, so the field never survived a save: every config silently ran
+      // on DEFAULT_COPIES_PER_MINUTE and the user had no way to change it.
+      // Absent stays absent — the engine reads that as the default — but a
+      // value that is present is validated, never coerced to one.
+      maxCopiesPerMinute:
+        r.maxCopiesPerMinute === undefined || r.maxCopiesPerMinute === null ? null : Number(r.maxCopiesPerMinute),
     };
     const v = validateConfig(clean);
     if (!v.ok) return fail(v.message);

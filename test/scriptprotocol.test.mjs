@@ -47,7 +47,8 @@ test('the sandbox page locks itself down and exposes only bot', () => {
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /default-src 'none'/, 'nothing loads from anywhere');
   assert.doesNotMatch(html, /fetch\(|XMLHttpRequest|WebSocket|<script src=/, 'no network primitives, no external script');
-  assert.match(html, /new Function\('bot', 'console', m\.code\)/, 'user code receives bot and a console — nothing else');
+  assert.match(html, /new AsyncFunction\('bot', 'console', m\.code\)/, 'user code receives bot and a console — nothing else, and may use top-level await');
+  assert.match(html, /webrtc 'block'/, 'the CSP names webrtc, even though Chromium ignores it today — the real block is the IP handling policy');
   assert.match(html, /Object\.freeze\(\{/, 'bot is frozen');
   assert.ok(EVENT_TIMEOUT_MS <= 5_000 && MIN_INTERVAL_S >= 5, 'a runaway handler is short-lived; a timer cannot spin');
 });

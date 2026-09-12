@@ -12,10 +12,12 @@ import type { LaunchRow } from '@shared/types';
 import { Sparkline } from '../components/viz/Sparkline';
 import { useAppState } from '../state/AppStateProvider';
 import { useTerminal } from '../state/TerminalProvider';
+import { EVM_CHAIN_META, isEvmChain, type ChainKind } from '@shared/evm';
+import { EvmRunnersSection } from '../components/terminal/EvmRunnersSection';
 import { useToast } from '../state/ToastProvider';
 import { Card, Empty, IconButton, NumberInput, Page, Section } from '../components/common';
 import { cls } from '../utils/format';
-import { RUNNER_BUCKET_LABEL, RUNNER_TTL_MS, bucketLabel, pruneRunners } from '@shared/runners';
+import { RUNNER_BUCKET_LABEL, RUNNER_TTL_MS, bucketLabel, pruneRunners, FLAG_FORWARD_LINE } from '@shared/runners';
 import type { RunnerFlag } from '@shared/runners';
 
 /** Where the quick-buy size is remembered, matching Discover's own. */
@@ -95,15 +97,34 @@ function RunnerRow({
             {bucketLabel(r.bucket)} · {r.observedPct.toFixed(0)} % graduated
           </span>
           <span className="text-krypt-muted">base {r.basePct.toFixed(1)} % · {failPct.toFixed(0)} % did not · n={r.n}</span>
+          {r.regime === 'mixed' && (
+            <span
+              className="rounded border border-amber-400/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300"
+              title="Mixed curve: its reserves do not follow the constant product. On the measured day these graduated into a pool seeded with about 0.16 SOL (a classic curve seeds 85) and held a median 0.008x of the flag price an hour later. 76 % of flags were mixed on 2026-07-27, 91 % live in September."
+            >
+              mixed curve
+            </span>
+          )}
+          {r.creatorSoldAt != null && (
+            <span
+              className="rounded border border-rose-400/40 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300"
+              title="The creator sold after this flag. Decided 60 s after the flag on the measured day (2026-07-27), flags whose creator had not sold graduated 22 %; those whose creator had, 5 %."
+            >
+              creator sold {Math.max(0, Math.round((r.creatorSoldAt - r.flaggedAt) / 1000))} s after the flag
+            </span>
+          )}
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11px] font-mono text-white/75">
-          <span>curve {r.curvePct.toFixed(0)} %</span>
+          <span title="Share of the curve's sellable supply already sold (the completion condition)">{r.curvePct.toFixed(0)} % of supply sold</span>
           <span>{r.uniqueBuyers} buyers</span>
           <span className={r.netInflowSol >= 0 ? 'text-emerald-300' : 'text-rose-300'}>
             {r.netInflowSol >= 0 ? '+' : ''}{r.netInflowSol.toFixed(2)} SOL net
           </span>
           <span>{r.tradesSeen} trades</span>
         </div>
+        {FLAG_FORWARD_LINE[r.windowS] && (
+          <div className="mt-0.5 text-[10px] text-krypt-muted/80">{FLAG_FORWARD_LINE[r.windowS]}</div>
+        )}
       </div>
       <div
         className="flex flex-shrink-0 items-center gap-1.5"
@@ -184,7 +205,24 @@ function RunnerRow({
   );
 }
 
-export function RunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
+/**
+ * The page follows the top-bar chain: Solana's odds-model flags on Solana,
+ * the Observatory's flags on Robinhood Chain and BNB. Until 2026-09-11 it
+ * showed Solana whatever was active, and the EVM flags had no page.
+ */
+export function RunnersPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
+  const { chain } = useTerminal();
+  if (isEvmChain(chain)) {
+    return (
+      <Page title="Runners" subtitle={`${EVM_CHAIN_META[chain].name} launches whose first-minute bucket clears this chain's own graduation record. Switch the chain in the top bar for Solana.`}>
+        <EvmRunnersSection chain={chain} onOpenToken={onOpenToken} />
+      </Page>
+    );
+  }
+  return <SolanaRunnersPage onOpenToken={onOpenToken} />;
+}
+
+function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const { runners, launches, settings, status, refreshFromEngine } = useAppState();
   const term = useTerminal();
   const toast = useToast();

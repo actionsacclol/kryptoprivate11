@@ -6,6 +6,10 @@ import { imageSrc } from '@shared/market';
 import { Card, Empty, GhostButton, Page, Section } from '../components/common';
 import { AreaChart } from '../components/viz/AreaChart';
 import { PnlCard, type CardSubject } from '../components/terminal/PnlCard';
+import { EvmPortfolioCard } from '../components/terminal/EvmPortfolioCard';
+import { useTerminal } from '../state/TerminalProvider';
+import { EvmFillsSection } from '../components/terminal/EvmFillsSection';
+import { type ChainKind, EVM_CHAIN_META, isEvmChain } from '@shared/evm';
 import { useToast } from '../state/ToastProvider';
 import { cachedPortfolio, rememberPortfolio } from '../state/routeCache';
 import { cls, fmtDur, fmtNum, fmtPriceUsd, fmtUsd, shortAddr, toneFor } from '../utils/format';
@@ -133,7 +137,24 @@ function PositionRow({
   );
 }
 
-export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
+/**
+ * The page follows the top-bar chain: the Solana ledger on Solana, the
+ * rail's positions and fills on Robinhood Chain and BNB (2026-09-11).
+ */
+export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
+  const { chain } = useTerminal();
+  if (isEvmChain(chain)) {
+    return (
+      <Page title="Portfolio" subtitle={`What you hold on ${EVM_CHAIN_META[chain].name}, what you paid, and every fill — joined from the chain and this install's ledger. Switch the chain in the top bar for Solana.`}>
+        <EvmPortfolioCard chain={chain} onOpenToken={onOpenToken} />
+        <EvmFillsSection chain={chain} onOpenToken={onOpenToken} />
+      </Page>
+    );
+  }
+  return <SolanaPortfolioPage onOpenToken={onOpenToken} />;
+}
+
+function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
   const toast = useToast();
   // Opens on the last portfolio this session saw; the engine's kept build
   // and then the fresh one follow (6.9 s of empty page per visit, 2026-09-08).
@@ -194,13 +215,15 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
       subtitle="What you hold, what you paid, and what it is worth — joined from the chain, this app's fill ledger and live prices."
       actions={
         <div className="flex items-center gap-2">
+          {/* Solana only: portfolio:export reads the engine's trade history.
+              EVM fills are listed on the Wallet page. */}
           <GhostButton onClick={() => void exportAs('csv')} className="!py-2 !px-3 text-xs">
             <Download className="h-3.5 w-3.5" />
-            CSV
+            Solana CSV
           </GhostButton>
           <GhostButton onClick={() => void exportAs('json')} className="!py-2 !px-3 text-xs">
             <Download className="h-3.5 w-3.5" />
-            JSON
+            Solana JSON
           </GhostButton>
           <button
             onClick={() => void load()}
@@ -265,7 +288,7 @@ export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string) => 
       <div className="flex items-center gap-1 mb-3 border-b border-white/8 pb-2">
         {([
           ['positions', `Positions (${data?.positions.length ?? 0})`],
-          ['history', `Trade history (${history.length})`],
+          ['history', `Solana trade history (${history.length})`],
         ] as Array<[Tab, string]>).map(([id, label]) => (
           <button
             key={id}

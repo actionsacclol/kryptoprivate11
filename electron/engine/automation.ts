@@ -27,6 +27,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { logger } from '../system/logger';
 import {
   contextFromLaunch,
   contextFromRunner,
@@ -59,6 +60,7 @@ import {
 import { MIN_INTERVAL_S, type SandboxToMain } from '@shared/scriptProtocol';
 import type { EngineEvent, LaunchRow } from '@shared/types';
 import type { RunnerFlag } from '@shared/runners';
+import { TRIGGER_BASES } from '@shared/orders';
 import type { NewOrderRequest, OrderKind, TriggerBasis } from '@shared/orders';
 import type { AlertKind, NewAlertRequest } from '@shared/alerts';
 import * as recorder from './recorder';
@@ -137,7 +139,7 @@ export interface AutomationHost {
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   changed(): void;
   sandbox: {
-    start(scriptId: string, code: string): Promise<{ ok: boolean; message: string }>;
+    start(scriptId: string, code: string): Promise<{ ok: boolean; message: string; retryable?: boolean }>;
     dispatch(scriptId: string, name: string, payload: unknown): Promise<{ ok: boolean; error?: string }>;
     reply(scriptId: string, id: number, ok: boolean, value?: unknown, error?: string): void;
     stop(scriptId: string, reason?: string): Promise<void>;
@@ -166,6 +168,12 @@ interface Runtime {
   lastTickAt: Map<string, number>;
   intervalSec: number | null;
   intervalTimer: NodeJS.Timeout | null;
+  /** Consecutive failed starts, and the timer for the next attempt. A start
+   *  can fail for reasons that have nothing to do with the script (a slow
+   *  machine, a provider parked behind a 429), and disarming on the first one
+   *  made the user re-arm by hand for a stall that would have cleared. */
+  startFails: number;
+  startRetry: NodeJS.Timeout | null;
   /** Daily schedules: "HH:MM" → timer to the next occurrence. */
   atTimers: Map<string, NodeJS.Timeout>;
   log: ScriptLogLine[];
@@ -180,6 +188,9 @@ interface PersistedRuntime {
   sellsToday: number;
   realizedToday: number;
   firedMints: string[];
+  /** Per-mint cooldown clocks. Without these a restart is a free reset of
+   *  every `cooldownSec`, which is a wall the user set. */
+  lastFireAt?: Record<string, number>;
   opened: Record<string, { costSol: number; at: number }>;
   subscribed?: string[];
   kv: Record<string, unknown>;
@@ -203,10 +214,36 @@ export function attach(h: AutomationHost): void {
 
 // ── Persistence ───────────────────────────────────────────────────────
 
+/** Set when automation.json exists but could not be read or parsed. While it
+ *  is set NOTHING is written: an unreadable file is not an empty one, and the
+ *  next save would otherwise destroy every script the user wrote. `shutdown()`
+ *  persists unconditionally, so without this simply closing the app is enough
+ *  to lose them. Same rule as the wallet file (2026-09-03) and the ledger. */
+let loadFailure: string | null = null;
+
+export function failure(): string | null {
+  return loadFailure;
+}
+
 export function init(userDataDir: string): void {
   filePath = path.join(userDataDir, FILE);
+  loadFailure = null;
+  let text: string;
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    // Absent is a first run. Anything else is a file we must not overwrite.
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      scripts = [];
+      return;
+    }
+    loadFailure = `${filePath} could not be read (${(e as Error).message})`;
+    logger.error(`automation: ${loadFailure}`);
+    scripts = [];
+    return;
+  }
+  try {
+    const raw = JSON.parse(text) as {
       version: 1;
       scripts: UserScript[];
       runtime: Record<string, PersistedRuntime>;
@@ -223,6 +260,7 @@ export function init(userDataDir: string): void {
         rt.sellsToday = p.sellsToday ?? 0;
         rt.realizedToday = p.realizedToday ?? 0;
         rt.firedMints = new Set(Array.isArray(p.firedMints) ? p.firedMints : []);
+        rt.lastFireAt = new Map(Object.entries(p.lastFireAt ?? {}).filter(([, v]) => typeof v === 'number'));
         rt.opened = new Map(Object.entries(p.opened ?? {}));
         rt.subscribed = new Set(Array.isArray(p.subscribed) ? p.subscribed : []);
         rt.kv = p.kv && typeof p.kv === 'object' ? p.kv : {};
@@ -236,19 +274,25 @@ export function init(userDataDir: string): void {
         pushLog(rt, 'warn', 'Disabled on restart — a live script must be re-armed by hand.');
       }
     }
-  } catch {
+  } catch (e) {
+    loadFailure = `${filePath} is not readable JSON (${(e as Error).message})`;
+    logger.error(`automation: ${loadFailure}`);
     scripts = [];
   }
 }
 
 function persist(): void {
-  if (!filePath) return;
+  if (!filePath || loadFailure) return;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(persistNow, 300);
 }
 
 function persistNow(): void {
   if (!filePath) return;
+  if (loadFailure) {
+    logger.warn(`automation: not saving — ${loadFailure}`);
+    return;
+  }
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -263,6 +307,7 @@ function persistNow(): void {
       sellsToday: rt.sellsToday,
       realizedToday: rt.realizedToday,
       firedMints: [...rt.firedMints].slice(-5_000),
+      lastFireAt: Object.fromEntries([...rt.lastFireAt].slice(-5_000)),
       opened: Object.fromEntries(rt.opened),
       subscribed: [...rt.subscribed],
       kv: rt.kv,
@@ -283,7 +328,35 @@ const nextId = (): string => {
   return `scr_${Date.now().toString(36)}_${seq.toString(36)}`;
 };
 
-const dayKeyNow = (): string => new Date().toISOString().slice(0, 10);
+// LOCAL, not UTC: the schedule trigger, `hourLocal` and `weekday` are all
+// local, so a UTC day key rolled the buy counter in the middle of the user's
+// evening and handed them a second day-budget.
+const dayKeyNow = (): string => new Date().toLocaleDateString('en-CA');
+
+// Every snapshot carries every script's source, so one `changed()` is a real
+// cost — a chatty `bot.log` loop measured 8.6 GB of serialisation and 8.4 s of
+// main-process time over 20,000 lines, and main is where stop-losses are
+// evaluated. Broadcasts are coalesced: the first is immediate so the UI stays
+// live, the rest ride a trailing 200 ms timer.
+const CHANGED_MIN_GAP_MS = 200;
+let changedAt = 0;
+let changedTimer: NodeJS.Timeout | null = null;
+
+function changed(): void {
+  const now = Date.now();
+  if (changedTimer) return;
+  if (now - changedAt >= CHANGED_MIN_GAP_MS) {
+    changedAt = now;
+    host?.changed();
+    return;
+  }
+  changedTimer = setTimeout(() => {
+    changedTimer = null;
+    changedAt = Date.now();
+    host?.changed();
+  }, CHANGED_MIN_GAP_MS - (now - changedAt));
+  if (typeof changedTimer.unref === 'function') changedTimer.unref();
+}
 
 function freshRuntime(): Runtime {
   return {
@@ -304,6 +377,8 @@ function freshRuntime(): Runtime {
     lastTickAt: new Map(),
     intervalSec: null,
     intervalTimer: null,
+    startFails: 0,
+    startRetry: null,
     atTimers: new Map(),
     log: [],
     running: false,
@@ -354,9 +429,26 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
     const wasLiveArmed = existing.mode === 'live' && existing.enabled;
     const codeChanged = existing.code !== input.code || existing.kind !== input.kind;
     const toLive = existing.mode !== 'live' && input.mode === 'live';
+    const modeChanged = existing.mode !== input.mode;
     Object.assign(existing, input, { id: existing.id, createdAt: existing.createdAt, updatedAt: now });
     // Switching to live disarms: arming live is a separate, confirmed act.
     if (toLive) existing.enabled = false;
+    // `opened` is the script's authority to SELL — it is what separates its own
+    // bags from bags the user bought by hand. Those sets are per mode and do
+    // not transfer: a mint the script "opened" in paper is a simulated fill,
+    // and carrying it into live would let a script that only ever rehearsed
+    // market-sell a real hand-bought bag on its first live action. Clear it in
+    // BOTH directions — the live→paper case strands nothing, because a live
+    // bag is still in the wallet and still sellable by hand.
+    if (modeChanged) {
+      const rt = runtimes.get(existing.id);
+      if (rt && rt.opened.size) {
+        slog(existing, 'info', `mode changed to ${existing.mode} — dropping ${rt.opened.size} position(s) opened in the other mode; this script can no longer sell them`);
+        rt.opened.clear();
+      }
+    }
+  // The kill switch is this module's invariant, not its caller's.
+  if (killSwitch) existing.enabled = false;
     persist();
     if (existing.enabled && existing.kind === 'code' && codeChanged) void startCode(existing);
     if (!existing.enabled) void stopCode(existing, 'edited');
@@ -364,7 +456,7 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
     if (!wasLiveArmed && existing.mode === 'live' && existing.enabled) {
       host?.toast('warn', `LIVE script armed: "${existing.name}" — real SOL will be spent within its budget`);
     }
-    host?.changed();
+    changed();
     return { ok: true, message: toLive ? 'Saved — switched to live, re-enable to arm it' : 'Saved', id: existing.id };
   }
   if (scripts.length >= MAX_SCRIPTS) return { ok: false, message: `Limit of ${MAX_SCRIPTS} scripts reached` };
@@ -372,7 +464,7 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
   scripts.unshift(s);
   runtimes.set(s.id, freshRuntime());
   persist();
-  host?.changed();
+  changed();
   return { ok: true, message: `Saved "${s.name}" — paper, disabled. Enable it when ready.`, id: s.id };
 }
 
@@ -386,7 +478,7 @@ export function remove(id: string): { ok: boolean; message: string } {
   if (rt?.intervalTimer) clearInterval(rt.intervalTimer);
   runtimes.delete(id);
   persist();
-  host?.changed();
+  changed();
   return { ok: true, message: `Removed "${s.name}"` };
 }
 
@@ -413,7 +505,7 @@ export function setEnabled(id: string, enabled: boolean): { ok: boolean; message
     void stopCode(s, 'disabled');
     clearSchedules(rt);
   }
-  host?.changed();
+  changed();
   return { ok: true, message: enabled ? `"${s.name}" is on (${s.mode})` : `"${s.name}" is off` };
 }
 
@@ -430,7 +522,7 @@ export function setKillSwitch(on: boolean): { ok: boolean; message: string } {
     }
   }
   persist();
-  host?.changed();
+  changed();
   return { ok: true, message: on ? 'Every script is off' : 'Kill switch lifted — enable scripts one by one' };
 }
 
@@ -442,7 +534,7 @@ function disable(s: UserScript, why: string): void {
   void stopCode(s, why);
   clearSchedules(rtFor(s));
   persist();
-  host?.changed();
+  changed();
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────
@@ -486,13 +578,18 @@ export function snapshot(): ScriptSnapshot {
 async function ctxFor(s: UserScript, mint: string, base?: RuleContext): Promise<RuleContext> {
   const h = host;
   const now = Date.now();
-  let c = base ?? (h?.launch(mint) ? contextFromLaunch(h.launch(mint) as LaunchRow, now) : emptyContext(mint));
-  if (h) {
-    c = withMarket(c, h.marketCached(mint));
-    const pos = (await h.positions(s.mode)).find((p) => p.mint === mint) ?? null;
-    c = withPosition(c, pos ? withPeak(s.mode, pos) : null, now);
-    c = withGlobals(c, { walletSol: h.wallet().sol, now });
-  }
+  if (!h) return base ?? emptyContext(mint);
+  const row = h.launch(mint);
+  const pos = (await h.positions(s.mode)).find((p) => p.mint === mint) ?? null;
+  // A bag the user opened by hand still lends its name to the context — the
+  // script can watch it and log about it — but it is not this script's
+  // POSITION. `held` means "held by this script": that is what the field guide
+  // says, what the open-position cap counts, and what the script may sell.
+  const mine = rtFor(s).opened.has(mint);
+  let c = base ?? (row ? contextFromLaunch(row, now) : emptyContext(mint, pos?.symbol, pos?.name));
+  c = withMarket(c, h.marketCached(mint));
+  c = withPosition(c, mine && pos ? withPeak(s.mode, pos) : null, now);
+  c = withGlobals(c, { walletSol: h.wallet().sol, now });
   return c;
 }
 
@@ -572,7 +669,41 @@ function orderKindOf(a: RuleAction): OrderKind | null {
   }
 }
 
-async function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): Promise<ActResult> {
+/**
+ * Every action from one script runs strictly after the previous one.
+ *
+ * Without this the budget is not a budget: `buyGate` reads the counters, then
+ * awaits (positions, then the buy itself), and only then increments — so every
+ * action that starts while an earlier buy is on the wire sees the pre-increment
+ * numbers. The engine drives scripts fire-and-forget (ipc.ts calls
+ * `onEngineEvent` from the emit callback, and `fanOut` dispatches one detached
+ * promise per event), and the DEFAULT rule is `launch_update` → buy, so this is
+ * the shipped configuration, not an adversarial one: measured 2026-09-09, a
+ * budget of 2 buys of 0.05 SOL executed 14 buys for 0.700 SOL.
+ */
+const actChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `fn` after everything else this script has in flight.
+ *
+ * Anything that reads a budget counter and later increments it must go through
+ * here, not just `act()`. `bot.order()`'s migration kinds place directly and
+ * were the one spending path left outside the chain: measured 2026-09-09, a
+ * budget of 1 buy/day and 0.05 SOL armed 36 `buy_on_migration` orders and
+ * committed 1.80 SOL, while `bot.buy` on the identical budget executed once.
+ */
+function chain<T>(s: UserScript, fn: () => Promise<T>): Promise<T> {
+  const prev = actChains.get(s.id) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  actChains.set(s.id, next.catch(() => undefined));
+  return next;
+}
+
+function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): Promise<ActResult> {
+  return chain(s, () => actInner(s, action, ctx));
+}
+
+async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | null): Promise<ActResult> {
   const h = host;
   if (!h) return { ok: false, message: 'no host' };
   const rt = rtFor(s);
@@ -594,6 +725,10 @@ async function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): 
       const sol = Number(action.sol);
       const gate = await buyGate(s, rt, mint, sol, what);
       if (gate) return gate;
+      // The gate awaited: re-read the arm bit before spending. The kill switch
+      // says "every script is off" and must not be overtaken by a buy that was
+      // already past its checks.
+      if (!s.enabled || killSwitch) return { ok: false, message: 'script is disabled' };
       const r = await h.buy(mint, sol, s.mode);
       if (r.ok || r.pending) {
         rt.buysToday += 1;
@@ -603,7 +738,7 @@ async function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): 
         slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}buy ${what} ${sol} SOL: ${r.message}${r.pending ? ' (pending)' : ''}`);
         recorder.record('script_buy', { scriptId: s.id, name: s.name, mode: s.mode, mint, sol, ok: r.ok, signature: r.signature ?? null });
         persist();
-        h.changed();
+        changed();
         return { ok: true, message: r.message };
       }
       slog(s, 'warn', `buy ${what} ${sol} SOL failed: ${r.message}`);
@@ -615,8 +750,13 @@ async function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): 
       return sellOne(s, rt, mint, pct, what);
     }
     case 'sell_all': {
-      const held = await h.positions(s.mode);
-      if (!held.length) return refuse(s, 'sell everything: nothing held');
+      // "Everything THIS SCRIPT holds" — which is what the action's own label,
+      // the `held` fact and the shipped example all promise. `h.positions`
+      // returns the whole wallet, so a schedule rule armed from the built-in
+      // "Daily housekeeping" example would otherwise market-sell every bag the
+      // user bought by hand.
+      const held = (await h.positions(s.mode)).filter((p) => rt.opened.has(p.mint));
+      if (!held.length) return refuse(s, 'sell everything: this script holds nothing');
       let sold = 0;
       for (const p of held) {
         const r = await sellOne(s, rt, p.mint, 100, p.symbol || p.mint.slice(0, 8));
@@ -653,7 +793,7 @@ async function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): 
       }
       slog(s, r.ok ? 'info' : 'warn', `${describeAction(action)} on ${what}: ${r.message}`);
       recorder.record('script_order', { scriptId: s.id, name: s.name, mint, kind, basis, triggerValue, amount, ok: r.ok });
-      if (r.ok) h.changed();
+      if (r.ok) changed();
       return r;
     }
     case 'cancel_orders': {
@@ -714,6 +854,10 @@ async function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): 
 
 async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, what: string): Promise<ActResult> {
   const h = host as AutomationHost;
+  // Only what this script opened — the same rule as sell_all. `h.positions`
+  // is the whole wallet; a script must never be able to exit a position the
+  // user opened by hand.
+  if (!rt.opened.has(mint)) return refuse(s, `sell ${what}: this script does not hold it`);
   const held = await h.positions(s.mode);
   const before = held.find((p) => p.mint === mint);
   if (!before) return refuse(s, `sell ${what}: nothing held in ${s.mode} mode`);
@@ -721,7 +865,22 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
     const blocked = h.liveBlockedReason();
     if (blocked) return refuse(s, `sell ${what}: not executed — ${blocked}`);
   }
-  const r = await h.sell(mint, pct, s.mode);
+  // `pct` is a percentage of the WHOLE wallet holding, and the guard above is
+  // only mint-granular: it proves the script opened this mint, not that it
+  // owns all of it. A script that bought 0.01 SOL of a bag the user then
+  // hand-added 5.0 SOL to would sell all 5.01 on a `sell 100%`.
+  //
+  // So scale by the script's share of the cost basis — the same construction
+  // copyTrade.ts `walletPctFor` already uses, and the reason `opened` carries
+  // costSol at all. `Math.max(1, …)` because a share that rounds to zero must
+  // still be able to exit; this only ever shrinks the sell, never grows it.
+  const ourCost = rt.opened.get(mint)?.costSol ?? 0;
+  let pctOfWallet = pct;
+  if (Number.isFinite(before.costSol) && before.costSol > 0 && ourCost > 0) {
+    const ratio = Math.min(1, ourCost / before.costSol);
+    pctOfWallet = Math.max(1, Math.min(100, Math.round(pct * ratio)));
+  }
+  const r = await h.sell(mint, pctOfWallet, s.mode);
   if (r.ok || r.pending) {
     rt.sellsToday += 1;
     // Paper says exactly what it realised. A live fill's own number is not
@@ -738,7 +897,7 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
     slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}sell ${pct}% ${what}: ${r.message}${realized !== null ? ` (realised ${realized >= 0 ? '+' : ''}${realized.toFixed(4)} SOL${typeof r.realizedSol === 'number' ? '' : ', estimated'})` : ''}`);
     recorder.record('script_sell', { scriptId: s.id, name: s.name, mode: s.mode, mint, pct, ok: r.ok, realizedSol: realized, signature: r.signature ?? null });
     persist();
-    h.changed();
+    changed();
     if (rt.realizedToday <= -s.budget.maxLossSolPerDay) {
       disable(s, `down ${Math.abs(rt.realizedToday).toFixed(3)} SOL today, past the ${s.budget.maxLossSolPerDay} SOL loss limit`);
     }
@@ -849,9 +1008,36 @@ function clearSchedules(rt: Runtime): void {
 
 // ── Code scripts ──────────────────────────────────────────────────────
 
-async function startCode(s: UserScript): Promise<void> {
+/** One start at a time per script. Saving a script while its sandbox is still
+ *  coming up used to race: the first start's failure path fired against the
+ *  second start's healthy box and disabled the script with the wrong reason. */
+const startChains = new Map<string, Promise<void>>();
+
+function startCode(s: UserScript): Promise<void> {
+  const prev = startChains.get(s.id) ?? Promise.resolve();
+  const run = (): Promise<void> => startCodeInner(s);
+  const next = prev.then(run, run);
+  startChains.set(
+    s.id,
+    next.catch(() => undefined),
+  );
+  return next;
+}
+
+async function startCodeInner(s: UserScript): Promise<void> {
   const h = host;
   if (!h) return;
+  // A script can reach here from a restart or from startup without ever
+  // passing the save path's validation — an oversized or empty body would
+  // start a renderer only to fail in the harness.
+  // The arm bit is re-read here, not where the start was queued: a kill
+  // switch or a disable that landed while this call waited its turn wins.
+  if (!s.enabled || killSwitch) return;
+  const v = validateScript(s);
+  if (!v.ok) {
+    disable(s, `will not start: ${v.message}`);
+    return;
+  }
   const rt = rtFor(s);
   rt.running = false;
   clearSchedules(rt);
@@ -859,26 +1045,63 @@ async function startCode(s: UserScript): Promise<void> {
   if (!r.ok) {
     rt.running = false;
     rt.lastError = r.message;
-    disable(s, `could not start: ${r.message}`);
+    // A start that lost to a newer one is not a fault of the script. Saving
+    // an armed script restarts it, and disabling it for that would be a wall
+    // the user never asked for.
+    if (/superseded by a newer start/.test(r.message)) return;
+    // Neither is a stall. A start can fail because the machine was busy or a
+    // provider the script's first line asked for was parked; disarming on the
+    // first of those left the user re-arming by hand for something that had
+    // already cleared. A body that throws is NOT retryable and still disarms
+    // at once, because it will throw identically every time.
+    if (r.retryable && rt.startFails < START_RETRIES) {
+      rt.startFails += 1;
+      const wait = START_BACKOFF_MS[Math.min(rt.startFails - 1, START_BACKOFF_MS.length - 1)];
+      slog(s, 'warn', `could not start (${r.message}) — trying again in ${Math.round(wait / 1000)} s (attempt ${rt.startFails} of ${START_RETRIES})`);
+      if (rt.startRetry) clearTimeout(rt.startRetry);
+      rt.startRetry = setTimeout(() => {
+        rt.startRetry = null;
+        if (s.enabled && !killSwitch) void startCode(s);
+      }, wait);
+      rt.startRetry.unref?.();
+      changed();
+      return;
+    }
+    disable(s, rt.startFails > 0 ? `could not start after ${rt.startFails + 1} attempts: ${r.message}` : `could not start: ${r.message}`);
     return;
   }
+  rt.startFails = 0;
   rt.running = true;
-  rt.errorsInARow = 0;
   slog(s, 'info', 'sandbox running');
-  host?.changed();
+  changed();
 }
 
 async function stopCode(s: UserScript, reason: string): Promise<void> {
   const rt = rtFor(s);
+  // A pending start retry is a start: stopping the script must cancel it, or
+  // a disarmed script comes back a few seconds later.
+  if (rt.startRetry) {
+    clearTimeout(rt.startRetry);
+    rt.startRetry = null;
+  }
+  rt.startFails = 0;
   if (rt.intervalTimer) {
     clearInterval(rt.intervalTimer);
     rt.intervalTimer = null;
   }
   rt.intervalSec = null;
   rt.queue = [];
-  if (rt.running || host?.sandbox.isRunning(s.id)) await host?.sandbox.stop(s.id, reason);
+  // Unconditional: a start queued behind this call has not created its box
+  // yet, so `isRunning` would say no and the kill switch would miss it. Stop
+  // is idempotent, and the start itself re-checks the arm bit.
   rt.running = false;
+  if (s.kind === 'code') await host?.sandbox.stop(s.id, reason);
 }
+
+/** How many times a RETRYABLE start failure is tried again before the script
+ *  is disarmed, and how long to wait between attempts. */
+const START_RETRIES = 3;
+const START_BACKOFF_MS = [2_000, 5_000, 15_000];
 
 /** Restart enabled scripts (app start). */
 export async function startEnabled(): Promise<void> {
@@ -894,7 +1117,14 @@ function noteError(s: UserScript, line: string): void {
   rt.errorsInARow += 1;
   rt.lastError = line;
   slog(s, 'error', line);
-  if (rt.errorsInARow >= ERRORS_TO_DISABLE) disable(s, `${ERRORS_TO_DISABLE} errors in a row (last: ${line.slice(0, 120)})`);
+  if (rt.errorsInARow >= ERRORS_TO_DISABLE) {
+    disable(s, `${ERRORS_TO_DISABLE} errors in a row (last: ${line.slice(0, 120)})`);
+    return; // disable() pushes its own snapshot
+  }
+  // The Scripts page reads errorsInARow and lastError from pushed snapshots
+  // only, so without this a script climbs 1→4 errors invisibly and then jumps
+  // straight to "disabled".
+  changed();
 }
 
 function enqueue(s: UserScript, name: string, payload: unknown): void {
@@ -934,13 +1164,17 @@ export function onSandboxMessage(scriptId: string, msg: SandboxToMain): void {
   if (!s) return;
   const rt = rtFor(s);
   switch (msg.t) {
+    case 'alive':
+      // The bridge is up. The script's own code has not run yet, so this is
+      // not "running" — it only tells main the sandbox is not broken.
+      return;
     case 'ready':
       rt.running = true;
       return;
     case 'log':
       pushLog(rt, msg.level, msg.line);
       if (msg.level === 'error') host?.log('warn', `script "${s.name}": ${msg.line}`);
-      host?.changed();
+      changed();
       return;
     case 'error':
       noteError(s, msg.line);
@@ -954,6 +1188,11 @@ export function onSandboxMessage(scriptId: string, msg: SandboxToMain): void {
 }
 
 /** The sandbox died on its own. */
+/** Restarts per script in the last minute — a crash loop must not spawn a
+ *  renderer every three seconds for the life of the app. */
+const restartWindow = new Map<string, number[]>();
+const RESTARTS_PER_MIN = 5;
+
 export function onSandboxGone(scriptId: string, reason: string): void {
   const s = scripts.find((x) => x.id === scriptId);
   if (!s) return;
@@ -962,19 +1201,36 @@ export function onSandboxGone(scriptId: string, reason: string): void {
   rt.queue = [];
   if (!s.enabled) return;
   noteError(s, `sandbox gone (${reason})`);
+  if (!s.enabled) return; // noteError may have disabled it
+  // A handler that never returns is killed by the watchdog, comes back, and
+  // runs again — so without a ceiling the five-error wall is never reached and
+  // the loop is endless. Count restarts, not just errors.
+  const now = Date.now();
+  const recent = (restartWindow.get(scriptId) ?? []).filter((t) => now - t < 60_000);
+  recent.push(now);
+  restartWindow.set(scriptId, recent);
+  if (recent.length > RESTARTS_PER_MIN) {
+    restartWindow.delete(scriptId);
+    disable(s, `restarted ${recent.length} times in a minute (last: ${reason}) — stopping it`);
+    return;
+  }
   // Killed by the watchdog or crashed: come back, unless the errors said stop.
-  if (s.enabled) void startCode(s);
+  void startCode(s);
 }
 
 const isMint = (v: unknown): v is string => typeof v === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v);
 const ORDER_KINDS: OrderKind[] = ['limit_buy', 'limit_sell', 'take_profit', 'stop_loss', 'trailing_stop', 'sell_on_dev_sell', 'sell_on_migration', 'buy_on_migration'];
-const BASES: TriggerBasis[] = ['price_sol', 'mcap_usd', 'pct'];
+
 
 async function handleCall(s: UserScript, id: number, method: string, args: unknown[]): Promise<void> {
   const h = host;
   if (!h) return;
   const answer = (ok: boolean, value?: unknown, error?: string): void => h.sandbox.reply(s.id, id, ok, value, error);
   const result = (r: ActResult): void => answer(true, { ok: r.ok, message: r.message, ...(r.count !== undefined ? { count: r.count, sold: r.count, cancelled: r.count } : {}) });
+  // A disabled script answers nothing. Its sandbox may still be draining a
+  // handler that started before the switch moved, and every read below costs
+  // something — `positions` walks the book, `market` hits a live provider.
+  if (!s.enabled || killSwitch) return answer(false, undefined, 'script is disabled');
   try {
     switch (method) {
       case 'buy': {
@@ -993,31 +1249,68 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         const req = (typeof args[0] === 'object' && args[0] !== null ? args[0] : {}) as Record<string, unknown>;
         if (!isMint(req.mint)) return answer(false, undefined, 'order: bad mint');
         if (!ORDER_KINDS.includes(req.kind as OrderKind)) return answer(false, undefined, `order: kind must be one of ${ORDER_KINDS.join(', ')}`);
-        if (!BASES.includes(req.triggerBasis as TriggerBasis)) return answer(false, undefined, `order: triggerBasis must be one of ${BASES.join(', ')}`);
+        if (!TRIGGER_BASES.includes(req.triggerBasis as TriggerBasis)) return answer(false, undefined, `order: triggerBasis must be one of ${TRIGGER_BASES.join(', ')}`);
         const kind = req.kind as OrderKind;
         const basis = req.triggerBasis as TriggerBasis;
+        // A limit order is a level, and 'pct' is not one. Silently reading it
+        // as a market cap armed a limit buy at $20 and reported success.
+        if (basis === 'pct' && (kind === 'limit_buy' || kind === 'limit_sell')) {
+          return answer(false, undefined, `order: ${kind} needs an absolute level — triggerBasis must be price_sol or mcap_usd`);
+        }
         const value = Number(req.triggerValue);
         const amount = Number(req.amount);
         let action: RuleAction | null = null;
         if (kind === 'stop_loss') action = { type: 'stop_loss', pct: value };
         else if (kind === 'trailing_stop') action = { type: 'trailing_stop', pct: value };
         else if (kind === 'take_profit') action = { type: 'take_profit', gainPct: value, sellPct: amount };
-        else if (kind === 'limit_buy') action = { type: 'limit_buy', basis: basis === 'pct' ? 'mcap_usd' : basis, value, sol: amount };
-        else if (kind === 'limit_sell') action = { type: 'limit_sell', basis: basis === 'pct' ? 'mcap_usd' : basis, value, pct: amount };
+        else if (kind === 'limit_buy') action = { type: 'limit_buy', basis: basis as 'price_sol' | 'mcap_usd', value, sol: amount };
+        else if (kind === 'limit_sell') action = { type: 'limit_sell', basis: basis as 'price_sol' | 'mcap_usd', value, pct: amount };
         if (action) return result(await act(s, action, await ctxFor(s, req.mint)));
-        // The migration / dev-sell kinds have no rule form; place directly, same gates.
-        const ctx = await ctxFor(s, req.mint);
-        if (s.mode === 'paper') {
-          slog(s, 'info', `PAPER order ${kind} on ${ctx.symbol || req.mint.slice(0, 8)} — noted, not placed`);
+        // The migration / dev-sell kinds have no rule form; place directly,
+        // same gates — and on the SAME per-script chain act() uses, or the
+        // gates below read counters that a call already on the wire has not
+        // incremented yet. See `chain`.
+        // `req` is a bag of unknowns; isMint() narrowed it above, but that
+        // narrowing does not survive into the closure. Capture it once.
+        const orderMint: string = req.mint;
+        return chain(s, async () => {
+          const ctx = await ctxFor(s, orderMint);
+          if (s.mode === 'paper') {
+          slog(s, 'info', `PAPER order ${kind} on ${ctx.symbol || orderMint.slice(0, 8)} — noted, not placed`);
           return result({ ok: true, message: 'paper: order noted, not placed' });
-        }
-        if (kind === 'buy_on_migration') {
-          const gate = await buyGate(s, rtFor(s), req.mint, amount, ctx.symbol || req.mint.slice(0, 8));
+          }
+          // These three kinds have no rule form, so they do not pass through
+          // act() — and therefore skipped the arm bit, the rate limit and the
+          // buy reservation. An armed order spends through the real pipeline
+          // with no knowledge of this script's budget, so the gates have to be
+          // applied here by hand.
+          const rt = rtFor(s);
+          const label = ctx.symbol || orderMint.slice(0, 8);
+          if (!s.enabled || killSwitch) return result({ ok: false, message: 'script is disabled' });
+          if (rateLimited(s, rt, Date.now())) {
+          const msg = `refused order ${kind}: over ${s.budget.maxActionsPerMinute} actions in a minute`;
+          slog(s, 'warn', msg);
+          return result({ ok: false, message: msg });
+          }
+          if (kind === 'sell_on_migration' || kind === 'sell_on_dev_sell') {
+          if (!rt.opened.has(orderMint)) return result(refuse(s, `order ${kind} on ${label}: this script does not hold it`));
+          }
+          if (kind === 'buy_on_migration') {
+          const gate = await buyGate(s, rt, orderMint, amount, label);
           if (gate) return result(gate);
-        }
-        const r = await h.placeOrder({ mint: req.mint, symbol: ctx.symbol, kind, triggerBasis: basis, triggerValue: Number.isFinite(value) ? value : null, amount });
-        slog(s, r.ok ? 'info' : 'warn', `order ${kind} on ${ctx.symbol || req.mint.slice(0, 8)}: ${r.message}`);
-        return result(r);
+          }
+          const r = await h.placeOrder({ mint: orderMint, symbol: ctx.symbol, kind, triggerBasis: basis, triggerValue: Number.isFinite(value) ? value : null, amount });
+          // An armed buy_on_migration is a buy this script has committed to:
+          // reserve it now, or the budget counts it only once it fires.
+          if (r.ok && kind === 'buy_on_migration') {
+          rt.buysToday += 1;
+          const prev = rt.opened.get(orderMint);
+          rt.opened.set(orderMint, { costSol: (prev?.costSol ?? 0) + amount, at: Date.now() });
+          persist();
+          }
+          slog(s, r.ok ? 'info' : 'warn', `order ${kind} on ${ctx.symbol || orderMint.slice(0, 8)}: ${r.message}`);
+          return result(r);
+        });
       }
       case 'cancelOrders': {
         const [mint] = args;
@@ -1078,12 +1371,17 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       case 'market': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'market: bad mint');
+        // The only read that leaves the machine: it goes to the shared provider
+        // queue, so an un-awaited loop of these starves the whole app and trips
+        // its 429 parks. It costs an action like anything else does.
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `market: over ${s.budget.maxActionsPerMinute} actions in a minute`);
         return answer(true, await h.market(mint));
       }
       case 'positions': {
         const now = Date.now();
         const out: RuleContext[] = [];
-        for (const p of await h.positions(s.mode)) {
+        const rtp = rtFor(s);
+        for (const p of (await h.positions(s.mode)).filter((x) => rtp.opened.has(x.mint))) {
           const row = h.launch(p.mint);
           let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
           c = withMarket(c, h.marketCached(p.mint));
@@ -1289,7 +1587,9 @@ export async function pollPositions(): Promise<void> {
     }
     if (s.kind === 'code' && !rt.running) continue;
     await reconcileOpened(s, rt);
-    const held = await h.positions(s.mode);
+    // Only this script's own positions. A position rule over the whole wallet
+    // would fire, log and notify about bags it can neither own nor sell.
+    const held = (await h.positions(s.mode)).filter((p) => rt.opened.has(p.mint));
     for (const p of held) {
       h.subscribeTicks(p.mint);
       const row = h.launch(p.mint);
@@ -1314,6 +1614,8 @@ export function stopTimers(): void {
   for (const rt of runtimes.values()) {
     if (rt.intervalTimer) clearInterval(rt.intervalTimer);
     rt.intervalTimer = null;
+    if (rt.startRetry) clearTimeout(rt.startRetry);
+    rt.startRetry = null;
     clearSchedules(rt);
   }
 }
@@ -1334,6 +1636,15 @@ export function _reset(): void {
   orderStates.clear();
   alertFires.clear();
   peaks.clear();
+  restartWindow.clear();
+  startChains.clear();
+  actChains.clear();
+  if (changedTimer) {
+    clearTimeout(changedTimer);
+    changedTimer = null;
+  }
+  changedAt = 0;
+  loadFailure = null;
   killSwitch = false;
   filePath = '';
 }

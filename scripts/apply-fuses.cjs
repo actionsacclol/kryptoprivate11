@@ -45,9 +45,80 @@ function assertBytecodeMatchesTarget(context) {
   );
 }
 
+/**
+ * The bytecode must be IN the package, not merely correct on disk.
+ *
+ * `assertBytecodeMatchesTarget` checks the bytecode's platform and arch. It
+ * says nothing about whether the .jsc files reached app.asar — and on
+ * 2026-09-09 they did not: a concurrent `npm run build` rewrote them
+ * mid-package, electron-builder exited 0, and a 113 MiB installer shipped
+ * whose dist-electron held nine .js files (six of them 71–77-byte bytenode
+ * stubs) and zero .jsc. That app has no main process; it dies at boot.
+ *
+ * A stub without its bytecode is the one failure that looks like success all
+ * the way to the user, so it is asserted against the artefact itself.
+ */
+function assertBytecodeIsPackaged(appOutDir) {
+  const stamp = path.join(process.cwd(), 'dist-electron', 'bytecode-target.json');
+  // No stamp means a plain-JavaScript build: nothing to look for.
+  if (!fs.existsSync(stamp)) return;
+
+  const asarPath = path.join(appOutDir, 'resources', 'app.asar');
+  if (!fs.existsSync(asarPath)) {
+    throw new Error(`[fuses] no app.asar at ${asarPath} — cannot verify the bytecode shipped`);
+  }
+
+  // asar header: uint32 pickle size, uint32 header-object size, uint32 string
+  // size, uint32 JSON length, then the JSON itself.
+  const fd = fs.openSync(asarPath, 'r');
+  let header;
+  try {
+    const sizeBuf = Buffer.alloc(16);
+    fs.readSync(fd, sizeBuf, 0, 16, 0);
+    const jsonLen = sizeBuf.readUInt32LE(12);
+    const jsonBuf = Buffer.alloc(jsonLen);
+    fs.readSync(fd, jsonBuf, 0, jsonLen, 16);
+    header = JSON.parse(jsonBuf.toString('utf8'));
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  const files = (header.files && header.files['dist-electron'] && header.files['dist-electron'].files) || {};
+
+  // Not every .js is a bytenode stub — `preload.js` ships as plain JavaScript
+  // and has no .jsc by design. The set that MUST be packaged is exactly the
+  // set the build produced, so read it off disk rather than guessing from
+  // names.
+  const built = fs
+    .readdirSync(path.join(process.cwd(), 'dist-electron'))
+    .filter((n) => n.endsWith('.jsc'));
+  if (built.length === 0) {
+    throw new Error('[fuses] dist-electron has a bytecode stamp but no .jsc files — the harden step did not run');
+  }
+
+  const missing = [];
+  for (const jsc of built) {
+    const entry = files[jsc];
+    // 1 KB: the smallest real .jsc here is ~13 KB, so this catches an absent,
+    // truncated or placeholder file without pinning an exact size.
+    if (!entry || typeof entry.size !== 'number' || entry.size < 1024) {
+      missing.push(`${jsc}${entry ? ` (${entry.size} B)` : ' (absent)'}`);
+    }
+  }
+  if (missing.length) {
+    throw new Error(
+      `[fuses] the packaged app.asar is missing its V8 bytecode — this build cannot boot.\n` +
+        `        ${missing.join('\n        ')}\n` +
+        `        Nothing may write to dist-electron while electron-builder runs; re-run \`npm run build && npx electron-builder\` with nothing else touching the tree.`,
+    );
+  }
+  console.log(`[fuses] bytecode verified in app.asar — ${built.length} .jsc file(s) present`);
+}
+
 module.exports = async function afterPack(context) {
   const { appOutDir, packager, electronPlatformName } = context;
   assertBytecodeMatchesTarget(context);
+  assertBytecodeIsPackaged(appOutDir);
   // Linux binaries carry no extension; naming one anyway skipped the fuses
   // silently and shipped an unhardened build.
   const exeName =
@@ -76,5 +147,6 @@ module.exports = async function afterPack(context) {
   console.log(`[fuses] applied to ${exeName} — RunAsNode/inspect/NODE_OPTIONS off, asar-only on`);
 };
 
-// Exported so a test can pin the rule without packaging anything.
+// Exported so a test can pin the rules without packaging anything.
 module.exports.assertBytecodeMatchesTarget = assertBytecodeMatchesTarget;
+module.exports.assertBytecodeIsPackaged = assertBytecodeIsPackaged;

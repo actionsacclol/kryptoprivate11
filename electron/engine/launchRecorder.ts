@@ -51,6 +51,15 @@ const ALWAYS_KEEP: ReadonlySet<string> = new Set([
   'armed',
   'disarmed',
   'program_upgrade',
+  // The EVM scanners' own session markers. Like engine_start/stop they say
+  // WHICH feed produced a day-file — without them a corpus mixing three
+  // chains cannot be told apart from one that lost a scanner overnight.
+  'evm_scan_start',
+  'evm_scan_stop',
+  // A closed measurement window is the derived row an analyst actually wants,
+  // and there is one per launch rather than one per trade — cheap to keep even
+  // in launch mode.
+  'evm_window',
 ]);
 
 interface MintWindow {

@@ -15,26 +15,28 @@ import type {
   StrategySettings,
   WalletHolding,
 } from '@shared/types';
+import type { EvmChainKind } from '@shared/evm';
 import { FeedManager, type LogNotification } from './feed';
 import { ReserveContinuity } from './feedHealth';
 import { DipShadow } from './dipShadow';
 import { StratLab } from './stratLab';
 import { MigShadow } from './migShadow';
 import { decodeAmmEventEx, decodeCpiAmmEventData, executedPriceSol, PUMP_AMM_GLOBAL_CONFIG, type AmmEvent } from './ammDecoder';
-import { fetchSocials } from './metadata';
+import { fetchSocials, type TokenSocials } from './metadata';
 import { decodeCpiEventData, decodeLogsEx, logsMentionPumpTrade, PUMP_PROGRAM_ID, type PumpCreateEvent, type PumpEvent, type PumpTradeEvent } from './pumpDecoder';
 import { staticChecks, checkMint, hasHardReject } from './risk';
 import { computeScore } from './scoring';
-import { curveProgressPct, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS } from './curve';
+import { curveProgressPct, curveProgressTokenPct, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, CURVE_COMPLETE_VIRTUAL_TOKENS } from './curve';
 import { oddsFeaturesFromTrades, scoreOdds } from '@shared/odds';
 import type { LaunchTrade } from '@shared/launchintel';
-import { runnerVerdict, runnerNotification, pruneRunners, RunnerRateLimit, type RunnerFlag } from '@shared/runners';
+import { runnerVerdict, runnerNotification, pruneRunners, markCreatorSold, RunnerRateLimit, ODDS_TAPE_CAP, type RunnerFlag } from '@shared/runners';
 import { PositionManager, type TokenMarket } from './positions';
 import { noteActiveMint } from './txBuilder';
-import { getTokenBalanceForMint, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from './rpcClient';
+import { getTokenBalanceForMint, getTokenBalanceRawForMint, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from './rpcClient';
 import { solToLamports } from './curve';
 import * as wallet from '../system/wallet';
 import * as programWatch from './programWatch';
+import { verifyDecoder } from './decoderVerify';
 import { scanExtraDelayMs, detectedTamper, seized, seizeMessage } from '../system/integrityGuard';
 import * as policy from './policy';
 import * as orders from './orders';
@@ -53,6 +55,8 @@ import * as tape from '../data/tape';
 import * as market from '../data/market';
 import * as advOrders from './advOrders';
 import * as ledger from './ledger';
+import * as scout from './walletScout';
+import { tradeId } from '@shared/walletScout';
 import * as paperBook from './paperBook';
 import * as walletWatcher from './walletWatcher';
 import { PAPER_FILL_MODEL, paperToPosition, modelledPaperFill, paperHistoryRows } from '@shared/paper';
@@ -71,9 +75,21 @@ import { buildShadowPlan } from './sender';
 import { shouldRetrySell, shouldRetryPreBroadcast, escalatedSellSlippagePct, nextConsecutiveLosses, liveBreakerReason } from '@shared/liveBreakers';
 import { LEAN_EXIT_LAMPORTS, planBuySize, planExitBudget } from '@shared/exitBudget';
 import { describeTemplate, ordersForTemplate } from '@shared/orderTemplates';
+import { isPctKind } from '@shared/orders';
 import * as templateStore from '../system/templateStore';
 import type { DisarmReason, ExecutionSnapshot, LiveState, ShadowSendPlan } from '@shared/types';
 import { DEFAULT_BLOCK_FEED_WSS_URL, LIVE_EXECUTION_AVAILABLE } from '@shared/types';
+
+/**
+ * A live trade result plus the size the engine actually SENT.
+ *
+ * The requested amount is a wish: the exit-headroom trim can shrink it, and
+ * anything that books a cost basis off the request is wrong by asked ÷ sent
+ * (copy trade audit, copy-8). The authoritative number is still the chain's
+ * lamport delta, which the ledger reads back asynchronously — this is what to
+ * use until it does, and it is undefined on every path that never broadcast.
+ */
+type EngineTradeResult = import('./liveSigner').LiveTradeResult & { sentSol?: number };
 
 interface TrackedTrade {
   at: number;
@@ -108,9 +124,16 @@ interface TrackedToken {
    *  judged at +60 s and +120 s over the launch's full tape — `trades` above
    *  is a rolling flow window and stops filling once decided). */
   oddsTrades: LaunchTrade[];
+  /** The odds tape hit ODDS_TAPE_CAP: its window features are floors and
+   *  the last-10-s rate is wrong, so the judge does not score it. */
+  oddsTapeTruncated: boolean;
   /** Highest window already judged: 0, 60 or 120. */
   oddsJudged: 0 | 60 | 120;
   flagged: boolean;
+  /** Off-chain socials once the create-time fetch resolves (null until then;
+   *  the odds model's `metaTwitter` is null-tolerant — null for 4.6 % of the
+   *  train set — so "not yet known" scores as unknown, never as "no"). */
+  socials: TokenSocials | null;
 }
 
 /** Hypothetical trading wallet used only to shape shadow send plans.
@@ -132,7 +155,55 @@ const DRIFT_WINDOW_MS = 60_000;
 /** How long after entry the launch signature must be canonically visible. */
 const ORPHAN_CHECK_DELAY_MS = 20_000;
 const LOSS_COOLDOWN_MS = 5 * 60_000;
+/**
+ * A holding with nothing worth selling.
+ *
+ * Measured 2026-09-09 from a user's log: a balance of ONE base unit went
+ * through the local builder, a Jupiter quote ("cannot compute other amount
+ * threshold, with amount 1 and slippageBps 1500") and three relayer retries
+ * before failing. No route exists for dust, so every attempt is spent proving
+ * that again — on the panic button, ahead of exits that are real.
+ *
+ * Deliberately generous in what counts as REAL: any account holding at least
+ * a thousandth of one whole token is sold as normal. Below that, the token
+ * account's own rent exceeds the balance's value on anything but a
+ * six-figure market cap, and closing it is a deliberate act, not an exit.
+ */
+const DUST_UI_AMOUNT = 0.001;
+
+function isDustHolding(h: { amountRaw: string; uiAmount: number }): boolean {
+  // Trust the raw string over the float: uiAmount is derived, and a mint with
+  // absurd decimals can round a real balance to 0 or a dust balance to
+  // something that looks real.
+  let raw: bigint;
+  try {
+    raw = BigInt(h.amountRaw);
+  } catch {
+    // Unreadable balance is not "dust" — it is unknown, so let the normal
+    // path handle it rather than silently skipping a position (honest null).
+    return false;
+  }
+  if (raw <= 0n) return true;
+  return Number.isFinite(h.uiAmount) && h.uiAmount < DUST_UI_AMOUNT;
+}
+
 const PROGRAM_CHECK_INTERVAL_MS = 10 * 60_000;
+/** The one hard pause the engine may lift by itself, once the decoder has been
+ *  re-checked against chain. Layout-drift pauses are a different signal with a
+ *  different remedy and are NOT auto-cleared. */
+const PROGRAM_UPGRADE_PAUSE = 'Pump program was redeployed — decoder must be re-verified';
+
+/** What main hands the engine so copy trading can reach the EVM rail. */
+export interface EvmCopyBridge {
+  buy(chain: EvmChainKind, token: string, amountNative: number, walletId?: string): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; spentSol?: number }>;
+  sell(chain: EvmChainKind, token: string, pct: number, walletId?: string): Promise<{ ok: boolean; message: string; signature?: string }>;
+  /** Why a LIVE copy cannot go out on this chain right now, or null. */
+  blocked(chain: EvmChainKind): string | null;
+  maxLive(chain: EvmChainKind): number | null;
+  /** Last price the Observatory saw for the token, native per token; null if unknown. */
+  price(chain: EvmChainKind, token: string): number | null;
+  facts(chain: EvmChainKind, token: string): Promise<{ liquidityUsd: number | null; marketCapUsd: number | null; kryptScore: number | null; isPumpfun: boolean }>;
+}
 
 export class SniperEngine {
   private feed: FeedManager | null = null;
@@ -168,6 +239,11 @@ export class SniperEngine {
   private layoutErrorTotal = 0;
   /** Hard pauses persist for the session (program upgrade, decoder drift). */
   private hardPauseReason: string | null = null;
+  /** One re-verification at a time; each one reads several accounts and a
+   *  handful of transactions. */
+  private reverifyInFlight = false;
+  /** A short retry when the only thing missing was a launch to test against. */
+  private reverifySoonTimer: NodeJS.Timeout | null = null;
   private lossCooldownUntil = 0;
   private programCheckTimer: NodeJS.Timeout | null = null;
   private orphanTimers = new Set<NodeJS.Timeout>();
@@ -414,7 +490,13 @@ export class SniperEngine {
       },
       buy: (walletId, mint, sol) => this.labBuy(walletId, mint, sol),
       sell: (walletId, mint) => this.labSell(walletId, mint),
-      realizedFor: (signatures) => ledger.cashDeltaFor(signatures),
+      // The ledger answers in lamports and says how many of the signatures it
+      // could not price at all; `unknown > 0` means the loss cap cannot be
+      // judged, and the lab refuses to trade rather than read it as 0.
+      realizedFor: (signatures) => {
+        const d = ledger.cashDeltaFor(signatures);
+        return { sol: d.solLamports / 1e9, unknown: d.unknown };
+      },
       log: (level, line) => this.log(level, line),
       emit: (runs) => this.emit({ kind: 'lab', runs }),
     });
@@ -524,6 +606,22 @@ export class SniperEngine {
         return pause ? `entries are paused (${pause})` : null;
       },
       maxLiveSol: () => this.getSettings().execution.maxLiveSol,
+      // The wallet an order is written over (advOrders §7): the ACTIVE signer,
+      // whose bag is what "sell 100%" means. Null when this install has no
+      // wallet — advOrders reads that as "the host cannot name a signer" and
+      // leaves armed orders alone rather than stamping or pausing them, which
+      // is why an empty string is normalised away here too.
+      owner: () => wallet.publicKey() || null,
+      // Only a CONFIRMED zero means anything to advOrders; an unreadable
+      // balance is null and changes nothing, so a failed RPC read can never
+      // stand between someone and their exit.
+      heldTokensRaw: async (mint) => {
+        const owner = wallet.publicKey();
+        if (!owner) return null;
+        const s = this.getSettings();
+        const r = await getTokenBalanceRawForMint(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner, mint);
+        return r.ok && r.data ? r.data.raw : null;
+      },
       log: (level, line) => this.log(level, line),
       toast: (level, message) => this.emit({ kind: 'toast', level, message }),
       changed: () => this.emit({ kind: 'orders', snapshot: this.ordersSnapshot() }),
@@ -537,17 +635,60 @@ export class SniperEngine {
     });
 
     copyTrade.attach({
-      buy: async (mint, sol) => {
-        const r = await this.testTrade(mint, sol, false);
-        return { ok: r.ok, message: r.message, signature: r.signature };
+      buy: async (mint, sol, opts) => {
+        // Robinhood Chain / BNB: the rail, by way of the bridge main wired.
+        if (opts?.chain && opts.chain !== 'solana') {
+          if (!this.evmCopy) return { ok: false, message: 'EVM copy trading is not available in this build' };
+          return this.evmCopy.buy(opts.chain, mint, sol, opts.walletId);
+        }
+        // A config that names its own wallet buys through the per-wallet
+        // pipeline (the same one a fan-out uses: every gate, fee and record,
+        // signed by THAT wallet). The active wallet keeps the manual path.
+        if (opts?.walletId) {
+          const lr = await this.labBuy(opts.walletId, mint, sol);
+          return { ok: lr.ok, message: lr.message, signature: lr.signature ?? undefined, pending: lr.stage === 'pending', spentSol: lr.costSol ?? undefined };
+        }
+        // `slippagePct` is the config's own `maxSlippagePct`, which until now
+        // had no execution path at all — every copy went out at the global
+        // execution slippage whatever the follower was set to (copy-7).
+        const r = await this.testTrade(mint, sol, false, { slippagePct: opts?.slippagePct });
+        const pending = r.stage === 'pending';
+        // A broadcast that has not confirmed is not a failure: the tokens may
+        // already be ours, and reporting it as "skipped" left a real position
+        // off the copy record entirely (copy-5).
+        // What it COST is the chain's number, never the size we asked for
+        // (house rule). The ledger reconciles a fresh fill in the background,
+        // so this is usually still unknown here — and `sentSol` is then the
+        // honest second best: the amount actually submitted, after the
+        // per-trade cap and the exit-headroom trim. Undefined means "I do not
+        // know", which leaves copyTrade on its own fallback rather than
+        // inventing a number.
+        const priced = r.signature ? this.reconciledFill(r.signature) : null;
+        return {
+          ok: r.ok,
+          message: r.message,
+          signature: r.signature,
+          pending,
+          spentSol: priced?.spentSol ?? r.sentSol,
+          fillPriceSol: priced?.priceSol ?? undefined,
+        };
       },
       // A mirrored sell is the same order a user places by hand: the full
       // pipeline, sized as a share of what THIS wallet holds now. It is only
       // reported done when it confirmed — a broadcast that is still pending
       // is not a fill, and calling it one is how the history came to say
       // "closed" over a bag that was still there (2026-09-08).
-      sell: async (mint, pct) => {
-        const r = await this.manualSell(mint, pct);
+      sell: async (mint, pct, opts) => {
+        if (opts?.chain && opts.chain !== 'solana') {
+          if (!this.evmCopy) return { ok: false, message: 'EVM copy trading is not available in this build' };
+          return this.evmCopy.sell(opts.chain, mint, pct, opts.walletId);
+        }
+        if (opts?.walletId) {
+          const lr = await this.labSell(opts.walletId, mint, pct);
+          if (lr.ok) return { ok: true, message: lr.message, signature: lr.signature ?? undefined };
+          return { ok: false, message: lr.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${lr.message})` : lr.message, signature: lr.signature ?? undefined };
+        }
+        const r = await this.manualSell(mint, pct, { slippagePct: opts?.slippagePct });
         if (r.ok) return { ok: true, message: r.message, signature: r.signature };
         return {
           ok: false,
@@ -555,26 +696,47 @@ export class SniperEngine {
           signature: r.signature,
         };
       },
-      liveBlockedReason: () => this.executionBlockedReason(),
-      priceSol: (mint) => this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null,
-      tokenFacts: async (mint) => {
-        const t = this.tokens.get(mint);
-        // Prefer our own live view; fall back to the market layer for mints
-        // the launch feed never carried.
-        if (t) {
-          return {
-            liquidityUsd: null,
-            marketCapUsd: null,
-            kryptScore: t.row.score?.total ?? null,
-            isPumpfun: true,
-          };
+      liveBlockedReason: (chain) => (chain && chain !== 'solana' ? (this.evmCopy ? this.evmCopy.blocked(chain) : 'EVM copy trading is not available in this build') : this.executionBlockedReason()),
+      // The entry breakers, which `liveBlockedReason` deliberately omits so an
+      // exit is never trapped. Without this a copy could OPEN a position
+      // during a decoder hard-pause or on a stale feed (copy-11). Same wording
+      // and same source as the automation and advanced-order hosts.
+      buyBlockedReason: (chain) => {
+        if (chain && chain !== 'solana') return null; // the rail has no entry breakers; `blocked` above is the gate
+        const pause = this.running ? this.entriesPauseReason() : null;
+        return pause ? `entries are paused (${pause})` : null;
+      },
+      // House rule 2: a budget is a refusal, not a clamp. copyTrade refuses a
+      // copy over this and records the size it refused (copy-8).
+      maxLiveSol: (chain) => (chain && chain !== 'solana' ? (this.evmCopy?.maxLive(chain) ?? null) : this.getSettings().execution.maxLiveSol),
+      // What the ACTIVE wallet paid for its whole holding of the mint, so a
+      // mirrored "they sold 40%" is scaled to the copier's share of our bag
+      // instead of taking 40% of hand-bought size too (copy-2).
+      ourCostBasisSol: (mint, chain) => (chain && chain !== 'solana' ? null : this.ourCostBasisSol(mint)),
+      priceSol: (mint, chain) =>
+        chain && chain !== 'solana' ? (this.evmCopy?.price(chain, mint) ?? null) : (this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null),
+      tokenFacts: async (mint, chain) => {
+        if (chain && chain !== 'solana') {
+          return this.evmCopy ? this.evmCopy.facts(chain, mint) : { liquidityUsd: null, marketCapUsd: null, kryptScore: null, isPumpfun: false };
         }
-        const sum = await market.summary(mint);
+        const t = this.tokens.get(mint);
+        // Liquidity and market cap are NOT on a launch row — a curve token has
+        // no USD basis in the hot path — so both come from the market layer
+        // whether or not the launch feed carried the mint. Returning null for
+        // every feed token (as this did until 2026-09-09) refused every copy
+        // on the whole pump rail, because copyTrade's filters fail closed and
+        // the shipped default is a $5,000 liquidity floor (copy-4b). Cached
+        // first, a round trip when cold — the same two sources automation's
+        // `marketCached` / `market` pair uses, so the two agree on a mint.
+        const sum = market.summaryIfCached(mint) ?? (await market.summary(mint));
         return {
           liquidityUsd: sum.liquidityUsd,
           marketCapUsd: sum.marketCapUsd,
-          kryptScore: sum.kryptScore,
-          isPumpfun: sum.launchpad === 'pumpfun',
+          // Our own live score when the feed is tracking the launch; the
+          // market layer's otherwise. Unknown stays null — the filter then
+          // refuses rather than guessing.
+          kryptScore: t ? (t.row.score?.total ?? sum.kryptScore) : sum.kryptScore,
+          isPumpfun: t ? true : sum.launchpad === 'pumpfun',
         };
       },
       log: (level, line) => this.log(level, line),
@@ -930,14 +1092,133 @@ export class SniperEngine {
       return;
     }
     if (r.changed && !this.hardPauseReason) {
-      this.hardPauseReason = 'Pump program was redeployed — decoder must be re-verified';
+      this.hardPauseReason = PROGRAM_UPGRADE_PAUSE;
       this.disarm('program_upgrade');
       this.log('error', `program watchdog: ${r.message} — entries paused, recording continues`);
-      this.emit({ kind: 'toast', level: 'error', message: 'Pump program upgraded — new entries paused (fail closed)' });
+      this.emit({ kind: 'toast', level: 'error', message: 'Pump program upgraded — new entries paused while the decoder is re-checked' });
       recorder.record('program_upgrade', { programId: PUMP_PROGRAM_ID, detail: r.message });
     } else if (!r.changed) {
       this.log('info', `program watchdog: ${r.message}`);
     }
+    // Pause FIRST, verify second. If the pause is ours to lift, try to lift
+    // it — on this pass and on every later one, because the reason it failed
+    // may be a provider that was down rather than a program that changed.
+    if (r.changed && r.deployedSlot !== undefined && r.programdata && this.hardPauseReason === PROGRAM_UPGRADE_PAUSE) {
+      await this.tryReverifyDecoder(r.deployedSlot, r.programdata);
+    }
+  }
+
+  /**
+   * Re-read what the decoder assumes and lift the pause only if it all still
+   * holds.
+   *
+   * The watchdog used to be a one-way door: `acceptCurrent()` had no caller,
+   * `hardPauseReason` is never assigned null, and the baseline kept the old
+   * slot — so a redeploy disabled live buys permanently, across restarts,
+   * recoverable only by deleting program-baseline.json by hand. Verified
+   * against the 2026-09-09 redeploy (slot 433095571 → 445691021).
+   *
+   * "Could not verify" is never "verified": an RPC that will not answer, a
+   * sample that cannot be read, or any failing check all leave the pause in
+   * place and it is retried on the next watchdog pass.
+   */
+  private async tryReverifyDecoder(deployedSlot: number, programdata: string): Promise<void> {
+    if (this.reverifyInFlight) return;
+    this.reverifyInFlight = true;
+    try {
+      const s = this.getSettings();
+      // Freshest first: a mint the feed saw seconds ago is the one most
+      // likely to still have an open curve and recent trades to read.
+      const samples = [...this.tokens.values()]
+        .sort((a, b) => b.row.detectedAt - a.row.detectedAt)
+        .map((t) => t.row.mint)
+        .slice(0, 8);
+      const v = await verifyDecoder(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, samples);
+      for (const c of v.checks) this.log(c.pass ? 'info' : 'warn', `decoder check ${c.name}: ${c.pass ? 'PASS' : 'FAIL'} — ${c.detail}`);
+      recorder.record('decoder_verify', { programId: PUMP_PROGRAM_ID, deployedSlot, ok: v.ok, checks: v.checks });
+      if (!v.ok) {
+        // A verification that failed only because the feed has not seen a
+        // launch yet is not evidence of anything — at engine start `tokens`
+        // is empty, and the watchdog's own interval is ten minutes. Come back
+        // in a minute rather than leaving buys paused that long for a reason
+        // that has nothing to do with the program.
+        const noSampleYet = samples.length === 0 && v.checks.some((c) => c.name === 'curve-layout' && /no recent pump mint/.test(c.detail));
+        this.log(
+          noSampleYet ? 'info' : 'error',
+          noSampleYet
+            ? 'program watchdog: no launch seen yet to re-check the decoder against — retrying shortly, entries stay paused'
+            : `program watchdog: ${v.summary} — entries stay paused, will retry`,
+        );
+        if (noSampleYet && !this.reverifySoonTimer) {
+          this.reverifySoonTimer = setTimeout(() => {
+            this.reverifySoonTimer = null;
+            void this.checkProgramUpgrade();
+          }, 60_000);
+          this.reverifySoonTimer.unref?.();
+        }
+        return;
+      }
+      // The address just observed, never the stored one.
+      programWatch.acceptCurrent(PUMP_PROGRAM_ID, deployedSlot, programdata);
+      this.hardPauseReason = null;
+      this.log('warn', `program watchdog: ${v.summary} — entries resume; live execution stays DISARMED until you arm it`);
+      this.emit({
+        kind: 'toast',
+        level: 'success',
+        message: 'Decoder re-verified against the new pump deployment — entries resume. Live execution is still disarmed.',
+      });
+    } catch (e) {
+      this.log('warn', `decoder re-verify failed to run (${(e as Error)?.message ?? 'unknown'}) — entries stay paused`);
+    } finally {
+      this.reverifyInFlight = false;
+    }
+  }
+
+  /**
+   * Every socket down, positions and orders untouched.
+   *
+   * A lid closing stops the network without closing a socket: each class only
+   * notices when its own ping deadline expires, and then they all redial in
+   * the same millisecond — into a budget of TEN pubsub connections per IP,
+   * where the eleventh handshake is a 429 that parks the host for 30 s for
+   * everyone. Measured 2026-09-09. Exits are unaffected: broadcast is never
+   * gated, and confirmation falls back to HTTP polling with no socket.
+   */
+  suspendSockets(why: string): void {
+    this.log('info', `sockets suspended (${why})`);
+    this.feed?.stop();
+    this.ammFeed?.stop();
+    priorityFeed.stop();
+    walletWatcher.stop();
+    dbcWatcher.stopAll();
+    launchLabWatcher.stopAll();
+    boopWatcher.stopAll();
+  }
+
+  /** Back up in priority order, one every 750 ms, so ten handshakes are not
+   *  one burst against a ten-connection budget. Order matters: the things a
+   *  user could be about to act on come first. */
+  resumeSockets(): void {
+    this.log('info', 'sockets resuming');
+    const steps: Array<() => void> = [
+      () => this.priorityTick(),
+      () => this.syncCopyWatch(),
+      () => {
+        if (this.running) this.feed?.start();
+      },
+      () => {
+        if (this.running) this.ammFeed?.start();
+      },
+    ];
+    steps.forEach((fn, i) =>
+      setTimeout(() => {
+        try {
+          fn();
+        } catch {
+          /* one socket failing to come back must not stop the rest */
+        }
+      }, i * 750),
+    );
   }
 
   stop(): { ok: boolean; message: string } {
@@ -961,6 +1242,8 @@ export class SniperEngine {
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.statusTimer) clearInterval(this.statusTimer);
     if (this.programCheckTimer) clearInterval(this.programCheckTimer);
+    if (this.reverifySoonTimer) clearTimeout(this.reverifySoonTimer);
+    this.reverifySoonTimer = null;
     if (this.execTimer) clearInterval(this.execTimer);
     this.tickTimer = null;
     this.statusTimer = null;
@@ -1267,8 +1550,8 @@ export class SniperEngine {
     mint: string,
     sol: number,
     simulateOnly: boolean,
-    opts: { manual?: boolean } = {},
-  ): Promise<import('./liveSigner').LiveTradeResult> {
+    opts: { manual?: boolean; slippagePct?: number } = {},
+  ): Promise<EngineTradeResult> {
     const { executeTrade } = await import('./liveSigner');
     const s = this.getSettings();
     const wantBroadcast = !simulateOnly;
@@ -1293,7 +1576,25 @@ export class SniperEngine {
     // size they typed (2026-09-02, user's call: "if the trade is above their
     // cap that shouldn't matter, it's them doing it manually"). The simulation
     // loss guard and the wallet balance still bound it.
-    let capped = opts.manual ? sol : Math.min(sol, s.execution.maxLiveSol);
+    //
+    // House rule 2: a budget is a REFUSAL, not a clamp. This used to be a
+    // silent `Math.min`, which is the parity break the copy-trade audit found
+    // (copy-8): copyTrade, advOrders and the script budgets all refuse over
+    // the cap and say so, while a buy that reached here was quietly shrunk and
+    // then recorded at a size it never traded. Every unattended caller already
+    // checks the cap before it gets here, so this is the backstop and it
+    // names the cap it is enforcing.
+    if (!opts.manual && !simulateOnly && sol > s.execution.maxLiveSol) {
+      return {
+        ok: false,
+        stage: 'validate',
+        message: `${sol} SOL is above your per-trade cap of ${s.execution.maxLiveSol} SOL.`,
+      };
+    }
+    // A dry run spends nothing, so the cap only SHAPES it: paper keeps
+    // modelling the trade at the size live would have been allowed, rather
+    // than refusing a rehearsal over a limit no money is crossing.
+    let capped = opts.manual || !simulateOnly ? sol : Math.min(sol, s.execution.maxLiveSol);
     if (opts.manual && sol > s.execution.maxLiveSol && !simulateOnly) {
       this.log('info', `manual buy ${sol} SOL is above the ${s.execution.maxLiveSol} SOL per-trade cap — allowed (manual)`);
     }
@@ -1346,7 +1647,10 @@ export class SniperEngine {
       mint,
       amount: capped,
       denominatedInSol: true,
-      slippagePct: s.execution.liveSlippagePct,
+      // A caller that states its own tolerance is honoured (copy trading's
+      // per-follower `maxSlippagePct`, which had no execution path at all
+      // before 2026-09-09). Everything else takes the execution setting.
+      slippagePct: opts.slippagePct !== undefined && opts.slippagePct > 0 ? opts.slippagePct : s.execution.liveSlippagePct,
       priorityFeeSol: this.priorityFeeSolFor('buy'),
       httpUrl,
       simulateOnly,
@@ -1418,7 +1722,9 @@ export class SniperEngine {
       this.log('info', `PAPER buy: ${res.message} — modelling the fill instead`);
       return this.paperFillFromPrice(mint, capped, decimals, why);
     }
-    return res;
+    // `sentSol` is what was actually submitted after the exit-headroom trim —
+    // not the same thing as what the chain took, but never the wish either.
+    return { ...res, sentSol: capped };
   }
 
   /** Paper = the mode the top bar shows as Paper: not (armed AND liveEnabled).
@@ -1530,6 +1836,31 @@ export class SniperEngine {
    * safety shortcut: every wallet is bounded, fee'd and interlocked exactly like
    * a single buy. Gated by the same arm + liveEnabled checks. Only BUYS fan out.
    */
+  /**
+   * Why a fan-out buy of this shape would be refused right now, or null.
+   *
+   * The same gates `fanoutBuy` applies, without buying. The launcher asks
+   * this BEFORE it creates a token, because a create whose first buy then
+   * bounces off a gate is the one outcome it must never produce.
+   */
+  async fanoutPreflight(walletIds: string[], sizing: { mode: 'same' | 'total'; amountSol: number; jitter?: number }): Promise<string | null> {
+    const s = this.getSettings();
+    if (!this.armed) return 'Arm the engine before a fan-out buy';
+    if (!s.execution.liveEnabled) return 'Enable live execution in settings first';
+    const breaker = this.liveBreakerReason();
+    if (breaker) {
+      this.updateLiveBreakers();
+      return `Live buys paused — ${breaker}`;
+    }
+    const { planFanout } = await import('@shared/fanout');
+    const plan = planFanout(walletIds, { mode: sizing.mode, amountSol: sizing.amountSol, jitter: sizing.jitter, minSol: 0.002 });
+    if (!plan.ok) return plan.message;
+    if (plan.totalLamports / 1e9 > s.execution.maxLiveSol) {
+      return `Fan-out total ${(plan.totalLamports / 1e9).toFixed(3)} SOL exceeds the ${s.execution.maxLiveSol} SOL live cap`;
+    }
+    return null;
+  }
+
   async fanoutBuy(
     mint: string,
     walletIds: string[],
@@ -1537,13 +1868,11 @@ export class SniperEngine {
     opts: { staggerMaxMs?: number } = {},
   ): Promise<{ ok: boolean; message: string; results: Array<{ walletId: string; ok: boolean; stage: string; message: string; signature: string | null }> }> {
     const s = this.getSettings();
-    if (!this.armed) return { ok: false, message: 'Arm the engine before a fan-out buy', results: [] };
-    if (!s.execution.liveEnabled) return { ok: false, message: 'Enable live execution in settings first', results: [] };
-    const breaker = this.liveBreakerReason();
-    if (breaker) {
-      this.updateLiveBreakers();
-      return { ok: false, message: `Live buys paused — ${breaker}`, results: [] };
-    }
+    // Every gate, in `fanoutPreflight` — armed, live, the breaker, the
+    // per-buy floor, the live cap — so the launcher can ask the same
+    // question before it creates anything.
+    const refused = await this.fanoutPreflight(walletIds, sizing);
+    if (refused) return { ok: false, message: refused, results: [] };
 
     const { executeTrade } = await import('./liveSigner');
     const { planFanout } = await import('@shared/fanout');
@@ -1551,9 +1880,6 @@ export class SniperEngine {
     // a fan-out can never spend more than a single trade is allowed to.
     const plan = planFanout(walletIds, { mode: sizing.mode, amountSol: sizing.amountSol, jitter: sizing.jitter, minSol: 0.002 });
     if (!plan.ok) return { ok: false, message: plan.message, results: [] };
-    if (plan.totalLamports / 1e9 > s.execution.maxLiveSol) {
-      return { ok: false, message: `Fan-out total ${(plan.totalLamports / 1e9).toFixed(3)} SOL exceeds the ${s.execution.maxLiveSol} SOL live cap`, results: [] };
-    }
 
     const local = await this.localBuildParamsAsync(mint);
     const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
@@ -1572,6 +1898,19 @@ export class SniperEngine {
         walletId,
         wssUrl: this.confirmWssUrl(),
       });
+      // A real buy that never reaches the ledger is invisible to cost basis,
+      // realised PnL, trade history AND the live loss breakers — and the exit
+      // reserve is computed from the ledger too, so an unrecorded fan-out
+      // could spend the SOL its own exits were relying on. labBuy has always
+      // recorded; this path never did. Pending counts: it is broadcast, and
+      // reconciliation resolves the rest.
+      const owner = wallet.publicKeyOf(walletId);
+      if ((res.ok || res.stage === 'pending') && res.signature && owner) {
+        ledger.recordFill(
+          { mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'buy', requested: sol, signature: res.signature },
+          { httpUrl, owner },
+        );
+      }
       return { walletId, ok: res.ok, stage: res.stage, message: res.message, signature: res.signature ?? null };
     };
 
@@ -1975,9 +2314,31 @@ export class SniperEngine {
     this.notifier = fn;
   }
 
+  /**
+   * Copy trading on Robinhood Chain and BNB goes through the EVM rail, which
+   * the engine does not import (it stays free of viem and testable in Node).
+   * Main wires the rail in here; without it an EVM copy is refused, never
+   * silently routed to Solana.
+   */
+  private evmCopy: EvmCopyBridge | null = null;
+  setEvmCopy(bridge: EvmCopyBridge | null): void {
+    this.evmCopy = bridge;
+  }
+
   private notify(title: string, body: string): void {
     if (!this.getSettings().alerts.desktopNotifications) return;
     this.notifier?.(title, body);
+  }
+
+  /**
+   * Notify from outside the engine — today, the EVM scanner's runner calls.
+   *
+   * It goes through the same `notify` as everything else rather than reaching
+   * for Electron directly, so the desktop-notification switch and the chat
+   * push mean the same thing for a Robinhood runner as for a Solana one.
+   */
+  pushNotification(title: string, body: string): void {
+    this.notify(title, body);
   }
 
   alertsSnapshot(): import('@shared/alerts').AlertsSnapshot {
@@ -2146,8 +2507,10 @@ export class SniperEngine {
 
     let solUsd: number | null = null;
     try {
-      const wsol = await market.summary('So11111111111111111111111111111111111111112');
-      solUsd = wsol.priceUsd;
+      // A full `summary()` for wSOL is four provider calls to read one number
+      // the Jupiter layer already holds on a 20 s cache. Null when Jupiter is
+      // off, which the catch below already treats as the honest result.
+      solUsd = await market.solUsd();
     } catch {
       /* null SOL price makes USD figures null, which is the honest result */
     }
@@ -2236,6 +2599,85 @@ export class SniperEngine {
     return [...portfolio.history(), ...paper].sort((a, b) => b.at - a.at);
   }
 
+  // ── What the chain says a position cost ──────────────────────────
+  //
+  // Three readers of the ledger's reconciled basis, all of them answering
+  // the same question — what did THIS wallet really pay — and all of them
+  // answering null rather than a guess. The house rule is that a cost basis
+  // is the on-chain lamport delta and never the amount that was requested,
+  // so an unreadable fill makes the answer unknown, not zero.
+
+  /** The active wallet's reconciled basis for one mint, or null. */
+  private basisFor(mint: string): import('./ledger').MintBasis | null {
+    const owner = wallet.publicKey();
+    if (!owner) return null;
+    return ledger.basisByMint(owner).get(mint) ?? null;
+  }
+
+  /**
+   * What the active wallet paid for everything it still holds of `mint`, SOL.
+   *
+   * copyTrade scales a mirrored sell by the copier's share of this, so that
+   * "they sold 40 % of their bag" does not sell 40 % of a hand-bought bag and
+   * of whatever an order ladder is still holding (copy-2).
+   *
+   * Null only when there is nothing to measure at all: no wallet, no
+   * reconciled buy, or nothing left of the position.
+   *
+   * A basis built from SOME of the fills is deliberately still returned. It
+   * reads as "we paid less than we did", so our share of it looks larger and
+   * the ratio moves toward 1 — and 1 is exactly what copyTrade falls back to
+   * when this answers null. A partial basis is therefore never worse than no
+   * basis, and usually much better. Refusing on any unreadable fill would
+   * also blind a mint PERMANENTLY, since `unreconciled` is a terminal state:
+   * one failed transaction would restore the copy-2 bug for that token for
+   * the life of the ledger.
+   */
+  private ourCostBasisSol(mint: string): number | null {
+    const b = this.basisFor(mint);
+    if (!b) return null;
+    if (!(b.spentSol > 0) || !(b.tokensBought > 0)) return null;
+    const held = b.tokensBought - b.tokensSold;
+    if (!(held > 0)) return null;
+    // Average cost of the tokens still held, not of everything ever bought.
+    return (b.spentSol / b.tokensBought) * Math.min(held, b.tokensBought);
+  }
+
+  /**
+   * The average price this wallet actually entered `mint` at, SOL per token,
+   * or null when it holds none / the fills cannot be priced yet.
+   */
+  private positionEntryPriceSol(mint: string): number | null {
+    const b = this.basisFor(mint);
+    if (!b || !(b.spentSol > 0) || !(b.tokensBought > 0)) return null;
+    if (!(b.tokensBought - b.tokensSold > 0)) return null;
+    const avg = b.spentSol / b.tokensBought;
+    return Number.isFinite(avg) && avg > 0 ? avg : null;
+  }
+
+  /**
+   * One fill, priced from the chain — only once the ledger has reconciled it.
+   * A fresh broadcast is `pending` for a few seconds, and this answers null
+   * for the whole of that: an unreconciled fill has no cost and no fill price,
+   * and inventing either is exactly the failure the ledger exists to prevent.
+   */
+  private reconciledFill(signature: string): { spentSol: number; priceSol: number | null } | null {
+    const f = ledger.all().find((x) => x.signature === signature);
+    if (!f || f.state !== 'reconciled' || f.solDeltaLamports === null) return null;
+    const spentSol = Math.abs(f.solDeltaLamports) / 1e9;
+    if (!(spentSol > 0)) return null;
+    let priceSol: number | null = null;
+    if (f.tokenDeltaRaw !== null && f.decimals !== null) {
+      try {
+        const tokens = Math.abs(Number(BigInt(f.tokenDeltaRaw)) / 10 ** f.decimals);
+        if (tokens > 0) priceSol = spentSol / tokens;
+      } catch {
+        /* an unreadable raw delta leaves the price unknown, never zero */
+      }
+    }
+    return { spentSol, priceSol };
+  }
+
   // ── Advanced orders (term.txt §2) ────────────────────────────────
   //
   // The engine owns the two things advOrders cannot know for itself: whether
@@ -2254,7 +2696,6 @@ export class SniperEngine {
     // during a breaker is how a protective stop becomes a trap. The
     // per-order check below only applies it to buys.
     return null;
-    return null;
   }
 
   ordersSnapshot(): import('@shared/orders').OrdersSnapshot {
@@ -2268,8 +2709,19 @@ export class SniperEngine {
   }
 
   /**
-   * Anchor a percentage order to the best price available, in the same
-   * priority order the evaluator will use:
+   * Anchor a percentage order.
+   *
+   * `referencePriceSol` is what "30 % stop" is measured FROM, and
+   * shared/orders.ts says what it is meant to be: "usually the user's entry,
+   * or the spot price if there is no position". It was resolved from three
+   * SPOT sources with no position lookup at all (ord-9) — so a stop written
+   * on a token that had already halved armed 30 % below the halved price,
+   * which is 65 % below the entry the user was thinking of, and nothing on
+   * screen said so.
+   *
+   * So: the open position's average entry FIRST, from the ledger's reconciled
+   * fills (the chain's lamport delta, not what was requested), and spot only
+   * when the wallet holds none of it. Spot's own priority order is unchanged:
    *
    *   1. our own live tape (what the order is actually judged against);
    *   2. the last price this session observed for the mint;
@@ -2278,8 +2730,20 @@ export class SniperEngine {
    * Step 3 matters: without it the engine refused to anchor orders on any
    * token it had not personally watched launch, while the UI was displaying
    * a perfectly good price two inches away. Async for that reason.
+   *
+   * `describeOrder` appends the anchor to every percentage order, so whichever
+   * one this picks is on the confirmation, the list and the chart label.
    */
   async createOrder(req: import('@shared/orders').NewOrderRequest): Promise<{ ok: boolean; message: string }> {
+    // Only the percentage kinds are measured from an anchor; a limit order's
+    // trigger is absolute and "entry" would be a meaningless thing to stamp.
+    if (isPctKind(req.kind)) {
+      const entry = this.positionEntryPriceSol(req.mint);
+      if (entry !== null) {
+        const r = advOrders.create(req, { referencePriceSol: entry });
+        return { ok: r.ok, message: r.message };
+      }
+    }
     const tracked = this.tokens.get(req.mint);
     let referencePriceSol = tracked?.row.priceSol ?? this.lastKnownPriceSol.get(req.mint) ?? null;
     if (!(referencePriceSol !== null && referencePriceSol > 0)) {
@@ -2357,11 +2821,34 @@ export class SniperEngine {
    *  the user has been told. */
   private priceGap = new Map<string, { since: number; warned: boolean }>();
 
+  /** Last lab-driven reconcile sweep, so the 12 s poll runs one every 30 s. */
+  private lastLabReconcileAt = 0;
+
+  private reconcileForLab(): void {
+    const now = Date.now();
+    if (now - this.lastLabReconcileAt < 30_000) return;
+    if (!randomLab.status().some((r) => r.running)) return;
+    this.lastLabReconcileAt = now;
+    const s = this.getSettings();
+    void ledger
+      .reconcilePending(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, wallet.publicKey())
+      .catch(() => undefined);
+  }
+
   private startOrdersPoll(): void {
     if (this.ordersPollTimer) return;
     const tick = async (): Promise<void> => {
       // A slow provider must not stack ticks behind itself.
       if (this.ordersPollBusy) return;
+      // Keep a running Wallet Lab's fills moving toward a terminal state.
+      // `recordFill` runs exactly ONE reconcile round; every later retry comes
+      // from `reconcilePending`, whose only other caller is the portfolio
+      // build — which is demand-driven, so a warmer left alone on its own page
+      // never triggered one. Since the lab's loss cap now fails closed, a fill
+      // that missed that first round stops the run after its 60 s grace
+      // instead of quietly reading as 0. This costs nothing when the ledger
+      // has nothing pending, and only runs while a lab run is live.
+      this.reconcileForLab();
       this.ordersPollBusy = true;
       try {
         // Orders AND alerts share this loop — both need prices for mints the
@@ -2477,7 +2964,11 @@ export class SniperEngine {
     }
   }
 
-  async manualSell(mint: string, percent = 100): Promise<import('./liveSigner').LiveTradeResult> {
+  async manualSell(
+    mint: string,
+    percent = 100,
+    opts: { slippagePct?: number } = {},
+  ): Promise<import('./liveSigner').LiveTradeResult> {
     const s = this.getSettings();
     const pct = Math.max(1, Math.min(100, Math.round(percent)));
     // Paper mode sells from the paper book at the current price. A real
@@ -2500,7 +2991,13 @@ export class SniperEngine {
       mint,
       amount: `${pct}%`,
       denominatedInSol: false,
-      slippagePct: Math.max(s.execution.liveSlippagePct, 15),
+      // A caller's own tolerance (copy trading's `maxSlippagePct`) replaces the
+      // execution setting, but never the 15 % exit floor: an exit must not be
+      // made impossible by a number someone typed into a follower's config.
+      slippagePct: Math.max(
+        opts.slippagePct !== undefined && opts.slippagePct > 0 ? opts.slippagePct : s.execution.liveSlippagePct,
+        15,
+      ),
       priorityFeeSol: exit.priorityFeeSol,
       httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
       simulateOnly: false,
@@ -2670,14 +3167,30 @@ export class SniperEngine {
         this.emit({ kind: 'toast', level: 'warn', message: `Sell-all could not read holdings: ${h.message}` });
         return;
       }
+      const all = h.data.filter((x) => x.mint !== SniperEngine.WSOL_MINT);
+      // Dust is not a position. A holding of a few base units has no route —
+      // measured 2026-09-09, a balance of ONE raw unit spent a local build, a
+      // Jupiter quote (HTTP 400 "cannot compute other amount threshold, with
+      // amount 1") and three relayer retries before failing. Sell-all is the
+      // panic button: the reordering below already keeps doomed holdings from
+      // delaying a real exit, and dust belongs in the same bucket. It is left
+      // in the wallet, where its rent is worth more than its balance and the
+      // user can close the account deliberately.
+      const dust = all.filter((x) => isDustHolding(x));
+      const held = all.filter((x) => !isDustHolding(x));
       // Holdings the mint itself flags (permanent delegate, transfer hook,
       // non-transferable) go LAST: each one that turns out to be a spam
       // airdrop burns three build routes, and a real exit must never queue
       // behind that.
-      const held = h.data.filter((x) => x.mint !== SniperEngine.WSOL_MINT);
       const sellable = [...held.filter((x) => !x.warning), ...held.filter((x) => x.warning)];
+      if (dust.length > 0) {
+        this.log(
+          'info',
+          `sell-all (${reason}): skipping ${dust.length} dust holding(s) with nothing to sell — ${dust.map((x) => `${x.symbol ?? `${x.mint.slice(0, 8)}…`}: ${x.uiAmount}`).join('; ')}`,
+        );
+      }
       if (sellable.length === 0) {
-        this.log('info', `sell-all (${reason}): wallet holds no tokens`);
+        this.log('info', `sell-all (${reason}): wallet holds no tokens${dust.length > 0 ? ' beyond dust' : ''}`);
         return;
       }
       const flagged = held.filter((x) => x.warning);
@@ -2689,18 +3202,23 @@ export class SniperEngine {
       for (const tkn of sellable) {
         const label = tkn.symbol ?? `${tkn.mint.slice(0, 8)}…`;
         const e = this.getSettings();
+        // Sell-all runs on the active wallet and is exactly the case the exit
+        // budget exists for: a wallet being emptied has less SOL with every
+        // leg, and the last few must still be able to leave. Without this the
+        // extras were charged at full price all the way down.
+        const exit = this.exitParams(e.execution);
         const res = await this.sellWithRetry({
           action: 'sell',
           mint: tkn.mint,
           amount: '100%',
           denominatedInSol: false,
           slippagePct: Math.max(e.execution.liveSlippagePct, 15),
-          priorityFeeSol: this.priorityFeeSolFor('sell'),
+          priorityFeeSol: exit.priorityFeeSol,
           httpUrl: e.rpc.heliusHttpUrl ?? e.rpc.httpUrl,
           simulateOnly: false,
           local: await this.localBuildParamsForSell(tkn.mint),
           estProceedsLamports: this.estSellProceedsLamports(tkn.mint, 100).catch(() => undefined),
-          exec: e.execution,
+          exec: exit.exec,
           wssUrl: this.confirmWssUrl(),
         });
         // A real exit that never reaches the ledger is invisible to cost
@@ -2911,21 +3429,25 @@ export class SniperEngine {
   // ── Wallet Lab ───────────────────────────────────────────────────
 
   /** A buy signed by a SPECIFIC wallet, through the full trade pipeline. */
-  private async labBuy(walletId: string, mint: string, wantSol: number): Promise<{ ok: boolean; message: string; signature: string | null; costSol: number | null }> {
+  private async labBuy(
+    walletId: string,
+    mint: string,
+    wantSol: number,
+  ): Promise<{ ok: boolean; message: string; signature: string | null; costSol: number | null; stage?: string | null }> {
     const s = this.getSettings();
-    if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'live execution is not armed', signature: null, costSol: null };
+    if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'live execution is not armed', signature: null, costSol: null, stage: 'validate' };
     // No click behind this buy, so the real-money breakers and the per-trade
     // cap apply exactly as they do to any other unattended buy.
     const breaker = this.liveBreakerReason();
     if (breaker) {
       this.updateLiveBreakers();
-      return { ok: false, message: `live buys paused — ${breaker}`, signature: null, costSol: null };
+      return { ok: false, message: `live buys paused — ${breaker}`, signature: null, costSol: null, stage: 'validate' };
     }
     const sol = Math.min(wantSol, s.execution.maxLiveSol);
     if (sol < wantSol) this.log('info', `lab buy sized down to the ${s.execution.maxLiveSol} SOL per-trade cap (asked ${wantSol})`);
     const { executeTrade } = await import('./liveSigner');
     const owner = wallet.publicKeyOf(walletId);
-    if (!owner) return { ok: false, message: 'no such wallet', signature: null, costSol: null };
+    if (!owner) return { ok: false, message: 'no such wallet', signature: null, costSol: null, stage: 'validate' };
     const res = await executeTrade({
       action: 'buy',
       mint,
@@ -2944,27 +3466,53 @@ export class SniperEngine {
       ledger.recordFill({ mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'buy', requested: sol, signature: res.signature }, { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner });
     }
     recorder.record('lab_buy', { walletId, mint, sol, ok: res.ok, stage: res.stage, signature: res.signature ?? null });
-    return { ok: res.ok, message: res.message, signature: res.signature ?? null, costSol: res.simulatedCostSol ?? null };
+    // `stage` travels with the result so the caller can tell "did not happen"
+    // from "broadcast, not confirmed yet". randomLab keyed its whole
+    // bookkeeping off `ok` alone, so a PENDING buy took the failure branch —
+    // no bag, no armSell, no hand-over — while the signature stayed in the
+    // run and dragged realised down by the full cost of a position nothing
+    // was watching (lab-3). Its own header says bags are never abandoned.
+    //
+    // `costSol` is DISPLAY ONLY and the field says so. `simulatedCostSol` is
+    // set only on the simulateOnly branch, and this call is never that, so it
+    // was null every single time (lab-11); the live result's own number is
+    // `simulatedLossSol` — what the pre-broadcast simulation said the wallet
+    // would be down. The loss cap ignores both and prices the bag from the
+    // chain via `buySig`.
+    return {
+      ok: res.ok,
+      message: res.message,
+      signature: res.signature ?? null,
+      costSol: res.simulatedLossSol ?? null,
+      stage: res.stage ?? null,
+    };
   }
 
   /** A sell (default the whole bag) signed by a SPECIFIC wallet. */
-  private async labSell(walletId: string, mint: string, pct = 100): Promise<{ ok: boolean; message: string; signature: string | null }> {
+  private async labSell(walletId: string, mint: string, pct = 100): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }> {
     const s = this.getSettings();
     if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'live execution is not armed', signature: null };
     const owner = wallet.publicKeyOf(walletId);
     if (!owner) return { ok: false, message: 'no such wallet', signature: null };
     const share = Math.max(1, Math.min(100, Math.round(pct)));
+    // A lab wallet is not the active one, so the engine tracks no balance for
+    // it — and a lab wallet is exactly the kind that runs down to dust. One
+    // getBalance is affordable here (the Wallet Lab is a deliberate action,
+    // not a snipe), and a failed read simply falls back to the unbudgeted
+    // behaviour rather than blocking the exit.
+    const labBal = await getBalance(s.rpc.httpUrl, owner).catch(() => null);
+    const exit = this.exitParams(s.execution, labBal && labBal.ok && typeof labBal.data === 'number' ? labBal.data : null);
     const res = await this.sellWithRetry({
       action: 'sell',
       mint,
       amount: `${share}%`,
       denominatedInSol: false,
       slippagePct: Math.max(s.execution.liveSlippagePct, 15),
-      priorityFeeSol: this.priorityFeeSolFor('sell'),
+      priorityFeeSol: exit.priorityFeeSol,
       httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
       simulateOnly: false,
       local: await this.localBuildParamsForSell(mint),
-      exec: s.execution,
+      exec: exit.exec,
       walletId,
       wssUrl: this.confirmWssUrl(),
     });
@@ -2978,7 +3526,10 @@ export class SniperEngine {
       if (res.ok) this.stuckMints.delete(mint);
     }
     recorder.record('lab_sell', { walletId, mint, pct: share, ok: res.ok, stage: res.stage, signature: res.signature ?? null });
-    return { ok: res.ok, message: res.message, signature: res.signature ?? null };
+    // Same reason as labBuy: 'pending' is a broadcast sell that has not
+    // confirmed. randomLab must not retry it as a failure — the bag may
+    // already be gone — nor drop it from the run's accounting.
+    return { ok: res.ok, message: res.message, signature: res.signature ?? null, stage: res.stage ?? null };
   }
 
   /**
@@ -3004,18 +3555,55 @@ export class SniperEngine {
       if (tally.skipped) parts.push(`${tally.skipped} sat out`);
       this.emit({ kind: 'toast', level: tally.failed ? 'warn' : 'info', message: `Followers on ${mint.slice(0, 6)}…: ${parts.join(', ')}` });
     };
+
+    // ── Plan every leg BEFORE any of them is scheduled ────────────────
+    //
+    // `fanoutBuy` refuses when the TOTAL is over `maxLiveSol`, "so a fan-out
+    // can never spend more than a single trade is allowed to". A followed
+    // manual buy is the same shape and had no such check (lab-4): the total
+    // was only ever bounded per leg, by `maxTradeSol` and then again by
+    // labBuy's own clamp, so with the shipped defaults (cap 0.05, follow
+    // maxTradeSol 0.05, up to 19 non-active wallets) one 0.05 SOL buy spent
+    // 0.95 SOL — nineteen times the cap — and the only signal was a toast
+    // counting LEGS, emitted after they were already on their timers.
+    //
+    // So the deduped set and its SOL total are computed first, the total is a
+    // refusal in fanoutBuy's own words, and the toast states the SOL.
+    interface FollowLeg { g: { name: string }; m: { id: string; label: string; publicKey: string }; f: FollowSettings; size: number }
+    const legs: FollowLeg[] = [];
     for (const g of groups) {
       const f: FollowSettings = { ...DEFAULT_FOLLOW, ...(g.lab?.follow ?? {}) };
       if (side === 'sell' && !f.followSells) continue;
       for (const m of g.members) {
         if (m.publicKey === active || seen.has(m.id)) continue;
         seen.add(m.id);
+        const want = f.sizeMode === 'fixed' ? f.fixedSol : (solSpent ?? 0) * f.ratio;
+        legs.push({ g, m, f, size: Math.round(Math.min(want, f.maxTradeSol) * 10_000) / 10_000 });
+      }
+    }
+    if (!legs.length) return;
+
+    let plannedSol = 0;
+    if (side === 'buy') {
+      // The planned total, not the eventual one: a wallet too poor to cover
+      // its leg sits out later, and a budget that only counted the legs that
+      // succeeded would not be a budget. Same reasoning as planFanout's.
+      plannedSol = legs.reduce((a, l) => a + (l.size >= 0.001 ? l.size : 0), 0);
+      if (plannedSol > s.execution.maxLiveSol) {
+        const msg = `Follow total ${plannedSol.toFixed(3)} SOL across ${legs.length} wallet(s) exceeds the ${s.execution.maxLiveSol} SOL live cap`;
+        this.log('warn', `follow: refused — ${msg}`);
+        this.emit({ kind: 'toast', level: 'warn', message: `${msg} — no follower bought. Lower the follow size or raise the cap.` });
+        recorder.record('follow_refused', { mint, side, wallets: legs.length, totalSol: plannedSol, cap: s.execution.maxLiveSol });
+        return;
+      }
+    }
+
+    for (const { g, m, f, size } of legs) {
+      {
         const delay = Math.round(labBetween(f.delayMinMs, f.delayMaxMs));
         setTimeout(() => {
           void (async () => {
             if (side === 'buy') {
-              const want = f.sizeMode === 'fixed' ? f.fixedSol : (solSpent ?? 0) * f.ratio;
-              const size = Math.round(Math.min(want, f.maxTradeSol) * 10_000) / 10_000;
               if (!(size >= 0.001)) {
                 tally.skipped++;
                 return;
@@ -3045,9 +3633,11 @@ export class SniperEngine {
         }, delay);
       }
     }
-    if (seen.size) {
-      const what = side === 'buy' ? 'buy' : `sell ${Math.round(pct)}% of`;
-      this.emit({ kind: 'toast', level: 'info', message: `${seen.size} follower wallet(s) will ${what} ${mint.slice(0, 6)}… after their delays` });
+    if (legs.length) {
+      // The SOL, not just the count: "19 wallets will buy" is not a number a
+      // user can weigh against their cap.
+      const what = side === 'buy' ? `buy ${plannedSol.toFixed(3)} SOL of` : `sell ${Math.round(pct)}% of`;
+      this.emit({ kind: 'toast', level: 'info', message: `${legs.length} follower wallet(s) will ${what} ${mint.slice(0, 6)}… after their delays` });
     }
   }
 
@@ -3172,13 +3762,24 @@ export class SniperEngine {
    * them, but a thin wallet drops them too: placement is worth nothing on a
    * trade that cannot go out.
    */
-  private exitParams(exec: import('@shared/types').ExecutionSettings): {
+  /**
+   * The speed extras an exit may pay for, budgeted against the balance that
+   * will actually pay them.
+   *
+   * `balanceLamports` defaults to the ACTIVE wallet. A sell from another
+   * wallet (the Wallet Lab) must pass that wallet's balance instead, or the
+   * budget is computed against SOL the transaction cannot spend.
+   */
+  private exitParams(
+    exec: import('@shared/types').ExecutionSettings,
+    balanceLamports?: number | null,
+  ): {
     priorityFeeSol: number;
     exec: import('@shared/types').ExecutionSettings;
     note: string | null;
   } {
     const wanted = this.priorityFeeSolFor('sell');
-    const balance = this.walletBalanceLamports;
+    const balance = balanceLamports === undefined ? this.walletBalanceLamports : balanceLamports;
     if (balance === null) return { priorityFeeSol: wanted, exec, note: null };
     const budget = planExitBudget(balance, Math.round(wanted * 1e9));
     if (budget.note) this.log('warn', `exit budget: ${budget.note}`);
@@ -3781,6 +4382,12 @@ export class SniperEngine {
         // keyed by mint so offline analysis can join it to outcomes.
         if (ev.uri) this.captureSocials(ev.mint, ev.uri);
       } else if (ev.kind === 'trade') {
+        // Wallet Scout: every pump trade names its trader, so the leaderboard
+        // is built from the feed the engine already decodes — no extra RPC,
+        // and it works whether or not the token is one we are tracking.
+        // The id lets a manual scan replaying these hours refuse the trades
+        // this feed already recorded, instead of scoring them twice.
+        scout.note('solana', ev.user, ev.mint, ev.isBuy, Number(ev.solAmount) / 1e9, Number(ev.tokenAmount) / 1e6, n.receivedAt, tradeId(n.signature, ev.mint, ev.user, ev.isBuy));
         recorder.record('tape_trade', {
           mint: ev.mint, user: ev.user, isBuy: ev.isBuy,
           sol: Number(ev.solAmount) / 1e9, tokens: Number(ev.tokenAmount) / 1e6,
@@ -3802,6 +4409,8 @@ export class SniperEngine {
     void fetchSocials(uri)
       .then((s) => {
         if (!this.running) return;
+        const tracked = this.tokens.get(mint);
+        if (tracked) tracked.socials = s;
         recorder.record('tape_metadata', {
           mint,
           resolved: s.resolved,
@@ -3878,8 +4487,10 @@ export class SniperEngine {
       mintChecked: false,
       evalDeadline: n.receivedAt + s.strategy.evalWindowSec * 1_000,
       oddsTrades: [],
+      oddsTapeTruncated: false,
       oddsJudged: 0,
       flagged: false,
+      socials: null,
       decided: false,
       curveComplete: false,
       dumpRecorded: false,
@@ -3931,17 +4542,24 @@ export class SniperEngine {
     }
     // Odds tape: the first ~130 s of every launch, bounded, regardless of
     // whether the flow window has decided — the runner judge reads it.
-    if (t.oddsTrades.length < 600 && n.receivedAt - t.row.detectedAt <= 130_000) {
-      t.oddsTrades.push({
-        slot: n.slot,
-        ts: n.receivedAt,
-        user: ev.user,
-        isBuy: ev.isBuy,
-        base: Number(ev.tokenAmount) / 1e6,
-        sol: Number(ev.solAmount) / 1e9,
-        program: 'pump',
-        tx: n.signature,
-      });
+    if (n.receivedAt - t.row.detectedAt <= 130_000) {
+      if (t.oddsTrades.length >= ODDS_TAPE_CAP) {
+        // Past the cap the last-10-s trade rate would read 0 for exactly the
+        // hottest launches (a 600-trade cap did that to 16 % of would-be
+        // 120 s flags on 07-27). A truncated tape is an unknown, not a zero.
+        t.oddsTapeTruncated = true;
+      } else {
+        t.oddsTrades.push({
+          slot: n.slot,
+          ts: n.receivedAt,
+          user: ev.user,
+          isBuy: ev.isBuy,
+          base: Number(ev.tokenAmount) / 1e6,
+          sol: Number(ev.solAmount) / 1e9,
+          program: 'pump',
+          tx: n.signature,
+        });
+      }
     }
     // Every event here is a trade that LANDED, which makes its mint a good
     // source of successful transactions for the local builder's account-layout
@@ -3951,6 +4569,14 @@ export class SniperEngine {
     // after the token is decided).
     t.virtualSolReserves = ev.virtualSolReserves;
     t.virtualTokenReserves = ev.virtualTokenReserves;
+    // The feed drops 13–21 % of events; if the `complete` event is one of
+    // them, the token-side floor still says the curve is sold out. The
+    // judge must never flag a finished curve, so mark it here; the full
+    // completion handler still runs when (if) the event arrives.
+    if (!t.curveComplete && t.virtualTokenReserves <= CURVE_COMPLETE_VIRTUAL_TOKENS) {
+      t.curveComplete = true;
+      this.log('info', `${t.row.symbol || t.row.mint.slice(0, 6)}: curve sold out (token floor reached before any complete event)`);
+    }
     const held = this.positions.hasOpenFor(ev.mint);
 
     // Advanced orders evaluate on EVERY trade of a mint we are tracking, at
@@ -4033,6 +4659,31 @@ export class SniperEngine {
     // Speed: once a token is decided AND we hold no position in it, there is
     // nothing left to compute — skip flow, scoring, per-trade recording and
     // buffer growth entirely. This is the bulk of the trade firehose.
+    // A creator sell is a runner gate (shared/runners.ts: "a creator sell
+    // never flags"), and the odds judge runs at +60/+120 s — long after the
+    // +15 s decision. So it is detected HERE, before the fast-path return,
+    // or a post-decision dump is invisible to the gate (the 09-11 tape had
+    // a creator sell inside the scoring window on 20 % of live flags).
+    if (!ev.isBuy && ev.user === t.createEvent.creator && !t.row.flow.creatorSold) {
+      t.row.flow.creatorSold = true;
+      // (creators.recordDump stays below the fast path: a "dump" in the
+      // creator record means a sell inside the evaluation or while held, and
+      // widening it would silently re-score every repeat creator.)
+      // A flag whose creator then sells keeps its row but says so. Decided
+      // 60 s after the flag on curves still open (07-27): flags whose creator
+      // had not sold graduated 22 %, those whose creator had 5 %.
+      if (t.flagged) {
+        const marked = markCreatorSold(this.runners, t.row.mint, n.receivedAt);
+        if (marked) {
+          this.runners = marked;
+          const flag = marked.find((r) => r.mint === t.row.mint);
+          const afterS = flag ? Math.max(0, (n.receivedAt - flag.flaggedAt) / 1000) : null;
+          this.log('info', `Runner ${t.row.symbol || t.row.mint.slice(0, 6)}: creator sold${afterS !== null ? ` ${afterS.toFixed(0)} s after the flag` : ''}`);
+          recorder.record('runner_creator_sold', { mint: t.row.mint, at: n.receivedAt, afterS });
+          this.emit({ kind: 'runners', runners: marked });
+        }
+      }
+    }
     if (t.decided && !held) {
       t.row.priceSol = spotPriceSol(t.virtualSolReserves, t.virtualTokenReserves);
       return;
@@ -4050,12 +4701,9 @@ export class SniperEngine {
       if (!t.firstBuyAtByUser.has(ev.user)) t.firstBuyAtByUser.set(ev.user, n.receivedAt);
     } else {
       t.tokensByUser.set(ev.user, (t.tokensByUser.get(ev.user) ?? 0) - tokens);
-      if (ev.user === t.createEvent.creator) {
-        t.row.flow.creatorSold = true;
-        if (!t.dumpRecorded) {
-          t.dumpRecorded = true;
-          creators.recordDump(t.createEvent.creator);
-        }
+      if (ev.user === t.createEvent.creator && !t.dumpRecorded) {
+        t.dumpRecorded = true;
+        creators.recordDump(t.createEvent.creator);
       }
     }
     t.row.priceSol = spotPriceSol(t.virtualSolReserves, t.virtualTokenReserves);
@@ -4139,6 +4787,11 @@ export class SniperEngine {
     flow.buyerAcceleration =
       buyersFirstHalf.size > 0 ? buyersSecondHalf.size / buyersFirstHalf.size : buyersSecondHalf.size > 0 ? 2 : 0;
     flow.topBuyerShare = totalBuySol > 0 ? topBuyer / totalBuySol : 0;
+    // SOL-side on purpose: the entry gates (entryCurveMin/MaxPct), the score's
+    // timing band, user rules, alerts and the backtest history all read this
+    // number on the SOL scale they were tuned on. The token-side share (the
+    // real completion condition) is used by the odds judge and the runner
+    // flag only, where it is labelled "supply sold".
     flow.curveProgressPct = curveProgressPct(t.virtualSolReserves);
     flow.distinctSellers = sellers.size;
 
@@ -4364,10 +5017,10 @@ export class SniperEngine {
         const features = oddsFeaturesFromTrades(t.oddsTrades, {
           creator: t.createEvent.creator,
           supply: 1e9,
-          curveProgress: curveProgressPct(t.virtualSolReserves) / 100,
+          curveProgress: curveProgressTokenPct(t.virtualTokenReserves) / 100,
           virtualSolReserves: Number(t.virtualSolReserves),
           virtualTokenReserves: Number(t.virtualTokenReserves),
-          hasTwitter: null,
+          hasTwitter: t.socials && t.socials.resolved ? t.socials.twitter : null,
           createSlot: t.row.slot,
           windowS,
         });
@@ -4379,6 +5032,8 @@ export class SniperEngine {
         hardRejected: hasHardReject(t.row.riskFlags),
         creatorSold: t.row.flow.creatorSold,
         alreadyFlagged: t.flagged,
+        tapeTruncated: t.oddsTapeTruncated,
+        nonSolQuote: t.virtualSolReserves === 0n,
       });
       if (!verdict.flag || !report?.graduate) continue;
       const flag: RunnerFlag = {
@@ -4395,15 +5050,17 @@ export class SniperEngine {
         line: report.graduate.line,
         mult3Line: report.mult3?.line ?? null,
         priceSol: t.row.priceSol,
-        curvePct: curveProgressPct(t.virtualSolReserves),
+        curvePct: curveProgressTokenPct(t.virtualTokenReserves),
         uniqueBuyers: t.row.flow.uniqueBuyers,
         netInflowSol: t.row.flow.netInflowSol,
         tradesSeen: report.tradesSeen,
+        regime: report.regime,
+        creatorSoldAt: null,
       };
       t.flagged = true;
       this.runners.unshift(flag);
       if (this.runners.length > 50) this.runners.length = 50;
-      recorder.record('runner', { mint: flag.mint, windowS, bucket: flag.bucket, observedPct: flag.observedPct, basePct: flag.basePct, curvePct: flag.curvePct, buyers: flag.uniqueBuyers, net: flag.netInflowSol });
+      recorder.record('runner', { mint: flag.mint, windowS, bucket: flag.bucket, observedPct: flag.observedPct, basePct: flag.basePct, curvePct: flag.curvePct, buyers: flag.uniqueBuyers, net: flag.netInflowSol, regime: flag.regime });
       if (t.row.phase !== 'entered') this.updatePhase(t, 'flagged');
       this.emit({ kind: 'runner', runner: flag });
       const { title, body } = runnerNotification(flag);

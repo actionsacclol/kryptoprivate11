@@ -81,7 +81,16 @@ export async function mintFacts(httpUrl: string, mint: string): Promise<MintFact
 async function mintFactsUncached(httpUrl: string, mint: string): Promise<MintFacts | null> {
   const res = await getAccountInfo(httpUrl, mint);
   if (!res.ok) return UNCHECKED(`mint not read (${res.message})`);
-  if (!res.data) return { ...UNCHECKED('mint account not found'), checked: true };
+  // NOT `checked: true`. "The RPC returned no account" is the definition of
+  // unknown, not a reading. UNCHECKED carries mintAuthority/freezeAuthority as
+  // null, and downstream a null authority on a CHECKED mint is read as
+  // "positively observed absent" — which in SPL is the SAFE state. So this one
+  // word turned "we could not find this mint" into "Mint authority: Disabled.
+  // No new supply can be minted." on the two heaviest security gates, sourced
+  // `onchain`. Reachable from a lagging node on a seconds-old mint, which is
+  // exactly when this app is used. Every consumer already renders null
+  // correctly (`shared/market.ts` gates on `!m.checked`).
+  if (!res.data) return UNCHECKED('mint account not found');
 
   const { owner, data } = res.data;
   const isToken2022 = owner === TOKEN_2022_PROGRAM_ID;
@@ -147,10 +156,14 @@ export async function topHolders(
   ]);
 
   if (!largestRes.ok || !largestRes.data?.length) {
-    // The free public RPC rate-limits getTokenLargestAccounts specifically
-    // (429 even when other methods succeed), so this is the common case on a
-    // default install. Say what to do about it rather than showing an empty
-    // panel that looks like the token has no holders.
+    // The free public RPC does not rate-limit getTokenLargestAccounts, it
+    // CLOSES it: measured 2026-09-09, the endpoint answers the very first
+    // call with `x-ratelimit-method-limit: 0` and `retry-after: 10`. So this
+    // is not an unlucky burst, it is the guaranteed outcome on a default
+    // install. Say what to do about it rather than showing an empty panel
+    // that looks like the token has no holders. (rpcClient now refuses this
+    // method locally without spending a request, and parks host#method rather
+    // than the whole host, so the refusal no longer blinds every other read.)
     const rateLimited = /429|too many/i.test(largestRes.message);
     return {
       ...empty,

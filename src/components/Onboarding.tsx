@@ -483,9 +483,10 @@ export function Onboarding({
                   your OS cannot store it securely, Krypto refuses to store it at all rather than leave it in the clear.
                 </p>
                 <p className="text-[11px] leading-relaxed text-krypt-muted">
-                  <span className="text-white">Once this wallet exists the app is in Live mode</span> — a trade you place
-                  spends real SOL. Switch to Paper in the top bar to practise first. Nothing trades on its own: there is a
-                  per-trade cap, a balance cap and a kill switch, and the scanner only flags tokens.
+                  <span className="text-white">Once this wallet exists the app is in Live mode on Solana</span> — a trade you
+                  place spends real SOL. Switch to Paper in the top bar to practise first. Nothing trades on its own: on
+                  Solana there is a per-trade cap, a balance cap and a kill switch, and the scanner only flags tokens. The
+                  EVM chains (Robinhood, BNB) start in Paper and are armed by hand, each on its own.
                 </p>
               </div>
               <div className="rounded-md border border-arc-gold/25 bg-arc-gold/[0.06] px-3 py-2">

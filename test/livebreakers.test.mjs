@@ -119,8 +119,14 @@ test('engine: testTrade (every user-facing buy) consults the live breaker', () =
 });
 
 test('engine: fanoutBuy consults the live breaker', () => {
+  // Since 2026-09-11 the gates live in `fanoutPreflight` (the launcher asks
+  // it before creating a token); fanoutBuy must go through it, and it must
+  // consult the breaker.
   const body = between(/async fanoutBuy\(/, /\n  private runLive\(/);
-  assert.match(body, /liveBreakerReason\(\)/);
+  assert.match(body, /fanoutPreflight\(/);
+  const preflight = between(/async fanoutPreflight\(/, /\n  async fanoutBuy\(/);
+  assert.match(preflight, /liveBreakerReason\(\)/);
+  assert.match(preflight, /updateLiveBreakers\(\)/);
 });
 
 test('engine: sells NEVER consult the breaker (an exit is never blocked)', () => {

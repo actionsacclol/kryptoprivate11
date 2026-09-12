@@ -159,7 +159,7 @@ const KNOWN_PROGRAMS = new Set<string>([
 ]);
 
 /** Parse an SPL token account's `amount` (u64 LE at byte offset 64). */
-function tokenAmount(base64Data: string | null): bigint {
+export function tokenAmount(base64Data: string | null): bigint {
   if (!base64Data) return 0n;
   try {
     const buf = Buffer.from(base64Data, 'base64');
@@ -776,15 +776,22 @@ async function runPipeline(
     requireFeeTransfer: requiredFee,
     trade: { side: p.action, mint: p.mint },
     // The relayer's published cut is 0.5% (+ a fixed 0.00005 SOL on the AMM
-    // route). Allow 1.5% of a buy plus a floor, so a fee-schedule bump does
-    // not strand users, while a relayer that tried to take the trade itself
-    // is still refused. A sell's proceeds are unknown here; 0.02 SOL covers
-    // 0.5% of a 4 SOL exit, and the local builder (no relayer fee) handles
-    // anything larger.
+    // route). Allow 1.5% of the trade plus a floor, so a fee-schedule bump
+    // does not strand users while a relayer that tried to take the trade
+    // itself is still refused.
+    //
+    // A sell used to get a FLAT 20,000,000 lamports, justified as "0.5% of a
+    // 4 SOL exit, and the local builder handles anything larger". The second
+    // half is not true for a graduated token, which has no local build — so a
+    // bigger exit was refused by its own fee cap. A limit must never block an
+    // exit. `solValueLamports` is the caller's estimate of the proceeds (held
+    // × price), the same number the fee is billed on, so scale with it and
+    // keep the old flat value as the floor: small exits behave exactly as
+    // before, and an estimate we never got still gets that floor.
     relayerFeeMaxLamports:
       p.action === 'buy' && typeof p.amount === 'number'
         ? Math.ceil(p.amount * LAMPORTS_PER_SOL * 0.015) + 500_000
-        : 20_000_000,
+        : Math.max(20_000_000, Math.ceil(solValueLamports * 0.015) + 500_000),
   };
   // A fan-out trade signs with its specific wallet; a normal trade with the
   // active one. Both go through the identical outflow policy above.
@@ -860,7 +867,14 @@ async function runPipeline(
   // allowance) keeps the guard as tight as it was: a fee we did not inject
   // still trips it.
   const feeSol = fee.totalLamports / LAMPORTS_PER_SOL;
-  const boundSol = spend * (1 + p.slippagePct / 100) + OVERHEAD_SOL + feeSol;
+  // Tips are OUR outflow too, and on a sell they are most of it. With a max
+  // Jito tip the app can legitimately spend more on an exit than OVERHEAD_SOL
+  // allows, and the guard would then refuse the sell — a limit blocking an
+  // exit, which is the one thing no limit here may do. Same discipline as the
+  // fee above: add the EXACT lamports we injected, so a tip we did not inject
+  // still trips the guard.
+  const tipSol = plan.totalLamports / LAMPORTS_PER_SOL;
+  const boundSol = spend * (1 + p.slippagePct / 100) + OVERHEAD_SOL + feeSol + tipSol;
   if (lossSol > boundSol) {
     return {
       ok: false,
@@ -879,6 +893,30 @@ async function runPipeline(
   if (p.action === 'buy') {
     receivedRaw = tokenAmount(sim.data.postData[1]) + tokenAmount(sim.data.postData[2]);
     if (receivedRaw <= 0n) receiptWarn = ' — WARNING: could not confirm token receipt in simulation';
+  } else if (p.action === 'sell') {
+    // The sell-side twin, and the reason it needs one: the loss guard bounds
+    // what we SPEND, and a sell whose proceeds were routed to someone else
+    // spends only the fees — comfortably inside the bound. So it passed every
+    // gate while paying out nothing.
+    //
+    // The test has to be one a real exit can never fail. `solValueLamports` is
+    // the caller's estimate of the proceeds; when it is materially positive,
+    // the wallet's simulated lamports must go UP. A stale estimate that halved
+    // still gains. Dust, an unknown estimate and a worthless token are all
+    // below the floor and are not checked at all — a limit never blocks an
+    // exit, and a sell yielding nothing is exactly the exit that must proceed.
+    const RECEIPT_FLOOR_LAMPORTS = 20_000_000; // 0.02 SOL — far above dust
+    if (solValueLamports >= RECEIPT_FLOOR_LAMPORTS && lossSol >= 0) {
+      return {
+        ok: false,
+        stage: 'guard',
+        message:
+          `Sell would not pay: expected about ${(solValueLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL ` +
+          `but the simulated balance ${lossSol > 0 ? `FALLS ${lossSol.toFixed(5)}` : 'does not rise'} SOL — refusing. ` +
+          'The proceeds are not arriving in this wallet.',
+        simulatedLossSol: lossSol,
+      };
+    }
   }
 
   const progWarn = unknownPrograms.length ? ` (routed via ${unknownPrograms.map((p2) => p2!.slice(0, 8)).join(', ')})` : '';

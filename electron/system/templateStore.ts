@@ -55,7 +55,22 @@ export function init(userDataDir: string): void {
     cache = empty();
     return;
   }
-  const parsed = parse(JSON.parse(text || '{}'));
+  // JSON.parse belongs INSIDE a try. `init` runs during bootstrap, before the
+  // window exists and under a `whenReady().then()` with no catch — so a
+  // SyntaxError here does not degrade the feature, it kills the app before it
+  // can show anything, on every launch, and a user holding a live position
+  // cannot open the app to sell. Unreadable and unparseable are the same
+  // event: we could not load it, so we fail closed and never overwrite it.
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text || '{}');
+  } catch (e) {
+    loadFailure = `${filePath} is not valid JSON (${(e as Error).message})`;
+    logger.error(`order templates: ${loadFailure} — built-ins still work, and the file will not be overwritten`);
+    cache = empty();
+    return;
+  }
+  const parsed = parse(raw);
   if (!parsed) {
     loadFailure = `${filePath} is not a template file this version understands`;
     logger.error(`order templates: ${loadFailure} — built-ins still work, and the file will not be overwritten`);

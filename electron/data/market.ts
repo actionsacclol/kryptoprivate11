@@ -51,7 +51,16 @@ import {
   type TradeRow,
   type TraderScanRow,
 } from '@shared/market';
-import { cached, cooldownRemainingMs, memo, providerHost, putCache, queueDepth, telemetry } from './http';
+import {
+  cached,
+  cooldownRemainingMs,
+  memo,
+  providerHost,
+  putCache,
+  queueDepth,
+  setJupiterKeySource,
+  telemetry,
+} from './http';
 import * as jup from './providers/jupiter';
 import * as ds from './providers/dexscreener';
 import * as pf from './providers/pumpfun';
@@ -123,6 +132,10 @@ let ctx: TerminalContext | null = null;
 
 export function attach(c: TerminalContext): void {
   ctx = c;
+  // Jupiter's host, gap and window all follow whether the user has pasted a
+  // key. It is PULLED from settings rather than pushed in, so registering
+  // the accessor once here is the whole wiring and it can never go stale.
+  setJupiterKeySource(() => c.data().jupiterApiKey ?? '');
 }
 
 function need(): TerminalContext {
@@ -304,6 +317,7 @@ function merge(base: TokenSummary, patch: TokenSummary): TokenSummary {
   out.holderChange24h = pick(base.holderChange24h, patch.holderChange24h);
   out.bondingCurvePct = pick(base.bondingCurvePct, patch.bondingCurvePct);
   out.poolAddress = pick(base.poolAddress, patch.poolAddress);
+  out.poolQuoteMint = pick(base.poolQuoteMint, patch.poolQuoteMint);
   out.dexId = pick(base.dexId, patch.dexId);
   out.devHoldingPct = pick(base.devHoldingPct, patch.devHoldingPct);
   out.top10Pct = pick(base.top10Pct, patch.top10Pct);
@@ -394,22 +408,39 @@ const TRENDING_EXCLUDE = new Set<string>([
 // pure and lives in shared/market.ts so the tests can pin it.
 
 type RugIntel = { rug: RugReport | null; volatility: VolatilityNote[]; top3Pct: number | null };
+/** Jupiter's cross-launchpad creator counts, off the row we already have. */
+type DevRecord = { mints: number | null; migrations: number | null };
 interface RugIntelApi {
-  rugReportFor(mint: string, opts?: { creator?: string | null; createdAt?: number | null }): Promise<RugIntel | null>;
+  rugReportFor(
+    mint: string,
+    opts?: { creator?: string | null; createdAt?: number | null; dev?: DevRecord; creatorLookup?: boolean },
+  ): Promise<RugIntel | null>;
   oddsFor(mint: string, opts?: { creator?: string | null; createdAt?: number | null }): Promise<OddsReport | null>;
 }
+
+/** The creator record every row already carries, for free, from Jupiter's
+ *  batched audit block — see providers/jupiter.ts `toSummary`. */
+const devRecordOf = (s: TokenSummary): DevRecord => ({
+  mints: s.audit.devMints,
+  migrations: s.audit.devMigrations,
+});
 
 /**
  * The measured rug rules for a pump launch, from launchIntel. Guarded so a
  * build in which that module has not landed the function — or throws —
  * degrades to "no report" rather than taking the security panel down.
  */
-async function rugReportSafe(mint: string, creator: string | null, createdAt: number | null = null): Promise<RugIntel | null> {
+async function rugReportSafe(
+  mint: string,
+  creator: string | null,
+  createdAt: number | null = null,
+  opts: { dev?: DevRecord; creatorLookup?: boolean } = {},
+): Promise<RugIntel | null> {
   if (!usable('pumpswap')) return null;
   try {
     const api = li as unknown as Partial<RugIntelApi>;
     if (typeof api.rugReportFor !== 'function') return null;
-    return (await api.rugReportFor(mint, { creator, createdAt })) ?? null;
+    return (await api.rugReportFor(mint, { creator, createdAt, ...opts })) ?? null;
   } catch {
     return null;
   }
@@ -430,6 +461,31 @@ async function oddsSafe(mint: string, creator: string | null, createdAt: number 
   }
 }
 
+/**
+ * `onchain.topHolders`, memoised.
+ *
+ * It costs `getTokenSupply` + `getTokenLargestAccounts`, and the second is
+ * the ONE method the public RPC refuses hardest (documented budget 0, and
+ * its refusal parks the whole host). Opening a token page ran it three
+ * times — the security report, the holders panel and the holder graph each
+ * asked independently. The memo lives here rather than in onchain.ts
+ * because that module is deliberately a thin, uncached chain reader.
+ *
+ * Short TTL: holder concentration is a fact people trade on, so this buys
+ * one page load's worth of sharing, not a stale panel.
+ */
+const HOLDERS_TTL_MS = 10_000;
+
+async function topHoldersMemo(httpUrl: string, mint: string): Promise<HolderReport> {
+  const hit = await memo<HolderReport>(`market:topholders:${mint}`, HOLDERS_TTL_MS, async () =>
+    onchain.topHolders(httpUrl, mint, { resolveOwners: true }),
+  );
+  if (!hit) return { mint, totalSupply: null, holderCount: null, rows: [], source: 'onchain', note: null };
+  // Callers tag and sort rows in place, so each gets its own copy — a shared
+  // array would accumulate every caller's tags and every caller's sort.
+  return { ...hit, rows: hit.rows.map((r) => ({ ...r, tags: [...r.tags] })) };
+}
+
 export async function securityReport(mint: string, summary: TokenSummary): Promise<SecurityReport> {
   const c = need();
   const httpUrl = c.httpUrl();
@@ -442,14 +498,17 @@ export async function securityReport(mint: string, summary: TokenSummary): Promi
   // leaves its gate 'unknown' with a detail that says so.
   const [facts, holdersRaw, intel, rcSummary, rcNets, shieldMap, dsOrders, history, rugIntel, odds] = await Promise.all([
     onchain.mintFacts(httpUrl, mint),
-    onchain.topHolders(httpUrl, mint, { resolveOwners: true }),
+    topHoldersMemo(httpUrl, mint),
     usable('pumpswap') ? li.launchIntel(mint, httpUrl) : Promise.resolve(null),
     usable('rugcheck') ? rc.summary(mint) : Promise.resolve(null),
     usable('rugcheck') ? rc.insiderNetworks(mint) : Promise.resolve(null),
     usable('jupiter') ? jup.shield([mint]) : Promise.resolve(null),
     usable('dexscreener') ? ds.orders(mint) : Promise.resolve(null),
     creator && usable('pumpfun') ? li.creatorHistory(creator) : Promise.resolve(null),
-    pumpRail ? rugReportSafe(mint, creator) : Promise.resolve(null),
+    // Single mint, so both creator floors are affordable: Jupiter's counts
+    // off the summary, plus the pump.fun history — which is the very fetch
+    // three lines up, joined through the same 120 s memo, not a second one.
+    pumpRail ? rugReportSafe(mint, creator, null, { dev: devRecordOf(summary) }) : Promise.resolve(null),
     pumpRail ? oddsSafe(mint, creator) : Promise.resolve(null),
   ]);
 
@@ -462,10 +521,27 @@ export async function securityReport(mint: string, summary: TokenSummary): Promi
   }
 
   const top10Chain = onchain.concentration(holders.rows, 10);
-  const top10 = top10Chain ?? summary.top10Pct;
   const top20 = onchain.concentration(holders.rows, 20);
-  const concSource: DataSource =
+  let top10 = top10Chain ?? summary.top10Pct;
+  let concSource: DataSource =
     top10Chain !== null ? (holders.source === 'rugcheck' ? 'rugcheck' : 'onchain') : summary.sources.concentration ?? 'none';
+
+  // Last keyless resort for concentration: GeckoTerminal's token/info route,
+  // which carries a holder count and a top-10 share and needs no key at all.
+  // It was already implemented here and called only from the EVM rail, which
+  // is why "holder features need a Helius key" was over-stated (api swarm
+  // 2026-09-09 §3). Asked ONLY when the chain and RugCheck both came back
+  // with nothing and Jupiter had no audit share either — GeckoTerminal's
+  // budget is 30 calls a minute and the chart lives on it.
+  if (top10 === null && usable('geckoterminal')) {
+    const gtInfo = await gt.tokenInfoOn('solana', mint).catch(() => null);
+    if (gtInfo?.top10Pct !== null && gtInfo?.top10Pct !== undefined) {
+      top10 = gtInfo.top10Pct;
+      // Provenance stays exact: this number is GeckoTerminal's, and the
+      // panel says so rather than borrowing the chain's authority.
+      concSource = 'geckoterminal';
+    }
+  }
 
   const local = creator ? c.creatorIntel(creator) : null;
 
@@ -651,7 +727,9 @@ async function attachRugReports(rows: TokenSummary[]): Promise<void> {
       if (!r) return;
       const oldEnoughForOdds = r.createdAt !== null && (now - r.createdAt) / 1000 >= ODDS_ATTACH_MIN_AGE_S;
       const [x, odds] = await Promise.all([
-        rugReportSafe(r.mint, r.creator, r.createdAt),
+        // A LIST row: its creator record is Jupiter's, already on the row,
+        // and no per-row `/coins?creator=` may be bought on top of it.
+        rugReportSafe(r.mint, r.creator, r.createdAt, { dev: devRecordOf(r), creatorLookup: false }),
         oldEnoughForOdds ? oddsSafe(r.mint, r.creator, r.createdAt) : Promise.resolve(null),
       ]);
       if (x) {
@@ -1092,24 +1170,104 @@ export async function summaryMany(
   // (dead launches re-walking parked providers). Never on the trade path.
   const unique = opts.skipUnpriceable ? all.filter((m) => !cached<boolean>(`market:nopx:${m}`)) : all;
   if (!unique.length) return out;
-  const cold = unique.filter((m) => summaryIfCached(m) === null);
-  if (cold.length && usable('jupiter')) {
-    await Promise.all([jup.byMints(cold, opts), jup.shield(cold, opts)]).catch(() => undefined);
-  }
+
   const lanes = Math.max(1, Math.min(concurrency, unique.length));
-  await Promise.all(
-    Array.from({ length: lanes }, async (_, lane) => {
-      for (let i = lane; i < unique.length; i += lanes) {
-        const m = unique[i];
-        try {
-          out.set(m, await summary(m));
-        } catch {
-          /* an unpriced mint is simply absent — the caller says so */
+  for (let start = 0; start < unique.length; start += WARM_CHUNK) {
+    const chunk = unique.slice(start, start + WARM_CHUNK);
+    const cold = chunk.filter((m) => summaryIfCached(m) === null);
+    if (cold.length) {
+      // Everything that HAS a batch route, batched, immediately before the
+      // assembly that consumes it — Jupiter's rows and Shield verdicts, and
+      // DexScreener's pairs 30 at a time. Each writes the very per-mint
+      // cache `buildSummary` reads, so the assembly below makes no request
+      // for any of the three.
+      await Promise.all([
+        usable('jupiter') ? jup.byMints(cold, opts) : Promise.resolve(null),
+        usable('jupiter') ? jup.shield(cold, opts) : Promise.resolve(null),
+        usable('dexscreener') ? ds.tokenInfoMany(cold, opts) : Promise.resolve(null),
+      ]).catch(() => undefined);
+    }
+    await Promise.all(
+      Array.from({ length: lanes }, async (_, lane) => {
+        for (let i = lane; i < chunk.length; i += lanes) {
+          const m = chunk[i];
+          try {
+            out.set(m, await summary(m));
+          } catch {
+            /* an unpriced mint is simply absent — the caller says so */
+          }
         }
-      }
-    }),
-  );
+      }),
+    );
+  }
+
+  await fillPricesFromGecko(out);
   return out;
+}
+
+/**
+ * Mints warmed per pass.
+ *
+ * The warm-then-assemble pattern only works while a chunk finishes INSIDE
+ * the warmed data's TTL. A 60-mint build takes about 16 s (the pump.fun
+ * per-mint leg at its 260 ms host gap is the pacer) against Jupiter's 8 s
+ * per-mint TTL, so warming all sixty up front meant 26 of them had gone
+ * stale by the time their assembly ran and re-fetched a row the same
+ * function had just batched (api swarm 2026-09-09 §4).
+ *
+ * Twenty is the fix, and it is the honest one: the answer stays as fresh as
+ * it always was — fresher, in fact, since a chunk's rows are seconds old
+ * when used — rather than lengthening the TTL until the staleness fits.
+ */
+const WARM_CHUNK = 20;
+
+/**
+ * Last resort for mints nothing priced: GeckoTerminal's batched
+ * `simple/token_price`, 30 per request.
+ *
+ * Only ever reached when Jupiter is switched off or parked AND DexScreener
+ * had nothing either, so on a healthy app this makes zero requests — which
+ * matters, because GeckoTerminal's entire budget is 30 calls a minute and
+ * the chart lives on it. Fills only fields that are still null and stamps
+ * `sources` accordingly: a GeckoTerminal price must never read as Jupiter's.
+ */
+async function fillPricesFromGecko(rows: Map<string, TokenSummary>): Promise<void> {
+  if (!usable('geckoterminal')) return;
+  const gaps = [...rows.values()].filter((s) => s.priceUsd === null && s.priceSol === null);
+  if (!gaps.length) return;
+  const prices = await gt.simpleTokenPrices(gaps.map((s) => s.mint)).catch(() => new Map());
+  if (!prices.size) return;
+  const solUsd = cached<number>('jup:solusd');
+  for (const s of gaps) {
+    const p = prices.get(s.mint);
+    if (!p) continue;
+    if (s.priceUsd === null && p.priceUsd !== null) {
+      s.priceUsd = p.priceUsd;
+      s.sources.price = 'geckoterminal';
+      if (s.priceSol === null && solUsd) s.priceSol = p.priceUsd / solUsd;
+    }
+    if (s.marketCapUsd === null && p.marketCapUsd !== null) {
+      s.marketCapUsd = p.marketCapUsd;
+      s.sources.marketCap = 'geckoterminal';
+    }
+    if (s.liquidityUsd === null && p.liquidityUsd !== null) {
+      s.liquidityUsd = p.liquidityUsd;
+      s.sources.liquidity = 'geckoterminal';
+    }
+  }
+}
+
+/**
+ * SOL/USD, from the rate Jupiter's own price route already caches for 20 s.
+ *
+ * Exists so nothing has to price wSOL by building a whole `summary()` for
+ * it: that is a four-call assembly (Jupiter search, Shield, DexScreener,
+ * an RPC mint read) for one number `jup.solUsd()` is already holding, and
+ * the portfolio was doing exactly that on every refresh.
+ */
+export async function solUsd(): Promise<number | null> {
+  if (!usable('jupiter')) return null;
+  return jup.solUsd();
 }
 
 /** Providers currently parked after a 429 — for a message that names them. */
@@ -1149,6 +1307,7 @@ async function buildSummary(mint: string): Promise<TokenSummary> {
       patch.priceSol = dsInfo.priceNative;
       patch.liquidityUsd = dsInfo.liquidityUsd;
       patch.poolAddress = dsInfo.pools[0]?.address ?? null;
+      patch.poolQuoteMint = dsInfo.pools[0]?.quoteMint ?? null;
       patch.dexId = dsInfo.pools[0]?.dexId ?? null;
       patch.sources = { liquidity: 'dexscreener', socials: 'dexscreener' };
       patch.fetchedAt = Date.now();
@@ -1193,8 +1352,23 @@ export async function tokenDetail(mint: string): Promise<TokenDetail> {
     poolsFor(mint, s),
   ]);
 
-  if (s.priceUsd === null) warnings.push('No provider returned a price for this mint.');
-  if (!pools.length) warnings.push('No trading pool found — this token may not be tradeable yet.');
+  // "Nobody priced it" and "we could not ask" are different facts, and only
+  // one of them is about the token. With every price source parked these two
+  // lines asserted a market fact the app never observed, next to a Buy button
+  // (API swarm 2026-09-09, fo-1). `parkNote` names the parked providers and
+  // how long until each retries.
+  const priceParked = parkNote(['jupiter', 'dexscreener', 'geckoterminal', 'birdeye']);
+  const poolParked = parkNote(['dexscreener', 'geckoterminal']);
+  if (s.priceUsd === null) {
+    warnings.push(priceParked ? `No price — ${priceParked} This is not a fact about the token.` : 'No provider returned a price for this mint.');
+  }
+  if (!pools.length) {
+    warnings.push(
+      poolParked
+        ? `No pool data — ${poolParked} The token may still be tradeable; the app could not ask.`
+        : 'No trading pool found — this token may not be tradeable yet.',
+    );
+  }
 
   const solUsd = usable('jupiter') ? await jup.solUsd() : null;
   const liveTrades = tape.trades(mint, 100, (w) => c.walletLabel(w), solUsd, s.circSupply);
@@ -1226,7 +1400,7 @@ async function poolsFor(mint: string, s: TokenSummary, opts: { priority?: boolea
     if (pools.length) return pools;
   }
   if (s.poolAddress) {
-    return [{ address: s.poolAddress, dexId: s.dexId ?? 'unknown', label: s.symbol || 'pool', liquidityUsd: s.liquidityUsd }];
+    return [{ address: s.poolAddress, dexId: s.dexId ?? 'unknown', label: s.symbol || 'pool', liquidityUsd: s.liquidityUsd, quoteMint: s.poolQuoteMint }];
   }
   return [];
 }
@@ -1740,7 +1914,7 @@ export async function holders(mint: string, limit = 50): Promise<HolderReport> {
     }
   }
 
-  let report = await onchain.topHolders(c.httpUrl(), mint, { resolveOwners: true });
+  let report = await topHoldersMemo(c.httpUrl(), mint);
   // The public RPC refuses getTokenLargestAccounts; RugCheck's keyless list
   // stands in, labelled as such, rather than an empty panel.
   if (report.source === 'none' && usable('rugcheck')) {
@@ -1754,6 +1928,22 @@ export async function holders(mint: string, limit = 50): Promise<HolderReport> {
   report.rows.sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
   report.holderCount = s.holders;
   if (report.totalSupply === null) report.totalSupply = s.circSupply ?? s.totalSupply;
+
+  // Nobody could list the holders and nobody could even count them. The
+  // keyless GeckoTerminal token/info route can usually do the second, and a
+  // count with a note beats a blank panel with none — as long as the note
+  // says whose count it is and does not imply a list we do not have.
+  if (!report.rows.length && report.holderCount === null && usable('geckoterminal')) {
+    const gtInfo = await gt.tokenInfoOn('solana', mint).catch(() => null);
+    if (gtInfo && (gtInfo.holders !== null || gtInfo.top10Pct !== null)) {
+      report.holderCount = gtInfo.holders;
+      report.source = 'geckoterminal';
+      report.note =
+        gtInfo.top10Pct !== null
+          ? `No holder list is available without an API key. GeckoTerminal reports ${gtInfo.holders === null ? 'no holder count' : `${gtInfo.holders} holders`} and a top-10 share of ${gtInfo.top10Pct.toFixed(1)}%.`
+          : 'No holder list is available without an API key. The count above is GeckoTerminal’s.';
+    }
+  }
   return report;
 }
 
@@ -1930,6 +2120,16 @@ export async function watch(mint: string): Promise<void> {
       c.watchBoop(mint, s.decimals);
       return;
     }
+    // Both pool watchers read raw QUOTE amounts and divide by 1e9 — SOL's
+    // decimals. A USDC-quoted pool would therefore price the whole live tape
+    // in the wrong currency, and that tape feeds the chart, rememberPrice and
+    // every advOrders trigger. The app already refuses non-SOL pools in three
+    // other places (`isSolQuoted`); this path did not. A pool we cannot
+    // confirm is SOL-quoted gets no tape rather than a wrong one — the page
+    // works without it, and the per-mint socket above is unaffected.
+    const poolIsSol = s.poolQuoteMint === null || s.poolQuoteMint === jup.WSOL_MINT;
+    if (!poolIsSol) return;
+
     const looksLaunchLab = s.launchpad === 'bonk' || s.dexId === 'raydium-launchlab';
     if (looksLaunchLab) {
       c.watchLaunchLabPool(mint, s.decimals, s.poolAddress);

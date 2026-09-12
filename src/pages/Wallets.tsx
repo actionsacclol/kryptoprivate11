@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
+import { EVM_CHAIN_META, nativeSymbolOf, type ChainKind, type EvmWalletSummary } from '@shared/evm';
 import { Copy, FlaskConical, Plus, RotateCcw, Trash2, TriangleAlert, Zap } from 'lucide-react';
 import {
+  DEFAULT_COPIES_PER_MINUTE,
   LEADER_RANK_KEYS,
   MIN_TRIPS_FOR_RANK,
   copySize,
@@ -12,10 +14,11 @@ import {
   type CopyConfig,
   type CopySnapshot,
   type LeaderRankKey,
-} from '@shared/copytrade';
-import type { WatchedWallet } from '@shared/types';
+  type CopyStats, chainOf } from '@shared/copytrade';
+import type { WalletSummary, WatchedWallet } from '@shared/types';
 import { Card, Empty, GhostButton, Page, PrimaryButton, Section } from '../components/common';
 import { useToast } from '../state/ToastProvider';
+import { useTerminal } from '../state/TerminalProvider';
 import { useModal } from '../state/ModalProvider';
 import { cls, fmtAgo, fmtDur, shortAddr, toneFor } from '../utils/format';
 
@@ -48,22 +51,117 @@ function Field({
 const numBox =
   'w-full rounded-md border border-white/10 bg-black/40 px-2 py-1.5 text-[12px] font-mono text-white outline-none focus:border-krypt-purple/50';
 
+/** Where the copy trading stands, live and paper apart — they are different experiments. */
+/** A chain's name for a label, whichever of the three it is. */
+const chainName = (c: ChainKind): string => (c === 'solana' ? 'Solana' : EVM_CHAIN_META[c].name);
+
+function CopyTotals({ snap }: { snap: CopySnapshot }) {
+  const chainsSeen = [...new Set(snap.configs.map((c) => chainOf(c)))];
+  const rows = (['live', 'paper'] as const).flatMap((mode) =>
+    chainsSeen.map((chain) => {
+      const configs = snap.configs.filter((c) => c.mode === mode && chainOf(c) === chain);
+      const ids = new Set(configs.map((c) => c.id));
+      const stats = Object.values(snap.stats).filter((s) => s.mode === mode && ids.has(s.configId));
+      const sum = (f: (s: CopyStats) => number) => stats.reduce((a, s) => a + f(s), 0);
+      return {
+        mode,
+        chain,
+        sym: nativeSymbolOf(chain),
+        name: chainName(chain),
+        configs: configs.length,
+        running: configs.filter((c) => c.enabled).length,
+        trades: sum((s) => s.trades),
+        wins: sum((s) => s.wins),
+        losses: sum((s) => s.losses),
+        pnl: sum((s) => s.realizedPnlSol),
+        open: sum((s) => s.openCount),
+        openCost: sum((s) => s.openCostSol),
+        skipped: sum((s) => s.skipped + s.blocked),
+      };
+    }),
+  );
+  const shown = rows.filter((r) => r.configs > 0);
+  if (shown.length === 0) return null;
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {shown.map((r) => (
+        <div key={`${r.mode}-${r.chain}`} className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+          <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-white/80">
+            {r.mode === 'paper' ? <FlaskConical className="h-3 w-3" /> : <Zap className="h-3 w-3" />}
+            {r.mode} · {r.name} · {r.running} of {r.configs} running
+          </div>
+          <div className="grid grid-cols-4 gap-2">
+            <Tot label="Copies" value={String(r.trades)} />
+            <Tot label="Up / down" value={`${r.wins} / ${r.losses}`} />
+            <Tot label="Realised" value={`${r.pnl >= 0 ? '+' : ''}${r.pnl.toFixed(4)} ${r.sym}`} tone={r.pnl > 0 ? 'good' : r.pnl < 0 ? 'bad' : undefined} />
+            <Tot label="Open" value={r.open ? `${r.open} · ${r.openCost.toFixed(4)} ${r.sym}` : '0'} />
+          </div>
+          {r.skipped > 0 && <div className="mt-1.5 text-[10px] text-krypt-muted">{r.skipped} skipped by filters or limits — counted, not hidden.</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Tot({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-krypt-muted">{label}</div>
+      <div className={cls('font-mono text-[12px]', tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : 'text-white')}>{value}</div>
+    </div>
+  );
+}
+
 function ConfigEditor({
   initial,
+  wallets,
+  evmWallets,
   onSave,
   onCancel,
 }: {
   initial: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: string };
+  wallets: WalletSummary[];
+  evmWallets: Record<'robinhood' | 'bnb', EvmWalletSummary[]>;
   onSave: (c: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: string }) => void;
   onCancel: () => void;
 }) {
   const [c, setC] = useState(initial);
   const set = <K extends keyof typeof c>(k: K, v: (typeof c)[K]): void => setC((p) => ({ ...p, [k]: v }));
-  const validity = validateConfig(c);
+  // Main is the authority (ipc.ts `copy:save` tests a real base58 address
+  // before handing it to the wallet watcher). `validateConfig` only asks for
+  // 32 characters, so without this the form would enable Save on a string
+  // the handler is going to refuse.
+  const chain = chainOf(c);
+  const sym = nativeSymbolOf(chain);
+  const ownWallets: Array<{ id: string; label: string }> = chain === 'solana' ? wallets : evmWallets[chain];
+  const base = validateConfig(c);
+  const validity =
+    base.ok && (chain === 'solana' ? !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.wallet.trim()) : !/^0x[0-9a-fA-F]{40}$/.test(c.wallet.trim()))
+      ? { ok: false, message: chain === 'solana' ? 'Enter a valid wallet address' : `Enter a valid 0x address on ${EVM_CHAIN_META[chain].name}` }
+      : base;
   const optNum = (raw: string): number | null => (raw.trim() === '' ? null : Number(raw));
 
   return (
     <Card className="space-y-3 border-krypt-purple/25">
+      <Field label="Chain">
+        <select
+          value={chain}
+          onChange={(e) => setC((p) => ({ ...p, chain: e.target.value as ChainKind, walletId: null, onlyPumpfun: e.target.value === 'solana' ? p.onlyPumpfun : false }))}
+          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[12px] text-white"
+        >
+          <option value="solana">Solana</option>
+          <option value="robinhood">Robinhood Chain</option>
+          <option value="bnb">BNB Smart Chain</option>
+        </select>
+        {chain !== 'solana' && (
+          <p className="mt-1 text-[10px] leading-relaxed text-krypt-muted">
+            On {EVM_CHAIN_META[chain].name} a leader is followed through the Observatory&rsquo;s trade feed: their launchpad-curve
+            trades while a token is on its curve. That chain&rsquo;s scanner has to be watching, and a live copy needs the chain
+            armed on its wallet page. Sells mirror the share they sold, read from their balance.
+          </p>
+        )}
+      </Field>
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="Wallet address">
           <input
@@ -85,6 +183,25 @@ function ConfigEditor({
         </Field>
       </div>
 
+      <Field label="Copy with">
+        <select
+          value={c.walletId ?? ''}
+          onChange={(e) => setC({ ...c, walletId: e.target.value || null })}
+          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[12px] text-white"
+        >
+          <option value="">Active wallet{chain !== 'solana' ? ` on ${EVM_CHAIN_META[chain].name}` : ''}</option>
+          {ownWallets.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.label}
+            </option>
+          ))}
+        </select>
+        <p className="mt-1 text-[10px] leading-relaxed text-krypt-muted">
+          Which of your wallets signs the copies. Pick a different one from your trading wallet to keep the two apart, and give each
+          followed leader its own — every config is its own runner.
+        </p>
+      </Field>
+
       <div className="grid grid-cols-4 gap-3">
         <Field label="Sizing">
           <div className="flex rounded-md border border-white/10 overflow-hidden">
@@ -102,10 +219,10 @@ function ConfigEditor({
             ))}
           </div>
         </Field>
-        <Field label={c.sizing === 'fixed' ? 'SOL per trade' : '% of their size'}>
+        <Field label={c.sizing === 'fixed' ? `${sym} per trade` : '% of their size'}>
           <input type="number" value={c.sizeValue} onChange={(e) => set('sizeValue', Number(e.target.value))} className={numBox} />
         </Field>
-        <Field label="Max per trade" hint="SOL">
+        <Field label="Max per trade" hint={sym}>
           <input type="number" value={c.maxTradeSol} onChange={(e) => set('maxTradeSol', Number(e.target.value))} className={numBox} />
         </Field>
         <Field label="Delay" hint="ms after their trade">
@@ -143,12 +260,24 @@ function ConfigEditor({
         </Field>
       </div>
 
-      <div className="grid grid-cols-4 gap-3">
-        <Field label="Daily loss limit" hint="SOL">
+      <div className="grid grid-cols-5 gap-3">
+        <Field label="Daily loss limit" hint={sym}>
           <input type="number" value={c.dailyLossLimitSol} onChange={(e) => set('dailyLossLimitSol', Number(e.target.value))} className={numBox} />
         </Field>
         <Field label="Daily trade limit">
           <input type="number" value={c.dailyTradeLimit} onChange={(e) => set('dailyTradeLimit', Number(e.target.value))} className={numBox} />
+        </Field>
+        {/* The burst wall. The daily limit is checked against copies that
+            have already resolved, so a leader firing eight swaps in one slot
+            can out-run it; this one is a refusal inside any rolling 60 s.
+            Blank means the shipped default, not "off". */}
+        <Field label="Copies per minute" hint={`1–120 · blank = ${DEFAULT_COPIES_PER_MINUTE}`}>
+          <input
+            type="number"
+            value={c.maxCopiesPerMinute ?? ''}
+            onChange={(e) => set('maxCopiesPerMinute', optNum(e.target.value))}
+            className={numBox}
+          />
         </Field>
         <Field label="Copy their sells">
           <button
@@ -184,8 +313,8 @@ function ConfigEditor({
           Cancel
         </GhostButton>
         <span className="text-[10px] text-krypt-muted/60 ml-2">
-          A trade of 1 SOL by them would copy as{' '}
-          <span className="font-mono text-white/80">{copySize(c as CopyConfig, 1).toFixed(3)} SOL</span>.
+          A trade of 1 {sym} by them would copy as{' '}
+          <span className="font-mono text-white/80">{copySize(c as CopyConfig, 1).toFixed(3)} {sym}</span>.
         </span>
       </div>
     </Card>
@@ -197,15 +326,27 @@ export function WalletsPage() {
   const modal = useModal();
   const [snap, setSnap] = useState<CopySnapshot | null>(null);
   const [tracked, setTracked] = useState<WatchedWallet[]>([]);
+  const [wallets, setWallets] = useState<WalletSummary[]>([]);
+  const [evmWallets, setEvmWallets] = useState<Record<'robinhood' | 'bnb', EvmWalletSummary[]>>({ robinhood: [], bnb: [] });
+  const { chain: termChain } = useTerminal();
+  const walletsFor = (c: ChainKind): Array<{ id: string; label: string }> => (c === 'solana' ? wallets : evmWallets[c]);
   const [editing, setEditing] = useState<(Omit<CopyConfig, 'id' | 'createdAt'> & { id?: string }) | null>(null);
   const [newAddr, setNewAddr] = useState('');
   const [newLabel, setNewLabel] = useState('');
   const [rankBy, setRankBy] = useState<LeaderRankKey>('realizedPnlSol');
 
   const load = useCallback(async () => {
-    const [c, w] = await Promise.all([window.krypt.copy.list(), window.krypt.watchlist.get()]);
+    const [c, w, ws, rh, bnb] = await Promise.all([
+      window.krypt.copy.list(),
+      window.krypt.watchlist.get(),
+      window.krypt.wallet.list(),
+      window.krypt.evm.wallet.list('robinhood').catch(() => null),
+      window.krypt.evm.wallet.list('bnb').catch(() => null),
+    ]);
     if (c.ok && c.data) setSnap(c.data);
     if (w.ok && w.data) setTracked(w.data);
+    if (ws.ok && ws.data) setWallets(ws.data);
+    setEvmWallets({ robinhood: rh && rh.ok && rh.data ? rh.data : [], bnb: bnb && bnb.ok && bnb.data ? bnb.data : [] });
   }, []);
 
   useEffect(() => {
@@ -254,8 +395,8 @@ export function WalletsPage() {
       const yes = await modal.confirm({
         title: 'Arm LIVE copy trading',
         message:
-          `Every buy by ${c.label || shortAddr(c.wallet)} will spend real SOL, up to ${c.maxTradeSol} per trade, ` +
-          `until you hit your ${c.dailyLossLimitSol} SOL daily loss limit. Six months of research in this repo ` +
+          `Every buy by ${c.label || shortAddr(c.wallet)} will spend real ${nativeSymbolOf(chainOf(c))} on ${chainName(chainOf(c))}, up to ${c.maxTradeSol} per trade, ` +
+          `until you hit your ${c.dailyLossLimitSol} ${nativeSymbolOf(chainOf(c))} daily loss limit. Six months of research in this repo ` +
           `failed to find a profitable automated memecoin strategy — run it on paper first if you have not.`,
         confirmLabel: 'Arm live copying',
         destructive: true,
@@ -320,7 +461,7 @@ export function WalletsPage() {
       subtitle="Track other traders' wallets, and follow them on paper before you follow them with money. Your own keys live under Wallet."
       actions={
         <PrimaryButton
-          onClick={() => setEditing(defaultConfig('', ''))}
+          onClick={() => setEditing(defaultConfig('', '', termChain))}
           className="!py-2 !px-3 text-xs"
         >
           <Plus className="h-3.5 w-3.5" />
@@ -328,9 +469,27 @@ export function WalletsPage() {
         </PrimaryButton>
       }
     >
+      {/* The copy store exists but could not be read, so NOTHING is being
+          saved this session. It has to be said before the user types a
+          config, not after they lose it: the page otherwise looks like a
+          fresh install and every Save appears to work. Same shape as the
+          EVM wallet panel's unreadable-file banner. */}
+      {snap?.loadFailure && (
+        <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-3 py-2.5 flex items-start gap-2">
+          <TriangleAlert className="h-4 w-4 text-rose-300 flex-shrink-0 mt-0.5" />
+          <p className="text-[11px] text-rose-200 leading-relaxed">
+            Your copy-trading file could not be read — <span className="font-semibold">nothing was overwritten</span>, and
+            nothing is being saved this session. {snap.loadFailure} Configs, copies and leader records you add now are
+            gone at the next start. Close the app, copy that file somewhere safe, and check it before continuing.
+          </p>
+        </div>
+      )}
+
+      {snap && <CopyTotals snap={snap} />}
+
       {editing && (
         <Section title={editing.id ? 'Edit config' : 'New copy config'}>
-          <ConfigEditor initial={editing} onSave={(c) => void save(c)} onCancel={() => setEditing(null)} />
+          <ConfigEditor initial={editing} wallets={wallets} evmWallets={evmWallets} onSave={(c) => void save(c)} onCancel={() => setEditing(null)} />
         </Section>
       )}
 
@@ -471,6 +630,10 @@ export function WalletsPage() {
                         {c.label || shortAddr(c.wallet, 6)}
                       </div>
                       <div className="text-[10px] font-mono text-krypt-muted">{shortAddr(c.wallet, 6)}</div>
+                      <div className="text-[10px] text-krypt-muted">
+                        {chainName(chainOf(c))} · signs with{' '}
+                        {c.walletId ? (walletsFor(chainOf(c)).find((w) => w.id === c.walletId)?.label ?? 'a wallet that no longer exists') : 'the active wallet'}
+                      </div>
                     </div>
 
                     <div className="flex-1" />
@@ -554,8 +717,8 @@ export function WalletsPage() {
                     if (w.state === 'over-cap') {
                       return (
                         <p className="text-[10px] text-arc-gold/90">
-                          Not watched: the free public socket allows 10 followed wallets. Add a Helius key in Settings to
-                          follow more.
+                          Not watched: the endpoint refused this subscription. It may be busy — the app will keep the
+                          others watched and retry this one.
                         </p>
                       );
                     }
@@ -615,7 +778,7 @@ export function WalletsPage() {
                 </span>
                 <span className="w-24 truncate text-white/85">{t.symbol || shortAddr(t.mint, 4)}</span>
                 <span className="w-24 text-krypt-muted">they {t.theirSol.toFixed(2)}</span>
-                <span className="w-24 text-white/85">us {t.ourSol.toFixed(3)}</span>
+                <span className="w-28 text-white/85">us {t.ourSol.toFixed(3)} {nativeSymbolOf(t.chain ?? 'solana')}</span>
                 <span className={cls('w-20 text-right', toneFor(t.pnlSol ?? t.realizedSol ?? null))}>
                   {(() => {
                     const v = t.pnlSol ?? t.realizedSol ?? null;

@@ -22,7 +22,7 @@
 
 import { FeedManager, type LogNotification } from './feed';
 export { DBC_PROGRAM_ID, decodeDbcEventB58 } from './dbcDecoder';
-import { DBC_PROGRAM_ID, decodeDbcEventB58, executedPriceSol, swapSol, swapTokens, type DbcSwapEvent } from './dbcDecoder';
+import { DBC_PROGRAM_ID, decodeDbcEventB58, dedupeSwaps, executedPriceSol, swapSol, swapTokens, type DbcSwapEvent } from './dbcDecoder';
 import { getSignaturesForAddress, getTransaction, resolveAccountKeys } from './rpcClient';
 
 /** How many pools may be watched at once. The tape allows 8 subscriptions;
@@ -245,6 +245,9 @@ async function onNotification(mint: string, pool: string, decimals: number, n: L
   // The fee payer is index 0 of the STATIC keys, which is also index 0 here.
   const wallet = keys[0] ?? '';
 
+  // Collected first, then de-duplicated: see below.
+  const swaps: DbcSwapEvent[] = [];
+
   for (const group of tx.meta?.innerInstructions ?? []) {
     for (const ix of group.instructions) {
       if (keys[ix.programIdIndex] !== DBC_PROGRAM_ID) continue;
@@ -274,8 +277,16 @@ async function onNotification(mint: string, pool: string, decimals: number, n: L
       if (event.kind !== 'dbc_swap') continue;
       // A transaction can touch several pools; only ours counts.
       if (event.pool !== pool) continue;
+      swaps.push(event as DbcSwapEvent);
+    }
+  }
 
-      const swap = event as DbcSwapEvent;
+  // One tick per swap: DBC emits both EvtSwap and EvtSwap2 for each one. See
+  // dedupeSwaps, which is where the rule is stated and pinned.
+  const deduped = dedupeSwaps(swaps);
+
+  {
+    for (const swap of deduped) {
       const priceSol = executedPriceSol(swap, decimals);
       if (!(priceSol > 0)) continue;
 

@@ -36,6 +36,7 @@ const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms));
 
 const MINT = 'CopyMint111111111111111111111111111111111';
 const MINT2 = 'CopyMint222222222222222222222222222222222';
+const MINT3 = 'CopyMint333333333333333333333333333333333';
 
 function launchRow(over = {}) {
   return {
@@ -130,6 +131,11 @@ function makeHost(over = {}) {
       start: async (id) => {
         calls.started.push(id);
         if (over.startFails) return { ok: false, message: 'boom' };
+        // `failStarts: n` fails the first n starts the way a stalled sandbox
+        // does — retryable — and succeeds after that.
+        if (over.failStarts && calls.started.length <= over.failStarts) {
+          return { ok: false, message: 'the sandbox bridge never loaded', retryable: true };
+        }
         running.add(id);
         return { ok: true, message: 'running' };
       },
@@ -265,6 +271,31 @@ test('a LIVE script never comes back armed after a restart; a paper one does', (
   });
 });
 
+test('a per-mint cooldown survives a restart — it is a wall the user set', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'krypt-auto-cd-'));
+  auto._reset();
+  auto.init(dir);
+  const h = makeHost();
+  auto.attach(h);
+  const s = saved(rulesScript({ name: 'CD' }, { oncePerMint: false, cooldownSec: 3600 }));
+  auto.setEnabled(s.id, true);
+  auto.onEngineEvent({ kind: 'launchUpdate', launch: launchRow() });
+  await tick(30);
+  assert.equal(h.calls.buys.length, 1);
+  await auto.shutdown();
+  auto._reset();
+  auto.init(dir);
+  const h2 = makeHost();
+  auto.attach(h2);
+  const back = auto.all()[0];
+  assert.equal(back.enabled, true, 'a paper script resumes');
+  auto.onEngineEvent({ kind: 'launchUpdate', launch: launchRow() });
+  await tick(30);
+  assert.equal(h2.calls.buys.length, 0, 'the cooldown came back with it');
+  auto.stopTimers();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 // ── Engine: rules fire, once, through the host ────────────────────────
 
 test('a rule fires on a launch update when every condition holds, buys through the host in PAPER, and only once per token', async () => {
@@ -307,10 +338,39 @@ test('a position rule sells through the host when a held position drops', async 
   const h = setup();
   const s = saved(rulesScript({}, { trigger: 'position', conditions: [{ field: 'pnlPct', op: 'lte', value: -30 }], actions: [{ type: 'sell', pct: 100 }] }));
   auto.setEnabled(s.id, true);
+  // The script must have OPENED these: a script may only sell what it bought,
+  // never a bag the user opened by hand.
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'buy', args: [MINT2, 0.02] });
+  await tick();
   h.book.paper.push(h.pos(MINT, 0.1, -35));
   h.book.paper.push(h.pos(MINT2, 0.1, +10));
   await auto.pollPositions();
   assert.deepEqual(h.calls.sells, [{ mint: MINT, pct: 100, mode: 'paper' }], 'only the loser is sold');
+});
+
+test('a position rule never even fires on a bag the user opened by hand', async () => {
+  const h = setup();
+  const s = saved(rulesScript({}, { trigger: 'position', conditions: [{ field: 'pnlPct', op: 'lte', value: -30 }], actions: [{ type: 'notify', message: 'down: {symbol}' }] }));
+  auto.setEnabled(s.id, true);
+  h.book.paper.push(h.pos(MINT, 5, -60)); // the user's own bag, deep in the red
+  await auto.pollPositions();
+  assert.deepEqual(h.calls.notifies, [], 'not this scripts position, not its business');
+  // `held` is false for it too, so no rule anywhere can read it as one.
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'positions', args: [] });
+  await tick();
+  assert.deepEqual(h.calls.replies.find((r) => r.cid === 1).value, [], 'and bot.positions does not list it');
+});
+
+test('a script may NOT sell a position it did not open', async () => {
+  const h = setup();
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  h.book.paper.push(h.pos(MINT, 5)); // the user's own bag
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'sell', args: [MINT, 100] });
+  await tick();
+  assert.equal(h.calls.sells.length, 0, 'a hand-bought bag is not the scripts to sell');
+  assert.match(h.calls.replies.find((r) => r.cid === 1).value.message, /does not hold it/);
 });
 
 // ── Engine: the budget walls ──────────────────────────────────────────
@@ -365,6 +425,10 @@ test('past the daily loss limit the script turns itself OFF', async () => {
   const c = saved(codeScript({ budget: { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 0.5, maxOpenPositions: 50, maxActionsPerMinute: 100 } }));
   auto.setEnabled(c.id, true);
   h.book.paper.push(h.pos(MINT, 0.5), h.pos(MINT2, 0.5));
+  // The script opens them first — it can only sell what it bought.
+  auto.onSandboxMessage(c.id, { t: 'call', id: 90, method: 'buy', args: [MINT, 0.5] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 91, method: 'buy', args: [MINT2, 0.5] });
+  await tick();
   auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'sell', args: [MINT, 100] });
   await tick();
   assert.equal(auto.all()[0].enabled, true, 'one loss of 0.3 is inside the 0.5 limit');
@@ -403,10 +467,18 @@ test('paper never touches the live gate; a sell of something not held is refused
   auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
   await tick();
   assert.equal(h.calls.buys.length, 1, 'paper buys while live is blocked');
-  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'sell', args: [MINT2, 50] });
+  // The user closed that bag by hand: the script still counts it as its own,
+  // but there is nothing left in the book to sell.
+  h.book.paper.length = 0;
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 50] });
   await tick();
   assert.equal(h.calls.sells.length, 0);
   assert.match(h.calls.replies.find((r) => r.cid === 2).value.message, /nothing held in paper mode/);
+  // A mint it never opened is refused before the book is even consulted.
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'sell', args: [MINT2, 50] });
+  await tick();
+  assert.equal(h.calls.sells.length, 0);
+  assert.match(h.calls.replies.find((r) => r.cid === 3).value.message, /does not hold it/);
 });
 
 test('the kill switch stops everything and blocks enabling until lifted', () => {
@@ -465,6 +537,42 @@ test('five errors in a row disable a code script; a sandbox that dies is restart
   await tick();
   assert.equal(h2.calls.started.length, 2, 'restarted once');
   assert.equal(auto.all()[0].enabled, true);
+});
+
+test('a stalled start is retried, not disarmed; a script that throws is disarmed at once', async () => {
+  // The failure users hit read "DISABLED — could not start: no ready within
+  // 8000 ms". A stall is usually the machine or a parked provider, and
+  // disarming on the first one made them re-arm by hand for nothing.
+  const h = setup({ failStarts: 1 });
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  await tick(30);
+  assert.equal(h.calls.started.length, 1, 'one attempt so far');
+  assert.equal(auto.all()[0].enabled, true, 'still armed while it retries');
+  assert.ok(auto.snapshot().logs[c.id].some((l) => /trying again in \d+ s \(attempt 1 of 3\)/.test(l.line)));
+  await tick(2600);
+  assert.equal(h.calls.started.length, 2, 'it tried again on its own');
+  assert.equal(auto.all()[0].enabled, true);
+  assert.ok(auto.snapshot().logs[c.id].some((l) => /sandbox running/.test(l.line)), 'and came up');
+
+  // A body that throws fails identically every time, so it disarms at once.
+  const h2 = setup({ startFails: true });
+  const c2 = saved(codeScript({ name: 'thrower' }));
+  auto.setEnabled(c2.id, true);
+  await tick(30);
+  assert.equal(h2.calls.started.length, 1, 'no retry for a script that cannot load');
+  assert.equal(auto.all()[0].enabled, false, 'disarmed straight away');
+});
+
+test('disarming a script cancels a start retry that was already scheduled', async () => {
+  const h = setup({ failStarts: 5 });
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  await tick(30);
+  assert.equal(h.calls.started.length, 1);
+  auto.setEnabled(c.id, false);
+  await tick(2600);
+  assert.equal(h.calls.started.length, 1, 'a disarmed script does not come back');
 });
 
 test('script state survives, is bounded, and timers have a floor', async () => {
@@ -563,10 +671,16 @@ test('a daily schedule fires its rule with only the global facts; a code script 
   const s = saved(rulesScript({}, { trigger: 'schedule', atHHMM: '23:55', conditions: [{ field: 'walletSol', op: 'lt', value: 0.5 }], actions: [{ type: 'notify', message: 'low wallet: {walletSol} SOL' }, { type: 'sell_all' }] }));
   auto.setEnabled(s.id, true);
   assert.deepEqual(auto._runtimeOf(s.id).atTimers, ['23:55'], 'armed on enable');
-  h.book.paper.push(h.pos(MINT, 0.1), h.pos(MINT2, 0.1));
+  h.book.paper.push(h.pos(MINT, 0.1), h.pos(MINT2, 0.1), h.pos(MINT3, 9));
+  // "Sell everything" means everything THIS SCRIPT holds. It opens two; the
+  // third is the user's own bag and must survive.
+  auto.onSandboxMessage(s.id, { t: 'call', id: 80, method: 'buy', args: [MINT, 0.02] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 81, method: 'buy', args: [MINT2, 0.02] });
+  await tick();
   await auto._fireSchedule(s.id, '23:55');
   assert.deepEqual(h.calls.notifies, ['low wallet: 0.200 SOL']);
-  assert.equal(h.calls.sells.length, 2, 'sell everything sold both');
+  assert.equal(h.calls.sells.length, 2, 'sell everything sold only what the script opened');
+  assert.deepEqual(h.calls.sells.map((x) => x.mint).sort(), [MINT, MINT2].sort(), 'the users own bag is untouched');
   const c = saved(codeScript({ name: 'sched' }));
   auto.setEnabled(c.id, true);
   await tick();
@@ -616,6 +730,36 @@ test('advanced orders: a PAPER script notes them; a LIVE script places them, and
   assert.equal(h2.calls.replies.find((r) => r.cid === 4).value.ok, true);
   assert.equal(h2.calls.replies.find((r) => r.cid === 5).value.cancelled, 1);
   assert.equal(h2.calls.replies.find((r) => r.cid === 6).ok, false, 'an unknown order kind never reaches the host');
+});
+
+test('a limit order needs an absolute level: a percent basis is refused, not read as a market cap', async () => {
+  const h = setup();
+  const c = saved(codeScript({ mode: 'live' }));
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'order', args: [{ mint: MINT, kind: 'limit_buy', triggerBasis: 'pct', triggerValue: 20, amount: 0.01 }] });
+  await tick();
+  assert.equal(h.calls.orders.length, 0, 'no order armed at $20 market cap');
+  const reply = h.calls.replies.find((r) => r.cid === 1);
+  assert.equal(reply.ok, false);
+  assert.match(reply.error, /price_sol or mcap_usd/);
+});
+
+test('a disabled script gets no answers, and a market lookup costs an action', async () => {
+  const h = setup({ market: { [MINT]: { liquidityUsd: 1 } } });
+  const c = saved(codeScript({ budget: { maxSolPerTrade: 0.05, maxBuysPerDay: 10, maxLossSolPerDay: 1, maxOpenPositions: 5, maxActionsPerMinute: 2 } }));
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'market', args: [MINT] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'market', args: [MINT] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'market', args: [MINT] });
+  await tick(30);
+  assert.equal(h.calls.replies.find((r) => r.cid === 3).ok, false, 'the third is over the minute budget');
+  assert.match(h.calls.replies.find((r) => r.cid === 3).error, /actions in a minute/);
+  auto.setEnabled(c.id, false);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 4, method: 'wallet', args: [] });
+  await tick();
+  const off = h.calls.replies.find((r) => r.cid === 4);
+  assert.equal(off.ok, false);
+  assert.match(off.error, /disabled/);
 });
 
 test('watch pins and streams; alert, template, wallet, leaders, runners and disable all go through the host', async () => {
@@ -714,6 +858,78 @@ test('a refused buy ends the firing — the "log bought" after it never runs —
   assert.ok(lines.some((l) => /refused — buy TWO: 1 buys today already/.test(l)));
   assert.ok(!lines.some((l) => /^TWO bought/.test(l)), 'no "bought" line after a refused buy');
   assert.equal(h.calls.buys.length, 1);
+});
+
+// ── Release audit 2026-09-09: three walls that were not there ─────────
+
+test('a script sells its OWN slice, not the whole wallet bag', async () => {
+  const h = setup();
+  const s = saved(rulesScript({ name: 'Slice' }));
+  auto.setEnabled(s.id, true);
+  // The script buys 0.02 SOL of it...
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  await tick();
+  // ...and the user then hand-adds to the same bag, so the wallet position is
+  // 1.0 SOL. Before the fix, `sell 100%` here emptied all of it: the guard was
+  // mint-granular (did this script open it?) but never size-granular.
+  h.book.paper[0].costSol = 1.0;
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100] });
+  await tick(30);
+  assert.equal(h.calls.sells.length, 1, 'the sell went through');
+  assert.equal(h.calls.sells[0].pct, 2, '100% of a 0.02/1.0 share is 2% of the wallet holding');
+});
+
+test('a share too small to round to a percent can still exit', async () => {
+  const h = setup();
+  const s = saved(rulesScript({ name: 'Dust' }));
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.001] });
+  await tick();
+  h.book.paper[0].costSol = 1000;
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100] });
+  await tick(30);
+  // 0.0001% rounds to 0, and a limit must never block an exit — so it floors
+  // at 1, never at nothing.
+  assert.equal(h.calls.sells[0].pct, 1, 'a rounding-to-zero share still sells 1%');
+});
+
+test('changing mode drops the positions the script claimed in the other one', async () => {
+  const h = setup();
+  const s = saved(rulesScript({ name: 'Flip' }));
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  await tick();
+  assert.deepEqual(auto._runtimeOf(s.id).opened, [MINT], 'the paper buy is claimed');
+
+  // `opened` is the authority to SELL. Carried into live, a script that only
+  // ever rehearsed on paper could market-sell a real hand-bought bag on its
+  // first live action.
+  const after = saved({ ...auto.all().find((x) => x.id === s.id), mode: 'live' });
+  assert.equal(after.mode, 'live');
+  assert.deepEqual(auto._runtimeOf(s.id).opened, [], 'and dropped on the way across');
+  assert.equal(after.enabled, false, 'switching to live still disarms');
+});
+
+test('bot.order cannot arm more buys than the budget allows, however fast it is called', async () => {
+  const h = setup();
+  const s = saved(rulesScript({ name: 'Race', mode: 'live', budget: { ...defaultScript('rules').budget, maxBuysPerDay: 1, maxSolPerTrade: 0.05, maxActionsPerMinute: 120 } }));
+  auto.setEnabled(s.id, true);
+  // buy_on_migration has no rule form, so it places directly — the one
+  // spending path that used to sit outside the per-script chain. Measured
+  // before the fix: 36 orders armed and 1.80 SOL committed against this exact
+  // budget.
+  for (let i = 0; i < 12; i++) {
+    auto.onSandboxMessage(s.id, {
+      t: 'call',
+      id: 100 + i,
+      method: 'order',
+      args: [{ mint: MINT, kind: 'buy_on_migration', triggerBasis: 'price_sol', triggerValue: 0.001, amount: 0.05 }],
+    });
+  }
+  await tick(200);
+  const armed = h.calls.orders.filter((o) => o.kind === 'buy_on_migration');
+  assert.equal(armed.length, 1, `the budget is 1 buy a day, ${armed.length} were armed`);
+  assert.equal(auto._runtimeOf(s.id).buysToday, 1, 'and exactly one was reserved');
 });
 
 async function run() {

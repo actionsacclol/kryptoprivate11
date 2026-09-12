@@ -4,6 +4,7 @@ import assert from 'node:assert';
 import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction, TransactionInstruction } from '@solana/web3.js';
 import { checkOutflowForTest } from './.signpolicy.mjs';
 import { parseFile } from './.walletstore.mjs';
+import { planFanout } from './.fanout.mjs';
 
 const me = Keypair.generate();
 const a = Keypair.generate().publicKey.toBase58();
@@ -98,5 +99,21 @@ const ME = me.publicKey.toBase58();
   const g2 = f.groups.find((g) => g.id === 'g2');
   assert.equal(g2?.lab, undefined, 'an invalid lab block is dropped rather than persisted');
   console.log('ok  parseFile keeps valid lab settings, fills defaults, drops invalid ones');
+}
+
+// ── a non-finite jitter or floor never yields a plan of NaN shares ────
+{
+  const ws = ['A', 'B', 'C'];
+  for (const bad of [NaN, Infinity, -Infinity, undefined, null, 'wide']) {
+    const p = planFanout(ws, { mode: 'total', amountSol: 0.3, jitter: bad, minSol: 0.05 });
+    assert.equal(p.ok, true, `jitter ${String(bad)}: ${p.message}`);
+    assert.equal(p.shares.length, 3);
+    assert.ok(p.shares.every((s) => Number.isFinite(s.lamports) && s.lamports > 0), `jitter ${String(bad)} produced a NaN share`);
+    assert.equal(p.shares.reduce((a, s) => a + s.lamports, 0), p.totalLamports, 'and the split still sums to the total');
+  }
+  // The floor is the same class of bug: a NaN minimum silently means no floor.
+  const nan = planFanout(ws, { mode: 'same', amountSol: 0.01, minSol: NaN });
+  assert.ok(nan.shares.every((s) => Number.isFinite(s.lamports)));
+  console.log('ok  fan-out: a non-finite jitter or minimum is treated as 0, never as NaN shares');
 }
 console.log('labguards: all tests passed');

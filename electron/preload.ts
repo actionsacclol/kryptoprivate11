@@ -2,11 +2,15 @@
 // (guidelines §4.4). Every event subscription returns a cleanup function.
 
 import { contextBridge, ipcRenderer } from 'electron';
+import type { LaunchDraft } from '@shared/launch';
+import type { SwapDraft } from '@shared/swap';
+import type { BridgeDraft } from '@shared/bridge';
 import type { AppSettings, EngineEvent } from '@shared/types';
 import type { CandleInterval, DiscoverColumn, StatsWindow } from '@shared/market';
 import type { NewOrderRequest } from '@shared/orders';
 import type { NewAlertRequest } from '@shared/alerts';
 import type { CopyConfig } from '@shared/copytrade';
+import type { EvmChainKind } from '@shared/evm';
 
 const api = {
   app: {
@@ -116,8 +120,8 @@ const api = {
     generateMany: (count: number, labelPrefix?: string, groupId?: string) => ipcRenderer.invoke('lab:generateMany', count, labelPrefix ?? '', groupId ?? ''),
     setFollow: (groupId: string, cfg: unknown) => ipcRenderer.invoke('lab:setFollow', groupId, cfg),
     setRandom: (groupId: string, cfg: unknown) => ipcRenderer.invoke('lab:setRandom', groupId, cfg),
-    fund: (targets: Array<{ walletId: string; sol: number }>) => ipcRenderer.invoke('lab:fund', targets),
-    collect: (walletIds: string[]) => ipcRenderer.invoke('lab:collect', walletIds),
+    fund: (targets: Array<{ walletId: string; sol: number }>, fromWalletId?: string) => ipcRenderer.invoke('lab:fund', targets, fromWalletId ?? null),
+    collect: (walletIds: string[], toWalletId?: string) => ipcRenderer.invoke('lab:collect', walletIds, toWalletId ?? null),
     randomStart: (groupId: string, walletIds?: string[]) => ipcRenderer.invoke('lab:randomStart', groupId, walletIds ?? null),
     randomStop: (groupId: string) => ipcRenderer.invoke('lab:randomStop', groupId),
     status: () => ipcRenderer.invoke('lab:status'),
@@ -179,6 +183,113 @@ const api = {
   gifs: {
     search: (provider: 'giphy' | 'tenor', query: string) => ipcRenderer.invoke('gifs:search', provider, query),
     pick: (provider: 'giphy' | 'tenor', id: string) => ipcRenderer.invoke('gifs:pick', provider, id),
+  },
+  // EVM chains — Robinhood Chain and BNB Smart Chain (shared/evm.ts). Every
+  // call names the chain first; addresses, columns and amounts only — the
+  // RPC endpoint is a setting, never an argument here. The wallet list is
+  // shared across EVM chains (same key, same address); balances, arm state,
+  // fills and positions are per chain.
+  /** Wallet Scout — top traders per chain, over a window. `scan` reads past
+   *  trades into the record; it spends nothing and can be cancelled. */
+  scout: {
+    top: (chain: string, window: string, sort: string, limit?: number) =>
+      ipcRenderer.invoke('scout:top', chain, window, sort, limit ?? 50),
+    saved: (chain: string, window: string) => ipcRenderer.invoke('scout:saved', chain, window),
+    save: (chain: string, address: string, on: boolean) => ipcRenderer.invoke('scout:save', chain, address, on),
+    scan: (chain: string, hours: number) => ipcRenderer.invoke('scout:scan', chain, hours),
+    scanStatus: (chain: string) => ipcRenderer.invoke('scout:scanStatus', chain),
+    scanCancel: (chain: string) => ipcRenderer.invoke('scout:scanCancel', chain),
+  },
+
+  // Creating a token. `pickImage` and `upload` touch no chain; `preview` asks
+  // a chain and broadcasts nothing; `send` is the one that makes something
+  // that cannot be unmade.
+  // Cross-chain transfers. `state` is free; `quote` spends a scarce token;
+  // `send` is the one that puts funds in a third party's hands.
+  bridge: {
+    state: () => ipcRenderer.invoke('bridge:state'),
+    quote: (draft: BridgeDraft) => ipcRenderer.invoke('bridge:quote', draft),
+    send: (draft: BridgeDraft, simulateOnly: boolean) => ipcRenderer.invoke('bridge:send', draft, simulateOnly),
+    refresh: () => ipcRenderer.invoke('bridge:refresh'),
+  },
+
+  // Wallet Utilities swapper. `balance` and `quote` touch no key.
+  swap: {
+    balance: (mint: string, chain: string) => ipcRenderer.invoke('swap:balance', mint, chain),
+    quote: (draft: SwapDraft) => ipcRenderer.invoke('swap:quote', draft),
+    execute: (draft: SwapDraft, simulateOnly: boolean) => ipcRenderer.invoke('swap:execute', draft, simulateOnly),
+  },
+
+  update: {
+    status: () => ipcRenderer.invoke('app:updateStatus'),
+    check: () => ipcRenderer.invoke('app:checkForUpdate'),
+  },
+
+  launch: {
+    pickImage: () => ipcRenderer.invoke('launch:pickImage'),
+    upload: (filePath: string, fields: Record<string, string>) => ipcRenderer.invoke('launch:upload', filePath, fields),
+    /** Creator fees this install's launch wallet has accrued, across every
+     *  coin it launched — the vault is per creator, not per token. */
+    fees: () => ipcRenderer.invoke('launch:fees'),
+    claimFees: () => ipcRenderer.invoke('launch:claimFees'),
+    preview: (draft: LaunchDraft) => ipcRenderer.invoke('launch:preview', draft),
+    send: (draft: LaunchDraft) => ipcRenderer.invoke('launch:send', draft),
+  },
+
+  evm: {
+    state: (chain: EvmChainKind) => ipcRenderer.invoke('evm:state', chain),
+    // Per-chain Observatory. The chain is always an argument — there is no
+    // "current chain" here, because the three are isolated.
+    scan: {
+      status: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:status', chain),
+      launches: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:launches', chain),
+      model: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:model', chain),
+      start: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:start', chain),
+      stop: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:stop', chain),
+    },
+    arm: (chain: EvmChainKind) => ipcRenderer.invoke('evm:arm', chain),
+    disarm: (chain: EvmChainKind) => ipcRenderer.invoke('evm:disarm', chain),
+    wallet: {
+      info: (chain: EvmChainKind) => ipcRenderer.invoke('evm:wallet:info', chain),
+      list: (chain: EvmChainKind) => ipcRenderer.invoke('evm:wallet:list', chain),
+      // The LIST of keys is shared by both EVM chains, but which one signs
+      // is each chain's own choice (since 2026-09-11), and the INFO that comes
+      // back is per chain (symbol, balance, active) — so every call names the
+      // chain it is answering for, FIRST. main reads them in this order; the
+      // ipccontract test pins it.
+      generate: (chain: string, label?: string) => ipcRenderer.invoke('evm:wallet:generate', chain, label ?? ''),
+      import: (chain: string, secret: string, label?: string) => ipcRenderer.invoke('evm:wallet:import', chain, secret, label ?? ''),
+      select: (chain: string, id: string) => ipcRenderer.invoke('evm:wallet:select', chain, id),
+      assign: (chain: string, id: string) => ipcRenderer.invoke('evm:wallet:assign', chain, id),
+      rename: (chain: string, id: string, label: string) => ipcRenderer.invoke('evm:wallet:rename', chain, id, label),
+      remove: (chain: string, id?: string) => ipcRenderer.invoke('evm:wallet:remove', chain, id),
+      exportAll: () => ipcRenderer.invoke('evm:wallet:export'),
+      refreshBalance: (chain: EvmChainKind) => ipcRenderer.invoke('evm:wallet:refreshBalance', chain),
+      refreshAll: (chain: EvmChainKind) => ipcRenderer.invoke('evm:wallet:refreshAll', chain),
+    },
+    discover: (chain: EvmChainKind, column: DiscoverColumn, limit: number) => ipcRenderer.invoke('evm:discover', chain, column, limit),
+    summary: (chain: EvmChainKind, address: string) => ipcRenderer.invoke('evm:summary', chain, address),
+    token: (chain: EvmChainKind, address: string) => ipcRenderer.invoke('evm:token', chain, address),
+    candles: (chain: EvmChainKind, address: string, interval: CandleInterval, limit: number) =>
+      ipcRenderer.invoke('evm:candles', chain, address, interval, limit),
+    quote: (chain: EvmChainKind, side: 'buy' | 'sell', address: string, amount: number) => ipcRenderer.invoke('evm:quote', chain, side, address, amount),
+    buy: (chain: EvmChainKind, address: string, amountNative: number, simulateOnly: boolean) => ipcRenderer.invoke('evm:buy', chain, address, amountNative, simulateOnly),
+    sell: (chain: EvmChainKind, address: string, pct: number, simulateOnly: boolean) => ipcRenderer.invoke('evm:sell', chain, address, pct, simulateOnly),
+    /** Get out of everything on this chain. Never simulated. */
+    sellAll: (chain: EvmChainKind) => ipcRenderer.invoke('evm:sellAll', chain),
+    holdings: (chain: EvmChainKind) => ipcRenderer.invoke('evm:holdings', chain),
+    portfolio: (chain: EvmChainKind) => ipcRenderer.invoke('evm:portfolio', chain),
+    fills: (chain: EvmChainKind) => ipcRenderer.invoke('evm:fills', chain),
+    track: (chain: EvmChainKind, address: string, on: boolean) => ipcRenderer.invoke('evm:track', chain, address, on),
+  },
+  // Published reward campaigns (Merkl). A chain and nothing else: `wallet`
+  // deliberately takes NO address — main resolves this install's own EVM
+  // address from the wallet store, so the renderer never has to be trusted
+  // with one, and no URL crosses this boundary in either direction.
+  rewards: {
+    opportunities: (chain: EvmChainKind) => ipcRenderer.invoke('rewards:opportunities', chain),
+    /** Sends this wallet's address to Merkl. User-triggered only. */
+    wallet: (chain: EvmChainKind) => ipcRenderer.invoke('rewards:wallet', chain),
   },
   market: {
     providers: () => ipcRenderer.invoke('market:providers'),

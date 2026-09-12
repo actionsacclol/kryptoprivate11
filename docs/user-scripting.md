@@ -23,9 +23,13 @@ order, and recorded on the script's log with its reason when refused.
 | Daily realised loss past the cap **disables** the script | `act()` after every sell (paper exact; live from the position's PnL at the moment of the sell — an estimate, and it counts) |
 | A live buy is also capped by `execution.maxLiveSol` and blocked by the same reasons as an order | `act()` via `liveBlockedReason` / `buyBlockedReason` |
 | An unknown fact never satisfies a rule | `conditionHolds` |
-| Five errors in a row disable a code script; a handler past 3 s is killed | `automation.ts` + `scriptSandbox.ts` watchdog |
-| Kill switch: everything off, nothing enables until lifted | `setKillSwitch` |
-| Code cannot reach keys, files, Node or the network | sandboxed renderer, own session partition, every request cancelled |
+| A start that STALLS is retried 3 times with backoff, not disarmed; a script whose body throws is disarmed at once | `automation.ts` `startCode` |
+| Five errors in a row disable a code script; a handler past 3 s is killed | `automation.ts` + `scriptSandbox.ts` watchdog — the deadline is cleared by the RENDERER answering a liveness probe, never by a `done` the page could forge |
+| Kill switch: everything off, nothing enables until lifted | `setKillSwitch`, re-read after every await and again before the buy |
+| A script may only sell what IT opened; `held` and `bot.positions()` mean this script's positions | `act()` sell / sell_all / order, `ctxFor`, `pollPositions` |
+| One action at a time per script, so N events in a tick cannot each read the same pre-buy counters | `act()` per-script chain |
+| A per-mint cooldown survives a restart | persisted with `firedMints` |
+| Code cannot reach keys, files, Node or the network — WebRTC included | sandboxed renderer, own session partition, every request cancelled, and the renderer pinned to `disable_non_proxied_udp` with the partition's proxy forced direct, so no ICE candidate, STUN lookup or data channel can leave |
 
 The sandbox is a hidden `BrowserWindow` with `sandbox: true`, `contextIsolation`,
 no Node, `devTools: false`, on the `script-sandbox` partition whose
@@ -33,7 +37,18 @@ no Node, `devTools: false`, on the `script-sandbox` partition whose
 load. Its preload (`electron/scriptPreload.ts`, built as its own entry) exposes
 one channel. Main attributes each message to the window it came from, never to
 anything the message says, and `parseFromSandbox` drops anything malformed.
-`npm run test:sandbox` proves all of this in a real Electron process.
+`npm run test:sandbox` proves all of this in a real Electron process (20 checks,
+including `rtcBlocked`, a forged `done` that is still killed on time, an
+11 s top-level `await` that starts anyway, and a missing preload reported as a
+broken install rather than a bare timeout).
+CSP3's `webrtc 'block'` is in the page CSP and Chromium 43 ignores it —
+measured: nine host candidates with the directive set, zero once the IP
+handling policy is applied. Deleting `RTCPeerConnection` from the page realm is
+not a fix either, since `window[0]` hands back a fresh one. The
+preload is deliberately EXCLUDED from the V8 bytecode step: a sandboxed preload
+has no Node `require`, so a bytenode stub throws on its first line and every
+code script dies with nothing but a start timeout. `scripts/harden-bytecode.mjs`
+asserts it.
 
 ## Rules
 
@@ -93,7 +108,7 @@ trailing exit, runner alert to watchlist).
 `shared/scriptProtocol.ts` (wire + harness page), `electron/scriptPreload.ts`,
 `electron/system/scriptSandbox.ts`, `electron/engine/automation.ts` (registry,
 budgets, dispatch), engine host wiring in `engine.ts`, IPC `automation:*`,
-`src/pages/Scripts.tsx`. Tests: `test/automation.test.mjs` (29),
+`src/pages/Scripts.tsx`. Tests: `test/automation.test.mjs` (37),
 `test/scriptprotocol.test.mjs` (5), `test/scriptsandbox.live.mjs` (real Electron).
 
 ## Verified end to end (2026-09-08)
@@ -108,6 +123,29 @@ no script errors; cleanup removed everything. Three things that run surfaced
 were fixed the same day: a refused trade now ends the firing (the "log bought"
 after it no longer runs), tiny prices print with precision in messages, and a
 sandbox stopped by the script's own `disable` is not counted as an error.
+
+## Starting a code script, and the eight-second timeout
+
+Users hit `DISABLED — could not start: no ready within 8000 ms`. The sandbox
+signals twice now, so the two causes behind that one message are separable:
+
+- **`alive`** is the harness's first statement, sent before the user's code is
+  compiled. Missing it means the preload never installed the bridge, i.e. a
+  broken install, not a problem with the script. `preload-error` is subscribed
+  too, so the real reason reaches the script log; nothing listened to it
+  before, which is why every preload failure looked identical. Budget: 4 s.
+- **`ready`** is sent after the script's top-level code finishes. Top-level
+  `await` is allowed, so that budget belongs to the USER's code: one
+  `await bot.market(...)` behind a parked provider can outlast 8 s. On that
+  deadline the renderer is probed for liveness — the same probe the handler
+  watchdog uses — and a renderer that answers is given more time, up to 30 s
+  total. One that does not answer is a synchronous runaway and is killed at
+  once, whatever the clock says.
+
+A stalled start is retried three times (2 s, 5 s, 15 s) and the script stays
+armed while it retries. A script whose body throws is not retried: it would
+throw identically every time, so it disarms immediately with the error.
+Disarming, the kill switch, or a newer start all cancel a pending retry.
 
 ## Not done yet
 

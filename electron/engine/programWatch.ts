@@ -18,6 +18,11 @@ export interface ProgramCheck {
   changed: boolean;
   message: string;
   deployedSlot?: number;
+  /** The ProgramData address this reading came from. The baseline compares it
+   *  as well as the slot, so re-recording MUST use the address just observed,
+   *  not the one already stored — otherwise a redeploy that also moved the
+   *  ProgramData account would keep firing forever. */
+  programdata?: string;
 }
 
 interface Baseline {
@@ -78,7 +83,7 @@ export async function checkProgram(httpUrl: string, programId: string): Promise<
   if (!prev) {
     baselines[programId] = { programdata: programdataAddr, deployedSlot, recordedAt: Date.now() };
     saveBaselines(baselines);
-    return { ok: true, changed: false, message: `baseline recorded (deploy slot ${deployedSlot})`, deployedSlot };
+    return { ok: true, changed: false, message: `baseline recorded (deploy slot ${deployedSlot})`, deployedSlot, programdata: programdataAddr };
   }
   if (prev.deployedSlot !== deployedSlot || prev.programdata !== programdataAddr) {
     return {
@@ -86,13 +91,18 @@ export async function checkProgram(httpUrl: string, programId: string): Promise<
       changed: true,
       message: `program redeployed: slot ${prev.deployedSlot} → ${deployedSlot}`,
       deployedSlot,
+      programdata: programdataAddr,
     };
   }
-  return { ok: true, changed: false, message: `unchanged (deploy slot ${deployedSlot})`, deployedSlot };
+  return { ok: true, changed: false, message: `unchanged (deploy slot ${deployedSlot})`, deployedSlot, programdata: programdataAddr };
 }
 
-/** After a human re-verifies the decoder against the new deployment,
- *  the baseline can be re-recorded. Exposed for a future UI action. */
+/** Re-record the baseline once the decoder has been re-verified against the
+ *  new deployment. Called by the engine's automatic re-verification, which
+ *  re-reads Global, a live bonding curve and a confirmed on-chain trade and
+ *  only gets here when all three still match this build (decoderVerify.ts).
+ *  Nothing else may call this: recording a baseline is what lifts the pause,
+ *  and it must never be a way to skip the checks. */
 export function acceptCurrent(programId: string, deployedSlot: number, programdata: string): void {
   const baselines = loadBaselines();
   baselines[programId] = { programdata, deployedSlot, recordedAt: Date.now() };

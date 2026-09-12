@@ -3,14 +3,54 @@
 // from the Wallet page — nobody can recover one.
 
 import { useState } from 'react';
-import { KeyRound, RefreshCw, Trash2 } from 'lucide-react';
+import { Check, Copy, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
 import type { WalletGroupView } from '@shared/types';
 import { Badge, Card, Empty, GhostButton, NumberInput, Page, PrimaryButton, Section } from '../../components/common';
 import { useModal } from '../../state/ModalProvider';
 import { useToast } from '../../state/ToastProvider';
-import { cls, shortAddr } from '../../utils/format';
+import { cls } from '../../utils/format';
 import { groupBalance, inputCls, selectCls, useLabData } from './shared';
 import { SwitchToPaper } from '../../components/SwitchToPaper';
+
+/**
+ * The wallet's full address, click to copy.
+ *
+ * It used to be truncated to six characters at each end, which is fine for
+ * recognising a wallet and useless for the thing people actually do here: send
+ * it money. A group wallet is empty until someone funds it from outside the
+ * app, so the address has to be readable and copyable without a detour through
+ * a details panel.
+ *
+ * `select-all` means a drag selects the whole thing rather than a word, for
+ * anyone who prefers selecting to clicking.
+ */
+function WalletAddress({ value }: { value: string }) {
+  const toast = useToast();
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        void navigator.clipboard.writeText(value).then(
+          () => {
+            setCopied(true);
+            toast.success('Address copied');
+            setTimeout(() => setCopied(false), 1200);
+          },
+          () => toast.error('Could not copy — select the address and copy it by hand'),
+        );
+      }}
+      title="Copy this wallet's address"
+      className="group/addr mt-0.5 flex w-full items-center gap-1.5 text-left"
+    >
+      <span className="select-all truncate font-mono text-[10px] text-krypt-muted group-hover/addr:text-white/70">{value}</span>
+      {copied ? (
+        <Check className="h-3 w-3 shrink-0 text-emerald-400" />
+      ) : (
+        <Copy className="h-3 w-3 shrink-0 text-krypt-muted/50 group-hover/addr:text-krypt-purple" />
+      )}
+    </button>
+  );
+}
 
 export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const toast = useToast();
@@ -39,6 +79,19 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
   };
   const deleteGroup = async (g: WalletGroupView): Promise<void> => {
     if (runs.some((r) => r.groupId === g.id && r.running)) return toast.error('Stop this group’s warmer run first');
+    // A run is only ever rendered THROUGH its group, and every run comes back
+    // from a restart not running — so deleting the group of a stopped run with
+    // open bags hides those bags for good. They keep selling on their timers
+    // with nowhere to report it.
+    const openBags = runs.filter((r) => r.groupId === g.id).flatMap((r) => r.open);
+    if (openBags.length) {
+      return toast.error(
+        `This group’s warmer still holds ${openBags.length} bag(s): ${openBags
+          .map((o) => o.symbol || o.mint.slice(0, 6))
+          .slice(0, 4)
+          .join(', ')}${openBags.length > 4 ? '…' : ''}. Sell them first — deleting the group would hide them.`,
+      );
+    }
     const yes = await modal.confirm({
       title: `Delete group “${g.name}”`,
       message: 'The wallets stay; only the grouping and its follow / warmer settings are removed.',
@@ -245,7 +298,10 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
                     w.active ? 'border-krypt-purple/50 bg-krypt-purple/10' : 'border-white/8 bg-white/[0.02]',
                   )}
                 >
-                  <div className="min-w-0 flex-1">
+                  {/* basis gives the address room to render in full before
+                      anything else claims width; a 44-character key at 10px is
+                      about 17rem. */}
+                  <div className="min-w-0 flex-1 basis-[17rem]">
                     {renaming === w.id ? (
                       <input
                         autoFocus
@@ -270,9 +326,9 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
                         {w.label}
                       </button>
                     )}
-                    <div className="font-mono text-[10px] text-krypt-muted">{shortAddr(w.publicKey, 6)}</div>
+                    <WalletAddress value={w.publicKey} />
                   </div>
-                  <span className="text-[10px] text-krypt-muted/70">
+                  <span className="min-w-0 shrink truncate text-[10px] text-krypt-muted/70">
                     {groups.filter((g) => g.members.some((m) => m.id === w.id)).map((g) => g.name).join(', ') || 'no group'}
                   </span>
                   {w.active && <Badge tone="gradient">active</Badge>}

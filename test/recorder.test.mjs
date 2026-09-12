@@ -162,4 +162,31 @@ const MIN = 60_000;
   console.log('ok  stats + reset');
 }
 
+{
+  // The EVM scanners write into the SAME tape format — `tape_create` /
+  // `tape_trade` / `tape_complete` with a `chain` field — so one corpus covers
+  // all three chains and this filter applies to them unchanged. If that ever
+  // stops being true, an overnight BNB run silently records nothing.
+  const f = new LaunchFilter();
+  const t0 = 1_800_000_000_000;
+  const TOKEN = '0xabc0000000000000000000000000000000000001';
+
+  assert.equal(f.accept('tape_create', { chain: 'bnb', mint: TOKEN, receivedAt: t0 }, t0), true, 'an EVM launch is kept');
+  assert.equal(f.accept('tape_trade', { chain: 'bnb', mint: TOKEN, receivedAt: t0 + 1000 }, t0 + 1000), true, 'and its early trades');
+  assert.equal(
+    f.accept('tape_trade', { chain: 'bnb', mint: TOKEN, receivedAt: t0 + LAUNCH_WINDOW_MS + 1000 }, t0 + LAUNCH_WINDOW_MS + 1000),
+    false,
+    'a trade past the window is dropped, exactly as on Solana',
+  );
+  assert.equal(f.accept('tape_complete', { chain: 'robinhood', mint: TOKEN, receivedAt: t0 }, t0), true, 'a graduation is always kept');
+
+  // The scanner's own session markers must survive launch mode, or a
+  // day-file cannot say which feeds produced it.
+  assert.equal(f.accept('evm_scan_start', { chain: 'robinhood' }, t0), true);
+  assert.equal(f.accept('evm_scan_stop', { chain: 'robinhood' }, t0), true);
+  assert.equal(f.accept('evm_window', { chain: 'bnb', mint: TOKEN, windowS: 60 }, t0 + 60_000), true);
+
+  console.log('ok  EVM rows ride the same launch tape as Solana');
+}
+
 console.log('recorder (launch tape) tests passed');

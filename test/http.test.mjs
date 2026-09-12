@@ -6,14 +6,30 @@
 //      shortened by a later, smaller answer;
 //   3. priority calls bypass the park but are spaced among themselves.
 // No network: fetch is stubbed.
+//
+// Tests 8-13 are the API swarm of 2026-09-09 §1 and §7:
+//   8-11. a refusal that arrives with a SUCCESS status is still a refusal —
+//         it parks, it never un-parks, and legitimate data is untouched;
+//   12-13. Jupiter's host, gap and window all follow the user's key.
 import assert from 'node:assert';
-import { getJson, cooldownRemainingMs, parseRetryAfterMs } from './.http.mjs';
+import {
+  getJson,
+  cooldownRemainingMs,
+  parseRetryAfterMs,
+  classifyBody,
+  providerLimits,
+  setJupiterApiKey,
+  jupiterKeyed,
+} from './.http.mjs';
 
 let hits = [];
+let lastInit = null;
 function stubFetch(handler) {
   hits = [];
+  lastInit = null;
   globalThis.fetch = async (url, init) => {
     hits.push({ url: String(url), at: Date.now() });
+    lastInit = init;
     return handler(String(url), init, hits.length);
   };
 }
@@ -48,15 +64,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('ok  queued calls do not fire into a park');
 }
 
-// ── 2. Retry-After sets the park ─────────────────────────────────────────
+// ── 2. Retry-After may EXTEND the park, never shorten it ─────────────────
+//
+// Changed 2026-09-09. It used to replace the escalation outright, and two
+// shapes exploited that: GeckoTerminal answers `Retry-After: 0`, which floors
+// to 2 s and replaced 20 s — so the provider we have the least budget with
+// was re-entered fastest — and any provider repeating a short wait defeated
+// the 20 → 40 → 80 s ladder. Over-waiting only costs freshness; under-waiting
+// is what produced the 429 storms this machinery exists for.
 {
   stubFetch(() => res(429, '', { 'retry-after': '3' }));
   const r = await getJson('dexscreener', '/x');
   assert.equal(r.status, 429);
-  assert.match(r.message, /pausing 3s/);
   const cooling = cooldownRemainingMs('dexscreener');
-  assert.ok(cooling > 2_500 && cooling <= 3_000, `Retry-After: 3 → ~3 s park: ${cooling}`);
-  console.log('ok  Retry-After is honoured');
+  assert.ok(cooling > 18_000 && cooling <= 20_000, `a shorter Retry-After does not shorten the 20 s floor: ${cooling}`);
+  console.log('ok  a Retry-After shorter than our escalation does not shorten the park');
+}
+
+// A Retry-After LONGER than our escalation is still obeyed in full.
+{
+  stubFetch(() => res(429, '', { 'retry-after': '90' }));
+  const r = await getJson('birdeye', '/x');
+  assert.equal(r.status, 429);
+  const cooling = cooldownRemainingMs('birdeye');
+  assert.ok(cooling > 88_000 && cooling <= 90_000, `Retry-After: 90 → ~90 s park: ${cooling}`);
+  console.log('ok  a longer Retry-After is obeyed in full');
 }
 
 // ── 3. repeats escalate; a success clears; a smaller answer never shortens ──
@@ -117,6 +149,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ── 6. Retry-After parsing ───────────────────────────────────────────────
 {
   assert.equal(parseRetryAfterMs('3'), 3_000);
+  // The parser still floors a zero at 2 s. What changed 2026-09-09 is that
+  // `park()` no longer lets that 2 s REPLACE its own 20/40/80 s escalation —
+  // GeckoTerminal answers `Retry-After: 0`, and the provider we have the
+  // least budget with was the one we re-entered fastest.
   assert.equal(parseRetryAfterMs('0'), 2_000, 'floor: a zero cannot un-park');
   assert.equal(parseRetryAfterMs('99999'), 120_000, 'ceiling: a hostile header cannot park for an hour');
   assert.equal(parseRetryAfterMs('garbage'), null);
@@ -138,6 +174,150 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // pumpswap is still parked from test 1 — both fail fast, no hits.
   assert.equal(hits.length, 0);
   console.log('ok  a parked provider stays parked across the queue');
+}
+
+// ── 8. a 200 carrying a GeckoTerminal refusal parks, and never un-parks ──
+{
+  // GeckoTerminal answers a throttle with HTTP 200 and a JSON error body.
+  // Before 2026-09-09 that took the success path, which ran
+  // `blockedUntil.delete(id)` — so a polite refusal UN-PARKED a provider an
+  // honest 429 had just parked.
+  //
+  // Park it honestly first, for longer than the escalation would choose, so
+  // the assertion proves BOTH halves: the park survives, and it is not
+  // shortened by the polite refusal's own (shorter) length.
+  stubFetch(() => res(429, '', { 'retry-after': '60' }));
+  await getJson('geckoterminal', '/honest');
+  const parked = cooldownRemainingMs('geckoterminal');
+  assert.ok(parked > 55_000, `an honest 429 parked GeckoTerminal for 60 s: ${parked}`);
+
+  const refusal = JSON.stringify({
+    status: { error_code: 429, error_message: "You've exceeded the Rate Limit. Please visit our pricing page." },
+  });
+  stubFetch(() => res(200, refusal, { 'content-type': 'application/json' }));
+  const r = await getJson('geckoterminal', '/pretend', { priority: true });
+  assert.equal(hits.length, 1, 'the call went out — this is a 200, not a fail-fast');
+  assert.equal(r.ok, false, 'a 200 with a rate-limit body is NOT a success');
+  assert.equal(r.data, undefined, 'no data is handed to the caller');
+  assert.match(r.message, /rate limited/, `the message names the refusal: ${r.message}`);
+  assert.match(r.message, /exceeded the Rate Limit/, "the provider's own words are kept");
+  const after = cooldownRemainingMs('geckoterminal');
+  assert.ok(after > 55_000, `the existing park survived the polite refusal: ${after}`);
+  console.log('ok  a 200 carrying a refusal parks and does not clear an existing park');
+}
+
+// ── 9. a 200 carrying legitimate data is untouched ───────────────────────
+{
+  // The conservatism test. A false positive parks a working provider, which
+  // is worse than the bug — so a row whose own TEXT talks about rate limits
+  // must still be ordinary data.
+  const legit = JSON.stringify({
+    data: [{ symbol: 'RATELIMIT', name: 'Rate Limit', description: 'too many requests, ser' }],
+  });
+  stubFetch(() => res(200, legit, { 'content-type': 'application/json' }));
+  const r = await getJson('pumpfun', '/coins');
+  assert.equal(r.ok, true, 'legitimate data is still a success');
+  assert.equal(r.message, 'ok');
+  assert.equal(r.data.data[0].symbol, 'RATELIMIT', 'the payload is parsed and handed over unchanged');
+  assert.equal(cooldownRemainingMs('pumpfun'), 0, 'nothing was parked');
+  console.log('ok  legitimate data that talks about rate limits is left alone');
+}
+
+// ── 10. a JSON-RPC error inside a 200 ────────────────────────────────────
+{
+  // -32005 is "limit exceeded": a refusal, so it parks.
+  const limited = JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32005, message: 'Too many requests' } });
+  stubFetch(() => res(200, limited));
+  const r = await getJson('helius', '/rpc', { json: {} });
+  assert.equal(r.ok, false, 'a JSON-RPC error is not a success, whatever the HTTP status');
+  assert.match(r.message, /rate limited/);
+  const parked = cooldownRemainingMs('helius');
+  assert.ok(parked > 18_000, `a JSON-RPC rate limit takes the park path: ${parked}`);
+
+  // -32603 is an ordinary internal error: the call fails, but no park is
+  // invented — and, the point of the branch, none is cleared either.
+  const internal = JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32603, message: 'Internal error' } });
+  stubFetch(() => res(200, internal));
+  const r2 = await getJson('helius', '/rpc', { json: {}, priority: true });
+  assert.equal(r2.ok, false, 'an RPC error body never reads as success');
+  assert.match(r2.message, /Internal error/);
+  const still = cooldownRemainingMs('helius');
+  assert.ok(still > 18_000, `an error body does not clear the park either: ${still}`);
+  console.log('ok  JSON-RPC error bodies are classified, not accepted');
+}
+
+// ── 11. the classifier table itself ──────────────────────────────────────
+{
+  const json = { get: (n) => (n.toLowerCase() === 'content-type' ? 'application/json' : null) };
+  const none = { get: () => null };
+
+  // GeckoTerminal's other refusal form, the JSON:API error document.
+  assert.equal(
+    classifyBody('geckoterminal', 200, json, '{"errors":[{"status":"429","title":"Rate limit exceeded"}]}'),
+    'refused',
+  );
+  // Same shape, a different problem: not data, but not a throttle.
+  assert.equal(classifyBody('geckoterminal', 200, json, '{"errors":[{"status":"404","title":"Not found"}]}'), 'error');
+  // A JSON:API document that carries `data` is never second-guessed.
+  assert.equal(classifyBody('geckoterminal', 200, json, '{"data":[],"errors":[]}'), 'ok');
+  // A bare `error` string only counts when it names throttling...
+  assert.equal(classifyBody('dexscreener', 200, json, '{"error":"Too Many Requests"}'), 'refused');
+  // ...and never demotes a working response otherwise.
+  assert.equal(classifyBody('dexscreener', 200, json, '{"error":"no pools for this mint"}'), 'ok');
+  // An `error` field is not a JSON-RPC envelope without `jsonrpc`.
+  assert.equal(classifyBody('helius', 200, json, '{"id":1,"error":{"code":-32603,"message":"boom"}}'), 'ok');
+  assert.equal(classifyBody('helius', 200, none, '{"jsonrpc":"2.0","id":1,"error":{"code":-32603}}'), 'error');
+  // A batched RPC reply where one member was refused.
+  assert.equal(
+    classifyBody('helius', 200, none, '[{"jsonrpc":"2.0","id":1,"result":{}},{"jsonrpc":"2.0","id":2,"error":{"code":-32005,"message":"limit"}}]'),
+    'refused',
+  );
+  // Not JSON, not inspected. Too big, not inspected.
+  assert.equal(classifyBody('geckoterminal', 200, none, 'rate limit exceeded'), 'ok');
+  const huge = `{"error":"rate limit exceeded","pad":"${'x'.repeat(20_000)}"}`;
+  assert.equal(classifyBody('dexscreener', 200, none, huge), 'ok', 'a big body is data, and is waved through unread');
+  // An empty body is the "empty" success the layer already returns.
+  assert.equal(classifyBody('jupiter', 200, none, ''), 'ok');
+  console.log('ok  the refusal table matches only quoted shapes');
+}
+
+// ── 12. Jupiter's host, gap and window follow the key ────────────────────
+{
+  setJupiterApiKey('');
+  assert.equal(jupiterKeyed(), false);
+  const keyless = providerLimits('jupiter');
+  assert.equal(keyless.host, 'lite-api.jup.ag', 'no key keeps the host the app uses today');
+  assert.equal(keyless.gapMs, 120);
+  assert.deepEqual(keyless.window, { n: 500, ms: 60_000 }, 'the window is the gap ceiling — Jupiter had none at all');
+
+  setJupiterApiKey('  jup_test_key  ');
+  assert.equal(jupiterKeyed(), true, 'the key is trimmed, not rejected for the spaces around it');
+  const keyed = providerLimits('jupiter');
+  assert.equal(keyed.host, 'api.jup.ag', 'a key moves off the retiring endpoint');
+  assert.equal(keyed.gapMs, 1_000, 'and onto its documented 1 request/second');
+  assert.deepEqual(keyed.window, { n: 60, ms: 60_000 }, 'the window followed the host — 8 rps there is an instant park');
+
+  // No other provider moved.
+  assert.equal(providerLimits('geckoterminal').host, 'api.geckoterminal.com');
+  assert.deepEqual(providerLimits('geckoterminal').window, { n: 28, ms: 60_000 });
+  console.log('ok  the Jupiter gap and window follow the host');
+}
+
+// ── 13. the key rides in a header, on the keyed host ─────────────────────
+{
+  stubFetch(() => res(200, '[]'));
+  await getJson('jupiter', '/swap/v1/quote?x=1', { priority: true });
+  assert.equal(hits.length, 1);
+  assert.ok(hits[0].url.startsWith('https://api.jup.ag/'), `the request went to the keyed host: ${hits[0].url}`);
+  assert.ok(!hits[0].url.includes('jup_test_key'), 'the key is never in the URL — no URL crosses IPC, and URLs get logged');
+  assert.equal(lastInit.headers['x-api-key'], 'jup_test_key', 'it rides in the header instead');
+
+  setJupiterApiKey('');
+  stubFetch(() => res(200, '[]'));
+  await getJson('jupiter', '/tokens/v2/x', { priority: true });
+  assert.ok(hits[0].url.startsWith('https://lite-api.jup.ag/'), 'clearing the key returns to the keyless host');
+  assert.equal(lastInit.headers['x-api-key'], undefined, 'and sends no key header');
+  console.log('ok  the Jupiter key travels as a header, never in the URL');
 }
 
 console.log('\nhttp layer: all rate-limit rules hold');

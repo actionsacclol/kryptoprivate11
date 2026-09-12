@@ -90,7 +90,28 @@ export function spotPriceSol(virtualSolReserves: bigint, virtualTokenReserves: b
   return vSol / vTok;
 }
 
-/** How far along the bonding curve is, 0..100 — display only. */
+/** The curve is complete when its sellable supply (793.1 M tokens) is gone:
+ *  vTok has fallen from 1.073 B to 279.9 M. This is the actual completion
+ *  condition — the `complete` event and this floor coincided on 100 % of
+ *  2,266 graduations in the July tape (launchset-2026-08-30 README §3). */
+export const CURVE_SELLABLE_TOKENS = 793_100_000n * BigInt(TOKEN_FACTOR);
+export const CURVE_COMPLETE_VIRTUAL_TOKENS = INITIAL_VIRTUAL_TOKENS - CURVE_SELLABLE_TOKENS;
+
+/** Token-side curve progress, 0..100 — the share of the sellable supply
+ *  already sold. Valid in every curve regime. The SOL-side version below is
+ *  meaningless on "mixed" curves (vSol moves far more per SOL than constant
+ *  product allows, and mostly sits BELOW 30 SOL): on the 07-27 runner flags
+ *  it read 0 % on 70 % of them and 100 % on 2 %. Mixed curves were 76 % of
+ *  those flags and 91 % of the live September ones. */
+export function curveProgressTokenPct(virtualTokenReserves: bigint): number {
+  const sold = Number(INITIAL_VIRTUAL_TOKENS - virtualTokenReserves);
+  const pct = (sold / Number(CURVE_SELLABLE_TOKENS)) * 100;
+  return Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+}
+
+/** How far along the bonding curve is, 0..100 — display only. SOL-side:
+ *  only meaningful on classic constant-product curves; prefer
+ *  curveProgressTokenPct wherever vTok is at hand. */
 export function curveProgressPct(virtualSolReserves: bigint): number {
   const num = Number(virtualSolReserves - INITIAL_VIRTUAL_SOL);
   const den = Number(COMPLETE_VIRTUAL_SOL - INITIAL_VIRTUAL_SOL);

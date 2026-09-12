@@ -8,6 +8,7 @@ import { BotsPanel } from '../components/terminal/BotsPanel';
 import { AiSettingsPanel } from '../components/terminal/AiSettingsPanel';
 import { CreditMeter } from '../components/terminal/CreditMeter';
 import { RpcKeyWarning } from '../components/terminal/RpcKeyWarning';
+import { EvmSettingsCard } from '../components/terminal/EvmSettingsCard';
 import { feePctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
 import type { RecorderStats } from '../../electron/engine/recorder';
 
@@ -256,6 +257,33 @@ export function SettingsPage() {
             </div>
             <PrimaryButton onClick={saveRpc}>Save RPC settings</PrimaryButton>
           </div>
+
+          {/* ── the standby block feed ────────────────────────────────────
+              It has been on by default since it was built and had no control
+              anywhere in the app — `grep blockFeed src/` found nothing. It is
+              the single largest thing this app downloads, and a user on a
+              metered connection could not find it, let alone turn it off.
+              The DEFAULT is unchanged; what changes is that it is now
+              visible and switchable. */}
+          <div className="space-y-1.5 border-t border-white/5 pt-3">
+            <Switch
+              checked={settings.rpc.blockFeed ?? true}
+              onChange={(v) => void updateSettings({ rpc: { ...settings.rpc, blockFeed: v } })}
+              label="Standby block feed"
+              description={`Whole blocks over blockSubscribe, decoded from inner instructions. It loses every race while pump still emits log events and exists to take over the day those go quiet — measured 2026-09-09 at ~5.5 GB/h while scanning (~${(5.5 * 24).toFixed(0)} GB/day). Turn it off on a metered connection; nothing you do today depends on it.`}
+            />
+            {(settings.rpc.blockFeed ?? true) && (
+              <div className="flex items-center gap-2 text-xs text-amber-300">
+                <span>⚠</span> ~5.5 GB/h while the scanner runs. This is the largest thing the app downloads.
+              </div>
+            )}
+            <Switch
+              checked={settings.rpc.blockFeedAmm ?? false}
+              onChange={(v) => void updateSettings({ rpc: { ...settings.rpc, blockFeedAmm: v } })}
+              label="Standby block feed — post-graduation (pAMM)"
+              description="The same standby for graduated tokens. Off by default because the host ignores a program filter there, so it pulls ~11 GB/h. Unmetered connections only."
+            />
+          </div>
           {status.running && (
             <div className="space-y-1.5 border-t border-white/5 pt-3">
               <p className="text-xs text-amber-300">Engine is running — RPC changes apply on next start.</p>
@@ -345,6 +373,7 @@ export function SettingsPage() {
         </Card>
       </Section>
 
+      <EvmSettingsCard settings={settings} updateSettings={updateSettings} />
       <Section title="General">
         <div className="grid lg:grid-cols-2 gap-3">
           <Switch
@@ -386,13 +415,13 @@ export function SettingsPage() {
         </div>
       </Section>
 
-      <Section title="Display" description="For a machine whose graphics driver does not like the app: a blue screen mid-session, or a driver that keeps crashing.">
+      <Section title="Display" description="For a slow machine, or one whose graphics driver does not like the app: stutter, a blue screen mid-session, or a driver that keeps crashing.">
         <div className="grid lg:grid-cols-2 gap-3">
           <Switch
             checked={settings.reduceEffects}
             onChange={(v) => void updateSettings({ reduceEffects: v })}
-            label="Reduce effects"
-            description="Replaces the 3D observatory and vault scenes with a still. They render every frame through the GPU driver and are pure decoration. Takes effect on the next visit to the page."
+            label="Lite mode (reduce effects)"
+            description="Turns off every animation and transition, blur, glows and the star backdrop, and replaces the 3D observatory and vault scenes with a still — the app at its lightest. Same switch as the Hub's “Laggy?” button. Applies at once; the 3D scenes on the next visit to their page."
           />
           <Switch
             checked={settings.hardwareAcceleration}

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader2, Search } from 'lucide-react';
 import { imageSrc, type TokenSummary } from '@shared/market';
+import { EVM_CHAIN_META, isEvmChain, type ChainKind } from '@shared/evm';
+import { useTerminal } from '../../state/TerminalProvider';
 import { cls, fmtAge, fmtUsd, shortAddr } from '../../utils/format';
 
 // "Search / paste CA anywhere" (term.txt section 21). Ctrl+K from anywhere,
@@ -10,9 +12,18 @@ import { cls, fmtAge, fmtUsd, shortAddr } from '../../utils/format';
 // to the token loader, so pasting a contract address works even with every
 // third-party provider disabled.
 
-const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const SOL_MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+/** An EVM token address opens its own page the same way — on the selected
+ *  EVM chain, or Robinhood while Solana is selected, since the address alone
+ *  does not say which chain it lives on. */
+const EVM_RE = /^0x[0-9a-fA-F]{40}$/;
+const MINT_RE = { test: (s: string): boolean => SOL_MINT_RE.test(s) || EVM_RE.test(s) };
 
-export function TokenSearch({ onOpen }: { onOpen: (mint: string) => void }) {
+const chainLabel = (c: ChainKind): string => (c === 'solana' ? 'Solana' : EVM_CHAIN_META[c].shortName);
+
+export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKind) => void }) {
+  const { chain } = useTerminal();
+  const chainFor = (mint: string): ChainKind => (EVM_RE.test(mint) ? (isEvmChain(chain) ? chain : 'robinhood') : 'solana');
   const [query, setQuery] = useState('');
   const [rows, setRows] = useState<TokenSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -72,13 +83,13 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string) => void }) {
   const submit = (): void => {
     const q = query.trim();
     if (MINT_RE.test(q)) {
-      onOpen(q);
+      onOpen(q, chainFor(q));
       setQuery('');
       setOpen(false);
       return;
     }
     if (rows[0]) {
-      onOpen(rows[0].mint);
+      onOpen(rows[0].mint, rows[0].chain ?? chainFor(rows[0].mint));
       setQuery('');
       setOpen(false);
     }
@@ -118,21 +129,34 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string) => void }) {
             >
               <span className="rounded bg-krypt-purple/20 px-1.5 py-0.5 text-[9px] font-bold text-krypt-pink">CA</span>
               <span className="font-mono text-[11px] text-white truncate">{shortAddr(query.trim(), 8)}</span>
-              <span className="ml-auto text-[10px] text-krypt-muted">Open ↵</span>
+              {/* An address alone does not say which chain it lives on, so name
+                  the one it will actually open on — a BNB contract pasted while
+                  Robinhood is selected otherwise opens an empty Robinhood page. */}
+              <span className="ml-auto text-[10px] text-krypt-muted">
+                {chainLabel(chainFor(query.trim()))} · Open ↵
+              </span>
             </button>
           ) : loading ? (
             <div className="flex items-center justify-center py-4">
               <Loader2 className="h-4 w-4 animate-spin text-krypt-purple" />
             </div>
           ) : rows.length === 0 ? (
-            <div className="px-3 py-3 text-[11px] text-krypt-muted">No matches.</div>
+            <div className="px-3 py-3 text-[11px] text-krypt-muted">
+              No matches.
+              {isEvmChain(chain) && <span className="block mt-1 text-krypt-muted/70">Name search is Solana-only for now — paste a 0x contract address to open a token on {chain === 'bnb' ? 'BNB Smart Chain' : 'Robinhood Chain'}.</span>}
+            </div>
           ) : (
             <div className="max-h-[320px] overflow-y-auto">
+              {isEvmChain(chain) && (
+                <div className="px-3 py-1.5 text-[10px] text-arc-gold/80 border-b border-white/8">
+                  Name search is Solana-only for now — these are Solana tokens. Paste a 0x contract address for {chain === 'bnb' ? 'BNB Smart Chain' : 'Robinhood Chain'}.
+                </div>
+              )}
               {rows.map((t) => (
                 <button
                   key={t.mint}
                   onClick={() => {
-                    onOpen(t.mint);
+                    onOpen(t.mint, t.chain ?? chainFor(t.mint));
                     setQuery('');
                     setOpen(false);
                   }}

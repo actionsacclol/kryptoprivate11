@@ -10,9 +10,15 @@
 // touched the driver.
 
 import { useEffect, useState } from 'react';
+import { useLite } from '../../state/useLite';
 
 /** Null until the setting has been read; true = keep the scenes off. */
 export function useReduceEffects(): boolean | null {
+  // The lite store is the same setting, already known: while it says on, the
+  // scene stays off without waiting for the IPC read — and a page that is
+  // open when the Hub's "Laggy?" button is pressed tears its scene down
+  // rather than keeping it until the next visit.
+  const lite = useLite();
   const [reduce, setReduce] = useState<boolean | null>(null);
   useEffect(() => {
     let alive = true;
@@ -31,7 +37,7 @@ export function useReduceEffects(): boolean | null {
       alive = false;
     };
   }, []);
-  return reduce;
+  return lite ? true : reduce;
 }
 
 /** What stands in for a scene while it is off (or not yet known). */

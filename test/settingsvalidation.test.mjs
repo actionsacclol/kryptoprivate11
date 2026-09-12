@@ -258,6 +258,21 @@ console.log('settingsvalidation: all tests passed');
   assert.equal(v({ strategy: { runnerAlerts: { maxPerHour: 12 } } }).ok, true);
   assert.equal(v({ strategy: { runnerAlerts: { minBucket: 'bogus' } } }).ok, false);
   assert.equal(v({ strategy: { runnerAlerts: { minBucket: 'top1' } } }).ok, true);
+  // Four levels deep — the EVM chains' runner alerts. Until 2026-09-11 the
+  // walk stopped one level short and every one of these saved.
+  for (const chain of ['robinhood', 'bnb']) {
+    assert.equal(v({ evm: { [chain]: { runnerAlerts: { maxPerHour: 0 } } } }).ok, false, `${chain}: 0 an hour`);
+    assert.equal(v({ evm: { [chain]: { runnerAlerts: { maxPerHour: 99999 } } } }).ok, false, `${chain}: 99999 an hour`);
+    assert.equal(v({ evm: { [chain]: { runnerAlerts: { maxPerHour: 12 } } } }).ok, true);
+    assert.equal(v({ evm: { [chain]: { runnerAlerts: { minBucket: 99 } } } }).ok, false, `${chain}: bucket 99`);
+    assert.equal(v({ evm: { [chain]: { runnerAlerts: { minBucket: 'top1' } } } }).ok, false, `${chain}: a Solana bucket name`);
+    assert.equal(v({ evm: { [chain]: { runnerAlerts: { minBucket: 11 } } } }).ok, true);
+    assert.equal(v({ evm: { [chain]: { runnerAlerts: { enabled: 'yes' } } } }).ok, false, `${chain}: a string for a boolean`);
+    // And the endpoint: https or nothing, in main and not only on the page.
+    assert.equal(v({ evm: { [chain]: { rpcUrl: 'http://rpc.example' } } }).ok, false, `${chain}: http endpoint`);
+    assert.equal(v({ evm: { [chain]: { rpcUrl: 'https://rpc.example/v1' } } }).ok, true);
+    assert.equal(v({ evm: { [chain]: { rpcUrl: '' } } }).ok, true, `${chain}: empty means the default`);
+  }
   assert.equal(v({ bots: { trading: { maxBuySol: -1 } } }).ok, false);
   assert.equal(v({ bots: { trading: { maxBuySol: NaN } } }).ok, false);
   assert.equal(v({ bots: { trading: { maxBuySol: 0.1 } } }).ok, true);

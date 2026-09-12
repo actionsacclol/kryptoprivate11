@@ -148,5 +148,28 @@ export function explainFeeFailure(errText: string, balanceLamports: number | nul
   if (/"Custom":\s*1\b/.test(errText) && /InstructionError/.test(errText)) {
     return `A transfer in this trade would spend more SOL than the wallet holds${bal === null ? '' : ` (${bal.toFixed(6)} SOL)`}. ${topUp}`;
   }
+  // pump.fun's own revert codes, read from its on-chain IDL (2026-09-10).
+  // Anchor logs the name, but a relayer-built transaction often gives us the
+  // bare code — and "Custom: 6025" tells nobody anything.
+  const pump = errText.match(/"Custom":\s*(60(?:2[0-9]|30))(?![0-9])/);
+  if (pump) {
+    const named: Record<string, string> = {
+      '6020': 'Buy zero amount',
+      '6021': 'Not enough tokens to buy',
+      '6022': 'Sell zero amount',
+      '6023': 'Not enough tokens to sell',
+      '6024': 'Overflow',
+      '6025': 'Truncation',
+      '6026': 'Division by zero',
+    };
+    const code = pump[1];
+    // 6022 and 6025 are the same story from two directions: the amount is too
+    // small for the curve to price. That is almost always a bag that is
+    // already gone or down to dust, not a broken order.
+    if (code === '6022' || code === '6023' || code === '6025') {
+      return `Nothing left to sell — pump rejected the amount (${named[code]}). The position is gone or too small for the curve to price.`;
+    }
+    if (named[code]) return `pump rejected this trade: ${named[code]} (${code}).`;
+  }
   return null;
 }

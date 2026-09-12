@@ -40,6 +40,9 @@ async function run() {
 }
 
 const MINT = 'OrderMint111111111111111111111111111111111';
+/** The wallet the test host signs with. Orders are bound to it at creation:
+ *  an order written on another wallet sells another bag. */
+const WALLET = 'WalletAAA1111111111111111111111111111111111';
 
 /** A host that records what it was asked to do. */
 function makeHost(over = {}) {
@@ -56,6 +59,7 @@ function makeHost(over = {}) {
         return over.sellResult ?? { ok: true, message: 'sold', signature: 'sigsell' };
       },
       blockedReason: () => over.blockedReason ?? null,
+      owner: () => (over.owner === undefined ? WALLET : over.owner),
       buyBlockedReason: () => over.buyBlockedReason ?? null,
       maxLiveSol: () => over.maxLiveSol ?? 1,
       log: (level, line) => calls.logs.push({ level, line }),
@@ -342,7 +346,7 @@ test('restored orders come back PAUSED and do not evaluate', async () => {
   const h = setup();
   ord._load([
     { id: 'a', mint: MINT, symbol: 'T', kind: 'stop_loss', state: 'paused', triggerValue: 20,
-      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: null,
+      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: null, owner: WALLET,
       createdAt: 1, updatedAt: 1, triggeredAt: null, note: null, signature: null, expiresAt: null },
   ]);
   ord.onTick({ mint: MINT, priceSol: 0.0000001, mcapUsd: null });
@@ -355,23 +359,112 @@ test('resume re-arms paused orders and resets a stale trailing peak', async () =
   const h = setup();
   ord._load([
     { id: 'a', mint: MINT, symbol: 'T', kind: 'trailing_stop', state: 'paused', triggerValue: 20,
-      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: 0.05,
+      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: 0.05, owner: WALLET,
       createdAt: 1, updatedAt: 1, triggeredAt: null, note: null, signature: null, expiresAt: null },
   ]);
   ord.resumePaused();
   const o = ord.all()[0];
   assert.equal(o.state, 'armed');
-  assert.equal(o.peakPriceSol, 0.001, 'a peak from an unobserved window would fire the stop instantly');
+  // The peak is CLEARED, not reset to the reference. The reference was
+  // captured when the order was written and says nothing about the price
+  // now: a token that fell 80% while the app was closed would resume with a
+  // reference far above the market and sell on the first tick. An empty peak
+  // adopts the first price actually observed.
+  assert.equal(o.peakPriceSol, null, 'a peak from an unobserved window is not knowledge');
   ord.onTick({ mint: MINT, priceSol: 0.001, mcapUsd: null });
   await new Promise((r) => setImmediate(r));
   assert.equal(h.calls.sells.length, 0, 'resuming must not immediately dump the position');
+});
+
+test('a trailing stop resumed after a crash does not sell into the drop it slept through', async () => {
+  const h = setup();
+  ord._load([
+    { id: 'a', mint: MINT, symbol: 'T', kind: 'trailing_stop', state: 'paused', triggerValue: 20,
+      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: 0.001, owner: WALLET,
+      createdAt: 1, updatedAt: 1, triggeredAt: null, note: null, signature: null, expiresAt: null },
+  ]);
+  ord.resumePaused();
+  // The market fell 80% while the app was closed. A 20% trailing stop
+  // measured from the stale 0.001 is instantly satisfied — but the app never
+  // saw that peak, so it has no business calling this a 20% drawdown.
+  ord.onTick({ mint: MINT, priceSol: 0.0002, mcapUsd: null });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.calls.sells.length, 0, 'the first tick after a resume sets the peak, it does not trigger');
+  assert.equal(ord.all()[0].peakPriceSol, 0.0002, 'the peak is what we actually saw');
+  ord.onTick({ mint: MINT, priceSol: 0.00016, mcapUsd: null }); // −20% from the OBSERVED peak
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.calls.sells.length, 1, 'once it has a real peak it protects normally');
+});
+
+test('an order pauses when the active wallet is not the one it was written on', async () => {
+  const h = setup({ owner: 'WalletBBB2222222222222222222222222222222222' });
+  ord._load([
+    { id: 'a', mint: MINT, symbol: 'T', kind: 'stop_loss', state: 'armed', triggerValue: 20,
+      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: null, owner: WALLET,
+      createdAt: 1, updatedAt: 1, triggeredAt: null, note: null, signature: null, expiresAt: null },
+  ]);
+  ord.onTick({ mint: MINT, priceSol: 0.0005, mcapUsd: null });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.calls.sells.length, 0, 'it would have sold the bag in another wallet');
+  assert.equal(ord.all()[0].state, 'paused');
+  assert.match(ord.all()[0].note, /different wallet/);
+});
+
+test('an order with no recorded wallet pauses rather than guessing', async () => {
+  const h = setup();
+  ord._load([
+    { id: 'a', mint: MINT, symbol: 'T', kind: 'stop_loss', state: 'armed', triggerValue: 20,
+      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: null, owner: null,
+      createdAt: 1, updatedAt: 1, triggeredAt: null, note: null, signature: null, expiresAt: null },
+  ]);
+  ord.onTick({ mint: MINT, priceSol: 0.0005, mcapUsd: null });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.calls.sells.length, 0);
+  assert.equal(ord.all()[0].state, 'paused', 'an order written before wallets were recorded fails closed');
+});
+
+test('resume leaves an order written on another wallet paused', () => {
+  setup({ owner: 'WalletBBB2222222222222222222222222222222222' });
+  ord._load([
+    { id: 'a', mint: MINT, symbol: 'T', kind: 'stop_loss', state: 'paused', triggerValue: 20,
+      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: null, owner: WALLET,
+      createdAt: 1, updatedAt: 1, triggeredAt: null, note: null, signature: null, expiresAt: null },
+  ]);
+  const r = ord.resumePaused();
+  assert.equal(r.resumed, 0, 'nothing was re-armed');
+  assert.equal(ord.all()[0].state, 'paused', 'it would only pause again on the next tick');
+  assert.match(r.message, /check/i, 'the count says some orders still need the user');
+});
+
+test('two rungs on one mint do not both size off the same balance', async () => {
+  // ordertemplates pins that a take-profit ladder sells a share of what is
+  // LEFT (40 then 50). Both rungs size off a balance read at build time, so
+  // a tick that satisfies both would sell 40% + 50% of the SAME bag — 90%
+  // where the ladder meant 70%, and at 50/50/100 the whole position. One
+  // sell per mint at a time; the other stays armed for the next tick.
+  const h = setup();
+  mk('take_profit', 40, { ref: 0.001, amount: 40 });
+  mk('take_profit', 100, { ref: 0.001, amount: 50 });
+
+  ord.onTick({ mint: MINT, priceSol: 0.0025, mcapUsd: null }); // +150%: both are satisfied
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(h.calls.sells.length, 1, 'only one sell may be in flight against a position');
+  const states = ord.all().map((o) => o.state).sort();
+  assert.deepEqual(states, ['armed', 'filled'], 'the rung that did not fire is still protecting, not spent');
+
+  ord.onTick({ mint: MINT, priceSol: 0.0025, mcapUsd: null }); // the next tick, nothing in flight
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.calls.sells.length, 2, 'the second rung fires once the first is done');
 });
 
 test('an order that was mid-flight at shutdown is NOT auto-resumed', () => {
   setup();
   ord._load([
     { id: 'a', mint: MINT, symbol: 'T', kind: 'stop_loss', state: 'paused', triggerValue: 20,
-      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: null,
+      triggerBasis: 'pct', amount: 100, referencePriceSol: 0.001, peakPriceSol: null, owner: WALLET,
       createdAt: 1, updatedAt: 1, triggeredAt: 2,
       note: 'The app closed while this order was executing. Check your wallet before resuming.',
       signature: null, expiresAt: null },

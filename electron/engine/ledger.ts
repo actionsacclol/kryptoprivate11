@@ -92,14 +92,48 @@ function settled(fill: Fill): void {
 }
 let filePath = '';
 let saveTimer: NodeJS.Timeout | null = null;
+/** Set when fills.json exists but could not be read: the file then holds
+ *  the only copy of every cost basis, so this session must NOT overwrite
+ *  it (the same rule as the wallet file). Absent file = fresh install. */
+let loadFailure: string | null = null;
 
 export function init(userDataDir: string): void {
   filePath = path.join(userDataDir, FILE);
+  loadFailure = null;
+  let text: string;
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as { version: 1; fills: Fill[] };
-    fills = Array.isArray(raw?.fills) ? raw.fills : [];
-  } catch {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
     fills = [];
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      loadFailure = `${filePath} could not be read (${(e as Error).message})`;
+      console.warn(`[sniper] ledger: ${loadFailure} — fills are read-only this session`);
+    }
+    return;
+  }
+  try {
+    const raw = JSON.parse(text) as { version: 1; fills: Fill[] };
+    fills = Array.isArray(raw?.fills) ? raw.fills : [];
+  } catch (e) {
+    fills = [];
+    loadFailure = `${filePath} is corrupt (${(e as Error).message})`;
+    console.warn(`[sniper] ledger: ${loadFailure} — fills are read-only this session`);
+  }
+}
+
+/** Why the ledger file is read-only this session, or null. */
+export function failure(): string | null {
+  return loadFailure;
+}
+
+function writeNow(): void {
+  if (!filePath || loadFailure) return;
+  try {
+    const tmp = `${filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, fills }, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+  } catch {
+    /* memory stays authoritative this session */
   }
 }
 
@@ -107,14 +141,18 @@ function persist(): void {
   if (!filePath) return;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try {
-      const tmp = `${filePath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ version: 1, fills }, null, 2), 'utf8');
-      fs.renameSync(tmp, filePath);
-    } catch {
-      /* memory stays authoritative this session */
-    }
+    saveTimer = null;
+    writeNow();
   }, 250);
+}
+
+/** Write a pending debounced save NOW — called on the way out of the
+ *  process, so a fill recorded in the last 250 ms is not lost. */
+export function flushSync(): void {
+  if (!saveTimer) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  writeNow();
 }
 
 let seq = 0;
@@ -353,17 +391,41 @@ export function basisByMint(wallet?: string | null): Map<string, MintBasis> {
  * known (no reconciled buys, or the sell itself is unreconciled) — a breaker
  * fed by this must then do NOTHING, not count a "0".
  */
+export interface CashDelta {
+  /** Net lamports across the signatures that COULD be priced. */
+  solLamports: number;
+  /**
+   * How many of the asked-for signatures could not be priced at all: the fill
+   * is still `pending`, is terminally `unreconciled`, or no fill was ever
+   * recorded for it.
+   *
+   * This count is the whole point of the type. `pending` is the normal state
+   * of a fresh fill and reconciliation is demand-driven, so a caller handed
+   * only the sum would read a run that has really lost SOL as "0.000
+   * realised" and would never trip a loss cap (Wallet Lab audit, lab-1). A
+   * caller must treat `unknown > 0` as "I do not know", never as zero.
+   */
+  unknown: number;
+}
+
 /** Net SOL that moved in the wallet across these fills (reconciled only):
- *  sells positive, buys negative, fees and tips included. The Wallet Lab's
- *  loss cap reads this — cash, not a mark. */
-export function cashDeltaFor(signatures: string[]): number {
-  if (!signatures.length) return 0;
+ *  sells positive, buys negative, fees and tips included — plus how many of
+ *  the signatures could not be priced. The Wallet Lab's loss cap reads this
+ *  — cash, not a mark. */
+export function cashDeltaFor(signatures: string[]): CashDelta {
+  if (!signatures.length) return { solLamports: 0, unknown: 0 };
   const want = new Set(signatures);
+  const priced = new Set<string>();
   let lamports = 0;
   for (const f of fills) {
-    if (f.signature && want.has(f.signature) && f.state === 'reconciled' && f.solDeltaLamports !== null) lamports += f.solDeltaLamports;
+    if (!f.signature || !want.has(f.signature)) continue;
+    if (f.state !== 'reconciled' || f.solDeltaLamports === null) continue;
+    lamports += f.solDeltaLamports;
+    priced.add(f.signature);
   }
-  return lamports / LAMPORTS;
+  let unknown = 0;
+  for (const sig of want) if (!priced.has(sig)) unknown += 1;
+  return { solLamports: lamports, unknown };
 }
 
 export function realizedPnlForSell(fill: Fill): number | null {

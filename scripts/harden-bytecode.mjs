@@ -48,6 +48,37 @@ if (r.status !== 0) {
   process.exit(r.status ?? 1);
 }
 
+// A preload must stay plain JS. Electron loads a preload BY PATH, and the
+// script sandbox's preload runs SANDBOXED — it has no Node `require`, so a
+// bytenode stub throws on its first line, the bridge is never installed, and
+// every code script fails to start with nothing but "no ready within 8000 ms".
+// compile-bytecode.cjs skips them by name; this asserts the artefact, because
+// the live sandbox test builds the preload from source and would never see a
+// hardened one.
+const distDir = path.join(root, 'dist-electron');
+const preloads = [];
+const walk = (dir) => {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walk(p);
+    else if (e.isFile() && /preload/i.test(e.name) && e.name.endsWith('.js')) preloads.push(p);
+  }
+};
+walk(distDir);
+if (preloads.length === 0) {
+  console.error('bytecode check: no *preload*.js in dist-electron — renamed, or the build did not run');
+  process.exit(1);
+}
+for (const p of preloads) {
+  if (fs.readFileSync(p, 'utf8').includes('bytenode')) {
+    console.error(`bytecode check FAILED: ${path.relative(root, p)} was compiled to bytecode.`);
+    console.error('  A sandboxed preload has no Node require: the stub throws and every code script');
+    console.error('  silently fails to start. Add it to SKIP in scripts/compile-bytecode.cjs.');
+    process.exit(1);
+  }
+}
+console.log(`  preload check: ${preloads.map((p) => path.basename(p)).join(', ')} left as plain JS`);
+
 // V8 cached data is only accepted by a V8 with the same version, flags AND
 // CPU features, so bytecode compiled here runs only on this platform and
 // architecture. Cross-packaging (electron-builder --mac from Windows) would

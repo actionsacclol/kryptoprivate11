@@ -25,6 +25,8 @@ import { FEE_BPS, REFERRAL_SHARE_BPS, TREASURY_ADDRESS, splitFee, feesEnabled } 
 import { resolveTreasury, canonicalTreasury } from './feeIntegrity';
 import { PRESENCE, packIdentity } from './presence';
 import { resolvePresence, canonicalPresence } from './presenceIntegrity';
+import { EVM_FEE_BPS, EVM_REFERRAL_SHARE_BPS, EVM_TREASURY_ADDRESS, evmFeesEnabled, isEvmAddress, splitEvmFee, WEI } from './evm';
+import { canonicalEvmTreasury, resolveEvmTreasury } from './evmFeeIntegrity';
 
 const SOL = 1_000_000_000;
 
@@ -45,6 +47,8 @@ export function tamperFlags(): boolean[] {
   const ident = canonicalPresence();
   const one = splitFee(SOL, false);
   const withRef = splitFee(SOL, true);
+  const evmCanon = canonicalEvmTreasury();
+  const evmSplit = splitEvmFee(WEI, true);
   return [
     // 1. The canonical treasury blob decodes to a valid address.
     canon.length !== 44,
@@ -74,6 +78,23 @@ export function tamperFlags(): boolean[] {
     packIdentity(PRESENCE).split('|').slice(1, 5).join('|') !== 'Free Tools|https://krypt.cc/tools|Krypt.cc|https://discord.gg/muzFKR657F',
     // 12. The art and the product name are unchanged.
     ident?.largeImageKey !== 'krypt' || ident?.largeImageText !== 'Krypto Bot',
+
+    // ── Robinhood Chain fee (shared/evm.ts + evmFeeIntegrity.ts). The same
+    //    facts as 1–7, for the second chain: pure functions of embedded
+    //    constants, no network, no user state.
+    // 13. The canonical EVM treasury blob decodes to a valid 0x address.
+    !isEvmAddress(evmCanon),
+    // 14. The readable constant still matches the canonical (not redirected).
+    resolveEvmTreasury(EVM_TREASURY_ADDRESS).state !== 'ok',
+    // 15. The EVM fee rate is untouched.
+    EVM_FEE_BPS !== 50,
+    // 16. The EVM referral share is untouched.
+    EVM_REFERRAL_SHARE_BPS !== 2000,
+    // 17. EVM fees are still enabled (treasury present and verified).
+    !evmFeesEnabled(),
+    // 18. The EVM fee arithmetic still produces the right treasury and
+    //     referrer cuts on 1 ETH (0.004 + 0.001).
+    evmSplit.treasuryWei !== 4_000_000_000_000_000n || evmSplit.referrerWei !== 1_000_000_000_000_000n,
   ];
 }
 

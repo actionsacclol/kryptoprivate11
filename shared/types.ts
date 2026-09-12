@@ -362,6 +362,9 @@ export interface WalletHolding {
 export const SETTINGS_REVISION = 5;
 
 import { defaultBotSettings, type BotSettings } from './bots';
+import { DEFAULT_EVM_SETTINGS, type EvmSettings } from './evm';
+export { DEFAULT_EVM_SETTINGS } from './evm';
+export type { EvmSettings } from './evm';
 
 export interface AppSettings {
   /** Revision of the last safety migration applied to this save. Absent/0 on
@@ -384,6 +387,9 @@ export interface AppSettings {
   bots: BotSettings;
   /** BYO-key AI second opinion on a token. Off by default; keys stay main-side. */
   ai: AiSettings;
+  /** Robinhood Chain (shared/evm.ts): RPC, slippage, referrer. The chain's
+   *  wallet lives in its own file, not here. */
+  evm: EvmSettings;
   /**
    * SOL address of whoever referred this user, collected once at onboarding.
    * They receive their share of the platform fee in the same transaction as
@@ -400,11 +406,48 @@ export interface AppSettings {
   /** Record every decoded event + decision to JSONL for replay. */
   recorderEnabled: boolean;
   /**
-   * Replace the WebGL scenes (the Dashboard observatory, the Wallet tome)
-   * with a still. They are decoration that renders every frame through the
-   * GPU driver — the one thing a user-mode app can do that provokes a bad
-   * driver into a blue screen (a user's BSOD, 2026-09-08). Off by default;
-   * takes effect on the next page visit, no restart.
+   * Start every enabled EVM scanner as soon as the app is ready.
+   *
+   * Solana has its own switch (`autoStartEngine`); this is the EVM twin, so
+   * an unattended run can cover all three chains.
+   *
+   * OFF by default and deliberately opt-in: a scanner polls RPC, and one that
+   * starts itself on a chain nobody is looking at is how someone wakes up to a
+   * rate-limited endpoint. It exists for the case it was written for — a long
+   * unattended collection run, where the scanners must survive a restart
+   * without someone at the keyboard.
+   *
+   * Scanning is not trading. The engine watches launches and flags them;
+   * autonomous firing was removed in code on 2026-08-16 and this cannot bring
+   * it back, nor does it arm any chain for live execution.
+   */
+  scannersAutoStart: boolean;
+  /**
+   * Launching tokens from inside the app. OFF by default.
+   *
+   * While `enabled` is false the signer's `launch` intent cannot be built, so
+   * the one-signer rule applies untouched — see shared/launch.ts.
+   */
+  launch: import('./launch').LaunchConfig;
+  /**
+   * Cross-chain transfers. OFF by default and deliberately separate from
+   * everything else: a bridge puts the user's funds in a third party's hands
+   * for the seconds between two chains, which is a trust model nothing else in
+   * this app asks of them. While it is off, the `bridge` signing intent is
+   * never constructed, so the signer refuses a bridge exactly as it did before
+   * the feature existed.
+   */
+  bridge: { enabled: boolean };
+  /**
+   * Lite mode. Replaces the WebGL scenes (the Dashboard observatory, the
+   * Wallet tome) with a still — they are decoration that renders every frame
+   * through the GPU driver, the one thing a user-mode app can do that
+   * provokes a bad driver into a blue screen (a user's BSOD, 2026-09-08) —
+   * and, since 2026-09-12, also stops every CSS transition and decorative
+   * animation, blur, glow and backdrop (`html.lite`, src/state/liteMode.ts)
+   * and framer-motion's transform/layout animation. Off by default. The CSS
+   * side applies at once; a scene leaves on the next visit to its page.
+   * Also toggled by the Hub's "Laggy?" button.
    */
   reduceEffects: boolean;
   /**
@@ -816,7 +859,18 @@ export type EngineEvent =
   /** The whole flag list, pushed when expiry removed some of it. */
   | { kind: 'runners'; runners: import('./runners').RunnerFlag[] }
   /** Wallet Lab random-trading runs changed (started, traded, stopped). */
-  | { kind: 'lab'; runs: import('./lab').RandomRunStatus[] };
+  | { kind: 'lab'; runs: import('./lab').RandomRunStatus[] }
+  /** EVM rail (shared/evm.ts). A fill that landed, reconciled or failed on
+   *  `fill.chain`; the panels re-read that chain's portfolio on it. */
+  | { kind: 'evmFill'; fill: import('./evm').EvmFill; state: 'landed' | 'reconciled' | 'failed' }
+  /** Arm state or active wallet changed on one EVM chain (`state.chain`). */
+  | { kind: 'evmState'; state: import('./evm').EvmState }
+  /**
+   * One EVM chain's Observatory moved. `status.chain` says which, and a
+   * renderer showing another chain must ignore it — the scanners are
+   * isolated, so an event carries one chain's numbers and never a blend.
+   */
+  | { kind: 'evmScan'; status: import('./evmScan').EvmScanStatus };
 
 export interface EngineSnapshot {
   status: EngineStatus;
@@ -909,10 +963,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hotkeys: structuredClone(DEFAULT_HOTKEYS),
   bots: defaultBotSettings(),
   ai: DEFAULT_AI_SETTINGS,
+  evm: { ...DEFAULT_EVM_SETTINGS },
   referrer: '',
   onboarded: false,
   watchOnBuy: true,
   recorderEnabled: false,
+  scannersAutoStart: false,
+  launch: { enabled: false, walletId: '', evmWalletId: '' },
+  bridge: { enabled: false },
   reduceEffects: false,
   hardwareAcceleration: true,
   recorderDir: '',

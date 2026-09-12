@@ -77,12 +77,16 @@ export function MarketDataSettings({
   const term = useTerminal();
   const toast = useToast();
   const [birdeyeKey, setBirdeyeKey] = useState(settings.data.birdeyeApiKey);
+  const [jupiterKey, setJupiterKey] = useState(settings.data.jupiterApiKey);
   const [giphyKey, setGiphyKey] = useState(settings.data.giphyApiKey);
   const [tenorKey, setTenorKey] = useState(settings.data.tenorApiKey);
 
   useEffect(() => {
     setBirdeyeKey(settings.data.birdeyeApiKey);
   }, [settings.data.birdeyeApiKey]);
+  useEffect(() => {
+    setJupiterKey(settings.data.jupiterApiKey);
+  }, [settings.data.jupiterApiKey]);
   useEffect(() => {
     setGiphyKey(settings.data.giphyApiKey);
     setTenorKey(settings.data.tenorApiKey);
@@ -241,6 +245,41 @@ export function MarketDataSettings({
           <p className="text-[10px] text-krypt-muted/60 mt-1.5 leading-relaxed">
             Stored in your local settings file. Everything in the terminal works without it — a key only adds
             sub-minute candles for tokens the engine is not taping, full holder lists, and historical trades.
+          </p>
+        </div>
+
+        {/* Jupiter key — a host switch, not a feature unlock. */}
+        <div>
+          <label className="block text-[11px] uppercase tracking-[0.14em] text-krypt-muted mb-1.5">
+            Jupiter API key (optional)
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={jupiterKey}
+              onChange={(e) => setJupiterKey(e.target.value)}
+              placeholder="Paste a key to move off Jupiter’s retiring endpoint"
+              spellCheck={false}
+              className="flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm font-mono text-white placeholder-krypt-muted/50 outline-none focus:border-krypt-purple/60"
+            />
+            <GhostButton
+              onClick={() => {
+                void updateSettings({
+                  data: { ...settings.data, jupiterApiKey: jupiterKey.trim() },
+                }).then(() => term.refreshProviders());
+              }}
+            >
+              Save
+            </GhostButton>
+          </div>
+          <p className="text-[10px] text-krypt-muted/60 mt-1.5 leading-relaxed">
+            Jupiter unlocks no extra data — everything it serves is keyless today. What a key buys is the{' '}
+            <span className="text-white/80">host</span>: without one the terminal uses{' '}
+            <span className="font-mono">lite-api.jup.ag</span>, which Jupiter says will be throttled further “until
+            it is fully retired”. A free key at portal.jup.ag moves every Jupiter call, including buy and sell
+            quotes, to <span className="font-mono">api.jup.ag</span>. Its published budget is 1 request per second,
+            so the terminal deliberately slows Jupiter down to match — bursts take longer, and the endpoint does not
+            disappear underneath you.
           </p>
         </div>
 

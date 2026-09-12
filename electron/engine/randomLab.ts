@@ -13,6 +13,14 @@
 // fees and tips included — with bags still held counted AT COST, so a run
 // that is merely holding is not stopped for "losing" the money it deployed.
 //
+// A fill that cannot be priced is NOT zero (audit 2026-09-09, lab-1). A fresh
+// fill is `pending` until the ledger reads it back off the chain, and the
+// cash delta excludes it — so a cap fed only the sum saw "0.000 realised"
+// while the group was really down 0.066 SOL and never fired. The ledger now
+// also reports how many signatures it could not price; while that count is
+// above zero the run reports realised as NULL (an em dash, never a 0), buys
+// nothing, and stops outright if the blindness persists.
+//
 // Bags are never abandoned (2026-09-03 review): open positions and the
 // run's signatures are persisted to userData and restored on start-up, a
 // disarmed or failed sell retries with backoff up to a cap and then says
@@ -31,10 +39,25 @@ export interface RandomHost {
   balanceSol(publicKey: string): Promise<number | null>;
   /** Candidate tokens from the chosen Discover column, already liquidity-filtered. */
   candidates(universe: 'trending' | 'graduating' | 'new', minLiquidityUsd: number): Promise<Array<{ mint: string; symbol: string }>>;
-  buy(walletId: string, mint: string, sol: number): Promise<{ ok: boolean; message: string; signature: string | null; costSol: number | null }>;
-  sell(walletId: string, mint: string): Promise<{ ok: boolean; message: string; signature: string | null }>;
-  /** Realised SOL (cash delta) across the given signatures, from reconciled fills. */
-  realizedFor(signatures: string[]): number;
+  /**
+   * `stage` is how far the trade got. 'pending' means it was BROADCAST and a
+   * fill was recorded against it — real SOL left the wallet — but the
+   * confirmation had not come back, so `ok` is false. A bag opened that way
+   * is a real bag and must be tracked (audit lab-3); its signature is real
+   * cash and must count towards the loss cap. Anything else with ok:false
+   * spent nothing that the ledger knows about, so its signature must NOT
+   * enter the run's cash set — there would be no fill to price it with.
+   */
+  buy(walletId: string, mint: string, sol: number): Promise<{ ok: boolean; message: string; signature: string | null; costSol: number | null; stage?: string | null }>;
+  sell(walletId: string, mint: string): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }>;
+  /**
+   * Realised SOL (cash delta) across the given signatures, from reconciled
+   * fills, PLUS how many of those signatures could not be priced at all
+   * (still pending, terminally unreadable, or never recorded). `unknown > 0`
+   * means the answer is "I do not know" — `sol` is then only the part that
+   * could be read and must not be used as the whole.
+   */
+  realizedFor(signatures: string[]): { sol: number; unknown: number };
   log(level: 'info' | 'warn' | 'error', line: string): void;
   emit(runs: RandomRunStatus[]): void;
 }
@@ -45,8 +68,19 @@ interface Run {
   status: RandomRunStatus;
   walletFilter: Set<string> | null;
   signatures: string[];
-  /** Realised cash at start(), so a restarted run is judged from zero. */
-  capBaseline: number;
+  /**
+   * Signatures that are NOT this run's business: everything already realised
+   * when start() was called, so a restarted run is judged from zero. Kept as
+   * a set rather than a precomputed number because a fill that could not be
+   * priced at start() must not freeze a wrong baseline into the run — an
+   * excluded signature simply cancels out of both sides of the difference.
+   */
+  excluded: Set<string>;
+  /** Bags carried in at start(); their cost sits in the baseline, so it comes
+   *  off again when this run closes one. */
+  baselineOpen: RandomOpen[];
+  /** When the loss cap first became unjudgeable, or null while it is known. */
+  blindSince: number | null;
   tradeStamps: number[];
   nextTimer: NodeJS.Timeout | null;
   sellTimers: Map<string, NodeJS.Timeout>;
@@ -60,12 +94,33 @@ const SELL_RETRY_BASE_MS = 120_000;
 /** While disarmed a sell cannot be signed; look again every minute. */
 const DISARMED_RETRY_MS = 60_000;
 
+/** How long the loss cap may stay unjudgeable before the run stops. A fill
+ *  is `pending` for a few seconds while the ledger reads it back off the
+ *  chain, and stopping on that would end a run on every single sell. Past
+ *  this it is not a hiccup, it is blindness. Nothing is bought in the
+ *  meantime — the wait is a refusal, not a grace period for trading. */
+let unknownGraceMs = 60_000;
+
 let host: RandomHost | null = null;
 let file = '';
+/**
+ * Set when lab-runs.json exists but could not be read or parsed. That file is
+ * the ONLY record of which lab wallet holds which bag — the engine's holdings
+ * and portfolio key off the ACTIVE wallet, so a lab bag that falls out of it
+ * is unattributed and effectively lost. So an unreadable file is NOT an empty
+ * one: this session refuses to write over it, and says so. Absent file =
+ * fresh install.
+ */
+let loadFailure: string | null = null;
 const runs = new Map<string, Run>();
 
+/** Why the lab run file is read-only this session, or null. */
+export function failure(): string | null {
+  return loadFailure;
+}
+
 function persist(): void {
-  if (!file) return;
+  if (!file || loadFailure) return;
   try {
     const rows = [...runs.values()].map((r) => ({ groupId: r.status.groupId, open: r.status.open, signatures: r.signatures.slice(-400) }));
     const tmp = `${file}.tmp`;
@@ -76,48 +131,73 @@ function persist(): void {
   }
 }
 
-/** Load persisted open bags so a restart never forgets what a wallet holds. */
+/**
+ * Load persisted open bags so a restart never forgets what a wallet holds.
+ *
+ * Fails CLOSED: a missing file is a fresh install, but a file that exists and
+ * cannot be read or parsed leaves `loadFailure` set — this session then never
+ * writes over it, so the bags it records stay recoverable by hand instead of
+ * being replaced by an empty file the moment any group is started.
+ */
 export function init(userDataDir: string): number {
   file = path.join(userDataDir, 'lab-runs.json');
-  let restored = 0;
+  loadFailure = null;
+  runs.clear();
+  let text: string;
   try {
-    if (!fs.existsSync(file)) return 0;
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { runs?: Array<{ groupId: string; open: RandomOpen[]; signatures: string[] }> };
-    for (const row of raw.runs ?? []) {
-      if (!row?.groupId) continue;
-      const open = Array.isArray(row.open) ? row.open.filter((o) => o && typeof o.walletId === 'string' && typeof o.mint === 'string') : [];
-      const run: Run = {
-        gen: 0,
-        status: {
-          groupId: row.groupId,
-          walletIds: null,
-          running: false,
-          startedAt: null,
-          stoppedAt: null,
-          stopReason: open.length ? 'restored after restart — open bags still sell on their timers' : null,
-          buys: 0,
-          sells: 0,
-          failed: 0,
-          realizedSol: 0,
-          maxLossSol: 0,
-          open,
-          nextActionAt: null,
-          lastLine: open.length ? `${open.length} open position(s) restored from the last session` : null,
-        },
-        walletFilter: null,
-        signatures: Array.isArray(row.signatures) ? row.signatures.filter((s) => typeof s === 'string') : [],
-        capBaseline: 0,
-        tradeStamps: [],
-        nextTimer: null,
-        sellTimers: new Map(),
-        busy: false,
-      };
-      runs.set(row.groupId, run);
-      for (const o of open) armSell(row.groupId, o, Math.max(5_000, o.sellAt - Date.now()));
-      restored += open.length;
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      loadFailure = `${file} could not be read (${(e as Error).message})`;
+      console.warn(`[sniper] lab: ${loadFailure} — open bags recorded there are NOT loaded and the file will not be overwritten`);
     }
-  } catch {
-    /* a corrupt file must not stop the app; it is rewritten on the next change */
+    return 0;
+  }
+  let raw: { runs?: Array<{ groupId: string; open: RandomOpen[]; signatures: string[] }> };
+  try {
+    raw = JSON.parse(text) as typeof raw;
+  } catch (e) {
+    loadFailure = `${file} is corrupt (${(e as Error).message})`;
+    console.warn(`[sniper] lab: ${loadFailure} — open bags recorded there are NOT loaded and the file will not be overwritten`);
+    return 0;
+  }
+  let restored = 0;
+  for (const row of raw?.runs ?? []) {
+    if (!row?.groupId) continue;
+    const open = Array.isArray(row.open) ? row.open.filter((o) => o && typeof o.walletId === 'string' && typeof o.mint === 'string') : [];
+    const run: Run = {
+      gen: 0,
+      status: {
+        groupId: row.groupId,
+        walletIds: null,
+        running: false,
+        startedAt: null,
+        stoppedAt: null,
+        stopReason: open.length ? 'restored after restart — open bags still sell on their timers' : null,
+        buys: 0,
+        sells: 0,
+        failed: 0,
+        // Last session's fills are not this session's realised PnL, and the
+        // cap is not known until status() reads it off the group config.
+        realizedSol: null,
+        maxLossSol: 0,
+        open,
+        nextActionAt: null,
+        lastLine: open.length ? `${open.length} open position(s) restored from the last session` : null,
+      },
+      walletFilter: null,
+      signatures: Array.isArray(row.signatures) ? row.signatures.filter((s) => typeof s === 'string') : [],
+      excluded: new Set(),
+      baselineOpen: [],
+      blindSince: null,
+      tradeStamps: [],
+      nextTimer: null,
+      sellTimers: new Map(),
+      busy: false,
+    };
+    runs.set(row.groupId, run);
+    for (const o of open) armSell(row.groupId, o, Math.max(5_000, o.sellAt - Date.now()));
+    restored += open.length;
   }
   return restored;
 }
@@ -126,18 +206,85 @@ export function attach(h: RandomHost): void {
   host = h;
 }
 
-function realizedOf(run: Run): number {
-  if (!host) return run.status.realizedSol;
-  // Cash delta of every fill of this run, PLUS the cost of bags still held
-  // (a buy is not a loss until its sell lands), MINUS what the run had
-  // already realised before this start.
-  const held = run.status.open.reduce((a, o) => a + (o.costSol ?? 0), 0);
-  return host.realizedFor(run.signatures) + held - run.capBaseline;
+/** Realised cash on this run's closed trades, or null when it is not
+ *  knowable — with the number of fills that could not be priced. */
+interface Realized {
+  sol: number | null;
+  unknown: number;
+}
+
+/**
+ * What the buy that opened this bag actually took out of the wallet, in SOL,
+ * from the CHAIN — never the size we asked for (the requested amount omits
+ * the priority fee, the tip, the ATA rent and the slippage, and is wrong in
+ * the user's favour every time). Null when that fill cannot be priced.
+ */
+function costOf(o: RandomOpen): number | null {
+  if (!host || !o.buySig) return null;
+  const r = host.realizedFor([o.buySig]);
+  // A buy's cash delta is negative; the cost is its magnitude.
+  return r.unknown > 0 ? null : -r.sol;
+}
+
+function realizedOf(run: Run): Realized {
+  if (!host) return { sol: null, unknown: 1 };
+  // Cash delta of this run's own fills (everything realised before start()
+  // is excluded and cancels), PLUS the cost of bags this run still holds — a
+  // buy is not a loss until its sell lands — MINUS the cost of bags it
+  // inherited and has since closed, which the baseline was carrying.
+  const sigs = run.signatures.filter((s) => !run.excluded.has(s));
+  const cash = host.realizedFor(sigs);
+  let unknown = cash.unknown;
+  let sol = cash.sol;
+
+  for (const o of run.status.open) {
+    // A bag that cannot name its buy has no honest cost; it is not priced
+    // from the requested size, it is reported as unknown.
+    if (!o.buySig) {
+      unknown += 1;
+      continue;
+    }
+    if (run.excluded.has(o.buySig)) continue; // carried in and still held — cancels
+    const c = costOf(o);
+    if (c === null) continue; // its signature is already in cash.unknown
+    sol += c;
+  }
+  const stillOpen = new Set(run.status.open.map((o) => key(o.walletId, o.mint)));
+  for (const o of run.baselineOpen) {
+    if (stillOpen.has(key(o.walletId, o.mint))) continue; // still held — cancels
+    if (!o.buySig) continue; // never entered the accounting; nor did its sell
+    const c = costOf(o);
+    if (c === null) {
+      unknown += 1; // excluded from `sigs`, so not counted above
+      continue;
+    }
+    sol -= c;
+  }
+  return unknown > 0 ? { sol: null, unknown } : { sol, unknown: 0 };
 }
 
 export function status(): RandomRunStatus[] {
-  for (const r of runs.values()) r.status.realizedSol = realizedOf(r);
-  return [...runs.values()].map((r) => ({ ...r.status, open: [...r.status.open] }));
+  const out: RandomRunStatus[] = [];
+  for (const r of runs.values()) {
+    if (r.status.startedAt === null) {
+      // Restored from disk and never started this session. Its signatures
+      // belong to the LAST session, so its realised PnL is not a number this
+      // one may claim; the cap, on the other hand, is knowable — it is the
+      // group's configured one (a stored 0 would pin the page's loss bar at
+      // 100 % against any negative figure).
+      out.push({
+        ...r.status,
+        realizedSol: null,
+        maxLossSol: host?.config(r.status.groupId)?.random.maxLossSol ?? r.status.maxLossSol,
+        open: [...r.status.open],
+        loadFailure,
+      });
+      continue;
+    }
+    r.status.realizedSol = realizedOf(r).sol;
+    out.push({ ...r.status, open: [...r.status.open], loadFailure });
+  }
+  return out;
 }
 
 function push(): void {
@@ -163,7 +310,6 @@ export function start(groupId: string, walletIds?: string[]): { ok: boolean; mes
   if (existing?.status.running) return { ok: false, message: 'Already running' };
   const inheritedSigs = existing?.signatures ?? [];
   const inheritedOpen = existing?.status.open ?? [];
-  const heldCost = inheritedOpen.reduce((a, o) => a + (o.costSol ?? 0), 0);
   const run: Run = {
     gen: (existing?.gen ?? 0) + 1,
     walletFilter: filter,
@@ -184,9 +330,14 @@ export function start(groupId: string, walletIds?: string[]): { ok: boolean; mes
       lastLine: inheritedOpen.length ? `started — ${inheritedOpen.length} bag(s) carried over, judged from zero` : 'started',
     },
     signatures: inheritedSigs,
-    // Judge this run from zero: whatever the inherited fills realised is the
-    // baseline, and inherited bags are carried at cost.
-    capBaseline: (host.realizedFor(inheritedSigs) + heldCost),
+    // Judge this run from zero: every fill that already existed is excluded
+    // (it cancels out of both sides), and inherited bags are carried at the
+    // cost the baseline already holds — so closing one here shows the whole
+    // round trip, not just its proceeds. A snapshot, not a frozen number:
+    // a fill that is unreadable today must not become a wrong baseline.
+    excluded: new Set(inheritedSigs),
+    baselineOpen: [...inheritedOpen],
+    blindSince: null,
     tradeStamps: [],
     nextTimer: null,
     sellTimers: existing?.sellTimers ?? new Map(),
@@ -194,6 +345,10 @@ export function start(groupId: string, walletIds?: string[]): { ok: boolean; mes
   };
   runs.set(groupId, run);
   host.log('info', `lab random: started on group ${groupId} (${members.length} wallet(s), loss cap ${cfg.random.maxLossSol} SOL)`);
+  if (loadFailure) {
+    run.status.lastLine = `started — WARNING: ${loadFailure}; bags opened now will not be remembered if the app restarts`;
+    host.log('warn', `lab random: ${run.status.lastLine}`);
+  }
   schedule(run, between(2_000, 6_000));
   persist();
   push();
@@ -249,9 +404,23 @@ async function tick(run: Run): Promise<void> {
       stop(groupId, 'live execution disarmed');
       return;
     }
-    run.status.realizedSol = realizedOf(run);
-    if (lossCapHit(run.status.realizedSol, r.maxLossSol)) {
-      stop(groupId, `loss cap reached (${run.status.realizedSol.toFixed(4)} SOL realised on closed trades)`);
+    const realized = realizedOf(run);
+    run.status.realizedSol = realized.sol;
+    if (realized.sol === null) {
+      // The cap cannot be judged, so nothing is bought. A fill is pending for
+      // a few seconds while the ledger reads it off the chain; past the grace
+      // the run stops rather than keep trading blind to its own losses.
+      if (blindTooLong(run)) {
+        stop(groupId, `cannot price ${realized.unknown} fill(s) yet — stopped rather than trade blind to the loss cap`);
+        return;
+      }
+      run.status.lastLine = `waiting: ${realized.unknown} fill(s) not readable on chain yet — the loss cap cannot be judged, so nothing is bought`;
+      schedule(run, 15_000);
+      return;
+    }
+    run.blindSince = null;
+    if (lossCapHit(realized.sol, r.maxLossSol)) {
+      stop(groupId, `loss cap reached (${realized.sol.toFixed(4)} SOL realised on closed trades)`);
       return;
     }
     const hourAgo = Date.now() - 3_600_000;
@@ -272,7 +441,11 @@ async function tick(run: Run): Promise<void> {
       .members(groupId)
       .filter((m) => m.publicKey !== active)
       .filter((m) => !run.walletFilter || run.walletFilter.has(m.id));
-    const openCount = (walletId: string): number => run.status.open.filter((o) => o.walletId === walletId).length;
+    // Across EVERY run, not just this one: two groups can share a wallet, and
+    // counting only this run's bags let each of them open maxOpenPerWallet on
+    // the same wallet (audit lab-10).
+    const openCount = (walletId: string): number =>
+      [...runs.values()].reduce((n, x) => n + x.status.open.filter((o) => o.walletId === walletId).length, 0);
     const eligible = members.filter((m) => openCount(m.id) < r.maxOpenPerWallet);
     if (!eligible.length) {
       run.status.lastLine = 'every wallet is at its open cap — waiting for sells';
@@ -301,8 +474,14 @@ async function tick(run: Run): Promise<void> {
     const res = await host.buy(wallet.id, pick.mint, sol);
     if (!live(run)) return; // a newer run replaced this one mid-buy; its bag is recorded below regardless
     run.tradeStamps.push(Date.now());
-    if (res.signature) run.signatures.push(res.signature);
-    if (!res.ok) {
+    // A broadcast-but-unconfirmed buy really did spend SOL and really does
+    // hold tokens: the ledger records a fill for it, so it opens a bag and
+    // its signature counts. A buy that got no further than a failure has no
+    // fill behind it, so its signature must stay out of the cash set — it
+    // could never be priced and would blind the loss cap forever.
+    const landed = res.ok || res.stage === 'pending';
+    if (res.signature && landed) run.signatures.push(res.signature);
+    if (!landed) {
       run.status.failed++;
       run.status.lastLine = `${wallet.label}: buy failed — ${res.message.slice(0, 120)}`;
       host.log('warn', `lab random: ${run.status.lastLine}`);
@@ -315,12 +494,14 @@ async function tick(run: Run): Promise<void> {
         symbol: pick.symbol,
         boughtAt: Date.now(),
         sellAt: Date.now() + holdMs,
-        // Carried at cost until sold; the simulated wallet delta when known,
-        // else the size sent.
+        // Display only: the simulated wallet delta when known, else the size
+        // sent. The loss cap prices this bag from `buySig` instead.
         costSol: res.costSol ?? sol,
+        buySig: res.signature,
       };
       run.status.open.push(open);
-      run.status.lastLine = `${wallet.label}: bought ${pick.symbol || pick.mint.slice(0, 6)} for ${sol} SOL — sells in ${Math.round(holdMs / 1000)} s`;
+      const unconfirmed = res.ok ? '' : ' (broadcast, still confirming)';
+      run.status.lastLine = `${wallet.label}: bought ${pick.symbol || pick.mint.slice(0, 6)} for ${sol} SOL${unconfirmed} — sells in ${Math.round(holdMs / 1000)} s`;
       host.log('info', `lab random: ${run.status.lastLine}`);
       armSell(groupId, open, holdMs);
     }
@@ -388,7 +569,15 @@ async function sellOpen(groupId: string, open: RandomOpen): Promise<void> {
     // the next BUY anywhere keeps its distance from it.
     lastTradeAt = Date.now();
     const res = await host.sell(open.walletId, open.mint);
-    if (res.signature) run.signatures.push(res.signature);
+    // Same rule as the buy: only a signature the ledger actually recorded a
+    // fill for can ever be priced, and only those enter the cash set.
+    if (res.signature && (res.ok || res.stage === 'pending')) {
+      run.signatures.push(res.signature);
+      // A bag whose buy was never priceable contributes nothing to this run's
+      // PnL — counting its proceeds alone would show a phantom gain and make
+      // the loss cap LESS likely to fire. Both legs stay out.
+      if (!open.buySig) run.excluded.add(res.signature);
+    }
     if (res.ok) {
       run.status.open = run.status.open.filter((o) => !(o.walletId === open.walletId && o.mint === open.mint));
       run.status.sells++;
@@ -420,13 +609,38 @@ async function sellOpen(groupId: string, open: RandomOpen): Promise<void> {
       host.log('warn', `lab random: ${run.status.lastLine}`);
     }
   } finally {
-    run.status.realizedSol = realizedOf(run);
-    if (run.status.running && lossCapHit(run.status.realizedSol, run.status.maxLossSol)) {
-      stop(groupId, `loss cap reached (${run.status.realizedSol.toFixed(4)} SOL realised on closed trades)`);
+    const realized = realizedOf(run);
+    run.status.realizedSol = realized.sol;
+    if (run.status.running) {
+      if (realized.sol === null) {
+        // Same rule as the tick: an unpriceable fill is not a zero. The sell
+        // just recorded is normally pending for a couple of seconds, so this
+        // only stops the run once the blindness outlasts the grace.
+        if (blindTooLong(run)) {
+          stop(groupId, `cannot price ${realized.unknown} fill(s) yet — stopped rather than trade blind to the loss cap`);
+        }
+      } else {
+        run.blindSince = null;
+        if (lossCapHit(realized.sol, run.status.maxLossSol)) {
+          stop(groupId, `loss cap reached (${realized.sol.toFixed(4)} SOL realised on closed trades)`);
+        }
+      }
     }
     persist();
     push();
   }
+}
+
+/** True once the loss cap has been unjudgeable for longer than the grace. The
+ *  first call only starts the clock — unless the grace is zero, which is how
+ *  the tests pin "a pending fill stops the run". */
+function blindTooLong(run: Run): boolean {
+  const now = Date.now();
+  if (run.blindSince === null) {
+    run.blindSince = now;
+    return unknownGraceMs <= 0;
+  }
+  return now - run.blindSince >= unknownGraceMs;
 }
 
 /** Test seam. */
@@ -434,5 +648,9 @@ async function sellOpen(groupId: string, open: RandomOpen): Promise<void> {
 const resetTradeClock = (): void => {
   lastTradeAt = 0;
 };
+/** Tests pin the blind-stop deterministically instead of waiting a minute. */
+const setUnknownGraceMs = (ms: number): void => {
+  unknownGraceMs = ms;
+};
 
-export const __internals = { runs, tick, sellOpen, realizedOf, resetTradeClock };
+export const __internals = { runs, tick, sellOpen, realizedOf, resetTradeClock, setUnknownGraceMs };

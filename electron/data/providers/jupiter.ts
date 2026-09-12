@@ -361,7 +361,13 @@ export async function shield(mints: string[], opts: { priority?: boolean } = {})
       );
       if (!r.ok || !r.data || typeof r.data !== 'object') return null;
       const w = r.data.warnings;
-      return w && typeof w === 'object' ? w : {};
+      // `warnings: {}` means Shield looked and found nothing — a real pass.
+      // A response with NO `warnings` key at all means Shield did not answer,
+      // and falling back to `{}` there turned every such mint into
+      // "Sellable — PASS", cached per mint. A 200 that omits the field is a
+      // polite refusal, not a clean bill of health: report it as unknown.
+      if (!w || typeof w !== 'object') return null;
+      return w;
     });
     for (const m of batch) {
       if (!hit) {

@@ -31,7 +31,7 @@ import {
   MessageV0,
   VersionedTransaction,
 } from '@solana/web3.js';
-import { getAccountInfo, getBlockHeight, getSignatureStatuses, sendRawTransaction, noteRpcRejection } from './rpcClient';
+import { getAccountInfo, getBlockHeight, getSignatureStatuses, isChallengeResponse, sendRawTransaction, noteRpcRejection } from './rpcClient';
 import { HELIUS_TIP_ACCOUNTS, JITO_TIP_ACCOUNTS } from './tipAccounts';
 import * as confirmSocket from './confirmSocket';
 
@@ -409,7 +409,13 @@ async function postJsonRpc(url: string, base64Tx: string): Promise<{ ok: boolean
       // one message and one failover, not two independent mysteries. Keyed
       // lanes only — a tip relay answering 401 is not the user's RPC key,
       // and must not send them off to fix a setting that is already right.
-      if ((res.status === 401 || res.status === 403) && /api-key=/i.test(url)) noteRpcRejection(url, res.status);
+      // ...and a Cloudflare challenge is not a rejected key either. A 403
+      // carrying an interstitial means the EDGE said no, not the provider:
+      // banning the endpoint for 15 minutes and telling the user to replace a
+      // key that works is the wrong answer twice over.
+      if ((res.status === 401 || res.status === 403) && /api-key=/i.test(url) && !(await isChallengeResponse(res))) {
+        noteRpcRejection(url, res.status);
+      }
       return { ok: false, message: `HTTP ${res.status}` };
     }
     const body = (await res.json()) as { error?: { message?: string } };

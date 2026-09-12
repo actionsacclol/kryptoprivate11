@@ -118,6 +118,8 @@ export function stop(): void {
   running = false;
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = null;
+  // Re-learned on the next socket: the ceiling belonged to that connection.
+  observedSubCap = null;
   pending.clear();
   for (const mint of wanted.keys()) wanted.set(mint, null);
   try {
@@ -229,7 +231,11 @@ function connect(): void {
     if (typeof msg.id === 'number' && msg.error) {
       const mint = pending.get(msg.id);
       pending.delete(msg.id);
-      host?.log('warn', `priority feed: subscribe rejected for ${mint ? `${mint.slice(0, 8)}…` : 'a mint'} — ${msg.error.message ?? 'no reason given'}; it stays on the public pool`);
+      const text = msg.error.message ?? 'no reason given';
+      // If the host really does have a per-socket ceiling, this is where we
+      // find out what it is — learn the number instead of assuming one.
+      if (/too many|limit/i.test(text)) observedSubCap = Math.max(1, subCount());
+      host?.log('warn', `priority feed: subscribe rejected for ${mint ? `${mint.slice(0, 8)}…` : 'a mint'} — ${text}; it stays on the public pool`);
       return;
     }
 
@@ -277,24 +283,60 @@ function connect(): void {
   });
 }
 
-/** The url the live socket was dialled with — for the subscription cap. */
+/** The url the live socket was dialled with — for the subscription guard. */
 let currentUrl = '';
-/** The default public socket caps subscriptions at 10 per connection
- *  (`x-ratelimit-pubsub-limit: 10`, observed 2026-09-06); past that the host
- *  rejects the subscribe and the mint would sit unsubscribed. Positions are
- *  watched before tape mints, so the cap lands on the tape. */
-const PUBLIC_SUB_CAP = 10;
+/**
+ * There is no ten-subscription ceiling. Until 2026-09-09 this file said there
+ * was, citing `x-ratelimit-pubsub-limit: 10` on api.mainnet-beta.solana.com.
+ *
+ * MEASURED 2026-09-09: that header counts pubsub CONNECTIONS per IP, not
+ * subscriptions per connection. Three independent observations —
+ *   • the header decrements once per socket opened (10 → 9 → 8), not per
+ *     subscribe;
+ *   • 16 `logsSubscribe` frames on ONE socket were all acked;
+ *   • connections 11, 12 and 13 were refused with HTTP 429 at the handshake.
+ * So the scarce resource is the socket this module already shares, and the
+ * old cap silently unsubscribed held mints (and, in walletWatcher.ts, copy
+ * leaders) to respect a limit the host does not have.
+ *
+ * 16 is what was actually verified, so this is a guard, not a claim: four
+ * times the proven number, far above any realistic held-mint count, and there
+ * only to stop a runaway loop from firing thousands of frames. If the host
+ * ever does refuse a subscribe for volume, `observedSubCap` below records the
+ * count it refused at and THAT becomes the ceiling — a number we watched
+ * happen rather than one we guessed.
+ */
+const VERIFIED_SUBS_PER_SOCKET = 16;
+const SUB_GUARD = 64;
+/** Live subscriptions this socket refused to go past, once observed. */
+let observedSubCap: number | null = null;
 let capNotedAt = 0;
 const keyed = (u: string): boolean => /api-key=|[?&]token=/i.test(u);
+
+/** Live + in-flight subscriptions on the current socket. */
+function subCount(): number {
+  return [...wanted.values()].filter((v) => v !== null).length + pending.size;
+}
+
+/** Test seam / diagnostics: mints with a confirmed subscription id. */
+export function subscribedMints(): string[] {
+  return [...wanted.entries()].filter(([, id]) => id !== null).map(([m]) => m);
+}
 
 function subscribe(mint: string): void {
   if (ws?.readyState !== WebSocket.OPEN || !host) return;
   if (!keyed(currentUrl)) {
-    const live = [...wanted.values()].filter((v) => v !== null).length + pending.size;
-    if (live >= PUBLIC_SUB_CAP) {
+    const live = subCount();
+    const ceiling = observedSubCap ?? SUB_GUARD;
+    if (live >= ceiling) {
       if (Date.now() - capNotedAt > 60_000) {
         capNotedAt = Date.now();
-        host.log('info', `priority feed: the public socket allows ${PUBLIC_SUB_CAP} subscriptions — ${mint.slice(0, 8)}… stays on the firehose (a Helius key lifts this)`);
+        host.log(
+          'info',
+          observedSubCap === null
+            ? `priority feed: holding at ${SUB_GUARD} live subscriptions on one socket — ${mint.slice(0, 8)}… stays on the program firehose (still covered, about 150 ms slower)`
+            : `priority feed: this socket refused a subscribe past ${observedSubCap} (${VERIFIED_SUBS_PER_SOCKET} were verified to work) — ${mint.slice(0, 8)}… stays on the program firehose (still covered, about 150 ms slower)`,
+        );
       }
       return;
     }
@@ -321,8 +363,20 @@ function scheduleReconnect(why: string): void {
   if (!running) return;
   attempts += 1;
   if (attempts === 1) host?.log('warn', `priority feed: ${why}; reconnecting`);
-  const wait = Math.min(30_000, 1_000 * 2 ** Math.min(attempts, 5));
-  reconnectTimer = setTimeout(connect, wait);
+  reconnectTimer = setTimeout(connect, reconnectDelayMs(attempts));
+}
+
+/**
+ * Backoff with ±25% jitter, like every other socket class in the app. Until
+ * 2026-09-09 this lane was the only one that redialled on a round number:
+ * after a suspend/resume or a host blip every socket comes back at the same
+ * instant, and the pubsub CONNECTION cap (10 per IP on the public host, the
+ * app's worst case is exactly 10) turns a synchronised redial into a 429 at
+ * the handshake — which parks the whole host, for every socket class, for 30 s.
+ */
+export function reconnectDelayMs(n: number): number {
+  const base = Math.min(30_000, 1_000 * 2 ** Math.min(n, 5));
+  return Math.round(base * (0.75 + Math.random() * 0.5));
 }
 
 // ── Per-mint fill ───────────────────────────────────────────────────────
@@ -420,6 +474,19 @@ async function runFillBatch(): Promise<void> {
     fillInFlight = false;
     if (fillQueue.size) armFillTimer();
   }
+}
+
+/** Test seam. */
+export function _reset(): void {
+  stop();
+  wanted.clear();
+  events = 0;
+  bytes = 0;
+  attempts = 0;
+  currentUrl = '';
+  capNotedAt = 0;
+  fillsRequested = 0;
+  fillsDecoded = 0;
 }
 
 /** Pump events from a transaction's emit_cpi inner instructions. */

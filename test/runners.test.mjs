@@ -1,6 +1,6 @@
 // Potential-runner alerts: the verdict, the cap, and the honesty of the text.
 import assert from 'node:assert';
-import { runnerVerdict, RunnerRateLimit, runnerNotification, bucketWithin, DEFAULT_RUNNER_ALERTS, RUNNER_TTL_MS, pruneRunners } from './.runners.mjs';
+import { ODDS_TAPE_CAP, markCreatorSold, regimeLine, FLAG_FORWARD_LINE, runnerVerdict, RunnerRateLimit, runnerNotification, bucketWithin, DEFAULT_RUNNER_ALERTS, RUNNER_TTL_MS, pruneRunners } from './.runners.mjs';
 
 const report = (bucket, observedPct = 18, basePct = 2.2) => ({
   model: '2026-07-27',
@@ -27,6 +27,9 @@ const cfg = { ...DEFAULT_RUNNER_ALERTS };
 {
   assert.equal(runnerVerdict(report('top1'), cfg, { ...ctx, hardRejected: true }).flag, false, 'a hard reject never flags');
   assert.equal(runnerVerdict(report('top1'), cfg, { ...ctx, creatorSold: true }).flag, false, 'a creator sell never flags');
+  assert.equal(runnerVerdict(report('top1'), cfg, { ...ctx, tapeTruncated: true }).flag, false, 'a truncated odds tape is unknown, never a flag');
+  assert.equal(runnerVerdict(report('top1'), cfg, { ...ctx, nonSolQuote: true }).flag, false, 'a curve not quoted in SOL is never scored');
+  assert.ok(ODDS_TAPE_CAP >= 5000, 'the odds tape holds at least 5,000 trades (600 zeroed the last-10-s rate on the hottest launches)');
   assert.equal(runnerVerdict(report('top1'), cfg, { ...ctx, alreadyFlagged: true }).flag, false, 'once per mint');
   assert.equal(runnerVerdict(null, cfg, ctx).flag, false, 'no report, no flag');
   assert.equal(runnerVerdict(report('top1'), { ...cfg, enabled: false }, ctx).flag, false, 'switch off');
@@ -59,6 +62,24 @@ const cfg = { ...DEFAULT_RUNNER_ALERTS };
   assert.equal(bucketWithin('top1', 'top5_10'), true);
   assert.equal(bucketWithin('bottom50', 'top5_10'), false);
   console.log('ok  bucket ordering');
+}
+{
+  const list = [{ mint: 'A', flaggedAt: 1000 }, { mint: 'B', flaggedAt: 1000 }];
+  const marked = markCreatorSold(list, 'A', 5000);
+  assert.ok(marked && marked !== list, 'marking returns a new list');
+  assert.equal(marked[0].creatorSoldAt, 5000, 'the flagged mint carries the sell time');
+  assert.equal(marked[1].creatorSoldAt, undefined, 'other flags untouched');
+  assert.equal(markCreatorSold(marked, 'A', 9000), null, 'a second sell does not move the first mark');
+  assert.equal(markCreatorSold(list, 'Z', 1), null, 'an unflagged mint changes nothing');
+  console.log('ok  a creator sell after the flag is marked once, on that flag only');
+}
+{
+  assert.ok(regimeLine('mixed') && regimeLine('mixed').includes('0.16 SOL'), 'a mixed flag says what its graduation is worth');
+  assert.equal(regimeLine('classic'), null, 'a classic flag adds nothing');
+  assert.equal(regimeLine(undefined), null, 'an unknown regime adds nothing');
+  assert.ok(FLAG_FORWARD_LINE[60].includes('18 in 100 graduated') && FLAG_FORWARD_LINE[60].includes('2026-07-27'), 'the 60 s line names the day and the graduation rate');
+  assert.equal(FLAG_FORWARD_LINE[120], null, 'the 120 s window has no honest line (n = 132)');
+  console.log('ok  the flag carries its regime and the measured forward lines');
 }
 console.log('runners: all tests passed');
 

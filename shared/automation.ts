@@ -34,7 +34,10 @@ export interface ScriptBudget {
   maxLossSolPerDay: number;
   /** Positions this script may hold open at once. */
   maxOpenPositions: number;
-  /** Any action (buy, sell, order, notify…) per minute — the runaway guard. */
+  /** Any action (buy, sell, order, notify…) per minute — the runaway guard.
+   *  Charged once per rule action and once per `bot.*` call, so a single
+   *  "sell everything" that closes N bags costs one, not N: exits are
+   *  deliberately ungated. */
   maxActionsPerMinute: number;
 }
 
@@ -717,9 +720,14 @@ export function validateScript(
   if (s.mode !== 'paper' && s.mode !== 'live') return { ok: false, message: 'Mode must be paper or live' };
   const b = validateBudget(s.budget);
   if (!b.ok) return b;
+  // Outside the branch on purpose: a RULES script carries a `code` field too,
+  // and the whole file is re-serialised on every save, so an unbounded body
+  // there is the same cost whether or not anything ever runs it.
+  if (typeof s.code === 'string' && new TextEncoder().encode(s.code).length > MAX_CODE_BYTES) {
+    return { ok: false, message: `Script is over ${MAX_CODE_BYTES / 1024} KB` };
+  }
   if (s.kind === 'code') {
     if (typeof s.code !== 'string' || !s.code.trim()) return { ok: false, message: 'The script is empty' };
-    if (new TextEncoder().encode(s.code).length > MAX_CODE_BYTES) return { ok: false, message: `Script is over ${MAX_CODE_BYTES / 1024} KB` };
   } else {
     const r = validateRules(s.rules);
     if (!r.ok) return r;
@@ -851,7 +859,7 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'price', signature: 'await bot.price(mint)', returns: 'number | null', notes: 'SOL per token from what the app already knows. Null when nothing local knows it.', action: false },
   { method: 'token', signature: 'await bot.token(mint)', returns: 'Token | null', notes: 'The same facts a rule sees (see the variable guide), from the launch feed and the cached market data. Null when the app has never seen the token.', action: false },
   { method: 'market', signature: 'await bot.market(mint)', returns: 'Market | null', notes: 'Asks the market providers (a network round trip inside the app): priceSol, priceUsd, marketCapUsd, liquidityUsd, holders, launchpad, symbol, name. Slow — a second or more; not for every tick.', action: false },
-  { method: 'positions', signature: 'await bot.positions()', returns: 'Position[]', notes: 'Every position held in the script’s mode, as the same facts object plus held=true, pnlPct, pnlSol, holdMinutes, drawdownFromPeakPct, costSol.', action: false },
+  { method: 'positions', signature: 'await bot.positions()', returns: 'Position[]', notes: 'Every position THIS SCRIPT opened, in its mode, as the same facts object plus held=true, pnlPct, pnlSol, holdMinutes, drawdownFromPeakPct, costSol. Bags the user opened by hand are not listed and cannot be sold.', action: false },
   { method: 'orders', signature: 'await bot.orders(mint?)', returns: 'Order[]', notes: '{id, mint, symbol, kind, state, triggerBasis, triggerValue, amount}. All orders, or the token’s.', action: false },
   { method: 'runners', signature: 'await bot.runners()', returns: 'Token[]', notes: 'Launches the scanner currently flags as runners.', action: false },
   { method: 'leaders', signature: 'await bot.leaders()', returns: 'Array<{wallet, label, enabled, mode}>', notes: 'Wallets followed on the Copy Trading page.', action: false },

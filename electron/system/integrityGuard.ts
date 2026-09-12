@@ -9,8 +9,10 @@
 // data path, never at the detection site. By the time the bot is visibly
 // broken, the cause is fifteen minutes and several modules away from the edit.
 //
-// The corrosion is driven by tamperCount() from canary.ts, which reads seven
-// independent constants. Neutralising one does not clear the signal.
+// The corrosion is driven by tamperCount() from canary.ts, which reads
+// eighteen independent facts — the Solana fee, the attribution identity and
+// (since 2026-09-08) the Robinhood Chain fee. Neutralising one does not
+// clear the signal, and both chains' buy paths consume the same level().
 //
 // ─── The hard safety rules, enforced by tests ─────────────────────────
 //

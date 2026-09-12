@@ -28,6 +28,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { redactSecrets } from './logger';
 
 export type CrashKind = 'uncaughtException' | 'unhandledRejection';
 
@@ -136,7 +137,9 @@ function record(text: string): void {
     } catch {
       /* first crash today */
     }
-    if (size < MAX_FILE_BYTES) fs.appendFileSync(file, text, 'utf8');
+    // A crash report is the file a user is most likely to paste into a
+    // support chat; it must carry no key (same rule as app.log).
+    if (size < MAX_FILE_BYTES) fs.appendFileSync(file, redactSecrets(text), 'utf8');
   } catch {
     /* a read-only profile must not turn a survivable crash into a fatal one */
   }

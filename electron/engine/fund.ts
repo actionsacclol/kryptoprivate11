@@ -94,20 +94,22 @@ async function sendTransfers(
 export async function fundWallets(
   httpUrl: string,
   targets: Array<{ publicKey: string; lamports: number }>,
+  /** Which of this install's wallets the SOL leaves; the active one if absent. */
+  fromWalletId?: string,
 ): Promise<FundOutcome> {
-  const owner = wallet.publicKey();
-  if (!owner) return { ok: false, message: 'No active wallet', sentLamports: 0, count: 0 };
+  const owner = fromWalletId ? wallet.publicKeyOf(fromWalletId) : wallet.publicKey();
+  if (!owner) return { ok: false, message: fromWalletId ? 'No such wallet to fund from' : 'No active wallet', sentLamports: 0, count: 0 };
   const own = new Set(wallet.list().map((w) => w.publicKey));
   for (const t of targets) {
     if (!own.has(t.publicKey)) return { ok: false, message: `${t.publicKey.slice(0, 8)}… is not one of this install's wallets`, sentLamports: 0, count: 0 };
-    if (t.publicKey === owner) return { ok: false, message: 'The active wallet cannot fund itself', sentLamports: 0, count: 0 };
+    if (t.publicKey === owner) return { ok: false, message: 'The source wallet cannot fund itself', sentLamports: 0, count: 0 };
     if (!(t.lamports >= RENT_EXEMPT_LAMPORTS)) return { ok: false, message: 'Every target must receive at least the rent-exempt minimum', sentLamports: 0, count: 0 };
   }
   const total = targets.reduce((a, t) => a + t.lamports, 0);
   const bal = await getBalance(httpUrl, owner);
   if (!bal.ok || bal.data === undefined) return { ok: false, message: `balance: ${bal.message}`, sentLamports: 0, count: 0 };
   if (bal.data - total < RENT_EXEMPT_LAMPORTS + TX_FEE_HEADROOM_LAMPORTS * Math.ceil(targets.length / MAX_TRANSFERS_PER_TX)) {
-    return { ok: false, message: 'The active wallet would be left below rent + fees', sentLamports: 0, count: 0 };
+    return { ok: false, message: 'The source wallet would be left below rent + fees', sentLamports: 0, count: 0 };
   }
   let sent = 0;
   let count = 0;
@@ -121,10 +123,10 @@ export async function fundWallets(
       const now = await getBalance(httpUrl, owner);
       if (!now.ok || now.data === undefined) return { ok: false, message: `balance: ${now.message} (after ${count} wallet(s) funded)`, signature: last, sentLamports: sent, count };
       if (now.data - chunkTotal < RENT_EXEMPT_LAMPORTS + TX_FEE_HEADROOM_LAMPORTS) {
-        return { ok: false, message: `the active wallet no longer covers the next batch (after ${count} wallet(s) funded)`, signature: last, sentLamports: sent, count };
+        return { ok: false, message: `the source wallet no longer covers the next batch (after ${count} wallet(s) funded)`, signature: last, sentLamports: sent, count };
       }
     }
-    const r = await sendTransfers(httpUrl, { publicKey: owner }, chunk);
+    const r = await sendTransfers(httpUrl, { walletId: fromWalletId, publicKey: owner }, chunk);
     if (!r.ok) return { ok: false, message: `${r.message} (after ${count} wallet(s) funded)`, signature: r.signature ?? last, sentLamports: sent, count };
     sent += r.sentLamports;
     count += r.count;
@@ -142,10 +144,12 @@ export interface CollectOutcome {
 }
 
 /** Each wallet sends everything above rent + fee back to the ACTIVE wallet. */
-export async function collectToActive(httpUrl: string, walletIds: string[]): Promise<CollectOutcome[]> {
-  const active = wallet.publicKey();
+export async function collectToActive(httpUrl: string, walletIds: string[], toWalletId?: string): Promise<CollectOutcome[]> {
+  // "Active" in the name is the default, not the rule: since 2026-09-11 the
+  // destination can be any of this install's wallets.
+  const active = toWalletId ? wallet.publicKeyOf(toWalletId) : wallet.publicKey();
   const out: CollectOutcome[] = [];
-  if (!active) return walletIds.map((walletId) => ({ walletId, ok: false, message: 'No active wallet', lamports: 0, signature: null }));
+  if (!active) return walletIds.map((walletId) => ({ walletId, ok: false, message: toWalletId ? 'No such wallet to collect to' : 'No active wallet', lamports: 0, signature: null }));
   for (const walletId of walletIds) {
     const pk = wallet.publicKeyOf(walletId);
     if (!pk) {
@@ -153,7 +157,7 @@ export async function collectToActive(httpUrl: string, walletIds: string[]): Pro
       continue;
     }
     if (pk === active) {
-      out.push({ walletId, ok: false, message: 'This is the active wallet', lamports: 0, signature: null });
+      out.push({ walletId, ok: false, message: 'This is the destination wallet', lamports: 0, signature: null });
       continue;
     }
     const bal = await getBalance(httpUrl, pk);

@@ -199,8 +199,17 @@ export interface RandomOpen {
   boughtAt: number;
   sellAt: number;
   /** What the buy cost the wallet (simulated delta, else the size sent); the
-   *  bag is carried at this until its sell lands. */
+   *  bag is carried at this until its sell lands. Display only — the loss cap
+   *  prices the bag from `buySig`'s on-chain delta, never from this. */
   costSol: number | null;
+  /**
+   * Signature of the buy that opened this bag. The run's realised cash adds a
+   * held bag back AT COST, and the only honest cost is the lamports that
+   * actually left the wallet — so the bag must be able to name its own fill.
+   * Null on bags persisted before this field existed; such a bag is excluded
+   * from the run's PnL rather than priced from the requested size.
+   */
+  buySig?: string | null;
   /** Failed sell attempts so far; after the cap the bag is handed to the user by name. */
   tries?: number;
 }
@@ -216,13 +225,24 @@ export interface RandomRunStatus {
   buys: number;
   sells: number;
   failed: number;
-  /** Realised SOL on CLOSED trades since start: reconciled cash delta of this
-   *  run's fills with open bags added back at cost. Fees and tips included. */
-  realizedSol: number;
+  /**
+   * Realised SOL on CLOSED trades since start: reconciled cash delta of this
+   * run's fills with open bags added back at cost. Fees and tips included.
+   *
+   * NULL when it is not knowable — a fill of this run is still `pending` or
+   * could not be read off the chain, or the run was restored from disk and
+   * has not been started this session. Renders as an em dash; it is never
+   * shown as 0, because "I could not read the fills" and "nothing was lost"
+   * are opposite facts.
+   */
+  realizedSol: number | null;
   maxLossSol: number;
   open: RandomOpen[];
   nextActionAt: number | null;
   lastLine: string | null;
+  /** Why the lab run file is read-only this session, or absent/null. The run
+   *  still trades; its open bags just will not survive a restart. */
+  loadFailure?: string | null;
 }
 
 /** Uniform pick in [lo, hi]. */

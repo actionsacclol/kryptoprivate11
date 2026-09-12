@@ -12,9 +12,13 @@
 // Same socket rules as the priority feed, learned the hard way: the pong
 // deadline is enforced only after a first pong and inbound frames count as
 // life; a handshake 429 parks the host for every socket class; reconnect
-// backoff resets on an ack or a notification, never on a bare open; the
-// public socket allows ten subscriptions, so past that a wallet is marked
-// `over-cap` rather than silently unsubscribed (a Helius key lifts it).
+// backoff resets on an ack or a notification, never on a bare open.
+//
+// 2026-09-09: the "public socket allows ten subscriptions" rule that used to
+// live here was wrong and cost users leaders. `x-ratelimit-pubsub-limit: 10`
+// is 10 pubsub CONNECTIONS per IP — 16 subscriptions on one socket were all
+// acked. What is scarce is the socket, and this module opens exactly one. A
+// wallet is only marked `over-cap` if the host itself refuses the subscribe.
 //
 // Independent of the scanner: paper copying costs nothing and should work
 // with the launch feed stopped, so this runs whenever a config is enabled.
@@ -41,7 +45,25 @@ interface WalletStats {
   overCap: boolean;
 }
 
-const PUBLIC_SUB_CAP = 10;
+/**
+ * There is no ten-wallet ceiling — see the header note. This is a runaway
+ * guard, not a limit we claim the host has.
+ *
+ * MEASURED 2026-09-09: `x-ratelimit-pubsub-limit: 10` on
+ * api.mainnet-beta.solana.com counts pubsub CONNECTIONS per IP, not
+ * subscriptions per connection. The header decrements once per socket opened,
+ * 16 `logsSubscribe` frames on ONE socket were all acked, and connections 11,
+ * 12 and 13 were refused with HTTP 429 at the handshake. Following 14 leaders
+ * left four of them silently unwatched for a limit that does not exist.
+ *
+ * 16 is the verified number, so the guard sits at 64 — well past any real
+ * follow list. If the host ever refuses a subscribe for volume, the count it
+ * refused at is recorded in `observedSubCap` and becomes the ceiling.
+ */
+const VERIFIED_SUBS_PER_SOCKET = 16;
+const SUB_GUARD = 64;
+/** Live subscriptions this socket refused to go past, once observed. */
+let observedSubCap: number | null = null;
 const PING_MS = 15_000;
 const SILENCE_MS = 25_000;
 const FETCH_ATTEMPTS = 3;
@@ -142,6 +164,8 @@ export function stop(): void {
   running = false;
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = null;
+  // Re-learned on the next socket: the ceiling belonged to that connection.
+  observedSubCap = null;
   pending.clear();
   bySub.clear();
   for (const w of wanted.keys()) wanted.set(w, null);
@@ -241,7 +265,12 @@ function connect(): void {
       pending.delete(msg.id);
       const text = msg.error.message ?? 'no reason given';
       if (wallet) {
-        if (/too many/i.test(text)) statsFor(wallet).overCap = true;
+        if (/too many|limit/i.test(text)) {
+          statsFor(wallet).overCap = true;
+          // Learn the real per-socket ceiling from the host rather than
+          // assuming one: this many were accepted, the next was not.
+          observedSubCap = Math.max(1, subCount());
+        }
         host?.log('warn', `wallet watcher: subscribe rejected for ${wallet.slice(0, 6)}… — ${text}`);
       }
       return;
@@ -279,15 +308,26 @@ function connect(): void {
   });
 }
 
+/** Live + in-flight subscriptions on the current socket. */
+function subCount(): number {
+  return [...wanted.values()].filter((v) => v !== null).length + pending.size;
+}
+
 function subscribe(wallet: string): void {
   if (ws?.readyState !== WebSocket.OPEN || !host) return;
   if (!keyed(currentUrl)) {
-    const live = [...wanted.values()].filter((v) => v !== null).length + pending.size;
-    if (live >= PUBLIC_SUB_CAP) {
+    const live = subCount();
+    const ceiling = observedSubCap ?? SUB_GUARD;
+    if (live >= ceiling) {
       statsFor(wallet).overCap = true;
       if (Date.now() - capNotedAt > 60_000) {
         capNotedAt = Date.now();
-        host.log('warn', `wallet watcher: the public socket allows ${PUBLIC_SUB_CAP} followed wallets — ${wallet.slice(0, 6)}… is not watched (a Helius key lifts this)`);
+        host.log(
+          'warn',
+          observedSubCap === null
+            ? `wallet watcher: holding at ${SUB_GUARD} wallet subscriptions on one socket — ${wallet.slice(0, 6)}… is not watched; unfollow someone to make room`
+            : `wallet watcher: this socket refused a subscribe past ${observedSubCap} followed wallets (${VERIFIED_SUBS_PER_SOCKET} were verified to work) — ${wallet.slice(0, 6)}… is not watched`,
+        );
       }
       return;
     }
@@ -371,4 +411,6 @@ export function _reset(): void {
   seen.clear();
   attempts = 0;
   currentUrl = '';
+  capNotedAt = 0;
+  observedSubCap = null;
 }

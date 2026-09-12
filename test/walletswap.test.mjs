@@ -38,7 +38,9 @@ function tx({ keys, signers = 1, pre, post, fee = 5000, preTok = [], postTok = [
 }
 
 let passed = 0;
+let ran = 0;
 const test = (name, fn) => {
+  ran++;
   try {
     fn();
     console.log(`ok  ${name}`);
@@ -48,6 +50,55 @@ const test = (name, fn) => {
     process.exitCode = 1;
   }
 };
+
+test('a one-sided LIQUIDITY ADD is not a buy — the position NFT has no market', () => {
+  // From balance deltas an LP add is indistinguishable from a buy: SOL out,
+  // one token in. That token is a position NFT — zero decimals, quantity one.
+  // Copied live, the follower would try to buy an untradeable mint and the
+  // leader's record would open a round trip that can never close. The
+  // MIN_BUY_SOL floor does not catch it: a real add is far above it.
+  const t = tx({
+    keys: [W, RAY, MINT_A],
+    pre: [10 * SOL, 0, 0],
+    post: [10 * SOL - 2 * SOL - 5000, 0, 0],
+    preTok: [],
+    postTok: [{ mint: MINT_A, owner: W, amount: '1', decimals: 0 }],
+    programs: [RAY],
+  });
+  assert.equal(decodeWalletSwap(t, W), null, 'two SOL into a position NFT is not a purchase');
+});
+
+test('a one-sided liquidity WITHDRAW is not a sell either', () => {
+  // Position NFT out, SOL in. Sells are ungated so a real exit is never
+  // missed — but a follower cannot hold the leader's position NFT, so this is
+  // a phantom exit, not one worth mirroring.
+  const t = tx({
+    keys: [W, RAY, MINT_A],
+    pre: [10 * SOL, 0, 0],
+    post: [10 * SOL + 2 * SOL - 5000, 0, 0],
+    preTok: [{ mint: MINT_A, owner: W, amount: '1', decimals: 0 }],
+    postTok: [],
+    programs: [RAY],
+  });
+  assert.equal(decodeWalletSwap(t, W), null, 'pulling liquidity is not a sale');
+});
+
+test('a real 0-decimal token purchase of more than one unit still decodes', () => {
+  // The guard must be exactly "one indivisible unit", not "zero decimals" —
+  // otherwise a legitimate 0-decimal token trade would vanish.
+  const t = tx({
+    keys: [W, JUP, MINT_B],
+    pre: [10 * SOL, 0, 0],
+    post: [10 * SOL - 0.5 * SOL - 5000, 0, 0],
+    preTok: [],
+    postTok: [{ mint: MINT_B, owner: W, amount: '250', decimals: 0 }],
+    programs: [JUP],
+  });
+  const s = decodeWalletSwap(t, W);
+  assert.ok(s, 'decoded');
+  assert.equal(s.isBuy, true);
+  assert.equal(s.tokens, 250);
+});
 
 test('a Jupiter-routed buy: SOL out, one token in, priced net of the fee', () => {
   const t = tx({
@@ -217,4 +268,46 @@ test('a sell reports the share of the holding that went out — what a copier mi
   assert.equal(decodeWalletSwap(buy, W).heldBefore, 0);
 });
 
-console.log(`walletswap: ${passed}/10 tests passed`);
+test('an account-rent-sized BUY is a receipt, not a trade — but the same size SELL is real', () => {
+  // Rule 6. Creating one associated token account costs 2,039,280 lamports,
+  // which clears MIN_SOL. A claim, an LP or staking receipt, an NFT mint or a
+  // pump.fun creation therefore decodes as "paid SOL, received a token", and
+  // a copier with fixed sizing would buy its full size of a token nobody
+  // traded. The wallet signs those itself, so the signer rule cannot help.
+  const rent = 2_039_280;
+  const receipt = tx({
+    keys: [W, JUP, MINT_A],
+    pre: [10 * SOL, 0, 0],
+    post: [10 * SOL - rent - 5000, 0, 0],
+    postTok: [{ mint: MINT_A, owner: W, amount: '1000000', decimals: 6 }],
+  });
+  assert.equal(decodeWalletSwap(receipt, W), null, 'a 0.00204 SOL "buy" is not a trade');
+
+  // The floor is a CHECK, never a subtraction: a buy just over it reports its
+  // full size.
+  const small = tx({
+    keys: [W, JUP, MINT_A],
+    pre: [10 * SOL, 0, 0],
+    post: [10 * SOL - 0.006 * SOL - 5000, 0, 0],
+    postTok: [{ mint: MINT_A, owner: W, amount: '1000000', decimals: 6 }],
+  });
+  const b = decodeWalletSwap(small, W);
+  assert.ok(b && b.isBuy, 'a 0.006 SOL buy is a trade');
+  assert.ok(Math.abs(b.sol - 0.006) < 1e-12, `nothing is subtracted: ${b && b.sol}`);
+
+  // SELLS are exempt. An exit must never be missed because it was small.
+  const tinySell = tx({
+    keys: [W, JUP, MINT_A],
+    pre: [SOL, 0, 0],
+    post: [SOL + rent - 5000, 0, 0],
+    preTok: [{ mint: MINT_A, owner: W, amount: '1000000', decimals: 6 }],
+    postTok: [{ mint: MINT_A, owner: W, amount: '0', decimals: 6 }],
+  });
+  const sell = decodeWalletSwap(tinySell, W);
+  assert.ok(sell && !sell.isBuy, 'a sell of the same size is still a sell');
+  assert.equal(sell.soldFraction, 1);
+});
+
+// Counted, not hardcoded: a hand-kept denominator silently lies the
+// moment a test is added, and reads as a failure when it is not.
+console.log(`walletswap: ${passed}/${ran} tests passed`);

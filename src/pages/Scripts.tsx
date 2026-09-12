@@ -99,10 +99,24 @@ export function ScriptsPage() {
 
   const current = useMemo(() => snap?.scripts.find((s) => s.id === selected) ?? null, [snap, selected]);
 
-  // Editing follows the selection; a fresh draft is a new script.
+  // Editing follows the SELECTION, not every push. `current` is rebuilt by
+  // `automation.all()` on every snapshot, and a snapshot lands on every script
+  // log line — depending on the object identity meant a second, chattier
+  // script silently wiped whatever you were half-way through typing.
   useEffect(() => {
     if (current) setDraft({ ...current, rules: { ...current.rules, conditions: [...current.rules.conditions], actions: [...current.rules.actions] }, budget: { ...current.budget } });
-  }, [current]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, current?.updatedAt]);
+
+  // The arm switch acts on the SAVED script, while every control above it
+  // edits the draft. Arming while they disagree is how a script gets armed at
+  // a size the screen is not showing — or worse, flipped to live in the editor
+  // and armed with no live confirmation, because the saved copy still says
+  // paper. The Warmer page already refuses this; so do we.
+  const dirty = useMemo(() => {
+    if (!current || !draft) return false;
+    return JSON.stringify({ ...draft, updatedAt: 0 }) !== JSON.stringify({ ...current, updatedAt: 0 });
+  }, [current, draft]);
 
   const startNew = (kind: 'rules' | 'code'): void => {
     setSelected(null);
@@ -283,7 +297,15 @@ export function ScriptsPage() {
                 {draft.mode === 'live' && (
                   <div className="text-[11px] text-rose-200/90 flex items-center gap-2">
                     <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
-                    Live spends real SOL on its own. Saving as live disarms the script; arming is a separate confirmed switch.
+                    {/* Saving disarms only on the paper → live TRANSITION. A script
+                        already saved as live keeps its arming and restarts with the
+                        new code the moment you save, which is the opposite of what
+                        the old sentence promised. */}
+                    {current?.mode === 'live'
+                      ? current.enabled
+                        ? 'This script is armed and live. Saving restarts it immediately with the new code — it stays armed.'
+                        : 'Live spends real SOL on its own. This script is already saved as live; arming is a separate confirmed switch.'
+                      : 'Live spends real SOL on its own. Saving as live disarms the script; arming is a separate confirmed switch.'}
                     {!liveEnabled && ' Live execution is off in Settings, so a live script would refuse every trade until it is on.'}
                   </div>
                 )}
@@ -326,7 +348,13 @@ export function ScriptsPage() {
                     {busy ? 'Saving…' : draft.id ? 'Save changes' : 'Save (paper, off)'}
                   </PrimaryButton>
                   {current && (
-                    <Switch checked={current.enabled} onChange={(v) => void toggle(current, v)} label={current.enabled ? 'On' : 'Off'} description={current.enabled ? `Running in ${current.mode} mode` : 'Enable to start'} />
+                    <Switch
+                      checked={current.enabled}
+                      disabled={dirty}
+                      onChange={(v) => void toggle(current, v)}
+                      label={current.enabled ? 'On' : 'Off'}
+                      description={dirty ? 'Unsaved settings — save before arming' : current.enabled ? `Running in ${current.mode} mode` : 'Enable to start'}
+                    />
                   )}
                 </div>
                 {current && (

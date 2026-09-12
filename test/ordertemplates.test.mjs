@@ -34,6 +34,10 @@ const MINT = 'So11111111111111111111111111111111111111112';
   assert.deepEqual(kinds, ['stop_loss', 'take_profit', 'take_profit', 'trailing_stop', 'sell_on_dev_sell']);
   const tps = ordersForTemplate(t, MINT, 'TEST').filter((o) => o.kind === 'take_profit');
   assert.deepEqual(tps.map((o) => o.triggerValue), [100, 300], 'ladder keeps its order');
+  // "What is left" is only true if the rungs fire one after another. This
+  // asserts the EXPANSION; the execution half — one sell per mint in flight
+  // at a time, so two rungs cannot both size off the same balance — is
+  // pinned in advorders.test.mjs ('two rungs on one mint...').
   assert.deepEqual(tps.map((o) => o.amount), [40, 50], 'each step sells its share of what is left');
   console.log('ok  a ladder expands in order, with each step sizing itself');
 }

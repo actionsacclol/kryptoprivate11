@@ -22,6 +22,7 @@ import {
   type TokenSummary,
 } from '@shared/market';
 import type { OddsBucket } from '@shared/odds';
+import { isEvmAddress, isEvmChain, type ChainKind } from '@shared/evm';
 import { useToast } from './ToastProvider';
 import { ODDS_BUCKET_ORDER, oddsBucketRank } from '../utils/odds';
 
@@ -89,13 +90,22 @@ interface TerminalState {
    *  can see. Ref-counted so StrictMode's double mount cannot strand it. */
   setDiscoverActive: (on: boolean) => void;
   refreshNow: (column?: DiscoverColumn) => void;
-  /** The mint the token page is showing, or null. */
+  /** The mint the token page is showing, or null, and the chain it is on. */
   openMint: string | null;
-  openToken: (mint: string | null) => void;
-  /** Locally pinned mints — the watchlist, persisted in localStorage. */
+  openChain: ChainKind;
+  openToken: (mint: string | null, chain?: ChainKind) => void;
+  /** The app-wide chain — Solana, Robinhood Chain or BNB Smart Chain.
+   *  Discover's columns, the top bar's wallet and Paper/Live, the quick buy
+   *  and the wallet page all follow it. Persisted. Switching clears the
+   *  columns and refetches — a Solana row must never sit under an EVM header. */
+  chain: ChainKind;
+  setChain: (c: ChainKind) => void;
+  /** Locally pinned tokens — the watchlist, persisted in localStorage. A
+   *  Solana pin is the bare mint; an EVM pin is `${chain}:${address}`,
+   *  because an 0x address alone does not say which chain it is on. */
   watchlist: string[];
-  toggleWatch: (mint: string) => void;
-  isWatched: (mint: string) => boolean;
+  toggleWatch: (mint: string, chain?: ChainKind) => void;
+  isWatched: (mint: string, chain?: ChainKind) => boolean;
 }
 
 const Ctx = createContext<TerminalState | null>(null);
@@ -106,11 +116,38 @@ export function useTerminal(): TerminalState {
   return ctx;
 }
 
+/** The watchlist key for a token: the bare mint on Solana, `chain:address`
+ *  on an EVM chain. An 0x address with no chain given is Robinhood's — the
+ *  only EVM chain that existed when bare 0x pins were written. */
+export function pinKey(mint: string, chain?: ChainKind): string {
+  const c: ChainKind = chain ?? (isEvmAddress(mint) ? 'robinhood' : 'solana');
+  return isEvmChain(c) ? `${c}:${mint.toLowerCase()}` : mint;
+}
+
+export function parsePin(pin: string): { mint: string; chain: ChainKind } {
+  const i = pin.indexOf(':');
+  if (i > 0) {
+    const c = pin.slice(0, i);
+    if (isEvmChain(c)) return { mint: pin.slice(i + 1), chain: c };
+  }
+  return isEvmAddress(pin) ? { mint: pin.toLowerCase(), chain: 'robinhood' } : { mint: pin, chain: 'solana' };
+}
+
 const WATCH_KEY = 'krypt.terminal.watchlist';
 const FILTER_KEY = 'krypt.terminal.filters';
 const HIDE_FLAGGED_KEY = 'krypt.terminal.hideFlagged';
 const SORT_KEY = 'krypt.terminal.sortBy';
 const MIN_ODDS_KEY = 'krypt.terminal.minOddsBucket';
+const CHAIN_KEY = 'krypt.terminal.chain';
+
+function loadChain(): ChainKind {
+  try {
+    const raw = localStorage.getItem(CHAIN_KEY);
+    return raw === 'robinhood' || raw === 'bnb' ? raw : 'solana';
+  } catch {
+    return 'solana';
+  }
+}
 
 function loadSortBy(): DiscoverSort {
   try {
@@ -144,7 +181,9 @@ function loadWatchlist(): string[] {
   try {
     const raw = localStorage.getItem(WATCH_KEY);
     const parsed = raw ? (JSON.parse(raw) as unknown) : null;
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    if (!Array.isArray(parsed)) return [];
+    // Pins saved before BNB existed stored a bare 0x address; that was Robinhood.
+    return parsed.filter((v): v is string => typeof v === 'string').map((v) => (isEvmAddress(v) ? pinKey(v, 'robinhood') : v));
   } catch {
     return [];
   }
@@ -184,11 +223,29 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     setDiscoverMounts((n) => Math.max(0, n + (on ? 1 : -1)));
   }, []);
   const [openMint, setOpenMint] = useState<string | null>(null);
+  const [openChain, setOpenChain] = useState<ChainKind>('solana');
   const [watchlist, setWatchlist] = useState<string[]>(loadWatchlist);
   const [hideFlagged, setHideFlaggedState] = useState<boolean>(loadHideFlagged);
   const [sortBy, setSortByState] = useState<DiscoverSort>(loadSortBy);
   const [minOddsBucket, setMinOddsBucketState] = useState<OddsBucket | null>(loadMinOddsBucket);
   const [tick, setTick] = useState(0);
+  const [chain, setChainState] = useState<ChainKind>(loadChain);
+  // Read through a ref by `load`, which must stay identity-stable.
+  const chainRef = useRef<ChainKind>(chain);
+
+  const setChain = useCallback((c: ChainKind) => {
+    if (chainRef.current === c) return;
+    chainRef.current = c;
+    setChainState(c);
+    try {
+      localStorage.setItem(CHAIN_KEY, c);
+    } catch {
+      /* non-fatal */
+    }
+    // Nothing from the other chain may survive under the new header.
+    setColumns({ new: emptyColumn(), graduating: emptyColumn(), migrated: emptyColumn(), trending: emptyColumn() });
+    setTick((t) => t + 1);
+  }, []);
 
   const setSortBy = useCallback((s: DiscoverSort) => {
     setSortByState(s);
@@ -286,7 +343,13 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     // consumer, per poll, to show a spinner nobody needs beside live rows.
     setColumns((c) => (c[column].rows.length > 0 ? c : { ...c, [column]: { ...c[column], loading: true } }));
     try {
-      const r = await window.krypt.market.discover(column, limitRef.current, winRef.current);
+      const askedChain = chainRef.current;
+      const r = isEvmChain(askedChain)
+        ? await window.krypt.evm.discover(askedChain, column, limitRef.current)
+        : await window.krypt.market.discover(column, limitRef.current, winRef.current);
+      // The chain flipped while this was in flight: the answer belongs to
+      // the previous header and must not land under the new one.
+      if (chainRef.current !== askedChain) return;
       setColumns((c) => {
         const prev = c[column];
         if (r.ok && r.data) {
@@ -365,10 +428,15 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       const startDelay = i * 350;
       let interval: ReturnType<typeof setInterval> | null = null;
       const startTimer = setTimeout(() => {
-        if (cancelled.current) return;
+        if (cancelled.current || document.hidden) return;
         void load(col);
         interval = setInterval(() => {
-          if (!cancelled.current) void load(col);
+          // A minimised or backgrounded window shows nobody these rows, and
+          // Discover is the route the app OPENS on — so without this the
+          // whole four-column poll (230 provider calls a minute, measured
+          // 2026-09-09) ran all day behind a hidden window. The token page,
+          // the watchlist and the position panel already gate this way.
+          if (!cancelled.current && !document.hidden) void load(col);
         }, every);
       }, startDelay);
       return () => {
@@ -376,8 +444,16 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
         if (interval) clearInterval(interval);
       };
     });
+    // Coming back into view must not wait out a 16 s migrated tick: refresh
+    // every column once, immediately, then let the timers carry on.
+    const onVisible = () => {
+      if (cancelled.current || document.hidden) return;
+      for (const col of order) void load(col);
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled.current = true;
+      document.removeEventListener('visibilitychange', onVisible);
       for (const stop of timers) stop();
     };
   }, [load, refreshSec, paused, tick, discoverMounts]);
@@ -392,7 +468,8 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
   // sub-second candles start recording. Unsubscribe on close so the tape's
   // small subscription budget is not spent on tokens nobody is watching.
   useEffect(() => {
-    if (!openMint) return;
+    // The Solana engine's tape only; an EVM address has nothing to tape.
+    if (!openMint || isEvmAddress(openMint)) return;
     void window.krypt.market.watch(openMint);
     return () => {
       void window.krypt.market.unwatch(openMint);
@@ -444,9 +521,10 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
 
   const visible = useCallback((column: DiscoverColumn) => visibleByColumn[column], [visibleByColumn]);
 
-  const toggleWatch = useCallback((mint: string) => {
+  const toggleWatch = useCallback((mint: string, chain?: ChainKind) => {
+    const key = pinKey(mint, chain);
     setWatchlist((cur) => {
-      const next = cur.includes(mint) ? cur.filter((m) => m !== mint) : [mint, ...cur];
+      const next = cur.includes(key) ? cur.filter((m) => m !== key) : [key, ...cur];
       try {
         localStorage.setItem(WATCH_KEY, JSON.stringify(next));
       } catch {
@@ -456,7 +534,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const isWatched = useCallback((mint: string) => watchlist.includes(mint), [watchlist]);
+  const isWatched = useCallback((mint: string, chain?: ChainKind) => watchlist.includes(pinKey(mint, chain)), [watchlist]);
 
   // A coin you just put money into is the definition of one you want to keep
   // an eye on, and pinning it by hand is the step people skip. Driven by the
@@ -468,10 +546,11 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       // A user script's watch / unwatch (Automation → Scripts). The list is
       // the renderer's, so main asks; this is the only writer besides clicks.
       if (ev.kind === 'pin') {
+        const key = pinKey(ev.mint);
         setWatchlist((cur) => {
-          const has = cur.includes(ev.mint);
+          const has = cur.includes(key);
           if (ev.on === has) return cur;
-          const next = ev.on ? [ev.mint, ...cur] : cur.filter((m) => m !== ev.mint);
+          const next = ev.on ? [key, ...cur] : cur.filter((m) => m !== key);
           try {
             localStorage.setItem(WATCH_KEY, JSON.stringify(next));
           } catch {
@@ -481,12 +560,24 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      if (ev.kind !== 'fill' || ev.side !== 'buy' || ev.state === 'failed') return;
+      // "Watch what you buy" — a Solana fill pins the bare mint, an EVM fill
+      // pins `chain:address` (fee-leg rows carry requested 0 and are not
+      // buys of anything).
+      let key: string | null = null;
+      if (ev.kind === 'fill') {
+        if (ev.side !== 'buy' || ev.state === 'failed') return;
+        key = ev.mint;
+      } else if (ev.kind === 'evmFill') {
+        if (ev.fill.side !== 'buy' || ev.state === 'failed' || ev.fill.requested === 0) return;
+        key = pinKey(ev.fill.token, ev.fill.chain);
+      }
+      if (key === null) return;
+      const pin = key;
       void window.krypt.settings.get().then((s) => {
         if (!s.ok || !s.data?.watchOnBuy) return;
         setWatchlist((cur) => {
-          if (cur.includes(ev.mint)) return cur;
-          const next = [ev.mint, ...cur];
+          if (cur.includes(pin)) return cur;
+          const next = [pin, ...cur];
           try {
             localStorage.setItem(WATCH_KEY, JSON.stringify(next));
           } catch {
@@ -499,7 +590,15 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     return off;
   }, []);
 
-  const openToken = useCallback((mint: string | null) => setOpenMint(mint), []);
+  const openToken = useCallback((mint: string | null, chain?: ChainKind) => {
+    setOpenMint(mint);
+    if (mint === null) return;
+    // The row's own chain when it says; an 0x address without one is read on
+    // the selected EVM chain, or Robinhood while Solana is selected.
+    if (chain) setOpenChain(chain);
+    else if (isEvmAddress(mint)) setOpenChain(isEvmChain(chainRef.current) ? chainRef.current : 'robinhood');
+    else setOpenChain('solana');
+  }, []);
 
   const value = useMemo<TerminalState>(
     () => ({
@@ -527,7 +626,10 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       setDiscoverActive,
       refreshNow,
       openMint,
+      openChain,
       openToken,
+      chain,
+      setChain,
       watchlist,
       toggleWatch,
       isWatched,
@@ -537,7 +639,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       hideFlagged, setHideFlagged, hiddenFlaggedCount,
       sortBy, setSortBy, minOddsBucket, setMinOddsBucket, hiddenByOddsCount,
       providers, refreshProviders, refreshSec, paused, setDiscoverActive, refreshNow, openMint,
-      openToken, watchlist, toggleWatch, isWatched,
+      openChain, openToken, chain, setChain, watchlist, toggleWatch, isWatched,
     ],
   );
 

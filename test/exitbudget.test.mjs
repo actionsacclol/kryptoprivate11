@@ -74,7 +74,6 @@ const SOL = 1e9;
   assert.match(explainFeeFailure('"InsufficientFundsForFee"', null), /Send a little SOL/, 'works without a known balance');
   console.log('ok  the two fee failures explain themselves in plain words');
 }
-console.log('exitbudget: all tests passed');
 
 // ── A buy must never spend the money needed to sell ──────────────────
 {
@@ -111,3 +110,28 @@ console.log('exitbudget: all tests passed');
   assert.equal(planBuySize(NaN, 1e9).refused, true);
   console.log('ok  a buy always leaves enough SOL to sell the position again');
 }
+
+{
+  // pump's own revert codes, read from its on-chain IDL on 2026-09-10.
+  // Reported from the field as two red FAILED orders quoting {"Custom":6022}
+  // and {"Custom":6025} — which told the user nothing about what happened.
+  const bal = 0.12 * SOL;
+
+  // 6022 SellZeroAmount and 6025 Truncation are the same story from two
+  // directions: the amount is too small for the curve to price.
+  for (const code of [6022, 6023, 6025]) {
+    const msg = explainFeeFailure(`{"InstructionError":[3,{"Custom":${code}}]}`, bal);
+    assert.match(msg, /Nothing left to sell/, `${code} reads as an empty bag`);
+  }
+
+  assert.match(explainFeeFailure('{"InstructionError":[3,{"Custom":6024}]}', bal), /Overflow \(6024\)/);
+
+  // The guard that stops 60250 being read as 6025. This line once held a
+  // literal backspace byte instead of a word boundary, which silently
+  // disabled the whole mapping — hence the explicit case.
+  assert.equal(explainFeeFailure('{"InstructionError":[3,{"Custom":60250}]}', bal), null, 'a longer code is not a prefix match');
+  assert.equal(explainFeeFailure('{"InstructionError":[3,{"Custom":6019}]}', bal), null, 'a code outside the table falls through');
+
+  console.log('ok  pump revert codes read as English, and only the real ones match');
+}
+console.log('exitbudget: all tests passed');

@@ -79,12 +79,12 @@ function holdLabel(ms: number): string {
   return `${h}h ${m % 60}m`;
 }
 
-function viewFor(subject: CardSubject): CardView {
+function viewFor(subject: CardSubject, unit: string): CardView {
   if (subject.kind === 'trade') {
     const tr = subject.trade;
     const rows: Array<[string, string]> = [
-      ['In', `${tr.costSol.toFixed(3)} SOL`],
-      ['Out', `${tr.proceedsSol.toFixed(3)} SOL`],
+      ['In', `${tr.costSol.toFixed(3)} ${unit}`],
+      ['Out', `${tr.proceedsSol.toFixed(3)} ${unit}`],
       ['Held', holdLabel(tr.holdMs)],
     ];
     return {
@@ -115,10 +115,14 @@ function viewFor(subject: CardSubject): CardView {
 export function PnlCard({
   subject,
   solUsd,
+  unit = 'SOL',
   onClose,
 }: {
   subject: CardSubject;
+  /** USD per unit of the coin the figures are in. */
   solUsd: number | null;
+  /** The coin the figures are in — SOL, or an EVM chain's own (2026-09-11). */
+  unit?: string;
   onClose: () => void;
 }) {
   const toast = useToast();
@@ -230,7 +234,7 @@ export function PnlCard({
     if (!ctx) return;
 
     const s = STYLES[style];
-    const view = viewFor(subject);
+    const view = viewFor(subject, unit);
     const pct = view.pct;
     const up = pct >= 0;
     const pnlColor = up ? '#34d399' : '#f43f5e';
@@ -319,7 +323,7 @@ export function PnlCard({
       const sign = view.pnlSol >= 0 ? '+' : '';
       const usd = solUsd !== null ? `  (${sign}${fmtUsd(view.pnlSol * solUsd)})` : '';
       const word = subject.kind === 'trade' ? 'Realised ' : 'Unrealized';
-      ctx.fillText(`${word} ${sign}${view.pnlSol.toFixed(3)} SOL${usd}`, PAD, L.pnl);
+      ctx.fillText(`${word} ${sign}${view.pnlSol.toFixed(3)} ${unit}${usd}`, PAD, L.pnl);
     }
 
     // Footer — kept ONLY for an open position, because an unrealized number
@@ -340,7 +344,7 @@ export function PnlCard({
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
     ctx.shadowOffsetY = 0;
-  }, [subject, style, solUsd, bgImage, bgAnim]);
+  }, [subject, style, solUsd, unit, bgImage, bgAnim]);
 
   useEffect(() => {
     // Fonts may not be ready on first paint; redraw once they are so the
@@ -398,7 +402,7 @@ export function PnlCard({
         return;
       }
       const a = document.createElement('a');
-      a.download = `krypt-${viewFor(subject).fileTag}.webm`;
+      a.download = `krypt-${viewFor(subject, unit).fileTag}.webm`;
       a.href = URL.createObjectURL(blob);
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
@@ -465,7 +469,7 @@ export function PnlCard({
   const copyGif = async (): Promise<void> => {
     const bytes = await makeGif();
     if (!bytes) return;
-    const r = await window.krypt.card.copyFile(`krypt-${viewFor(subject).fileTag}`, bytes);
+    const r = await window.krypt.card.copyFile(`krypt-${viewFor(subject, unit).fileTag}`, bytes);
     if (r.ok) toast.success(r.message);
     else toast.error(r.message);
   };
@@ -473,7 +477,7 @@ export function PnlCard({
   const saveGif = async (): Promise<void> => {
     const bytes = await makeGif();
     if (!bytes) return;
-    const r = await window.krypt.card.saveFile(`krypt-${viewFor(subject).fileTag}`, bytes);
+    const r = await window.krypt.card.saveFile(`krypt-${viewFor(subject, unit).fileTag}`, bytes);
     if (r.ok) toast.success(r.message);
     else if (!/cancelled/i.test(r.message)) toast.error(r.message);
   };
@@ -484,7 +488,7 @@ export function PnlCard({
     // A renderer-initiated download is allowed here (this is the app's own
     // window, not a sandboxed artifact), so an anchor is the simplest path.
     const a = document.createElement('a');
-    a.download = `krypt-${viewFor(subject).fileTag}.png`;
+    a.download = `krypt-${viewFor(subject, unit).fileTag}.png`;
     a.href = canvas.toDataURL('image/png');
     a.click();
     toast.info('Saved');

@@ -22,10 +22,22 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const toast = useToast();
   const [snap, setSnap] = useState<OrdersSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
+  // The per-trade cap. The panel refuses a buy order above it BEFORE the
+  // click; without this it silently skipped that check on this page while
+  // the token page enforced it, so the same order was offered here and
+  // rejected by the engine.
+  const [maxLiveSol, setMaxLiveSol] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     const r = await window.krypt.orders.list();
     if (r.ok && r.data) setSnap(r.data);
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      const r = await window.krypt.settings.get();
+      if (r.ok && r.data) setMaxLiveSol(r.data.execution.maxLiveSol ?? null);
+    })();
   }, []);
 
   useEffect(() => {
@@ -173,6 +185,7 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
                 orders={orders.filter((o) => o.mint === token.mint)}
                 executable={snap?.executable ?? false}
                 blockedReason={snap?.blockedReason ?? null}
+                maxLiveSol={maxLiveSol}
                 onChanged={() => void load()}
               />
             </div>
@@ -294,8 +307,8 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
             order-driven buy but never blocks an exit.
           </li>
           <li>
-            <span className="text-white">Partial sells route through the relayer</span> (0.5% fee) because the local
-            transaction builder can only sell a whole position.
+            <span className="text-white">Sells are built locally when they can be.</span> The local builder sizes a
+            partial sell as well as a full one, and the relayer is only a fallback when it cannot build the route.
           </li>
         </ul>
       </Card>

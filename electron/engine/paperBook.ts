@@ -25,17 +25,48 @@ const FILE = 'paper-positions.json';
 let filePath: string | null = null;
 let book: PaperBook = emptyPaperBook();
 
+/**
+ * Set when the book on disk exists but could not be read or parsed.
+ *
+ * An unreadable book is NOT an empty book. Before this, any throw produced
+ * `emptyPaperBook()` and the very next paper fill called `save()` over the top
+ * — a real file (2 open, 9 closed, a realised total) became 0/0/0 and was then
+ * destroyed. That breaks two house rules at once: state fails CLOSED, and
+ * unknown is an em dash rather than a 0. This is the `ledger.ts` shape.
+ */
+let loadFailure: string | null = null;
+
 export function init(userDataDir: string): void {
   filePath = path.join(userDataDir, FILE);
+  loadFailure = null;
+  let text: string;
   try {
-    if (fs.existsSync(filePath)) book = parsePaperBook(JSON.parse(fs.readFileSync(filePath, 'utf8')));
-  } catch {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      loadFailure = `${filePath} could not be read (${(e as Error).message})`;
+      console.warn(`[sniper] paper book: ${loadFailure} — paper trading is read-only this session`);
+    }
+    book = emptyPaperBook();
+    return;
+  }
+  try {
+    book = parsePaperBook(JSON.parse(text));
+  } catch (e) {
+    loadFailure = `${filePath} is corrupt (${(e as Error).message})`;
+    console.warn(`[sniper] paper book: ${loadFailure} — paper trading is read-only this session`);
     book = emptyPaperBook();
   }
 }
 
+/** Null when the book loaded. A string means the numbers are not the truth. */
+export function failure(): string | null {
+  return loadFailure;
+}
+
 function save(): void {
-  if (!filePath) return;
+  // Never write over a book we could not read — that is the data loss itself.
+  if (!filePath || loadFailure) return;
   try {
     const tmp = `${filePath}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(book, null, 2), 'utf8');
@@ -46,6 +77,13 @@ function save(): void {
 }
 
 export function open(p: { mint: string; symbol: string; tokens: number; costSol: number; decimalsKnown: boolean }): { ok: boolean; message: string; position: PaperPosition | null } {
+  // A buy is refused while the book is unreadable, because it could not be
+  // recorded and the user would be told they hold something they do not. A
+  // SELL is deliberately NOT gated the same way (see below): a limit never
+  // blocks an exit, even a simulated one.
+  if (loadFailure) {
+    return { ok: false, message: `Paper trading is read-only — ${loadFailure}`, position: null };
+  }
   const r = openPaper(book, p);
   if (r.ok) {
     book = r.book;

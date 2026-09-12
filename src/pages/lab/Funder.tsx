@@ -10,7 +10,7 @@ import { Card, GhostButton, NumberInput, Page, PrimaryButton, Section } from '..
 import { useModal } from '../../state/ModalProvider';
 import { useToast } from '../../state/ToastProvider';
 import { cls, fmtSol } from '../../utils/format';
-import { RealMoneyBanner, ScopePicker, selectCls, tooMany, useLabData, useScope } from './shared';
+import { RealMoneyBanner, Row, ScopePicker, selectCls, tooMany, useLabData, useScope } from './shared';
 
 export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const toast = useToast();
@@ -20,6 +20,10 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
 
   // ── Fund ─────────────────────────────────────────────────────────────
   const fundScope = useScope(data);
+  // Which wallet the SOL leaves. '' is the active one; until 2026-09-11 it
+  // was the only choice.
+  const [fromId, setFromId] = useState('');
+  const from = useMemo(() => (fromId ? wallets.find((w) => w.id === fromId) ?? null : active), [fromId, wallets, active]);
   const [fundMode, setFundMode] = useState<'each' | 'total'>('each');
   const [fundSol, setFundSol] = useState(0.01);
   const [fundResult, setFundResult] = useState<string | null>(null);
@@ -27,11 +31,11 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
     () =>
       fundScope.walletIds
         .map((id) => wallets.find((w) => w.id === id))
-        .filter((w): w is NonNullable<typeof w> => !!w)
+        .filter((w): w is NonNullable<typeof w> => !!w && w.id !== from?.id)
         .map((w) => ({ walletId: w.id, publicKey: w.publicKey })),
-    [fundScope.walletIds, wallets],
+    [fundScope.walletIds, wallets, from],
   );
-  const fundPlan = useMemo(() => planFund(fundTargets, fundMode, fundSol, active?.balanceSol ?? null), [fundTargets, fundMode, fundSol, active]);
+  const fundPlan = useMemo(() => planFund(fundTargets, fundMode, fundSol, from?.balanceSol ?? null), [fundTargets, fundMode, fundSol, from]);
 
   const fundTooMany = tooMany(fundTargets.length);
 
@@ -41,8 +45,8 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
     if (fundTooMany) return toast.error(fundTooMany);
     setBusy('fund');
     const yes = await modal.confirm({
-      title: 'Fund wallets from the active wallet',
-      message: `This sends REAL SOL: ${fundPlan.message}, ${fmtSol(fundPlan.totalLamports / 1e9)} SOL total from ${active?.label ?? 'the active wallet'}. Cannot be undone.`,
+      title: `Fund wallets from ${from?.label ?? 'the active wallet'}`,
+      message: `This sends REAL SOL: ${fundPlan.message}, ${fmtSol(fundPlan.totalLamports / 1e9)} SOL total from ${from?.label ?? 'the active wallet'}. Cannot be undone.`,
       confirmLabel: 'Send',
       destructive: true,
     });
@@ -52,7 +56,7 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
     }
     setFundResult(null);
     try {
-      const r = await window.krypt.lab.fund(fundPlan.targets.map((t) => ({ walletId: t.walletId, sol: t.sol })));
+      const r = await window.krypt.lab.fund(fundPlan.targets.map((t) => ({ walletId: t.walletId, sol: t.sol })), fromId || undefined);
       if (r.ok && r.data) {
         setFundResult(`Sent ${fmtSol(r.data.sentSol)} SOL to ${r.data.count} wallet${r.data.count === 1 ? '' : 's'} · ${r.data.signature.slice(0, 16)}…`);
         toast.success(r.message);
@@ -74,6 +78,9 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
 
   const collectTooMany = tooMany(collectScope.walletIds.length);
 
+  // Where a collect lands. '' is the active wallet.
+  const [toId, setToId] = useState('');
+
   const doCollect = async (): Promise<void> => {
     if (busy) return;
     const ids = collectScope.walletIds;
@@ -92,7 +99,7 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
     }
     setCollectResults(null);
     try {
-      const r = await window.krypt.lab.collect(ids);
+      const r = await window.krypt.lab.collect(ids, toId || undefined);
       if (r.ok && r.data) {
         setCollectResults(r.data);
         const okN = r.data.filter((x) => x.ok).length;
@@ -114,13 +121,41 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
         </GhostButton>
       }
     >
-      <RealMoneyBanner armed={armed} what="Funding and collecting are plain transfers to and from wallets this install holds — the signer refuses any other destination." />
+      <RealMoneyBanner
+        armed={armed}
+        kind="transfer"
+        what="Funding and collecting are plain transfers to and from wallets this install holds — the signer refuses any other destination."
+      />
 
       <Section
-        title="Fund from the active wallet"
+        title="Fund wallets"
         description="Transfers from the active wallet to every selected wallet, twelve per transaction. Each target must end up rent-exempt (about 0.0009 SOL) or that transaction reverts; a batch counts only once it has confirmed on chain."
       >
         <Card>
+          <Row label="From" hint="the wallet the SOL leaves">
+            <select className={selectCls} value={fromId} onChange={(e) => setFromId(e.target.value)}>
+              <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>
+              {wallets
+                .filter((w) => !active || w.id !== active.id)
+                .map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.label} · {w.balanceSol === null ? '—' : fmtSol(w.balanceSol)} SOL
+                  </option>
+                ))}
+            </select>
+          </Row>
+          <Row label="From" hint="the wallet the SOL leaves">
+            <select className={selectCls} value={fromId} onChange={(e) => setFromId(e.target.value)}>
+              <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>
+              {wallets
+                .filter((w) => !active || w.id !== active.id)
+                .map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.label} · {w.balanceSol === null ? '—' : fmtSol(w.balanceSol)} SOL
+                  </option>
+                ))}
+            </select>
+          </Row>
           <ScopePicker data={data} scope={fundScope} />
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <select value={fundMode} onChange={(e) => setFundMode(e.target.value as 'each' | 'total')} className={selectCls}>
@@ -144,10 +179,34 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
       </Section>
 
       <Section
-        title="Collect back to the active wallet"
+        title="Collect back"
         description="Each selected wallet sends everything above rent and fee headroom back to the active wallet. Tokens are not touched — sell them first from the Copier page or the token page."
       >
         <Card>
+          <Row label="To" hint="the wallet everything above rent lands in">
+            <select className={selectCls} value={toId} onChange={(e) => setToId(e.target.value)}>
+              <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>
+              {wallets
+                .filter((w) => !active || w.id !== active.id)
+                .map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.label}
+                  </option>
+                ))}
+            </select>
+          </Row>
+          <Row label="To" hint="the wallet everything above rent lands in">
+            <select className={selectCls} value={toId} onChange={(e) => setToId(e.target.value)}>
+              <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>
+              {wallets
+                .filter((w) => !active || w.id !== active.id)
+                .map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.label}
+                  </option>
+                ))}
+            </select>
+          </Row>
           <ScopePicker data={data} scope={collectScope} />
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <GhostButton onClick={() => void doCollect()} disabled={!armed || busy !== null || !!collectTooMany || collectScope.walletIds.length === 0}>

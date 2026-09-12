@@ -53,6 +53,37 @@ export interface RunnerFlag {
   uniqueBuyers: number;
   netInflowSol: number;
   tradesSeen: number;
+  /** When the creator sold AFTER the flag (ms epoch), else null. The flag
+   *  stays on the list so the call can be judged, but its premise is gone.
+   *  Decided 60 s after the flag on curves still open (07-27, n = 848):
+   *  flags whose creator had not sold graduated 21.6 %, those whose creator
+   *  had 4.7 % (runner-outcome swarm 09-11, reviewer r4). */
+  creatorSoldAt?: number | null;
+  /** Curve regime at the judge (shared/odds.ts curveRegime). "mixed" curves
+   *  were 76 % of 07-27 flags and 91 % of live September flags; a mixed
+   *  graduation seeds a median 0.16 SOL into the pool against exactly
+   *  84.99 SOL for a classic one, and mixed graduates held a median 0.008×
+   *  of the flag price an hour later (labeler + reviewer r3). */
+  regime?: 'classic' | 'mixed' | 'unknown';
+}
+
+/** What happened after the flags of the measured day, for the +60 s window.
+ *  Test day 2026-07-27 (held out), 873 launches flagged by the shipped rule,
+ *  791 of them with a SOL price. Graduated 18.4 % (n 873); +50 % before
+ *  −25 % inside the hour 32.6 %, a 25 % trailing stop beating 1.035× 24.9 %
+ *  (n 791); no trade 5–10 min after the flag 39.4 % (n 873). Live on
+ *  2026-09-10/11 (n 2,633) 11.0 % graduated. The +120 s window has too few
+ *  flags (n 132) for an honest line. Source: E:\data\work\runner-outcome-2026-09-11
+ *  (flag-eval, reviewer r1). */
+export const FLAG_FORWARD_LINE: Record<60 | 120, string | null> = {
+  60: 'Of 873 flagged like this on 2026-07-27: 18 in 100 graduated (11 in 100 live on 09-10/11) · 33 in 100 reached +50 % before −25 % within the hour · 25 in 100 beat break-even on a 25 % trailing stop · 39 in 100 had no trade at 10 min.',
+  120: null,
+};
+
+/** One sentence on the curve regime for a flag, or null when it adds nothing. */
+export function regimeLine(regime: RunnerFlag['regime']): string | null {
+  if (regime === 'mixed') return 'Mixed curve: on the measured day these graduated into a pool seeded with ~0.16 SOL, not 85, and held a median 0.008× of the flag price an hour later.';
+  return null;
 }
 
 const RANK: Record<OddsBucket, number> = { top1: 0, top1_5: 1, top5_10: 2, top10_25: 3, top25_50: 4, bottom50: 5 };
@@ -82,19 +113,42 @@ export interface RunnerVerdict {
 export const RUNNER_TTL_MS = 15 * 60_000;
 
 /** The flags still worth showing at `now`, newest first order preserved. */
+/** Mark a flagged launch's creator sell. Returns the new list, or null when
+ *  nothing changed (mint not flagged, or already marked). */
+export function markCreatorSold<T extends { mint: string; creatorSoldAt?: number | null }>(list: T[], mint: string, at: number): T[] | null {
+  let changed = false;
+  const out = list.map((r) => {
+    if (r.mint !== mint || (r.creatorSoldAt !== undefined && r.creatorSoldAt !== null)) return r;
+    changed = true;
+    return { ...r, creatorSoldAt: at };
+  });
+  return changed ? out : null;
+}
+
 export function pruneRunners<T extends { flaggedAt: number }>(list: T[], now: number, ttlMs = RUNNER_TTL_MS): T[] {
   return list.filter((r) => now - r.flaggedAt < ttlMs);
 }
 
+/** Trades the scanner keeps per launch for the odds judge. A launch that
+ *  fills this inside its first 130 s is an unknown to the judge (its window
+ *  features are floors and the last-10-s rate reads 0) — never a zero. */
+export const ODDS_TAPE_CAP = 5000;
+
 export function runnerVerdict(
   report: OddsReport | null,
   cfg: RunnerAlertSettings,
-  ctx: { hardRejected: boolean; creatorSold: boolean; alreadyFlagged: boolean },
+  ctx: { hardRejected: boolean; creatorSold: boolean; alreadyFlagged: boolean; tapeTruncated?: boolean; nonSolQuote?: boolean },
 ): RunnerVerdict {
   if (!cfg.enabled) return { flag: false, reason: 'runner alerts off' };
   if (ctx.alreadyFlagged) return { flag: false, reason: 'already flagged' };
   if (ctx.hardRejected) return { flag: false, reason: 'hard reject' };
   if (ctx.creatorSold) return { flag: false, reason: 'creator sold' };
+  if (ctx.tapeTruncated) return { flag: false, reason: 'odds tape truncated (too many trades to score honestly)' };
+  // A curve whose SOL reserves read 0 is quoted in something other than SOL:
+  // every SOL feature is 0, the count features are a launch farm's (9 % of
+  // 07-27 flags, one creator behind 54 of 91), no rug rule can fire, and the
+  // builder refuses to buy it. Unknown quote → not scored.
+  if (ctx.nonSolQuote) return { flag: false, reason: 'curve is not quoted in SOL (unknown quote) — not scored' };
   if (!report || !report.graduate) return { flag: false, reason: 'no odds (too few trades)' };
   if (!bucketWithin(report.graduate.bucket, cfg.minBucket)) {
     return { flag: false, reason: `bucket ${report.graduate.bucket} below ${cfg.minBucket}` };
@@ -122,10 +176,11 @@ export class RunnerRateLimit {
 export function runnerNotification(f: RunnerFlag): { title: string; body: string } {
   const failPct = Math.max(0, 100 - f.observedPct);
   const title = `Potential runner: ${f.symbol || f.mint.slice(0, 6)}`;
+  const regime = regimeLine(f.regime);
   const body =
-    `${f.name || f.symbol} · curve ${f.curvePct.toFixed(0)} % · ${f.uniqueBuyers} buyers · +${f.netInflowSol.toFixed(2)} SOL net at ${f.windowS} s. ` +
+    `${f.name || f.symbol} · ${f.curvePct.toFixed(0)} % of supply sold · ${f.uniqueBuyers} buyers · +${f.netInflowSol.toFixed(2)} SOL net at ${f.windowS} s. ` +
     `Graduation odds bucket ${bucketLabel(f.bucket)}: ${f.observedPct.toFixed(0)} % of these graduated (base ${f.basePct.toFixed(1)} %), ` +
-    `${failPct.toFixed(0)} % did not. Open the token to decide — nothing is bought for you.`;
+    `${failPct.toFixed(0)} % did not.${regime ? ` ${regime}` : ''} Open the token to decide — nothing is bought for you.`;
   return { title, body };
 }
 

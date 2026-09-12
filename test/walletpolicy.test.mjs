@@ -7,8 +7,17 @@
 // drained wallet, not a failed test.
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction, ComputeBudgetProgram, TransactionInstruction } from '@solana/web3.js';
-import { checkOutflowForTest as check } from './.signpolicy.mjs';
+import {
+  checkOutflowForTest as check,
+  KNOWN_TRADE_PROGRAMS,
+  unknownTopLevelPrograms,
+} from './.signpolicy.mjs';
+import { VersionedTransaction as VT } from '@solana/web3.js';
+
+/** The gate, over serialized bytes — what the callers actually hold. */
+const unknownPrograms = (bytes) => unknownTopLevelPrograms(VT.deserialize(bytes), KNOWN_TRADE_PROGRAMS);
 
 const BLOCKHASH = '11111111111111111111111111111111';
 const me = Keypair.generate();
@@ -465,10 +474,154 @@ const pumpIx = (keys = []) => new TransactionInstruction({ programId: PUMP_PROGR
 }
 
 {
-  // A sell that pushes the traded mint into the pool at top level is expected.
-  const r = check(tx([tokTransfer(MY_ATA, POOL_ATA, 1000), tokTransferChecked(MY_ATA, MINT, POOL_ATA)]), MY_PUB, HOME, SELL());
+  // A sell that pushes the traded mint into the pool at top level is expected —
+  // alongside the venue instruction that names the pool account, which is what
+  // a real exit always carries.
+  const r = check(
+    tx([pumpIx([w(POOL_ATA)]), tokTransfer(MY_ATA, POOL_ATA, 1000), tokTransferChecked(MY_ATA, MINT, POOL_ATA)]),
+    MY_PUB, HOME, SELL(),
+  );
   assert.equal(r.ok, true, r.message);
-  console.log('ok  a SELL transferring the traded mint out is allowed');
+  console.log('ok  a SELL transferring the traded mint into the venue is allowed');
+}
+
+{
+  // WHERE the tokens go used to be decoded and never checked, so a sell could
+  // hand the whole bag to any address at all. A destination no venue in the
+  // transaction touches is not an exit.
+  const r = check(tx([pumpIx([w(POOL_ATA)]), tokTransfer(MY_ATA, ata(ATTACKER_PK, MINT), 1000)]), MY_PUB, HOME, SELL());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /no trade program in this transaction touches/);
+
+  // And the venue instruction has to be a VENUE: the Token program is on
+  // KNOWN_TRADE_PROGRAMS too, so a Transfer must not vouch for itself.
+  const r2 = check(tx([tokTransfer(MY_ATA, ata(ATTACKER_PK, MINT), 1000)]), MY_PUB, HOME, SELL());
+  assert.equal(r2.ok, false, 'a lone Transfer cannot be its own evidence of a swap');
+
+  console.log('ok  a SELL cannot send the traded mint somewhere no venue touches');
+}
+
+{
+  // MintTo and FreezeAccount were waved through as "needs an authority that
+  // is not us" — but a top-level Token instruction's authority must SIGN, and
+  // a second signer is already refused. So the only reachable version is the
+  // one where WE are the authority: minting supply, or freezing our own bag
+  // so it cannot be sold.
+  const mintTo = tokIx([w(MINT), w(MY_ATA), ro(me.publicKey, true)], Buffer.concat([Buffer.from([7]), u64(1_000_000)]));
+  const r = check(tx([pumpIx(), mintTo]), MY_PUB, HOME, BUY());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /MintTo creates supply/);
+
+  const freeze = tokIx([w(MY_ATA), ro(MINT), ro(me.publicKey, true)], [10]);
+  const r2 = check(tx([pumpIx(), freeze]), MY_PUB, HOME, SELL());
+  assert.equal(r2.ok, false);
+  assert.match(r2.message, /unsellable/);
+
+  // Thaw stays allowed: on a default-frozen mint whose freeze authority is
+  // ours, thawing is what makes the sell possible.
+  const thaw = tokIx([w(MY_ATA), ro(MINT), ro(me.publicKey, true)], [11]);
+  assert.equal(check(tx([pumpIx(), thaw]), MY_PUB, HOME, SELL()).ok, true, 'a thaw must not block an exit');
+
+  console.log('ok  MintTo and FreezeAccount are refused; ThawAccount still signs');
+}
+
+{
+  // Raydium CLMM / Orca Whirlpool / Meteora DLMM are on the allowlist because
+  // Jupiter routes THROUGH them. A top-level call is not a route — it is the
+  // shape an LP deposit takes, and an allowlisted program is otherwise never
+  // inspected. Measured 0 of 25 real routes at top level.
+  const WHIRLPOOL = new PublicKey('whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc');
+  const direct = new TransactionInstruction({ programId: WHIRLPOOL, keys: [w(MY_ATA)], data: Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]) });
+
+  const buy = check(tx([direct]), MY_PUB, HOME, BUY());
+  assert.equal(buy.ok, false, 'a buy calling a routing venue directly is refused');
+  assert.match(buy.message, /only ever calls through a router/);
+
+  // But never on a sell: the measurement says it will not happen, and a limit
+  // never blocks an exit on a probability.
+  const sell = check(tx([direct]), MY_PUB, HOME, SELL());
+  assert.equal(sell.ok, true, 'a sell is never blocked by this rule');
+  assert.match(sell.message, /WARNING/, 'it is reported instead');
+
+  console.log('ok  routing venues cannot be called directly on a buy, and never block a sell');
+}
+
+// ── The launch exception ──
+//
+// A launchpad create is the one legitimate transaction that cannot satisfy
+// "exactly one signer", because the new mint signs for itself. The exception
+// is deliberately narrow, and the FIRST test here is the one that matters
+// most: with the launcher off, nothing changes at all.
+
+const MINT_KP = Keypair.generate();
+const LAUNCH_MINT = MINT_KP.publicKey.toBase58();
+const LAUNCH = (extra = {}) => ({ intent: 'launch', maxTransferLamports: 10_000_000, launchMint: LAUNCH_MINT, ...extra });
+
+// Two signers: us (fee payer) and the new mint.
+function launchTx(instructions, secondSigner = MINT_KP.publicKey) {
+  const msg = new TransactionMessage({
+    payerKey: me.publicKey,
+    recentBlockhash: BLOCKHASH,
+    instructions: [
+      // The create names the mint as a SIGNER — this is what makes the
+      // transaction two-signer in the first place.
+      new TransactionInstruction({
+        programId: PUMP_PROGRAM,
+        keys: [{ pubkey: secondSigner, isSigner: true, isWritable: true }, w(MY_ATA)],
+        data: Buffer.from([0xd6, 0x90, 0x4c, 0xec, 0x5f, 0x8b, 0x31, 0xb4]),
+      }),
+      ...instructions,
+    ],
+  }).compileToV0Message();
+  return new VersionedTransaction(msg).serialize();
+}
+
+{
+  // THE test. A user who never turns the launcher on cannot construct the
+  // launch intent, so a create is refused exactly as it was before any of
+  // this existed — on the signer count, by the original rule.
+  const r = check(launchTx([]), MY_PUB, HOME, TRADE(10_000_000));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /needs 2 signers/);
+  console.log('ok  with the launcher OFF, a create is refused exactly as before');
+}
+
+{
+  const r = check(launchTx([]), MY_PUB, HOME, LAUNCH());
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  a launch naming its own mint as the second signer passes');
+}
+
+{
+  // The whole point: the second signer must be OUR ephemeral mint, not merely
+  // "some other key". A stranger co-signer is the attack this guards.
+  const stranger = Keypair.generate().publicKey;
+  const r = check(launchTx([], stranger), MY_PUB, HOME, LAUNCH());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /not the mint this launch created/);
+  console.log('ok  a second signer that is not the generated mint is refused');
+}
+
+{
+  // A launch with no mint named is not a launch, whatever its intent says.
+  const r = check(launchTx([]), MY_PUB, HOME, { intent: 'launch', maxTransferLamports: 10_000_000 });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /must name the mint/);
+  console.log('ok  the launch intent without a named mint is refused');
+}
+
+{
+  // A launch may only call a launchpad. The trade allowlist does NOT apply —
+  // that list waves programs through without inspection, and a two-signer
+  // transaction must never inherit it.
+  const jupiter = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
+  const r = check(
+    launchTx([new TransactionInstruction({ programId: jupiter, keys: [w(MY_ATA)], data: Buffer.from([1, 2, 3, 4]) })]),
+    MY_PUB, HOME, LAUNCH(),
+  );
+  assert.equal(r.ok, false);
+  assert.match(r.message, /may only call a launchpad/);
+  console.log('ok  a launch cannot ride alongside a non-launchpad program');
 }
 
 // ── Rejections ──
@@ -718,4 +871,425 @@ const routerIx = (keys) => new TransactionInstruction({ programId: ROUTER, keys,
   const r = check(tx([sync, init3]), MY_PUB, HOME, TRADE(10_000_000));
   assert.equal(r.ok, true, r.message);
   console.log('ok  the token instructions a trade actually needs still sign');
+}
+
+// ── Claiming creator fees ────────────────────────────────────────────────
+//
+// `intent: 'collect-fees'` is deliberately TIGHTER than a trade, not looser.
+// A trade may call any known trade program with any data; a claim may do
+// exactly one thing, and the thing that matters is who gets paid — pump lets
+// anybody crank a collection, so the account in slot 0 is the whole security
+// property.
+
+const COLLECT = { intent: 'collect-fees', maxTransferLamports: 0 };
+const CU = ComputeBudgetProgram.setComputeUnitLimit({ units: 40_000 });
+const vaultFor = (creator) =>
+  PublicKey.findProgramAddressSync([Buffer.from('creator-vault'), new PublicKey(creator).toBuffer()], PUMP_PROGRAM)[0];
+const EVENT_AUTHORITY = PublicKey.findProgramAddressSync([Buffer.from('__event_authority')], PUMP_PROGRAM)[0];
+
+/** A collect_creator_fee instruction paying `creator`. */
+const collectIx = (creator, disc = '1416567bc61cdb84') =>
+  new TransactionInstruction({
+    programId: PUMP_PROGRAM,
+    keys: [
+      { pubkey: new PublicKey(creator), isSigner: false, isWritable: true },
+      { pubkey: vaultFor(creator), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey('11111111111111111111111111111111'), isSigner: false, isWritable: false },
+      { pubkey: EVENT_AUTHORITY, isSigner: false, isWritable: false },
+      { pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(disc, 'hex'),
+  });
+
+{
+  const r = check(tx([CU, collectIx(MY_PUB)]), MY_PUB, HOME, COLLECT);
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  a claim that pays this wallet signs');
+}
+
+{
+  // The one that matters. Anyone may crank a collection, so a claim built to
+  // pay somebody else is the attack — and it is refused by the account in
+  // slot 0, not by anything about signatures.
+  const r = check(tx([CU, collectIx(ATTACKER)]), MY_PUB, HOME, COLLECT);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /pays .*not this wallet/i);
+  console.log('ok  a claim that pays somebody else is refused');
+}
+
+{
+  // A buy wearing a claim's name. `intent: 'collect-fees'` must not become a
+  // way to reach the pump program with arbitrary data.
+  const buyDisc = '66063d1201daebea';
+  const r = check(tx([CU, collectIx(MY_PUB, buyDisc)]), MY_PUB, HOME, COLLECT);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /not a creator-fee collection/i);
+  console.log('ok  another pump instruction under the claim intent is refused');
+}
+
+{
+  // The quote-token variant is recognised, so adding it later is a builder
+  // change rather than a policy change.
+  const r = check(tx([CU, collectIx(MY_PUB, 'cf118af204221338')]), MY_PUB, HOME, COLLECT);
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  collect_creator_fee_v2 is recognised too');
+}
+
+{
+  // Exactly one. Two collects in one transaction is not a shape this app
+  // builds, so it is not one the signer accepts.
+  const r = check(tx([CU, collectIx(MY_PUB), collectIx(MY_PUB)]), MY_PUB, HOME, COLLECT);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /exactly one pump instruction/i);
+  console.log('ok  a claim is exactly one pump instruction, never two');
+}
+
+{
+  // A transfer smuggled in beside the collect. The outflow ceiling is zero,
+  // so it is refused twice over — but the program check fires first.
+  const r = check(tx([CU, collectIx(MY_PUB), transfer(ATTACKER, 1)]), MY_PUB, HOME, COLLECT);
+  assert.equal(r.ok, false);
+  console.log('ok  nothing may leave the wallet beside a claim');
+}
+
+{
+  // And a foreign program alongside it.
+  const foreign = new TransactionInstruction({
+    programId: new PublicKey(ATTACKER),
+    keys: [{ pubkey: me.publicKey, isSigner: false, isWritable: true }],
+    data: Buffer.from([1]),
+  });
+  const r = check(tx([CU, collectIx(MY_PUB), foreign]), MY_PUB, HOME, COLLECT);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /may only call pump/i);
+  console.log('ok  a claim may call pump and infrastructure, nothing else');
+}
+
+// ── The Wallet Utilities swapper ─────────────────────────────────────────
+//
+// A token-for-token swap signs as `trade: { side: 'sell', mint: inputMint }`,
+// and the whole claim behind that design is the block below: the existing
+// rules already cover it EXACTLY, so nothing in this file had to be widened
+// to ship the swapper. If that ever stops being true, these fail rather than
+// a policy quietly growing a hole.
+
+const SWAP_IN = (extra = {}) => ({ intent: 'trade', maxTransferLamports: 10_000_000, trade: { side: 'sell', mint: MINT.toBase58() }, ...extra });
+
+{
+  // The input leaves into an account the route itself names, and the output
+  // simply arrives — receiving needs no permission, because nothing of ours
+  // moves out to do it.
+  const route = pumpIx([w(MY_ATA), w(POOL_ATA), w(MY_OTHER_ATA)]);
+  const out = tokTransfer(MY_ATA, POOL_ATA);
+  const r = check(tx([route, out]), MY_PUB, HOME, SWAP_IN());
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  a token-for-token swap signs as a sell of the input mint');
+}
+
+{
+  // The output token arriving in OUR account is not something the policy has
+  // to permit — and must not accidentally refuse either.
+  const route = pumpIx([w(MY_ATA), w(POOL_ATA), w(MY_OTHER_ATA)]);
+  const mkAta = createAtaIdempotent(MY_OTHER_ATA, me.publicKey, OTHER_MINT);
+  const r = check(tx([mkAta, route, tokTransfer(MY_ATA, POOL_ATA)]), MY_PUB, HOME, SWAP_IN());
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  creating the output token account is part of a swap, not a drain');
+}
+
+{
+  // The protection that matters, unchanged: a swap that ALSO moves a
+  // different token of ours out is a drain riding on a swap.
+  const route = pumpIx([w(MY_ATA), w(POOL_ATA), w(MY_OTHER_ATA)]);
+  const r = check(tx([route, tokTransfer(MY_ATA, POOL_ATA), tokTransfer(MY_OTHER_ATA, POOL_ATA)]), MY_PUB, HOME, SWAP_IN());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /token other than the one being sold/i);
+  console.log('ok  a swap that also moves a second token of ours is still refused');
+}
+
+{
+  // And the destination rule holds: the input may only go somewhere the
+  // route touches, so a swap cannot become a transfer to a stranger.
+  const strangerAta = ata(ATTACKER_PK, MINT);
+  const route = pumpIx([w(MY_ATA), w(POOL_ATA)]);
+  const r = check(tx([route, tokTransfer(MY_ATA, strangerAta)]), MY_PUB, HOME, SWAP_IN());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /which no trade program in this transaction touches/i);
+  console.log('ok  a swap cannot send the input anywhere the route does not touch');
+}
+
+{
+  // An approval is never part of a swap, whatever the route wants.
+  const r = check(tx([approve(MY_ATA, POOL)]), MY_PUB, HOME, SWAP_IN());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /delegate/i);
+  console.log('ok  a swap may not delegate the input token account');
+}
+
+// ── Bridging between chains ──────────────────────────────────────────────
+//
+// The intent that signs a transaction BUILT BY SOMEBODY ELSE. Every bound
+// here came out of the 2026-09-11 swarm, which demolished the three bounds
+// originally proposed — "exactly one signer" was already enforced, "the
+// destination must match the quote" validates attacker bytes against attacker
+// bytes from the same channel, and a loss bound is blind to destination.
+//
+// What survived: pin the programs as BUILD CONSTANTS, refuse lookup tables,
+// and let the existing fee-allowance machinery bound the one transfer.
+
+const RELAY_DEPOSITORY = new PublicKey('99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2');
+const LIFI_IX = new PublicKey('3i5JeuZuUxeKtVysUnwQNGerJP2bSMX9fTFfS4Nxe3Br');
+const LIFI_FEE_COLLECTOR = Keypair.generate().publicKey.toBase58();
+
+const BRIDGE = (extra = {}) => ({ intent: 'bridge', maxTransferLamports: 0, ...extra });
+const bridgeIx = (program, accounts = 2) =>
+  new TransactionInstruction({
+    programId: program,
+    keys: Array.from({ length: accounts }, (_, i) => (i === 0 ? w(me.publicKey, true) : w(Keypair.generate().publicKey))),
+    data: Buffer.from([0x0d, 0x9e, 0x0d, 0xdf, 0x5f, 0xd5, 0x1c, 0x06]),
+  });
+
+{
+  // A synthetic shape: compute budget, LI.FI's own instruction, the
+  // integrator fee, and the depository call — no lookup table.
+  const r = check(
+    tx([CU, bridgeIx(LIFI_IX), transfer(LIFI_FEE_COLLECTOR, 125_000), bridgeIx(RELAY_DEPOSITORY, 5)]),
+    MY_PUB,
+    HOME,
+    BRIDGE({ feeAllowance: [{ address: LIFI_FEE_COLLECTOR, maxLamports: 125_000 }] }),
+  );
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  a bridge shape without lookup tables signs');
+}
+
+{
+  // THE real one: the 503-byte Relay transaction LI.FI returned on
+  // 2026-09-11 for 0.02 SOL solana -> robinhood. It carries ONE lookup
+  // table (config readonly at index 1, vault writable at index 2) and a
+  // 50,000-lamport transfer to LI.FI's collector. Until that day the policy
+  // refused any lookup table outright, and the fixture above — built without
+  // one — kept the suite green on a shape the bridge never produces.
+  const REAL = fs.readFileSync(new URL('./fixtures/lifi-sol-rh-relay.base64.txt', import.meta.url), 'utf8').trim();
+  const bytes = new Uint8Array(Buffer.from(REAL, 'base64'));
+  const PAYER = '2NWQUKUgryz5fWenCntyxLadKNgVuFHfercV7wYSPSce';
+  const TABLE = 'Hm9fUgcn7qwDaiNTFiGh6pNtVATgnaRcmK6Bbx6EMZfP';
+  const CONFIG = 'Dodg2HifwU8rmaVVyMyUZDGTRbqAJTyVYxXPwcbNpBKc';
+  const VAULT = '7uTT8Xi5RWXzy7h9XL244GRgEycDYDhLjr3ZyNdXi8pZ';
+  const COLLECTOR = '34FKjAdVcTax2DHqV2XnbXa9J3zmyKcFuFKWbcmgxjgm';
+  const resolved = [{ key: TABLE, addresses: [Keypair.generate().publicKey.toBase58(), CONFIG, VAULT] }];
+  const fee = [{ address: COLLECTOR, maxLamports: 500_000 }];
+
+  // Unresolved: refused, and the message says what is missing.
+  let r = check(bytes, PAYER, HOME, BRIDGE({ feeAllowance: fee }));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /lookup table this signer has not resolved/);
+
+  // Resolved and pinned: signs.
+  r = check(bytes, PAYER, HOME, BRIDGE({ feeAllowance: fee, resolvedTables: resolved, bridgeAccounts: [CONFIG, VAULT] }));
+  assert.equal(r.ok, true, r.message);
+
+  // Resolved, but the table hands the program an account this route was
+  // never measured with (a swapped vault): refused, by name.
+  const stranger = Keypair.generate().publicKey.toBase58();
+  r = check(bytes, PAYER, HOME, BRIDGE({ feeAllowance: fee, resolvedTables: [{ key: TABLE, addresses: [resolved[0].addresses[0], CONFIG, stranger] }], bridgeAccounts: [CONFIG, VAULT] }));
+  assert.equal(r.ok, false);
+  assert.match(r.message, new RegExp(stranger.slice(0, 4)));
+
+  // A table resolved under the wrong key: refused.
+  r = check(bytes, PAYER, HOME, BRIDGE({ feeAllowance: fee, resolvedTables: [{ key: stranger, addresses: resolved[0].addresses }], bridgeAccounts: [CONFIG, VAULT] }));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /resolved as/);
+
+  // Without the fee allowance the 50,000-lamport collector transfer is a
+  // bare transfer to nowhere we know: refused.
+  r = check(bytes, PAYER, HOME, BRIDGE({ resolvedTables: resolved, bridgeAccounts: [CONFIG, VAULT] }));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /neither your withdrawal address nor a known tip account/);
+
+  // And a ceiling under the measured fee refuses too.
+  r = check(bytes, PAYER, HOME, BRIDGE({ feeAllowance: [{ address: COLLECTOR, maxLamports: 49_999 }], resolvedTables: resolved, bridgeAccounts: [CONFIG, VAULT] }));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /over the/);
+  console.log('ok  the real Relay transaction signs only with its table resolved to the pinned accounts and its fee allowed');
+}
+
+{
+  // THE bound. A program the quote named but this build never measured is
+  // attacker data, and it is refused by name.
+  const stranger = new PublicKey(ATTACKER);
+  const r = check(tx([CU, bridgeIx(stranger, 5)]), MY_PUB, HOME, BRIDGE());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /only call a bridge this build has measured/i);
+  console.log('ok  a bridge program this build never measured is refused');
+}
+
+{
+  // Lookup tables. LI.FI's Solana routes use them, and relaxing the existing
+  // ALT refusals to accommodate that would be the actual loss event — an
+  // account we cannot name is one we cannot judge.
+  // The lookup table has to actually be USED, or web3.js compiles it away and
+  // the test proves nothing — the accounts in the instruction must be the ones
+  // the table holds.
+  const hidden = [Keypair.generate().publicKey, Keypair.generate().publicKey];
+  const alt = { key: Keypair.generate().publicKey, state: { addresses: hidden } };
+  const viaAlt = new TransactionInstruction({
+    programId: LIFI_IX,
+    keys: [w(me.publicKey, true), w(hidden[0]), ro(hidden[1])],
+    data: Buffer.from([1]),
+  });
+  const msg = new TransactionMessage({
+    payerKey: me.publicKey,
+    recentBlockhash: BLOCKHASH,
+    instructions: [CU, viaAlt],
+  }).compileToV0Message([alt]);
+  assert.ok(msg.addressTableLookups.length > 0, 'the fixture must really use a lookup table');
+  const r = check(new VersionedTransaction(msg).serialize(), MY_PUB, HOME, BRIDGE());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /lookup table/i);
+  console.log('ok  a bridge using address lookup tables is refused outright');
+}
+
+{
+  // The fee is bounded by the EXISTING per-address summing allowance, so two
+  // transfers to the same collector cannot each slip under one ceiling.
+  const r = check(
+    tx([CU, bridgeIx(RELAY_DEPOSITORY, 5), transfer(LIFI_FEE_COLLECTOR, 125_000), transfer(LIFI_FEE_COLLECTOR, 125_000)]),
+    MY_PUB,
+    HOME,
+    BRIDGE({ feeAllowance: [{ address: LIFI_FEE_COLLECTOR, maxLamports: 125_000 }] }),
+  );
+  assert.equal(r.ok, false);
+  console.log('ok  two transfers to the same fee collector cannot each slip under the ceiling');
+}
+
+{
+  // Anything leaving to anywhere the policy did not name is refused, which is
+  // the rule that already refuses today's bridge transaction.
+  const r = check(
+    tx([CU, bridgeIx(RELAY_DEPOSITORY, 5), transfer(ATTACKER, 1_000)]),
+    MY_PUB,
+    HOME,
+    BRIDGE({ feeAllowance: [{ address: LIFI_FEE_COLLECTOR, maxLamports: 125_000 }] }),
+  );
+  assert.equal(r.ok, false);
+  console.log('ok  a transfer smuggled in beside a bridge is refused');
+}
+
+{
+  // A transaction that calls no bridge at all is not a bridge, whatever the
+  // intent claims.
+  const r = check(tx([CU, transfer(LIFI_FEE_COLLECTOR, 125_000)]), MY_PUB, HOME,
+    BRIDGE({ feeAllowance: [{ address: LIFI_FEE_COLLECTOR, maxLamports: 125_000 }] }));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /calls no bridge/i);
+  console.log('ok  the bridge intent refuses a transaction with no bridge in it');
+}
+
+{
+  // No trade context, so a token instruction that moves a holding hits the
+  // ordinary refusal. A bridge of native SOL touches no token account, and a
+  // transaction claiming otherwise is not one.
+  const r = check(tx([CU, bridgeIx(RELAY_DEPOSITORY, 5), tokTransfer(MY_ATA, POOL_ATA)]), MY_PUB, HOME, BRIDGE());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /moves no token out|token other than/i);
+  console.log('ok  a bridge may not move a token holding');
+}
+
+{
+  // The launcher's second-signature exception does not leak here: a bridge is
+  // a one-signature transaction like everything else that is not a launch.
+  const second = Keypair.generate();
+  const msg = new TransactionMessage({
+    payerKey: me.publicKey,
+    recentBlockhash: BLOCKHASH,
+    instructions: [
+      CU,
+      new TransactionInstruction({
+        programId: RELAY_DEPOSITORY,
+        keys: [w(me.publicKey, true), w(second.publicKey, true)],
+        data: Buffer.from([1]),
+      }),
+    ],
+  }).compileToV0Message();
+  const r = check(new VersionedTransaction(msg).serialize(), MY_PUB, HOME, BRIDGE());
+  assert.equal(r.ok, false);
+  assert.match(r.message, /needs 2 signers/i);
+  console.log('ok  a bridge needing a second signature is refused, invariant intact');
+}
+
+// ── The program gate that was missing ────────────────────────────────────
+//
+// `checkOutflow` reads TOP-LEVEL instructions and guards our TOKEN accounts.
+// It does NOT stop an unrecognised program that has been handed the wallet's
+// own system account — writable, and a signer — from moving SOL by CPI,
+// because a CPI is not a top-level instruction. Until 2026-09-11 the only
+// defence lived in liveSigner's relayer path; swap.ts signed Jupiter's bytes
+// without it. This is the shared gate, and these pin what it catches.
+
+{
+  // The exact shape the gate exists for: a stranger program holding our
+  // wallet writable and signing. checkOutflow alone WAVES THIS THROUGH.
+  const stranger = new PublicKey(ATTACKER);
+  const drain = new TransactionInstruction({
+    programId: stranger,
+    keys: [w(me.publicKey, true), w(Keypair.generate().publicKey)],
+    data: Buffer.from([1, 2, 3]),
+  });
+  const permissive = check(tx([CU, drain]), MY_PUB, HOME, TRADE(10_000_000));
+  assert.equal(permissive.ok, true, 'checkOutflow alone does not catch a CPI drain — this is why the gate exists');
+
+  const unknown = unknownPrograms(tx([CU, drain]));
+  assert.equal(unknown.length, 1);
+  assert.equal(unknown[0], stranger.toBase58());
+  console.log('ok  the gate catches the CPI shape that checkOutflow cannot see');
+}
+
+{
+  // A real route's programs pass. Jupiter, a venue, and the infrastructure.
+  const jup = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
+  const whirl = new PublicKey('whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc');
+  const ix = (prog) => new TransactionInstruction({ programId: prog, keys: [w(me.publicKey, true)], data: Buffer.from([0]) });
+  assert.deepEqual(unknownPrograms(tx([CU, ix(jup), ix(whirl), syncNative(MY_WSOL_ATA)])), []);
+  console.log('ok  a real Jupiter route passes the gate');
+}
+
+{
+  // A program hidden in a lookup table reads as unknown, because an account
+  // we cannot name is one we cannot judge.
+  const hidden = [Keypair.generate().publicKey];
+  const alt = { key: Keypair.generate().publicKey, state: { addresses: hidden } };
+  const viaAlt = new TransactionInstruction({
+    programId: new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'),
+    keys: [w(me.publicKey, true), w(hidden[0])],
+    data: Buffer.from([0]),
+  });
+  const msg = new TransactionMessage({ payerKey: me.publicKey, recentBlockhash: BLOCKHASH, instructions: [CU, viaAlt] }).compileToV0Message([alt]);
+  // The PROGRAM here is static, so this route is fine — the point is the
+  // helper reports hidden PROGRAMS, not hidden accounts.
+  assert.deepEqual(unknownPrograms(new VersionedTransaction(msg).serialize()), []);
+  console.log('ok  a lookup table holding accounts is not itself an unknown program');
+}
+
+{
+  // The real Mayan route, measured 2026-09-11: it carries THREE lookup tables
+  // and a System transfer whose destination lives inside one of them. The
+  // bridge intent refuses it, and that refusal is the feature working — the
+  // alternative is signing a payment to an address we cannot read.
+  const hidden = [Keypair.generate().publicKey, Keypair.generate().publicKey];
+  const alt = { key: Keypair.generate().publicKey, state: { addresses: hidden } };
+  const mayan = new PublicKey('D8C8iW6zmoKg5TRr8nQ7h14TMWqQX8FiBdj2ju5MF3wa');
+  const viaAlt = new TransactionInstruction({
+    programId: mayan,
+    keys: [w(me.publicKey, true), w(hidden[0]), ro(hidden[1])],
+    data: Buffer.from([1]),
+  });
+  const msg = new TransactionMessage({
+    payerKey: me.publicKey,
+    recentBlockhash: BLOCKHASH,
+    instructions: [CU, viaAlt],
+  }).compileToV0Message([alt]);
+  assert.ok(msg.addressTableLookups.length > 0);
+  const r = check(new VersionedTransaction(msg).serialize(), MY_PUB, HOME, BRIDGE());
+  assert.equal(r.ok, false, 'the real SOL to BNB route shape is refused');
+  assert.match(r.message, /lookup table/i);
+  console.log('ok  the measured Mayan route is refused for hiding accounts in lookup tables');
 }

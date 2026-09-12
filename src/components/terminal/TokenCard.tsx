@@ -1,6 +1,7 @@
 import { Globe, Send, Star, Twitter, Zap } from 'lucide-react';
 import { memo } from 'react';
 import { imageSrc, windowExceedsAge, type StatsWindow, type TokenSummary } from '@shared/market';
+import { nativeSymbolOf } from '@shared/evm';
 import { cls, fmtAge, fmtChange, fmtNum, fmtPctOrDash, fmtUsd, scoreTone, shortAddr, toneFor } from '../../utils/format';
 import { ODDS_BUCKET_LABEL, oddsChipClass } from '../../utils/odds';
 
@@ -113,6 +114,10 @@ const LAUNCHPAD_LABEL: Record<string, string> = {
   boop: 'BOOP',
   raydium: 'RAY',
   meteora: 'MET',
+  pons: 'PONS',
+  robinhood: 'HOOD',
+  fourmeme: '4MEME',
+  bnb: 'BNB',
   unknown: '—',
 };
 
@@ -136,6 +141,7 @@ function TokenCardInner({
   watched,
   onToggleWatch,
   canQuickBuy,
+  quickBuyHint,
   layout = 'card',
 }: {
   token: TokenSummary;
@@ -146,6 +152,9 @@ function TokenCardInner({
   watched: boolean;
   onToggleWatch: () => void;
   canQuickBuy: boolean;
+  /** Why quick buy is disabled, when it is — the EVM chains have their own
+   *  reasons (no EVM wallet, still reading it) that are not "arm live". */
+  quickBuyHint?: string;
   /** 'card' = the dense 3-line block for the narrow columns. 'row' = a wide
    *  single-line DexScreener-style row, used when a column is expanded. */
   layout?: 'card' | 'row';
@@ -158,6 +167,8 @@ function TokenCardInner({
   const buys = s?.buys ?? null;
   const sells = s?.sells ?? null;
   const change = s?.priceChangePct ?? null;
+  // The quick-buy size is in the row's own native unit (SOL / ETH / BNB).
+  const unit = nativeSymbolOf(token.chain ?? 'solana');
 
   const open = (url: string | null) => (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -259,7 +270,7 @@ function TokenCardInner({
               onQuickBuy();
             }}
             disabled={!canQuickBuy}
-            title={canQuickBuy ? `Quick buy ${quickBuySol} SOL` : 'Arm live execution on the Wallet page to quick-buy'}
+            title={canQuickBuy ? `Quick buy ${quickBuySol} ${unit}` : quickBuyHint ?? 'Arm live execution on the Wallet page to quick-buy'}
             className={cls(
               'inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold transition',
               canQuickBuy
@@ -371,7 +382,7 @@ function TokenCardInner({
               onQuickBuy();
             }}
             disabled={!canQuickBuy}
-            title={canQuickBuy ? `Buy ${quickBuySol} SOL` : 'Quick buy needs a funded wallet with live execution armed'}
+            title={canQuickBuy ? `Buy ${quickBuySol} ${unit}` : quickBuyHint ?? 'Quick buy needs a funded wallet with live execution armed'}
             className={cls(
               'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-bold transition',
               canQuickBuy
@@ -476,6 +487,7 @@ export const TokenCard = memo(TokenCardInner, (a, b) => {
   if (a.window !== b.window) return false;
   if (a.watched !== b.watched) return false;
   if (a.canQuickBuy !== b.canQuickBuy) return false;
+  if (a.quickBuyHint !== b.quickBuyHint) return false;
   if (a.quickBuySol !== b.quickBuySol) return false;
   const x = a.token;
   const y = b.token;

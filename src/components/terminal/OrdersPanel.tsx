@@ -172,6 +172,13 @@ export function OrdersPanel({
   // form here rather than letting the user fill it in and be rejected —
   // this panel's contract is that it never offers what the engine will
   // refuse, and finding out after the click breaks it.
+  // Paper is not a fault, it is the mode the user picked. The engine's
+  // "why can nothing execute" answer is the SAME predicate as paper mode, so
+  // in Paper this panel would otherwise show a gold "will fire when it is
+  // fixed" warning forever and happily arm orders that can never fire —
+  // advanced orders have no paper path. Say so plainly and refuse instead.
+  const paperBlocked = !executable && (blockedReason?.includes('live execution is off') ?? false);
+
   const anchorable = token.priceSol !== null && token.priceSol > 0;
   const needsAnchor = isPctKind(kind);
   const anchorProblem =
@@ -191,11 +198,13 @@ export function OrdersPanel({
     isBuyKind(kind) && maxLiveSol !== null && Number(amount) > maxLiveSol
       ? `Above your per-trade cap of ${maxLiveSol} SOL — raise it on the Wallet page or buy less.`
       : null;
-  const validity = anchorProblem
-    ? { ok: false, message: anchorProblem }
-    : capProblem
-      ? { ok: false, message: capProblem }
-      : validateOrder(req);
+  const validity = paperBlocked
+    ? { ok: false, message: 'Orders are live-only — switch to Live to arm them.' }
+    : anchorProblem
+      ? { ok: false, message: anchorProblem }
+      : capProblem
+        ? { ok: false, message: capProblem }
+        : validateOrder(req);
 
   const submit = async (): Promise<void> => {
     setBusy(true);
@@ -241,13 +250,23 @@ export function OrdersPanel({
         </button>
       </div>
 
-      {!executable && blockedReason && (
+      {paperBlocked ? (
         <div className="rounded-md border border-arc-gold/30 bg-arc-gold/10 px-2.5 py-2">
           <p className="text-[10px] text-arc-gold/90 leading-relaxed">
-            Orders will not execute right now — {blockedReason}. They stay armed and will fire when it is fixed,
-            which may be at a much worse price.
+            Orders are live-only — switch to Live to arm them. There is no paper version of a stop loss, so nothing
+            created here would fire while you are in Paper.
           </p>
         </div>
+      ) : (
+        !executable &&
+        blockedReason && (
+          <div className="rounded-md border border-arc-gold/30 bg-arc-gold/10 px-2.5 py-2">
+            <p className="text-[10px] text-arc-gold/90 leading-relaxed">
+              Orders will not execute right now — {blockedReason}. They stay armed and will fire when it is fixed,
+              which may be at a much worse price.
+            </p>
+          </div>
+        )
       )}
 
       {open && (

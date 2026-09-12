@@ -104,6 +104,13 @@ export function parseFile(raw: unknown, now: number, mintId: () => string): Wall
     // record must not take the other wallets down with it.
     if (parsed && !wallets.some((x) => x.publicKey === parsed.publicKey)) wallets.push(parsed);
   }
+  // Skipping one bad record is right; skipping EVERY record is not. A file
+  // that listed wallets and yielded none is a file we failed to understand —
+  // returning a valid empty file here leaves the store writable, and the next
+  // `generate()` writes over the only copy of the ciphertext. Fail closed and
+  // let the caller keep the file untouched.
+  if (wallets.length === 0 && (obj.wallets as unknown[]).length > 0) return null;
+
   const activeId = typeof obj.activeId === 'string' ? obj.activeId : null;
   const validIds = new Set(wallets.map((w) => w.id));
   const groups: WalletGroup[] = [];

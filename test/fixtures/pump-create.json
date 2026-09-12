@@ -1,0 +1,33 @@
+{
+  "note": "A real pump.fun create_v2, captured 2026-09-10 and verified account-for-account and byte-for-byte against electron/engine/pumpLaunch.ts.",
+  "sig": "3iFeQXhJFjfr1dT31m2TBxvd771JGD3C3mpjVASNQqP4P46DJu5XUKxxATpVrcLcBGyMV9saDbrVZb43pzVXsHfx",
+  "mint": "6XCVtaVz4jomsSfvUjSbFeWRSYsf6Gya5vsRpXxUpump",
+  "creator": "K6Eh9fwKkrhVNq6SpRtJn7F4Myi3HUst5QP8x5BKHnR",
+  "args": {
+    "name": "67%",
+    "symbol": "SXSN",
+    "uri": "https://ipfs.io/ipfs/Qmd1EkMiM9vbdD4Ns2cy2Vq4mRwJXdAVZi4YuhfCMnCFVn",
+    "creator": "K6Eh9fwKkrhVNq6SpRtJn7F4Myi3HUst5QP8x5BKHnR",
+    "mayhem": true,
+    "cashback": null
+  },
+  "accounts": [
+    "6XCVtaVz4jomsSfvUjSbFeWRSYsf6Gya5vsRpXxUpump",
+    "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+    "7DyCQxzUQdEpqsbt3SNSdH5mkXhXxpZkiBd9xYRks4mP",
+    "8ck4iiQ6vNQdyFHTxE1xJKdXhBjBZQ8RYYJevwbne5Dz",
+    "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf",
+    "K6Eh9fwKkrhVNq6SpRtJn7F4Myi3HUst5QP8x5BKHnR",
+    "11111111111111111111111111111111",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    "MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e",
+    "13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ",
+    "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s",
+    "EFNYJDrkj54wAJfGBMTT9FC4cdrNAspdABH5J3X9kAjj",
+    "6z3cLRSLGc1JLEvC48AnqQ9CfQyDu3RDyQCSynUMukZN",
+    "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+  ],
+  "data": "d6904cec5f8b31b403000000363725040000005358534e4300000068747470733a2f2f697066732e696f2f697066732f516d6431456b4d694d3976626444344e73326379325671346d52774a586441565a693459756866434d6e4346566e04a26000a6d5f7642375de9615900a6e864a4e177e7a5e69ec686d62911c41ba01000000000000000000"
+}

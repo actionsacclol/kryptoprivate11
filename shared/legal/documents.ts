@@ -107,7 +107,9 @@ export const TERMS_OF_SERVICE: LegalDocument = {
     {
       heading: '6. Third-party services',
       body: [
-        `${PRODUCT_NAME} connects to services we do not own or control — Solana RPC providers, market-data APIs, launchpads, transaction relayers, and, if you switch them on, chat platforms. Your use of those services is governed by their terms, not ours.`,
+        `${PRODUCT_NAME} connects to services we do not own or control — RPC providers for Solana, Robinhood Chain and BNB Smart Chain, market-data APIs, launchpads, transaction relayers, a bridge aggregator, and, if you switch them on, chat platforms. Your use of those services is governed by their terms, not ours.`,
+        'Bridging is different from everything else in this software and is off until you switch it on. When you move a chain’s coin to another chain, your funds leave your wallet into a third party’s bridge contracts and are delivered on the other chain by that third party (routed through LI.FI, li.quest). For the time in between, nobody you know holds them. The software checks what it can — the contract it pays, the amount, and where it can read it, the recipient — and it cannot check the rest; a transfer can arrive late, arrive as a different token, be refunded on the chain it left, or fail. We are not the bridge, we do not hold your funds at any point, and we cannot recover a transfer.',
+        'Launching a token is your own act of issuance. A token you create with this software is created by you, on chain, under your key: it cannot be unmade, it is attributable to your wallet, and any fees it earns you and any obligations it creates are yours. The software builds the transaction you asked for and nothing else.',
         'We do not guarantee that any third-party service will be available, accurate, timely, or fit for any purpose. A third party can change, rate-limit, break, or withdraw its service at any time, and that may stop parts of the software working.',
         'Automated or high-frequency interaction with a third-party service may breach that service\'s rules and result in rate-limiting, blocking, or account termination by that provider. That risk is yours.',
       ],
@@ -223,20 +225,27 @@ export const PRIVACY_POLICY: LegalDocument = {
       heading: '4. What leaves your machine, and to whom',
       body: [
         'The software makes requests directly from your computer to third parties. Each of them can see your IP address, the timing of your requests, and what you asked for — which, for a market-data provider, reveals which tokens you are looking at.',
-        'Blockchain access: api.mainnet-beta.solana.com, mainnet.helius-rpc.com and sender.helius-rpc.com (if you supply a Helius key), plus any additional RPC endpoints you configure yourself.',
-        'Market data: api.dexscreener.com, api.geckoterminal.com, public-api.birdeye.so, frontend-api-v3.pump.fun, swap-api.pump.fun.',
+        'Blockchain access (Solana): api.mainnet-beta.solana.com, solana-rpc.publicnode.com, mainnet.helius-rpc.com and sender.helius-rpc.com (if you supply a Helius key), plus any additional RPC endpoints you configure yourself.',
+        'Blockchain access (Robinhood Chain and BNB Smart Chain): rpc.mainnet.chain.robinhood.com, robinhood-rpc.publicnode.com, rpc.ordofi.network, robinhood-mainnet.g.alchemy.com (only if you supply an Alchemy key), bsc-rpc.publicnode.com, bsc-dataseed.bnbchain.org, rpc-bnb.blockmachine.io, plus any RPC URL you configure yourself. No single public endpoint serves everything these chains need, so reads are split by what each one can answer: receipts, balances at a past block, event logs, simulation and broadcast may each go to a different one of these.',
+        'Market data: api.dexscreener.com, api.geckoterminal.com, lite-api.jup.ag (or api.jup.ag if you supply a Jupiter key), public-api.birdeye.so, frontend-api-v3.pump.fun, swap-api.pump.fun, api.rugcheck.xyz.',
         'Trade execution: pumpportal.fun (transaction relayer), bundles.jito.wtf and mainnet.block-engine.jito.wtf (transaction submission lanes).',
-        'Token images and metadata: ipfs.io and cloudflare-ipfs.com.',
+        'Token images and metadata: ipfs.io and cloudflare-ipfs.com, and — because a token’s image is whatever URL its creator published — any public image host that URL points to.',
+        'Bridging (the Bridge page, off by default): li.quest. Pricing a transfer necessarily sends the aggregator the amount and BOTH of your own wallet addresses — the one the money leaves and the one it arrives at — and following a transfer sends its transaction hash. For the minutes a transfer is in flight, your funds are held by the bridge’s own contracts, not by you and not by us; see the Terms.',
+        'Launching a token (the Launch page, off by default): pump.fun receives the image you chose and the name, symbol, description and links you typed, and pins them publicly. Nothing else — no wallet address, no key — is sent with them.',
+        'Update check: thirty seconds after every start, and every six hours after, the software fetches a small version file from krypt.cc to learn whether a newer build exists. That request carries no identifier and no data about you, but like any request it reveals your IP address to the host serving the file (our site is fronted by Cloudflare, which sees it too). Nothing is downloaded or installed automatically; the software only shows a notice.',
+        'Discord Rich Presence, only if you switch it on: the Discord client on your own computer is told what the software is doing so it can show it on your profile. Nothing is sent to us.',
+        'GIF search, only if you enable it and supply your own key: api.giphy.com or tenor.googleapis.com.',
+        'Reward rates (the Rewards page): api.merkl.xyz. Listing the published reward campaigns on a chain sends no address. Asking what YOUR wallets are earning necessarily sends that wallet address to Merkl, so the software only does it when you ask it to, and says so where you ask.',
         'Chat notifications, only if you enable and pair them: api.telegram.org, discord.com.',
         'AI analysis, only if you enable it and supply your own key: api.openai.com or api.anthropic.com. When you run an analysis, the public on-chain facts about that one token (the same facts shown in the app — no wallet address, no key) are sent to whichever provider you chose, under that provider’s own terms and privacy policy. It is off by default and never runs on its own.',
-        'Links you click deliberately may open your browser at solscan.io, x.com, dashboard.helius.dev, or our own site.',
+        'Links you click deliberately may open your browser at solscan.io, robinhoodchain.blockscout.com, bscscan.com, dexscreener.com, x.com, dashboard.helius.dev, dashboard.alchemy.com, or our own site.',
         'Market data can be switched off entirely in Settings, which stops the market-data requests above. The blockchain and execution requests are what the software does; they cannot be switched off while you are using it to trade.',
       ],
     },
     {
       heading: '5. What we collect',
       body: [
-        'Nothing automatically. There is no telemetry, no analytics, no crash reporting to us, no advertising identifiers, and no tracking of any kind built into this software.',
+        'Nothing about you. There is no telemetry, no analytics, no crash reporting to us, no advertising identifiers, and no tracking built into this software. The one automatic request the software makes to us is the update check described in section 4 — a fetch of a public version file that carries nothing about you.',
         'That claim is about us, and it has a limit worth stating in the same breath: the third-party services listed in section 4 still see your IP address and your requests when the software talks to them. "No telemetry" means we built no channel that reports you to us. It does not mean nothing about you leaves your computer.',
         `If you email us at ${CONTACT_EMAIL}, we hold that correspondence in order to answer you.`,
         'If you choose to send us a crash log, you are sending us a file you can read first. We do not collect them by ourselves.',
@@ -276,7 +285,7 @@ export const PRIVACY_POLICY: LegalDocument = {
     {
       heading: '10. IP addresses',
       body: [
-        'We do not log your IP address, because we operate no server that could. If we ever record an IP for evidential purposes, it will be stored only as a salted SHA-256 hash, never in raw form.',
+        'We keep no server for this software and no account for you, so there is no log of yours to keep. The one request the software makes to us — the update check — reaches our website, and a website’s host (ours is fronted by Cloudflare) sees the IP address of every request it serves; we do not read those logs to identify users. If we ever record an IP for evidential purposes, it will be stored only as a salted SHA-256 hash, never in raw form.',
         'The third-party services listed in section 4 do see your IP address. If that matters to you, a VPN and disabling market data are the controls available to you.',
       ],
     },
@@ -350,7 +359,7 @@ export const SOFTWARE_TERMS: LegalDocument = {
       heading: '5. We are not a broker, adviser, or fiduciary',
       body: [
         `${LEGAL_ENTITY} is not a broker, dealer, exchange, custodian, commodity trading advisor, investment adviser, or fiduciary. We are not registered with the SEC, CFTC, FCA, or any other financial regulator, and no such registration is claimed.`,
-        'Using this software creates no advisory, brokerage, agency, or fiduciary relationship between you and us. We never take custody of your funds, never hold your keys, and never execute anything on your behalf — the software runs on your computer and signs with your key under your control.',
+        'Using this software creates no advisory, brokerage, agency, or fiduciary relationship between you and us. We never take custody of your funds, never hold your keys, and never execute anything on your behalf — the software runs on your computer and signs with your key under your control. (A bridge transfer, if you switch bridging on, is held in transit by the bridge’s own contracts — a third party, never us; see the Terms of Service.)',
       ],
     },
     {
@@ -374,7 +383,7 @@ export const SOFTWARE_TERMS: LegalDocument = {
     {
       heading: '8. Fees',
       body: [
-        `${BRAND} charges a platform fee on trades executed through the software. The current rate is shown in the application before you trade and in Settings. It is charged inside the same blockchain transaction as your trade, so it is visible on-chain.`,
+        `${BRAND} charges a platform fee on trades executed through the software. The current rate is shown in the application before you trade and in Settings. It is charged inside the same blockchain transaction as your trade wherever the venue allows it, so it is visible on-chain; on launchpad curves that cannot carry a fee it is a separate transfer sent immediately after the fill, and on four.meme sells the whole fee goes to the treasury with no referrer share.`,
         'This is separate from, and in addition to, fees charged by the launchpad, protocol, relayer, or network — none of which we receive. Network and priority fees are paid to validators.',
         'If you entered a referrer, a share of our fee is sent to that address in the same transaction. It comes out of our fee and does not increase what you pay.',
         'We may change the fee. Material changes come with a new version of these terms and you will be asked to accept them.',

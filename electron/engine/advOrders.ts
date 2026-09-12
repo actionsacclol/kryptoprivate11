@@ -26,6 +26,20 @@
 // 5. NO SILENT RETRY. A failed order goes to `failed` with the reason. It is
 //    not retried, because a retry against an unknown post-broadcast state is
 //    how you double-spend.
+//
+// 6. ONE SELL PER POSITION AT A TIME. §2 makes each ORDER fire once; that is
+//    not enough, because several orders can name the same mint (the shipped
+//    "Runner" template arms five). Every sell is sized as a share of the token
+//    balance READ AT BUILD TIME, so two that overlap both size off the same
+//    undiminished bag: a 40% + 50% ladder sells 90% of the whole position
+//    instead of 40% and then 50% of what is left. So a mint with a sell in
+//    flight holds its other sell orders ARMED — they take the next tick, and
+//    size against the balance the first one actually left behind.
+//
+// 7. AN ORDER BELONGS TO THE WALLET IT WAS WRITTEN ON. "Sell 100%" means the
+//    position the user was looking at. Switching the active signer must not
+//    silently repoint an order at a different bag, so an order whose owner is
+//    not the current signer pauses instead of firing.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,6 +63,10 @@ const MAX_ORDERS = 200;
 let orders: AdvOrder[] = [];
 let filePath = '';
 let saveTimer: NodeJS.Timeout | null = null;
+/** Why the saved orders could not be read, or null. `init` runs before the
+ *  engine exists, so the toast inside `failClosed` reaches nobody — this is
+ *  what the startup dialog reads. Same shape as ledger's. */
+let loadFailure: string | null = null;
 
 /** Injected by the engine so this module never imports it (cycle). */
 export interface OrderHost {
@@ -67,6 +85,17 @@ export interface OrderHost {
   buyBlockedReason(): string | null;
   /** Per-trade SOL cap from execution settings. */
   maxLiveSol(): number;
+  /** Public key of the wallet that would sign right now, or null if none.
+   *  Orders are stamped with it and refuse to fire for a different one. */
+  owner?(): string | null;
+  /**
+   * Raw token units of `mint` the signing wallet still holds, or null when it
+   * could not be read.
+   *
+   * Null means UNKNOWN and must never stop a sell — see the pre-flight check
+   * in `execute`. Only a confirmed zero does anything.
+   */
+  heldTokensRaw?(mint: string): Promise<bigint | null>;
   log(level: 'info' | 'warn' | 'error', line: string): void;
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   /** Notify the renderer that the order list changed. */
@@ -83,12 +112,31 @@ export function attach(h: OrderHost): void {
 
 export function init(userDataDir: string): void {
   filePath = path.join(userDataDir, FILE);
+  loadFailure = null;
+  let text: string;
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as { version: 1; orders: AdvOrder[] };
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    // No file is a first run — start empty and stay writable.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      orders = [];
+      return;
+    }
+    // Anything else means the file EXISTS and we could not read it. Treating
+    // that as "no orders" would let the next write destroy a user's stop
+    // losses, so this session serves nothing and refuses to persist.
+    failClosed(`could not be read (${(err as Error)?.message ?? 'unknown error'})`);
+    return;
+  }
+  try {
+    const raw = JSON.parse(text) as { version: 1; orders: AdvOrder[] };
     const loaded = Array.isArray(raw?.orders) ? raw.orders : [];
     // Anything that was live when we shut down comes back PAUSED. See §3.
     orders = loaded.map((o) => ({
       ...o,
+      // Orders written before owners existed have an unknown wallet. §7 makes
+      // those pause rather than fire, so null is the fail-closed value.
+      owner: o.owner ?? null,
       state: o.state === 'armed' || o.state === 'triggered' ? ('paused' as OrderState) : o.state,
       note:
         o.state === 'armed'
@@ -97,9 +145,25 @@ export function init(userDataDir: string): void {
             ? 'The app closed while this order was executing. Check your wallet before resuming.'
             : o.note,
     }));
-  } catch {
-    orders = [];
+  } catch (err) {
+    failClosed(`is not readable JSON (${(err as Error)?.message ?? 'parse error'})`);
   }
+}
+
+/** The file exists but we cannot use it: set it aside, serve nothing, and
+ *  make every write a no-op so the damaged copy survives for inspection. */
+function failClosed(why: string): void {
+  const bad = filePath;
+  orders = [];
+  filePath = '';
+  loadFailure = `${bad} ${why}`;
+  try {
+    fs.renameSync(bad, `${bad}.corrupt-${Date.now()}`);
+  } catch {
+    /* if it cannot even be renamed, blanking filePath already protects it */
+  }
+  host?.log('error', `orders file ${why} — set aside, not overwritten`);
+  host?.toast('error', 'Your saved orders could not be read. They have been set aside, not overwritten — no orders are armed.');
 }
 
 function persist(): void {
@@ -133,7 +197,21 @@ function persistNow(): void {
   }
 }
 
+/** Flush a pending debounced write NOW. Called on quit: `cancel` and `create`
+ *  use the 200 ms debounce, so closing the app inside that window would lose
+ *  the change and bring a cancelled order back as `paused`. */
+export function flushSync(): void {
+  if (!filePath || !saveTimer) return;
+  persistNow();
+}
+
 // ── CRUD ──────────────────────────────────────────────────────────────
+
+/** Why the saved orders could not be read, or null. Nothing is persisted
+ *  while this is set, and no order is armed. */
+export function failure(): string | null {
+  return loadFailure;
+}
 
 export function all(): AdvOrder[] {
   return orders.map((o) => ({ ...o }));
@@ -183,6 +261,7 @@ export function create(
     amount: req.amount,
     referencePriceSol: ctx.referencePriceSol,
     peakPriceSol: req.kind === 'trailing_stop' ? ctx.referencePriceSol : null,
+    owner: host?.owner?.() ?? null,
     createdAt: now,
     updatedAt: now,
     triggeredAt: null,
@@ -201,9 +280,19 @@ export function create(
 export function cancel(id: string): { ok: boolean; message: string } {
   const o = orders.find((x) => x.id === id);
   if (!o) return { ok: false, message: 'Order not found' };
-  if (!ACTIVE_STATES.includes(o.state)) return { ok: false, message: `Order is already ${o.state}` };
+  // A `triggered` order that never reported a result and is not currently
+  // executing is stranded: nothing will ever move it, but it still counts
+  // against MAX_ORDERS and still shows as Active. Let the user clear it.
+  // One that IS in flight stays refused — cancelling cannot recall a
+  // transaction that is already being signed or broadcast.
+  const stranded = o.state === 'triggered' && !o.signature && !inFlight.has(o.id);
+  if (!ACTIVE_STATES.includes(o.state) && !stranded) {
+    return { ok: false, message: o.state === 'triggered' ? 'Order is executing' : `Order is already ${o.state}` };
+  }
   o.state = 'cancelled';
-  o.note = 'Cancelled by you.';
+  o.note = stranded
+    ? 'Cancelled by you. It never reported a result — check your wallet in case the trade landed.'
+    : 'Cancelled by you.';
   o.updatedAt = Date.now();
   persist();
   recorder.record('order_cancel', { id: o.id, mint: o.mint, kind: o.kind });
@@ -224,23 +313,39 @@ export function clearCompleted(): number {
 export function resumePaused(): { ok: boolean; message: string; resumed: number } {
   const paused = orders.filter((o) => o.state === 'paused');
   if (!paused.length) return { ok: true, message: 'Nothing to resume', resumed: 0 };
+  let resumed = 0;
+  let needsCheck = 0;
   for (const o of paused) {
     // A `triggered` order that got paused was mid-flight when the app died.
     // Resuming it would re-send a transaction that may already have landed,
     // so those are NOT re-armed — they need a human to check the wallet.
-    if (o.note?.startsWith('The app closed while this order was executing')) continue;
+    if (o.note?.startsWith('The app closed while this order was executing')) {
+      needsCheck += 1;
+      continue;
+    }
+    // §7: re-arming an order written on another wallet would only pause it
+    // again on the next tick. Leave it, and say so in the count.
+    const signer = host?.owner?.() ?? null;
+    if (signer !== null && (o.owner ?? null) !== signer) {
+      needsCheck += 1;
+      continue;
+    }
     o.state = 'armed';
     o.note = 'Resumed.';
     o.updatedAt = Date.now();
-    // A trailing stop's peak is meaningless across a gap in observation:
-    // whatever happened while the app was closed was not seen, so the peak
-    // restarts from the current reference rather than a stale high.
-    if (o.kind === 'trailing_stop') o.peakPriceSol = o.referencePriceSol;
+    // A trailing stop's peak is meaningless across a gap in observation. It
+    // cannot restart from the reference either: that was captured when the
+    // order was WRITTEN, so on a token that fell while the app was closed the
+    // reference IS the stale high, and the first tick back would sell into
+    // the fall the stop was supposed to have caught. Null means "no peak seen
+    // yet" — onTick adopts the first price it actually observes.
+    if (o.kind === 'trailing_stop') o.peakPriceSol = null;
+    resumed += 1;
   }
-  const resumed = orders.filter((o) => o.state === 'armed').length;
   persistNow();
   host?.changed();
-  return { ok: true, message: `Resumed ${resumed} order${resumed === 1 ? '' : 's'}`, resumed };
+  const tail = needsCheck > 0 ? `; ${needsCheck} still need${needsCheck === 1 ? 's' : ''} your check` : '';
+  return { ok: true, message: `Resumed ${resumed} order${resumed === 1 ? '' : 's'}${tail}`, resumed };
 }
 
 // ── Evaluation ────────────────────────────────────────────────────────
@@ -293,6 +398,14 @@ function shouldTrigger(o: AdvOrder, t: MarketTick): boolean {
 }
 
 const inFlight = new Set<string>();
+/**
+ * Mints with a SELL in flight. See §6: sells are sized as a share of the
+ * balance read when the transaction is built, so two overlapping sells on one
+ * mint both size off the same undiminished bag and together take more than
+ * either was meant to. Buys are not affected — they spend a stated amount of
+ * SOL, not a share of something — so this is deliberately sell-only.
+ */
+const sellInFlightMints = new Set<string>();
 
 /**
  * Feed a price observation in. Called from the engine's trade handler for
@@ -314,6 +427,25 @@ export function onTick(t: MarketTick): void {
 
   for (const o of orders) {
     if (o.mint !== t.mint || o.state !== 'armed') continue;
+
+    // §7: an order sells a share of "the position", and which position that
+    // is depends on who signs. A mismatch pauses rather than skips, so the
+    // paused banner tells the user their protection is not running instead of
+    // it going quiet. An unknown owner (an order written before this field
+    // existed) pauses too — fail closed, because the one thing we must not do
+    // is sell an unknown bag. Nothing to compare against (a host that cannot
+    // name the signer) leaves the order alone.
+    const signer = host?.owner?.() ?? null;
+    if (signer !== null && (o.owner ?? null) !== signer) {
+      o.state = 'paused';
+      o.note =
+        (o.owner ?? null) === null
+          ? 'Paused — this order does not say which wallet it was written on. Check the wallet, then resume.'
+          : 'Paused — created on a different wallet than the one now active.';
+      o.updatedAt = now;
+      dirty = true;
+      continue;
+    }
 
     if (o.expiresAt !== null && now >= o.expiresAt) {
       o.state = 'expired';
@@ -339,6 +471,12 @@ export function onTick(t: MarketTick): void {
 
     if (!shouldTrigger(o, t)) continue;
     if (inFlight.has(o.id)) continue;
+    // §6: another sell on this mint is already building against a balance
+    // this one would double-count. Leave it ARMED — the same shape as a
+    // blocked order — so it fires on the next tick, sized against what the
+    // first sell actually left. Silent by design: nothing is lost or spent,
+    // and the delay is one tick.
+    if (!isBuyKind(o.kind) && sellInFlightMints.has(o.mint)) continue;
 
     // ── Blocked execution does NOT consume the order ───────────────────
     //
@@ -372,6 +510,7 @@ export function onTick(t: MarketTick): void {
     // built or signed. Everything after this point is allowed to fail; what
     // is not allowed is for this order to be evaluated as `armed` again.
     inFlight.add(o.id);
+    if (!isBuyKind(o.kind)) sellInFlightMints.add(o.mint);
     o.state = 'triggered';
     o.triggeredAt = now;
     o.updatedAt = now;
@@ -428,6 +567,32 @@ async function execute(o: AdvOrder): Promise<void> {
       return;
     }
 
+    // ── Is there anything left to sell? ────────────────────────────────
+    //
+    // A sell order fired on an empty bag reaches the chain and reverts with
+    // pump's `SellZeroAmount (6022)` or `Truncation (6025)` — verified against
+    // pump's on-chain IDL. The user then sees a red FAILED order quoting a
+    // custom error code, when what actually happened is that the position was
+    // already gone (sold by hand, dusted, or closed by an earlier order).
+    //
+    // A CONFIRMED zero expires the order — "conditions can no longer be met"
+    // is exactly what that state is for, and it stops the order retrying
+    // against nothing. A balance we could not READ changes nothing: unknown
+    // is not zero, and a failed RPC read must never block an exit.
+    if (!isBuyKind(o.kind) && h.heldTokensRaw) {
+      let held: bigint | null = null;
+      try {
+        held = await h.heldTokensRaw(o.mint);
+      } catch {
+        held = null; // unreadable — proceed, exactly as if we had never asked
+      }
+      if (held === 0n) {
+        finish(o, 'expired', 'Nothing left to sell — the position is already gone.', null);
+        h.toast('warn', `${o.symbol || 'Order'}: nothing left to sell — the position is gone`);
+        return;
+      }
+    }
+
     h.log('info', `order firing: ${describeOrder(o)} on ${o.symbol || o.mint.slice(0, 8)}`);
     const res = isBuyKind(o.kind)
       ? await h.buy(o.mint, o.amount)
@@ -469,6 +634,7 @@ async function execute(o: AdvOrder): Promise<void> {
     finish(o, 'failed', (err as Error)?.message ?? 'unknown error', null);
   } finally {
     inFlight.delete(o.id);
+    if (!isBuyKind(o.kind)) sellInFlightMints.delete(o.mint);
   }
 }
 
@@ -493,8 +659,10 @@ export function _reset(): void {
   orders = [];
   filePath = '';
   inFlight.clear();
+  sellInFlightMints.clear();
 }
 
 export function _load(list: AdvOrder[]): void {
+  loadFailure = null;
   orders = list;
 }

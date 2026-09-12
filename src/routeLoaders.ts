@@ -11,6 +11,11 @@ import type { RouteId } from './components/Sidebar';
 // Discover and the token page are not here: they ship in the entry bundle.
 export const ROUTE_LOADERS = {
   legal: () => import('./pages/Legal'),
+  workspace: () => import('./pages/Workspace'),
+  scout: () => import('./pages/Scout'),
+  launch: () => import('./pages/Launch'),
+  swap: () => import('./pages/Swap'),
+  bridge: () => import('./pages/Bridge'),
   watchlist: () => import('./pages/Watchlist'),
   runners: () => import('./pages/Runners'),
   creator: () => import('./pages/lab/Creator'),
@@ -21,6 +26,8 @@ export const ROUTE_LOADERS = {
   orders: () => import('./pages/Orders'),
   trades: () => import('./pages/Trades'),
   dashboard: () => import('./pages/Dashboard'),
+  observatoryrobinhood: () => import('./pages/EvmObservatory'),
+  observatorybnb: () => import('./pages/EvmObservatory'),
   launches: () => import('./pages/Launches'),
   positions: () => import('./pages/Portfolio'),
   paper: () => import('./pages/Positions'),
@@ -28,11 +35,19 @@ export const ROUTE_LOADERS = {
   execution: () => import('./pages/Execution'),
   history: () => import('./pages/History'),
   backtest: () => import('./pages/Backtest'),
+  rewards: () => import('./pages/Rewards'),
   wallet: () => import('./pages/Wallet'),
+  // Both EVM wallet pages live in the same chunk as the Solana one — they
+  // share EvmWalletPanel and the page shell, so splitting them would fetch
+  // the same code twice.
+  walletrobinhood: () => import('./pages/Wallet'),
+  walletbnb: () => import('./pages/Wallet'),
   strategy: () => import('./pages/Strategy'),
   console: () => import('./pages/Console'),
   settings: () => import('./pages/Settings'),
   about: () => import('./pages/About'),
+  // Not a nav route: reached by an 0x address plus the chain it lives on.
+  evmToken: () => import('./pages/EvmToken'),
 } as const;
 
 type LoaderMap = Partial<Record<RouteId, () => Promise<unknown>>>;

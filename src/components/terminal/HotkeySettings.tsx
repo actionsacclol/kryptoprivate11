@@ -137,7 +137,7 @@ export function HotkeySettings({
           label="Enable trading hotkeys"
           description={
             hk.enabled
-              ? `On. ${armedCount} key${armedCount === 1 ? '' : 's'} armed. Keys act only on the token you have open, and are ignored while you are typing.`
+              ? `On. ${armedCount} key${armedCount === 1 ? '' : 's'} armed. Keys act only on the token you have open (Solana token pages only — they do nothing on Robinhood or BNB pages), and are ignored while you are typing.`
               : 'Off. No key triggers a trade.'
           }
           checked={hk.enabled}
@@ -166,7 +166,7 @@ export function HotkeySettings({
           <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-3 py-2.5 flex items-start gap-2">
             <TriangleAlert className="h-4 w-4 text-rose-300 flex-shrink-0 mt-0.5" />
             <p className="text-[11px] text-rose-200 leading-relaxed">
-              With confirmation off, pressing an armed key on an open token buys or sells immediately. The keys are
+              With confirmation off, pressing an armed key on an open Solana token buys or sells immediately. The keys are
               still ignored while a text field has focus, and still respect the live-execution switch and
               arming — but nothing else stands between the keystroke and the transaction. A key is a manual
               trade, so the {settings.execution.maxLiveSol} SOL per-trade cap does not apply to it.

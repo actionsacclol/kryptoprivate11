@@ -75,6 +75,35 @@ function file(): string {
 function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
   const d = DEFAULT_SETTINGS;
   if (!loaded || typeof loaded !== 'object') return structuredClone(d);
+  // `evm` was FLAT for one day (2026-09-08: enabled/rpcUrl/apiKey at the top
+  // level, Robinhood only). The per-chain split on 09-09 would otherwise read
+  // a flat save as "no Robinhood block" and hand the user an empty Alchemy
+  // key while their real one sat in a field nothing reads. Lift, then drop.
+  function mergeEvm(saved: unknown): AppSettings['evm'] {
+    const e = (saved && typeof saved === 'object' ? (saved as Record<string, unknown>) : {}) as Partial<AppSettings['evm']> & { enabled?: unknown; rpcUrl?: unknown; apiKey?: unknown };
+    const flat = !e.robinhood && (typeof e.rpcUrl === 'string' || typeof e.apiKey === 'string' || typeof e.enabled === 'boolean');
+    const lifted = flat
+      ? {
+          enabled: typeof e.enabled === 'boolean' ? e.enabled : d.evm.robinhood.enabled,
+          rpcUrl: typeof e.rpcUrl === 'string' ? e.rpcUrl : d.evm.robinhood.rpcUrl,
+          apiKey: typeof e.apiKey === 'string' ? e.apiKey : d.evm.robinhood.apiKey,
+        }
+      : {};
+    const merged = {
+      ...d.evm,
+      ...e,
+      // `runnerAlerts` is merged a level deeper than the rest: a settings
+      // file written before the filters existed has no such key at all, and
+      // one written by a half-finished save could have some of it. Either way
+      // the missing fields come from the defaults rather than from undefined.
+      robinhood: { ...d.evm.robinhood, ...lifted, ...(e.robinhood ?? {}), runnerAlerts: { ...d.evm.robinhood.runnerAlerts, ...(e.robinhood?.runnerAlerts ?? {}) } },
+      bnb: { ...d.evm.bnb, ...(e.bnb ?? {}), runnerAlerts: { ...d.evm.bnb.runnerAlerts, ...(e.bnb?.runnerAlerts ?? {}) } },
+    } as AppSettings['evm'] & { enabled?: unknown; rpcUrl?: unknown; apiKey?: unknown };
+    delete merged.enabled;
+    delete merged.rpcUrl;
+    delete merged.apiKey;
+    return merged;
+  }
   // heliusHttpUrl is DERIVED by resolveRpc() and embeds the API key — if a
   // resolved rpc object ever reaches this boundary, drop it so the key is
   // stored once (its own field) and never duplicated into settings.json.
@@ -128,10 +157,28 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
     execution,
     data,
     ai: { ...d.ai, ...(loaded.ai ?? {}) },
+    // A save written before the EVM rail existed has no block, and one
+    // written before BNB has no `bnb`; every field picks up its default
+    // rather than reading as undefined. Per-chain blocks merge one level
+    // deeper so a saved Robinhood key survives a new BNB default.
+    evm: mergeEvm(loaded.evm),
     referrer: typeof loaded.referrer === 'string' ? loaded.referrer : d.referrer,
     onboarded: loaded.onboarded ?? d.onboarded,
     watchOnBuy: loaded.watchOnBuy ?? d.watchOnBuy,
     recorderEnabled: loaded.recorderEnabled ?? d.recorderEnabled,
+    scannersAutoStart: loaded.scannersAutoStart ?? d.scannersAutoStart,
+    launch: {
+      // Both fields fail CLOSED: an unreadable or half-written launch block
+      // leaves the launcher off, never on.
+      enabled: typeof loaded.launch?.enabled === 'boolean' ? loaded.launch.enabled : d.launch.enabled,
+      walletId: typeof loaded.launch?.walletId === 'string' ? loaded.launch.walletId : d.launch.walletId,
+      evmWalletId: typeof loaded.launch?.evmWalletId === 'string' ? loaded.launch.evmWalletId : d.launch.evmWalletId,
+    },
+    // Fails CLOSED like the launcher's: a half-written or unreadable block
+    // leaves bridging off, never on.
+    bridge: {
+      enabled: typeof loaded.bridge?.enabled === 'boolean' ? loaded.bridge.enabled : d.bridge.enabled,
+    },
     reduceEffects: loaded.reduceEffects ?? d.reduceEffects,
     hardwareAcceleration: loaded.hardwareAcceleration ?? d.hardwareAcceleration,
     recorderDir: loaded.recorderDir ?? d.recorderDir,
@@ -224,6 +271,20 @@ export function update(patch: Partial<AppSettings>): AppSettings {
       providers: { ...cur.data.providers, ...(patch.data?.providers ?? {}) },
     },
     alerts: { ...cur.alerts, ...(patch.alerts ?? {}) },
+    evm: {
+      ...cur.evm,
+      ...(patch.evm ?? {}),
+      robinhood: {
+        ...cur.evm.robinhood,
+        ...(patch.evm?.robinhood ?? {}),
+        runnerAlerts: { ...cur.evm.robinhood.runnerAlerts, ...(patch.evm?.robinhood?.runnerAlerts ?? {}) },
+      },
+      bnb: {
+        ...cur.evm.bnb,
+        ...(patch.evm?.bnb ?? {}),
+        runnerAlerts: { ...cur.evm.bnb.runnerAlerts, ...(patch.evm?.bnb?.runnerAlerts ?? {}) },
+      },
+    },
     hotkeys: {
       ...cur.hotkeys,
       ...(patch.hotkeys ?? {}),

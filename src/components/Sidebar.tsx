@@ -1,5 +1,10 @@
+import { Fragment } from 'react';
+import { UpdateNotice } from './UpdateNotice';
 import {
   Scale,
+  Home,
+  Gift,
+  LayoutGrid,
   Compass,
   FlaskConical,
   Gauge,
@@ -16,7 +21,8 @@ import {
   Sparkles,
   Telescope,
   BookMarked,
-  Wallet, Flame, Coins, Thermometer, Copy, FolderPlus, Receipt, Code2 } from 'lucide-react';
+  Wallet, Flame, Coins, Thermometer, Copy, FolderPlus, Receipt, Code2, Repeat, Shuffle } from 'lucide-react';
+import { groupsFor, workspaceSpec, type WorkspaceId } from '../workspaces';
 import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
 import { cls } from '../utils/format';
@@ -34,6 +40,9 @@ function DiscordIcon({ className }: { className?: string }) {
 
 export type RouteId =
   | 'discover'
+  | 'workspace'
+  | 'scout'
+  | 'launch'
   | 'token'
   | 'watchlist'
   | 'runners'
@@ -46,6 +55,8 @@ export type RouteId =
   | 'wallets'
   | 'scripts'
   | 'dashboard'
+  | 'observatoryrobinhood'
+  | 'observatorybnb'
   | 'launches'
   | 'positions'
   | 'paper'
@@ -53,6 +64,11 @@ export type RouteId =
   | 'backtest'
   | 'execution'
   | 'wallet'
+  | 'walletrobinhood'
+  | 'walletbnb'
+  | 'swap'
+  | 'bridge'
+  | 'rewards'
   | 'strategy'
   | 'console'
   | 'settings'
@@ -81,11 +97,26 @@ export const TERMINAL_ROUTES: RouteSpec[] = [
   { id: 'trades', label: 'Trades', hint: 'Every round trip you made, in and out', icon: Receipt },
   { id: 'orders', label: 'Orders', hint: 'Place and manage stop losses, take profits, limits', icon: ListOrdered },
   { id: 'positions', label: 'Portfolio', hint: 'Positions and PnL', icon: Wallet },
-  { id: 'wallet', label: 'Wallet', hint: 'Your trading wallets, keys and arming', icon: KeyRound },
+  { id: 'wallet', label: 'Sol Wallet', hint: 'Your Solana trading wallet, keys and arming', icon: KeyRound },
+  // One page per EVM chain rather than one page with a chain switch: a user
+  // looking for their BNB balance should find "BNB Wallet" in the menu, not
+  // discover that "Wallet" means something different depending on a control
+  // in the top bar. The KEY is shared across EVM chains and each page says so.
+  { id: 'walletrobinhood', label: 'Robinhood Wallet', hint: 'Your Robinhood Chain wallet and balances', icon: KeyRound },
+  { id: 'walletbnb', label: 'BNB Wallet', hint: 'Your BNB Smart Chain wallet and balances', icon: KeyRound },
+  // Its own entry rather than a card on the Solana wallet page: it is a tool
+  // people come here to use, not housekeeping they find while checking a
+  // balance.
+  { id: 'swap', label: 'Swap', hint: 'Trade one token for another — cash out to a stablecoin, or consolidate dust', icon: Repeat },
+  // Separate from Swap on purpose: a swap is atomic and nobody ever holds
+  // your money; a bridge is two transactions with a third party in between.
+  { id: 'bridge', label: 'Bridge', hint: 'Move a chain’s own coin to another chain — off by default', icon: Shuffle },
 ];
 
 export const AUTOMATION_ROUTES: RouteSpec[] = [
-  { id: 'dashboard', label: 'Observatory', hint: 'Engine dashboard', icon: Telescope },
+  { id: 'dashboard', label: 'Observatory', hint: 'Solana engine dashboard', icon: Telescope },
+  { id: 'observatoryrobinhood', label: 'Observatory · Robinhood', hint: 'Pons launches on Robinhood Chain', icon: Telescope },
+  { id: 'observatorybnb', label: 'Observatory · BNB', hint: 'four.meme launches on BNB Smart Chain', icon: Telescope },
   // Lives under Automation, not Terminal: this is the one page that trades on
   // its own initiative, off someone else's activity rather than your click.
   // It also used to be called "Wallets", one letter from the page holding YOUR
@@ -107,13 +138,29 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   { id: 'console', label: 'Grimoire', hint: 'Console log', icon: ScrollText },
 ];
 
+export const REWARDS_ROUTES: RouteSpec[] = [
+  { id: 'rewards', label: 'Reward Pools', hint: 'Published reward rates, and what your wallets are earning', icon: Gift },
+];
+
+export const SCOUT_ROUTES: RouteSpec[] = [
+  { id: 'scout', label: 'Wallet Scout', hint: 'Top traders per chain, over a window you pick', icon: Users },
+];
+
+export const LAUNCH_ROUTES: RouteSpec[] = [
+  { id: 'launch', label: 'Launch a token', hint: 'Create your own token — off by default', icon: Rocket },
+];
+
+export const LAYOUT_ROUTES: RouteSpec[] = [
+  { id: 'workspace', label: 'My Layout', hint: 'Panels you choose, arranged how you like', icon: LayoutGrid },
+];
+
 export const SYSTEM_ROUTES: RouteSpec[] = [
   { id: 'settings', label: 'Settings', icon: Settings },
   { id: 'about', label: 'About', icon: Sparkles },
   { id: 'legal', label: 'Legal', hint: 'Terms, privacy, risk disclosure', icon: Scale },
 ];
 
-export const ROUTES: RouteSpec[] = [...TERMINAL_ROUTES, ...AUTOMATION_ROUTES, ...SYSTEM_ROUTES];
+export const ROUTES: RouteSpec[] = [...TERMINAL_ROUTES, ...AUTOMATION_ROUTES, ...REWARDS_ROUTES, ...SCOUT_ROUTES, ...LAUNCH_ROUTES, ...LAYOUT_ROUTES, ...SYSTEM_ROUTES];
 
 function NavButton({
   route,
@@ -177,6 +224,10 @@ export function Sidebar({
   feedLive,
   openSymbol,
   badges,
+  workspace,
+  onHub,
+  hiddenRoutes,
+  groupsOverride,
 }: {
   current: RouteId;
   onNavigate: (next: RouteId) => void;
@@ -186,7 +237,41 @@ export function Sidebar({
   openSymbol: string | null;
   /** Per-route count chips. */
   badges?: Partial<Record<RouteId, number>>;
+  /** The workspace being shown. The nav lists only its pages — twenty-five
+   *  routes in one column was the thing workspaces exist to fix. */
+  workspace: WorkspaceId;
+  /** Back to the Hub. Present on every page, which is the point. */
+  onHub: () => void;
+  /** Routes to leave out of the menu entirely — a chain switched off in
+   *  Settings, for instance. Hiding rather than disabling is deliberate: the
+   *  original EVM panel hid a disabled chain so it could not be armed from a
+   *  surface the user turned off, and its balance poll stopped hitting an RPC
+   *  they had disabled. A menu entry that opens an armable page is the same
+   *  hazard one click further away. */
+  hiddenRoutes?: ReadonlySet<RouteId>;
+  /**
+   * Replaces the workspace's own sections entirely.
+   *
+   * Used by My Layout, where the menu is whatever the user pinned rather than
+   * a fixed set of pages. Passed in rather than read here so this component
+   * stays a pure function of its props.
+   */
+  groupsOverride?: Array<{ label: string | null; routes: RouteId[] }>;
 }) {
+  const spec = workspaceSpec(workspace);
+  // Sections come from the WORKSPACE, not from the app-wide Terminal /
+  // Automation / System split — inside "Wallet Utilities" those headings
+  // described a different app.
+  const byId = new Map(ROUTES.map((r) => [r.id, r]));
+  const groups = (groupsOverride ?? groupsFor(workspace))
+    .map((g) => ({
+      label: g.label,
+      items: g.routes
+        .filter((id) => !hiddenRoutes?.has(id))
+        .map((id) => byId.get(id))
+        .filter((r): r is RouteSpec => !!r),
+    }))
+    .filter((g) => g.items.length > 0);
   return (
     <aside className="relative flex flex-col w-[210px] flex-shrink-0 border-r border-white/10 bg-krypt-panel/70  shadow-[inset_-14px_0_28px_rgba(0,0,0,0.35)]">
       <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-arc-gold/25 to-transparent" aria-hidden="true" />
@@ -206,26 +291,33 @@ export function Sidebar({
 
       <div className="mx-5 h-px bg-gradient-to-r from-white/10 via-white/5 to-transparent" aria-hidden="true" />
 
+      <button
+        onClick={onHub}
+        className="mx-3 mt-3 flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] font-medium text-krypt-muted transition hover:border-krypt-purple/40 hover:bg-krypt-purple/10 hover:text-white"
+        title="Back to the Hub"
+      >
+        <Home className="h-3.5 w-3.5" />
+        Hub
+        {spec && <span className="ml-auto truncate text-[10px] text-krypt-muted/60">{spec.title}</span>}
+      </button>
+
       <nav className="flex-1 px-3 pb-3 flex flex-col gap-0.5 overflow-y-auto">
-        <GroupLabel>Terminal</GroupLabel>
-        {TERMINAL_ROUTES.filter((r) => !r.hidden || current === r.id).map((r) => (
-          <NavButton
-            key={r.id}
-            route={r.id === 'token' && openSymbol ? { ...r, label: openSymbol } : r}
-            badge={badges?.[r.id]}
-            active={current === r.id}
-            onNavigate={onNavigate}
-          />
-        ))}
-
-        <GroupLabel>Automation</GroupLabel>
-        {AUTOMATION_ROUTES.map((r) => (
-          <NavButton key={r.id} route={r} active={current === r.id} onNavigate={onNavigate} />
-        ))}
-
-        <GroupLabel>System</GroupLabel>
-        {SYSTEM_ROUTES.map((r) => (
-          <NavButton key={r.id} route={r} active={current === r.id} onNavigate={onNavigate} />
+        {groups.map((g, gi) => (
+          <Fragment key={g.label ?? `g${gi}`}>
+            {/* A single unlabelled section renders as a plain list. */}
+            {g.label && groups.length > 1 && <GroupLabel>{g.label}</GroupLabel>}
+            {g.items
+              .filter((r) => !r.hidden || current === r.id)
+              .map((r) => (
+                <NavButton
+                  key={r.id}
+                  route={r.id === 'token' && openSymbol ? { ...r, label: openSymbol } : r}
+                  badge={badges?.[r.id]}
+                  active={current === r.id}
+                  onNavigate={onNavigate}
+                />
+              ))}
+          </Fragment>
         ))}
       </nav>
 
@@ -241,6 +333,9 @@ export function Sidebar({
             {running && feedLive ? 'Scanning' : running ? 'Attuning' : 'Dormant'}
           </div>
         </div>
+
+        {/* Renders nothing unless a newer version actually exists. */}
+        <UpdateNotice />
 
         <div className="grid grid-cols-2 gap-1.5">
           <button

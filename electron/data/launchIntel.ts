@@ -161,13 +161,16 @@ interface Located {
   createdAt: number;
 }
 
-/** The coin record for intel paths. pf.coin() memoises 6 s, which is right for
- *  a price header and wrong for thirty Discover rows re-asking every refresh:
- *  pump.fun allows 60 /coins a minute, and on 2026-08-30 the overflow queued a
- *  trade's own lookup for ~60 s. Intel tolerates a minute-old record. */
-function coinForIntel(mint: string): Promise<pf.PumpCoin | null> {
-  return memo<pf.PumpCoin>(`pf:coin:intel:${mint}`, 60_000, () => pf.coin(mint));
-}
+/**
+ * The coin record for intel paths — `pf.coinForIntel`, which is answered
+ * from the row the `/coins?` LIST route already returned whenever one is in
+ * hand, and only buys a `/coins/{mint}` when it is not.
+ *
+ * This used to be a local 60 s memo over `pf.coin()`, which meant every
+ * Discover row bought back a record the list read had already delivered:
+ * 45 `/coins/{mint}` a minute measured, 100 % of them redundant.
+ */
+const coinForIntel = pf.coinForIntel;
 
 async function locate(mint: string): Promise<{ located: Located | null; note: string }> {
   const coin = await coinForIntel(mint);
@@ -339,26 +342,68 @@ export function curveProgressFromCoin(c: {
 }
 
 /**
- * Creator's PRIOR launches and graduations. pump.fun's creator list
- * includes the mint being judged, so it is subtracted when present; a
- * truncated history is a floor, which only makes R5 fire less. If a Jupiter
- * `devMints` count lands on CreatorHistory later, the larger of the two
- * wins — both are floors.
+ * A creator record from JUPITER's batched audit block. Every Discover row
+ * and every token-page summary already carries it (`providers/jupiter.ts`
+ * sets `s.audit.devMints` / `s.audit.devMigrations` from a call already
+ * made), so passing it in costs nothing at all.
+ *
+ * Both counts INCLUDE the mint being judged, exactly like pump.fun's own
+ * creator list does; the subtraction below is the same on either side.
+ */
+export interface DevRecord {
+  /** Mints this dev has created, cross-launchpad. Null = Jupiter silent. */
+  mints: number | null;
+  /** How many of those graduated — "the useful half of devMints". */
+  migrations: number | null;
+}
+
+const finite = (v: number | null | undefined): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Creator's PRIOR launches and graduations, from whichever records the
+ * caller could supply for free.
+ *
+ * Two sources, both FLOORS, so the larger wins and a missing one only ever
+ * makes R5 fire less:
+ *
+ *   • Jupiter's `audit.devMints` / `audit.devMigrations` — cross-launchpad,
+ *     already on the row, no request;
+ *   • pump.fun's creator list — pump-only, one `/coins?creator=` per
+ *     creator, and therefore only ever fetched for a SINGLE mint the user
+ *     actually opened (see `rugReportFor`).
+ *
+ * Until 2026-09-09 this read `h.devMints` off a `CreatorHistory` widened at
+ * the call site to reach a field that interface does not declare — nothing
+ * populated it, so the branch was dead while the per-row `/coins?creator=`
+ * it stood next to cost 38 requests a minute.
  */
 function priorLaunches(
-  h: (CreatorHistory & { devMints?: number | null }) | null,
+  h: CreatorHistory | null,
+  dev: DevRecord | null,
   mint: string,
   thisGraduated: boolean,
 ): { launches: number | null; graduations: number | null } {
-  if (!h) return { launches: null, graduations: null };
-  // The list is newest-first and this mint is on pump.fun, so it is in the
-  // list whenever the list is non-empty; `recent` only holds 12 rows, so the
-  // membership check is a confirmation, not the test.
-  const listed = h.launches > 0 || h.recent?.some((l) => l.mint === mint) === true;
-  let launches = Math.max(0, h.launches - (listed ? 1 : 0));
-  const dev = h.devMints;
-  if (typeof dev === 'number' && Number.isFinite(dev)) launches = Math.max(launches, Math.max(0, dev - 1));
-  const graduations = Math.max(0, h.graduated - (listed && thisGraduated ? 1 : 0));
+  let launches: number | null = null;
+  let graduations: number | null = null;
+
+  if (h) {
+    // The list is newest-first and this mint is on pump.fun, so it is in the
+    // list whenever the list is non-empty; `recent` only holds 12 rows, so the
+    // membership check is a confirmation, not the test.
+    const listed = h.launches > 0 || h.recent?.some((l) => l.mint === mint) === true;
+    launches = Math.max(0, h.launches - (listed ? 1 : 0));
+    graduations = Math.max(0, h.graduated - (listed && thisGraduated ? 1 : 0));
+  }
+
+  if (dev && finite(dev.mints)) {
+    const prior = Math.max(0, dev.mints - 1);
+    launches = launches === null ? prior : Math.max(launches, prior);
+  }
+  if (dev && finite(dev.migrations)) {
+    const prior = Math.max(0, dev.migrations - (thisGraduated ? 1 : 0));
+    graduations = graduations === null ? prior : Math.max(graduations, prior);
+  }
+
   return { launches, graduations };
 }
 
@@ -373,15 +418,23 @@ function priorLaunches(
  */
 export async function rugReportFor(
   mint: string,
-  opts?: { creator?: string | null; createdAt?: number | null },
+  opts?: { creator?: string | null; createdAt?: number | null; dev?: DevRecord; creatorLookup?: boolean },
 ): Promise<{ rug: RugReport | null; volatility: VolatilityNote[]; top3Pct: number | null } | null> {
+  // `dev` is the creator record the caller already holds (Jupiter's batched
+  // audit block, free on every row). `creatorLookup: false` says "and do NOT
+  // buy a pump.fun creator history on top of it" — which is what a LIST
+  // caller must say, because that lookup is per row and lands on the same
+  // 55/min window Discover's own feeds compete for. A single-mint caller
+  // leaves it alone and gets both floors.
+  const dev = opts?.dev ?? null;
+  const lookup = opts?.creatorLookup !== false;
   try {
     // A caller that already knows the creation time (every Discover row does)
     // lets the age gate run with NO request at all.
     if (typeof opts?.createdAt === 'number' && Number.isFinite(opts.createdAt)) {
       const ageS = (Date.now() - opts.createdAt) / 1000;
       if (ageS < RUG_WINDOW_S) return { rug: null, volatility: [], top3Pct: null };
-      const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null));
+      const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null, dev, lookup));
       return r;
     }
     // The rules were measured at +60 s. Judging a 7-second-old launch — when
@@ -393,7 +446,7 @@ export async function rugReportFor(
     if (!located) return null;
     const ageS = (Date.now() - located.createdAt) / 1000;
     if (Number.isFinite(ageS) && ageS < RUG_WINDOW_S) return { rug: null, volatility: [], top3Pct: null };
-    const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null));
+    const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null, dev, lookup));
     // Launch-window rules describe launches NOT yet graduated; a token that
     // has completed its curve is outside that population. Keep the
     // concentration facts, drop the verdict.
@@ -404,7 +457,12 @@ export async function rugReportFor(
   }
 }
 
-async function buildRug(mint: string, creatorHint: string | null): Promise<RugIntel | null> {
+async function buildRug(
+  mint: string,
+  creatorHint: string | null,
+  dev: DevRecord | null,
+  lookupCreator: boolean,
+): Promise<RugIntel | null> {
   const { located } = await locate(mint);
   if (!located) return null;
   const { coin, createdAt } = located;
@@ -422,15 +480,22 @@ async function buildRug(mint: string, creatorHint: string | null): Promise<RugIn
 
   const curveProgress = curveProgressFromCoin(coin);
 
+  // The creator's track record. A list caller says `creatorLookup: false`
+  // and its record comes entirely from Jupiter's audit counts, at no request
+  // cost — this is the 38 requests a minute the per-row `/coins?creator=`
+  // used to spend on the same 55/min list window Discover's own feeds
+  // compete for. A single-mint caller also buys the deeper pump-only
+  // history, which on the token page is the very fetch the security report
+  // has already started (same 120 s memo key, so the two share one request).
   let history: CreatorHistory | null = null;
-  if (creator) {
+  if (lookupCreator && creator) {
     try {
       history = await creatorHistory(creator);
     } catch {
       history = null;
     }
   }
-  const prior = priorLaunches(history, mint, coin.complete === true);
+  const prior = priorLaunches(history, dev, mint, coin.complete === true);
 
   const inputs = rugInputsFromTrades(trades, {
     creator,

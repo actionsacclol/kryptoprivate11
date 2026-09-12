@@ -44,6 +44,9 @@ export interface JupiterSwapResult {
   solValueLamports?: number;
   /** Quoted token units out (buy) — informational. */
   outAmount?: string;
+  /** The quote's own floor after slippage: the least that may arrive. The
+   *  swap's receipt check holds the simulation to it. */
+  otherAmountThreshold?: string;
   /** DEX labels on the route, for the log. */
   route?: string[];
 }
@@ -69,8 +72,12 @@ interface SwapResponse {
 /**
  * DEX labels Jupiter may route through: the signer's allowlisted programs,
  * translated with Jupiter's own map (memoised an hour). Null when the map is
- * unavailable — the quote then goes unrestricted and the signer's allowlist
- * is the (later, louder) gate.
+ * unavailable — and the route is then REFUSED (see buildRoute), because the
+ * `dexes` parameter is the only thing that restricts which venue Jupiter
+ * uses: the DEX runs as a CPI under Jupiter's own program, invisible to the
+ * signer's top-level check. Measured 2026-09-11: an unrestricted quote
+ * routed SOL→USDC through GoonFi and USDC→USDT through BisonFi, neither on
+ * the allowlist; the same request with `dexes` went through Whirlpool.
  */
 async function allowedDexLabels(): Promise<string[] | null> {
   const map = await memo<Record<string, string>>('jup:program-labels', 60 * 60_000, async () => {
@@ -99,13 +106,69 @@ async function onceMoreOn429<T>(run: () => Promise<FetchResult<T>>): Promise<Fet
 
 export async function buildJupiterSwap(req: JupiterSwapRequest): Promise<JupiterSwapResult> {
   const isBuy = req.action === 'buy';
-  const inputMint = isBuy ? WSOL : req.mint;
-  const outputMint = isBuy ? req.mint : WSOL;
-  const amount = isBuy ? BigInt(Math.round(Number(req.amount) * LAMPORTS_PER_SOL)) : BigInt(req.amount);
+  return buildRoute({
+    publicKey: req.publicKey,
+    inputMint: isBuy ? WSOL : req.mint,
+    outputMint: isBuy ? req.mint : WSOL,
+    amountRaw: isBuy ? BigInt(Math.round(Number(req.amount) * LAMPORTS_PER_SOL)) : BigInt(req.amount),
+    slippagePct: req.slippagePct,
+    priorityFeeSol: req.priorityFeeSol,
+    label: req.action,
+  });
+}
+
+/**
+ * Any mint to any mint — the Wallet Utilities swapper.
+ *
+ * The trade path above is this with one side pinned to wrapped SOL. Splitting
+ * them apart rather than adding a third `action` keeps the trade path's
+ * signature exactly as it was: a swap is a NEW caller of the same route
+ * builder, not a new branch inside the one every buy and sell goes through.
+ *
+ * ─── Why the signer needs no new rule for this ─────────────────────────
+ *
+ * A token-to-token swap is, to the signing policy, a SELL of the input mint:
+ * the input leaves our token account (permitted on a sell of the traded
+ * mint, into an account the route itself names) and the output merely
+ * arrives, which needs no permission at all because nothing of ours moves
+ * out. So `swap.ts` signs with `trade: { side: 'sell', mint: inputMint }`
+ * and every existing refusal stays exactly as strict as it was.
+ */
+export async function buildPairSwap(req: {
+  publicKey: string;
+  inputMint: string;
+  outputMint: string;
+  /** Base units of the INPUT mint. */
+  amountRaw: bigint;
+  slippagePct: number;
+  priorityFeeSol: number;
+}): Promise<JupiterSwapResult> {
+  if (req.inputMint === req.outputMint) return { ok: false, message: 'a swap needs two different tokens' };
+  return buildRoute({ ...req, label: 'swap' });
+}
+
+interface RouteRequest {
+  publicKey: string;
+  inputMint: string;
+  outputMint: string;
+  amountRaw: bigint;
+  slippagePct: number;
+  priorityFeeSol: number;
+  label: string;
+}
+
+async function buildRoute(req: RouteRequest): Promise<JupiterSwapResult> {
+  const { inputMint, outputMint } = req;
+  const isBuy = inputMint === WSOL;
+  const amount = req.amountRaw;
   if (amount <= 0n) return { ok: false, message: 'amount is zero' };
   const slippageBps = Math.max(1, Math.min(5_000, Math.round(req.slippagePct * 100)));
 
   const dexes = await allowedDexLabels();
+  // The quote that becomes a SIGNED transaction is never unrestricted. (The
+  // display quote in quoteSellLamports below may be — it prices a holding
+  // and signs nothing.)
+  if (!dexes) return { ok: false, message: 'Could not read the venue list that restricts this route — nothing was sent. Try again in a moment.' };
   const q = new URLSearchParams({
     inputMint,
     outputMint,
@@ -114,7 +177,7 @@ export async function buildJupiterSwap(req: JupiterSwapRequest): Promise<Jupiter
     // Intermediate hops through obscure tokens are where routes go wrong.
     restrictIntermediateTokens: 'true',
   });
-  if (dexes) q.set('dexes', dexes.join(','));
+  q.set('dexes', dexes.join(','));
 
   const quote = await onceMoreOn429(() =>
     getJson<QuoteResponse>('jupiter', `/swap/v1/quote?${q.toString()}`, { priority: true, timeoutMs: 6_000 }),
@@ -153,14 +216,40 @@ export async function buildJupiterSwap(req: JupiterSwapRequest): Promise<Jupiter
   if (tx.length < 64) return { ok: false, message: 'swap: implausibly small transaction' };
 
   const route = (qd.routePlan ?? []).map((r) => r.swapInfo?.label ?? '?');
-  const solValueLamports = Number(isBuy ? qd.inAmount : qd.outAmount);
+  // The SOL leg, whichever side it is on. A token-to-token pair has NO SOL
+  // leg, so this stays undefined rather than reporting a token amount as
+  // lamports — swap.ts prices those separately and says where the number
+  // came from.
+  //
+  // ─── A SELL is valued at the QUOTE, and that is deliberate ──────────
+  //
+  // This is what the platform fee is charged on, and on Solana the fee
+  // transfer is injected into the same transaction BEFORE signing — so unlike
+  // the EVM rail, which sends its fee afterwards and rebases on the actual
+  // fill, there is no later moment here in which to correct an estimate.
+  //
+  // The quote is the right estimate anyway: it is UNBIASED. Fills land near
+  // it, sometimes above and sometimes below, so the fee averages to the
+  // published 0.5 %. Measured on a real round trip 2026-09-11 the fill came in
+  // 11 % under quote and the fee worked out at 0.556 % of what arrived — which
+  // looks like an overcharge in isolation and is simply the other tail of the
+  // same distribution.
+  //
+  // Switching to `otherAmountThreshold` (the slippage floor) was considered
+  // and rejected: the floor sits a full slippage tolerance below the quote —
+  // 12 % on this app's default — so it would undercharge SYSTEMATICALLY on
+  // every sell, forever, to correct an occasional few thousand lamports. An
+  // unbiased estimate beats a deliberately pessimistic one.
+  const solLeg = isBuy ? qd.inAmount : outputMint === WSOL ? qd.outAmount : null;
+  const solValueLamports = solLeg === null ? Number.NaN : Number(solLeg);
   return {
     ok: true,
-    message: `jupiter ${req.action} via ${route.join(' → ') || 'unknown route'}${qd.priceImpactPct ? ` (impact ${(Number(qd.priceImpactPct) * 100).toFixed(2)}%)` : ''}`,
+    message: `jupiter ${req.label} via ${route.join(' → ') || 'unknown route'}${qd.priceImpactPct ? ` (impact ${(Number(qd.priceImpactPct) * 100).toFixed(2)}%)` : ''}`,
     tx,
     lastValidBlockHeight: typeof swap.data.lastValidBlockHeight === 'number' ? swap.data.lastValidBlockHeight : undefined,
     solValueLamports: Number.isFinite(solValueLamports) ? solValueLamports : undefined,
     outAmount: qd.outAmount,
+    otherAmountThreshold: qd.otherAmountThreshold,
     route,
   };
 }

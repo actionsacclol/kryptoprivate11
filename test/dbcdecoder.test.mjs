@@ -214,6 +214,33 @@ function base58Encode(buf) {
   return out;
 }
 
+test('a real EvtSwap is tagged as the v1 variant', () => {
+  for (const f of fixtures.EvtSwap) {
+    const { event } = dbc.decodeDbcEventEx(bytes(f.data));
+    assert.equal(event.kind, 'dbc_swap');
+    assert.equal(event.variant, 1, 'EvtSwap is variant 1');
+  }
+});
+
+test('one swap produces one tick, even though DBC emits two events for it', () => {
+  // DBC emits BOTH EvtSwap and EvtSwap2 per swap. Before this, every DBC
+  // token had exactly 2x the real volume, trade count and candle body.
+  const v1 = { kind: 'dbc_swap', variant: 1, pool: 'P' };
+  const v2 = { kind: 'dbc_swap', variant: 2, pool: 'P' };
+
+  assert.deepEqual(dbc.dedupeSwaps([v1, v2]), [v2], 'v2 wins when both are present');
+  assert.deepEqual(dbc.dedupeSwaps([v2, v1]), [v2], 'and order does not matter');
+
+  // Two genuine swaps in one transaction are two ticks, not one.
+  const b1 = { kind: 'dbc_swap', variant: 2, pool: 'P', n: 1 };
+  const b2 = { kind: 'dbc_swap', variant: 2, pool: 'P', n: 2 };
+  assert.deepEqual(dbc.dedupeSwaps([b1, b2]), [b1, b2], 'two real swaps stay two');
+
+  // And if a future deploy stops emitting v2, v1 must still tape.
+  assert.deepEqual(dbc.dedupeSwaps([v1]), [v1], 'v1 alone still counts');
+  assert.deepEqual(dbc.dedupeSwaps([]), [], 'nothing in, nothing out');
+});
+
 async function run() {
   for (const c of cases) {
     try {

@@ -45,7 +45,14 @@ export function Console() {
     let alive = true;
     void window.krypt.log.recent().then((r) => {
       if (alive && r.ok && r.data) {
-        setLines((cur) => (cur.length > 0 ? cur : r.data!.map((l) => ({ ...l, id: seq++ }))));
+        // The history goes FIRST and the live lines that beat it here go
+        // after; a live line arriving first used to make the 500-line
+        // history give way to itself. Found by audit 2026-09-11.
+        setLines((cur) => {
+          const history = r.data!.map((l) => ({ ...l, id: seq++ }));
+          const merged = [...history, ...cur];
+          return merged.length > CAP ? merged.slice(merged.length - CAP) : merged;
+        });
       }
     });
     const off = window.krypt.engine.onEvent((ev: EngineEvent) => {

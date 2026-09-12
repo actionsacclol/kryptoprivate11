@@ -1,7 +1,9 @@
-import { memo, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { Sidebar, type RouteId } from './Sidebar';
+import type { WorkspaceId } from '../workspaces';
 import { Ticker } from './viz/Ticker';
 import { useAppState } from '../state/AppStateProvider';
+import { loadPinned, subscribePinned } from '../panels/pinned';
 import { useTerminal } from '../state/TerminalProvider';
 
 // The two pieces of chrome that follow live engine state.
@@ -23,13 +25,38 @@ export const SidebarLive = memo(function SidebarLive({
   current,
   onNavigate,
   openMint,
+  workspace,
+  onHub,
 }: {
   current: RouteId;
   onNavigate: (r: RouteId) => void;
   /** The mint the token page is showing, or null. */
   openMint: string | null;
+  workspace: WorkspaceId;
+  onHub: () => void;
 }) {
-  const { status, runners } = useAppState();
+  const { status, runners, settings } = useAppState();
+  // An EVM chain switched off in Settings has no menu entry: its page can arm
+  // that chain and polls its RPC, so a disabled chain must not be one click
+  // away. Same rule the EVM panel already applied to its own chain strips.
+  const hiddenRoutes = useMemo(() => {
+    const out = new Set<RouteId>();
+    if (!settings.evm.robinhood.enabled) out.add('walletrobinhood');
+    if (!settings.evm.bnb.enabled) out.add('walletbnb');
+    return out;
+  }, [settings.evm.robinhood.enabled, settings.evm.bnb.enabled]);
+  // My Layout's menu is whatever the user pinned, so it is state rather than
+  // a fixed list. Read here — this component already re-renders on its own,
+  // away from the root.
+  const [pinned, setPinned] = useState<RouteId[]>(loadPinned);
+  useEffect(() => subscribePinned(() => setPinned(loadPinned())), []);
+  const groupsOverride = useMemo(() => {
+    if (workspace !== 'layout') return undefined;
+    return [
+      { label: null as string | null, routes: ['workspace' as RouteId] },
+      ...(pinned.length ? [{ label: 'Pinned' as string | null, routes: pinned }] : []),
+    ];
+  }, [workspace, pinned]);
   const { columns } = useTerminal();
   const recentRunners = useMemo(() => runners.filter((r) => Date.now() - r.flaggedAt < 3_600_000).length, [runners]);
   const openSymbol = useMemo(() => {
@@ -48,6 +75,10 @@ export const SidebarLive = memo(function SidebarLive({
       feedLive={status.feed === 'live'}
       openSymbol={openSymbol}
       badges={{ runners: recentRunners }}
+      workspace={workspace}
+      onHub={onHub}
+      hiddenRoutes={hiddenRoutes}
+      groupsOverride={groupsOverride}
     />
   );
 });

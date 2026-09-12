@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { UpdateStatus } from '@shared/version';
 import { ExternalLink, FolderOpen, RotateCcw, ShieldAlert } from 'lucide-react';
 import { Card, GhostButton, Page, Section } from '../components/common';
 import { GuidePanel } from '../components/GuidePanel';
@@ -17,6 +18,8 @@ export function About() {
   const toast = useToast();
   const [version, setVersion] = useState('…');
   const [paths, setPaths] = useState<{ logs: string | null; crashes: string | null }>({ logs: null, crashes: null });
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [checking, setChecking] = useState(false);
   useEffect(() => {
     void window.krypt.app.version().then((r) => {
       if (r.ok && r.data) setVersion(r.data);
@@ -24,7 +27,23 @@ export function About() {
     void window.krypt.app.logPaths().then((r) => {
       if (r.ok && r.data) setPaths(r.data);
     });
+    void window.krypt.update.status().then((r) => {
+      if (r.ok && r.data) setUpdate(r.data);
+    });
   }, []);
+
+  // The only place in the app that can force a check. Everywhere else reads
+  // what main already knows.
+  const checkForUpdate = async (): Promise<void> => {
+    setChecking(true);
+    try {
+      const r = await window.krypt.update.check();
+      if (r.ok && r.data) setUpdate(r.data);
+      else toast.error(r.message);
+    } finally {
+      setChecking(false);
+    }
+  };
 
   const openLogs = async (): Promise<void> => {
     const r = await window.krypt.app.openLogs();
@@ -68,6 +87,45 @@ export function About() {
         </Card>
       </Section>
 
+      <Section title="Version">
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              {/* Four states, and three of them are not "you are fine".
+                  "Could not check" must never read as "up to date" — a user
+                  told they are current by an app that never asked stops
+                  checking. See shared/version.ts. */}
+              <div className="text-sm text-white/90">
+                {update === null ? 'Reading…' : update.detail}
+              </div>
+              <div className="mt-0.5 text-xs text-krypt-muted">
+                {update?.checkedAt
+                  ? `Last checked ${new Date(update.checkedAt).toLocaleString()}.`
+                  : 'Not checked yet this session.'}{' '}
+                Nothing is downloaded or installed automatically — updates are installed by you, from krypt.cc.
+              </div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <button
+                onClick={() => void checkForUpdate()}
+                disabled={checking}
+                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white/90 transition hover:bg-white/10 disabled:opacity-50"
+              >
+                {checking ? 'Checking…' : 'Check now'}
+              </button>
+              {update?.state === 'update' && (
+                <button
+                  onClick={() => window.krypt.app.openExternal('https://krypt.cc')}
+                  className="rounded-lg border border-krypt-purple/40 bg-krypt-purple/15 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-krypt-purple/25"
+                >
+                  Get {update.latest}
+                </button>
+              )}
+            </div>
+          </div>
+        </Card>
+      </Section>
+
       <GuidePanel />
 
       <Section title="Onboarding">
@@ -80,6 +138,31 @@ export function About() {
             <GhostButton onClick={() => void replayOnboarding()}>
               <RotateCcw className="h-3.5 w-3.5" /> Replay onboarding
             </GhostButton>
+          </div>
+        </Card>
+      </Section>
+
+      <Section title="Market data">
+        <Card>
+          <div className="text-[12px] text-krypt-muted leading-relaxed space-y-2">
+            <p>
+              Prices, pools and token facts come from providers this app queries directly from your
+              machine. Two of them ask to be credited where their data is shown, and this is that
+              credit.
+            </p>
+            <p>
+              <span className="text-white">Powered by Jupiter.</span> Routing, token records and
+              Shield warnings.
+            </p>
+            <p>
+              <span className="text-white">On-chain data provided by GeckoTerminal.</span> Pools,
+              candles and token information.
+            </p>
+            <p>
+              Also queried: DexScreener, pump.fun, RugCheck, and Birdeye or Solana RPC endpoints you
+              configure yourself. Section 4 of the Privacy Policy lists every host and what each one
+              can see.
+            </p>
           </div>
         </Card>
       </Section>
@@ -111,11 +194,13 @@ export function About() {
               <p>
                 Memecoin trading is extremely high risk: a large majority of new launches die the
                 same day they appear, and no filter catches every rug. The app runs in
-                <span className="text-white font-semibold"> Live mode by default</span> once a wallet
-                exists, so a trade you place spends real SOL; Paper mode in the top bar simulates
+                <span className="text-white font-semibold"> Live mode by default on Solana</span> once a
+                wallet exists, so a trade you place spends real SOL; Paper mode in the top bar simulates
                 instead. It signs only with a dedicated hot wallet whose key is encrypted on this
-                machine, and is bounded by a per-trade cap, a balance cap and a kill switch. Krypt
-                takes 0.5 % of each side of a trade. Trade with lunch money, never your main wallet.
+                machine, and on Solana is bounded by a per-trade cap, a balance cap and a kill switch.
+                The EVM chains (Robinhood Chain, BNB Smart Chain) start in Paper, are armed by hand per
+                chain, and have no caps yet. Krypt takes 0.5 % of each side of a trade on every chain.
+                Trade with lunch money, never your main wallet.
                 Nothing here is financial advice.
               </p>
             </div>

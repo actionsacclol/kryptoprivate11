@@ -23,6 +23,118 @@ import { SimulateTrade } from '../components/terminal/SimulateTrade';
 import { cls, fmtUsd, shortAddr } from '../utils/format';
 import { useToast } from '../state/ToastProvider';
 import { ageLabel, cachedPortfolio, rememberPortfolio } from '../state/routeCache';
+import { useTerminal } from '../state/TerminalProvider';
+import { EVM_CHAIN_META, evmClosedTrips, isEvmChain, type ChainKind, type EvmChainKind, type EvmFill } from '@shared/evm';
+import { EvmFillsSection } from '../components/terminal/EvmFillsSection';
+
+/**
+ * The page follows the top-bar chain: Solana round trips on Solana, the
+ * rail's fills on Robinhood Chain and BNB. Until 2026-09-11 it showed Solana
+ * whatever was active and pointed at the Wallet page for the rest.
+ */
+export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
+  const { chain } = useTerminal();
+  if (isEvmChain(chain)) return <EvmTradesPage chain={chain} onOpenToken={onOpenToken} />;
+  return <SolanaTradesPage onOpenToken={onOpenToken} />;
+}
+
+/**
+ * Robinhood Chain / BNB: the same page as Solana's — closed round trips
+ * with a share card and a candle replay each — built from the rail's fills,
+ * with the fills themselves underneath. The trips are in the chain's own
+ * coin and say so; the replay draws that chain's candles.
+ */
+function EvmTradesPage({ chain, onOpenToken }: { chain: EvmChainKind; onOpenToken: (mint: string, chain?: ChainKind) => void }) {
+  const meta = EVM_CHAIN_META[chain];
+  const sym = meta.nativeSymbol;
+  const [fills, setFills] = useState<EvmFill[] | null>(null);
+  const [nativeUsd, setNativeUsd] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [share, setShare] = useState<CardSubject | null>(null);
+  const [replay, setReplay] = useState<ClosedTrade | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [f, p] = await Promise.all([window.krypt.evm.fills(chain), window.krypt.evm.portfolio(chain)]);
+      if (f.ok && f.data) setFills(f.data);
+      if (p.ok && p.data) setNativeUsd(p.data.nativeUsd);
+    } finally {
+      setLoading(false);
+    }
+  }, [chain]);
+  useEffect(() => {
+    setFills(null);
+    void load();
+    const off = window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'evmFill' && ev.fill.chain === chain) void load();
+    });
+    return off;
+  }, [chain, load]);
+
+  const trips = useMemo(() => (fills ? evmClosedTrips(fills) : []), [fills]);
+  const totals = useMemo(() => {
+    const realised = trips.reduce((a, t) => a + t.pnlSol, 0);
+    const wins = trips.filter((t) => t.pnlSol > 0).length;
+    return { realised, wins, count: trips.length };
+  }, [trips]);
+
+  return (
+    <Page
+      title="Trades"
+      subtitle={
+        totals.count
+          ? `${totals.count} closed round trip${totals.count === 1 ? '' : 's'} on ${meta.name} · ${totals.wins} up, ${totals.count - totals.wins} down · ${totals.realised >= 0 ? '+' : ''}${totals.realised.toFixed(5)} ${sym} realised`
+          : `Every ${meta.name} round trip you complete lands here, read back from the chain — switch the chain in the top bar for Solana`
+      }
+      actions={
+        <IconButton onClick={() => void load()} title="Re-read fills" disabled={loading}>
+          <RefreshCw className={cls('h-4 w-4', loading && 'animate-spin')} />
+        </IconButton>
+      }
+    >
+      <Section
+        title={`Closed round trips (${totals.count})`}
+        description={`A buy and the sells that brought the wallet back to flat, in ${sym}: what actually left and what actually came back, gas included. A trip with a fill the chain has not answered for yet is not counted. Make a card from one, or replay it on ${meta.name}'s own candles.`}
+      >
+        <Card>
+          {fills === null ? (
+            <div className="px-3 py-6 text-center text-[12px] text-krypt-muted">Reading the ledger…</div>
+          ) : trips.length === 0 ? (
+            <Empty title={`No ${meta.name} round trips yet`} message="A round trip is a buy and the sells that closed it. Open positions and every fill are listed below." />
+          ) : (
+            <div className="divide-y divide-white/5">
+              {trips.map((t) => (
+                <ClosedRow
+                  key={`${t.mint}-${t.closedAt}`}
+                  t={t}
+                  paper={false}
+                  solUsd={nativeUsd}
+                  unit={sym}
+                  onOpen={() => onOpenToken(t.mint, chain)}
+                  onShare={() => setShare({ kind: 'trade', trade: t })}
+                  onReplay={() => setReplay(t)}
+                />
+              ))}
+            </div>
+          )}
+        </Card>
+      </Section>
+
+      <EvmFillsSection chain={chain} onOpenToken={onOpenToken} />
+
+      {share && <PnlCard subject={share} solUsd={nativeUsd} unit={sym} onClose={() => setShare(null)} />}
+      {replay && (
+        <TradeReplay
+          trade={replay}
+          nativeSymbol={sym}
+          candleSource={(iv, n) => window.krypt.evm.candles(chain, replay.mint, iv, n)}
+          onClose={() => setReplay(null)}
+        />
+      )}
+    </Page>
+  );
+}
 
 function holdLabel(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -52,11 +164,14 @@ function ClosedRow({
   onOpen,
   onShare,
   onReplay,
+  unit = 'SOL',
 }: {
   t: ClosedTrade;
   /** A paper round trip: the fills were modelled, never broadcast. */
   paper: boolean;
   solUsd: number | null;
+  /** The coin the figures are in (2026-09-11: ETH / BNB on those chains). */
+  unit?: string;
   onOpen: () => void;
   onShare: () => void;
   onReplay: () => void;
@@ -79,11 +194,11 @@ function ClosedRow({
         </div>
         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 font-mono text-[11px]">
           <span className="text-krypt-muted">
-            in <span className="text-white/85">{t.costSol.toFixed(4)} SOL</span>
+            in <span className="text-white/85">{t.costSol.toFixed(4)} {unit}</span>
             {t.entryPriceSol !== null && <span className="text-krypt-muted/60"> @ {price(t.entryPriceSol)}</span>}
           </span>
           <span className="text-krypt-muted">
-            out <span className="text-white/85">{t.proceedsSol.toFixed(4)} SOL</span>
+            out <span className="text-white/85">{t.proceedsSol.toFixed(4)} {unit}</span>
             {t.exitPriceSol !== null && <span className="text-krypt-muted/60"> @ {price(t.exitPriceSol)}</span>}
           </span>
         </div>
@@ -92,7 +207,7 @@ function ClosedRow({
       <div className="flex flex-shrink-0 flex-col items-end">
         <span className={cls('font-mono text-[15px] font-semibold', up ? 'text-emerald-300' : 'text-rose-300')}>
           {up ? '+' : ''}
-          {t.pnlSol.toFixed(4)} SOL
+          {t.pnlSol.toFixed(4)} {unit}
         </span>
         <span className={cls('font-mono text-[11px]', up ? 'text-emerald-300/70' : 'text-rose-300/70')}>
           {up ? '+' : ''}
@@ -143,7 +258,7 @@ function OpenRow({ p, onOpen, onShare }: { p: Position; onOpen: () => void; onSh
   );
 }
 
-export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
+function SolanaTradesPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const toast = useToast();
   // Open on the last portfolio this session saw (routeCache); the engine's
   // kept build and then the fresh one follow. Loading only when there is
@@ -223,7 +338,7 @@ export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
             ]
               .filter(Boolean)
               .join(' · ')
-          : 'Every round trip you complete lands here, paper or real'
+          : 'Every Solana round trip you complete lands here, paper or real — switch the chain in the top bar for Robinhood Chain or BNB fills'
       }
       actions={
         <div className="flex items-center gap-2">
@@ -244,7 +359,7 @@ export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
         {rows.length === 0 ? (
           <Empty
             title={loading ? 'Reading your fills…' : 'No completed trades yet'}
-            message="A trade appears here once you have sold everything you bought of a token, in Paper or Live. Buy and sell from the token page and it lands here by itself. Simulate builds a made-up one if you just want to see how the replay and the card look."
+            message="A Solana trade appears here once you have sold everything you bought of a token, in Paper or Live. Buy and sell from the token page and it lands here by itself. Robinhood and BNB fills are listed on the Wallet page for now. Simulate builds a made-up one if you just want to see how the replay and the card look."
           />
         ) : (
           <Card padded={false} className="overflow-hidden">

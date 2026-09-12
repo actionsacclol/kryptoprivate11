@@ -14,7 +14,7 @@
 // API — same arithmetic that prices a paper fill, so the number in the
 // Discover row and the number in the trade panel can never disagree.
 
-import { getJson, memo } from '../http';
+import { getJson, memo, putCache } from '../http';
 import { curveProgressPct, INITIAL_VIRTUAL_SOL } from '../../engine/curve';
 import { emptySummary, type TokenSummary } from '@shared/market';
 
@@ -124,6 +124,40 @@ export function toSummary(c: PumpCoin, solUsd: number | null = null): TokenSumma
 
 // ── Feeds ─────────────────────────────────────────────────────────────
 
+/**
+ * The `/coins?` list routes return COMPLETE coin records — the same object
+ * `/coins/{mint}` serves. Every row a list returns is therefore remembered
+ * per mint, exactly as `jupiter.ts` remembers its batch rows, so the intel
+ * paths read the row we were already given instead of buying it back.
+ *
+ * Measured before this existed (api swarm 2026-09-09 §4): 45 `/coins/{mint}`
+ * a minute on an idle Discover, 100 % of them following a list read that
+ * contained the row, against a documented budget of 60 per 60 s.
+ *
+ * The TTL is the one `coinForIntel` already accepted for this data (60 s):
+ * a list row is at most its own list TTL old (4-6 s) when it lands here, so
+ * this is strictly FRESHER than the request it replaces, never staler.
+ */
+export const COIN_INTEL_TTL_MS = 60_000;
+
+const intelKey = (mint: string): string => `pf:coin:intel:${mint}`;
+
+function rememberCoins(rows: PumpCoin[]): void {
+  for (const c of rows) if (c && typeof c.mint === 'string' && c.mint) putCache(intelKey(c.mint), c, COIN_INTEL_TTL_MS);
+}
+
+/**
+ * The coin record for the INTEL paths (launch analysis, rug rules, odds).
+ *
+ * `coin()` memoises 6 s, which is right for a price header and wrong for
+ * thirty Discover rows re-asking every refresh. Intel tolerates a
+ * minute-old record — and usually pays nothing at all, because the list
+ * route that produced the row already filled this cache.
+ */
+export function coinForIntel(mint: string): Promise<PumpCoin | null> {
+  return memo<PumpCoin>(intelKey(mint), COIN_INTEL_TTL_MS, () => coin(mint));
+}
+
 type Sort = 'created_timestamp' | 'market_cap' | 'last_trade_timestamp';
 
 async function coins(params: {
@@ -144,7 +178,9 @@ async function coins(params: {
   const hit = await memo<PumpCoin[]>(params.key, params.ttlMs, async () => {
     const r = await getJson<PumpCoin[]>('pumpfun', `/coins?${q.toString()}`, { lane: 'list' });
     if (!r.ok || !Array.isArray(r.data)) return null;
-    return r.data.filter((c) => c && typeof c.mint === 'string' && !c.is_banned);
+    const rows = r.data.filter((c) => c && typeof c.mint === 'string' && !c.is_banned);
+    rememberCoins(rows);
+    return rows;
   });
   return hit ?? [];
 }
@@ -244,7 +280,9 @@ export async function byCreator(creator: string, maxPages = 2): Promise<{ coins:
     const hit = await memo<PumpCoin[]>(`pf:creator:${creator}:${p}`, 60_000, async () => {
       const r = await getJson<PumpCoin[]>('pumpfun', `/coins?${q.toString()}`, { lane: 'list' });
       if (!r.ok || !Array.isArray(r.data)) return null;
-      return r.data.filter((c) => c && typeof c.mint === 'string');
+      const rows = r.data.filter((c) => c && typeof c.mint === 'string');
+      rememberCoins(rows);
+      return rows;
     });
     if (!hit) break;
     // The API's offset paging overlaps at the boundary; dedupe by mint.

@@ -72,6 +72,16 @@ export interface DbcInitPoolEvent {
 
 export interface DbcSwapEvent {
   kind: 'dbc_swap';
+  /**
+   * Which event this came from: 1 = `EvtSwap`, 2 = `EvtSwap2`.
+   *
+   * DBC emits BOTH for a single swap, so a consumer that ticks on every
+   * `dbc_swap` counts every DBC trade twice — measured 2026-09-09 across four
+   * live transactions (identical pool, amounts and price), which doubled
+   * volume, trade counts and every candle on every DBC token. Callers must
+   * de-duplicate on this; see dbcWatcher.
+   */
+  variant: 1 | 2;
   pool: string;
   config: string;
   /** True when quote (SOL) went in and base (the token) came out. */
@@ -164,6 +174,7 @@ function decodeInitPool(p: Buffer): DbcInitPoolEvent {
 function decodeSwap(p: Buffer): DbcSwapEvent {
   return {
     kind: 'dbc_swap',
+    variant: 1,
     pool: pubkey(p, 0),
     config: pubkey(p, 32),
     isBuy: p.readUInt8(64) === 1,
@@ -202,6 +213,7 @@ function decodeSwap(p: Buffer): DbcSwapEvent {
 function decodeSwap2(p: Buffer): DbcSwapEvent {
   return {
     kind: 'dbc_swap',
+    variant: 2,
     pool: pubkey(p, 0),
     config: pubkey(p, 32),
     isBuy: p.readUInt8(64) === 1,
@@ -322,4 +334,23 @@ export function curveProgressPct(e: DbcSwapEvent): number | null {
   const pct = (Number(e.quoteReserve) / Number(e.migrationThreshold)) * 100;
   if (!Number.isFinite(pct)) return null;
   return Math.max(0, Math.min(100, pct));
+}
+
+/**
+ * One tick per swap.
+ *
+ * DBC emits BOTH `EvtSwap` and `EvtSwap2` for a single swap, so a consumer
+ * that ticks on every `dbc_swap` counts every DBC trade twice — measured
+ * 2026-09-09 across four live transactions (identical pool, amounts and
+ * price), which doubled volume, trade counts and every candle bar on every
+ * DBC token.
+ *
+ * Prefer v2 and drop v1 whenever v2 is present: v2 is the richer event and the
+ * only one carrying quoteReserve/migrationThreshold, so curve progress comes
+ * from it too. A transaction that legitimately contains two swaps yields two
+ * v2 events, which is the right answer. If a future deploy stops emitting v2,
+ * the v1 events pass through untouched and the tape keeps working.
+ */
+export function dedupeSwaps(swaps: DbcSwapEvent[]): DbcSwapEvent[] {
+  return swaps.some((x) => x.variant === 2) ? swaps.filter((x) => x.variant === 2) : swaps;
 }

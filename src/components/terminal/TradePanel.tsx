@@ -142,8 +142,8 @@ export function TradePanel({
 
       {side === 'sell' && sellPct < 100 && (
         <p className="text-[10px] text-krypt-muted/70 leading-relaxed">
-          Partial sells are built by the relayer (0.5%), because the local transaction builder can only sell a whole
-          position. A 100% sell can use the cheaper local path and also reclaims the token-account rent.
+          A partial sell is built locally like any other, but it keeps the token account open. A 100% sell closes it
+          in the same transaction and reclaims the ~0.002 SOL of rent sitting in it.
         </p>
       )}
 

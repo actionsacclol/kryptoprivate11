@@ -539,6 +539,26 @@ export function signVersionedTransactionForWallet(
   return signWith(w, unsignedTx, policy);
 }
 
+/**
+ * Sign a LAUNCH: this wallet plus the new mint, and nothing else.
+ *
+ * Separate from the trade paths so the two-signer exception has exactly one
+ * door, and that door needs the mint secret to open. A caller that does not
+ * hold a freshly generated mint keypair cannot produce a two-signer signature
+ * through this module at all.
+ */
+export function signLaunchForWallet(
+  walletId: string,
+  unsignedTx: Uint8Array,
+  policy: SignPolicy,
+  launchMintSecret: Uint8Array,
+): { ok: boolean; message: string; signed?: Uint8Array } {
+  if (policy.intent !== 'launch') return { ok: false, message: 'signLaunchForWallet requires the launch intent' };
+  const w = loadFile().wallets.find((x) => x.id === walletId);
+  if (!w) return { ok: false, message: 'No such wallet' };
+  return signWith(w, unsignedTx, policy, launchMintSecret);
+}
+
 /** Public key of a specific wallet by id, for building that wallet's tx. */
 export function publicKeyOf(walletId: string): string | null {
   return loadFile().wallets.find((x) => x.id === walletId)?.publicKey ?? null;
@@ -548,6 +568,15 @@ function signWith(
   w: StoredWallet,
   unsignedTx: Uint8Array,
   policy: SignPolicy,
+  /**
+   * The launch mint's secret, supplied ONLY by signLaunchForWallet.
+   *
+   * It is a parameter rather than a field on SignPolicy on purpose: a policy
+   * is a description that gets logged, compared and passed around, and a
+   * secret has no business in one. It lives for the microseconds between
+   * generation and signature and is zeroed in the finally below.
+   */
+  launchMintSecret?: Uint8Array,
 ): { ok: boolean; message: string; signed?: Uint8Array } {
   let secret: Uint8Array | null = null;
   let kp: Keypair | null = null;
@@ -558,7 +587,15 @@ function signWith(
     if (feePayer !== w.publicKey) {
       return { ok: false, message: 'Transaction fee payer is not this wallet — refusing to sign' };
     }
-    if (tx.message.header.numRequiredSignatures !== 1) {
+    // A launch is the one shape with a second signer, and it can only arrive
+    // through signLaunchForWallet — which is the only caller that can supply
+    // the mint secret. Without it, intent 'launch' is unreachable here and the
+    // original rule applies untouched.
+    const launching = policy.intent === 'launch' && launchMintSecret !== undefined;
+    if (policy.intent === 'launch' && !launching) {
+      return { ok: false, message: 'A launch must be signed through the launch path — refusing to sign' };
+    }
+    if (!launching && tx.message.header.numRequiredSignatures !== 1) {
       return { ok: false, message: `Transaction needs ${tx.message.header.numRequiredSignatures} signers — refusing (expect 1)` };
     }
     // Decode-and-revalidate BEFORE the key is ever decrypted.
@@ -571,7 +608,17 @@ function signWith(
     if (kp.publicKey.toBase58() !== w.publicKey) {
       return { ok: false, message: 'Key mismatch — refusing to sign' };
     }
-    tx.sign([kp]);
+    if (launching) {
+      // Both signatures, in one call: ours as fee payer, the mint's for
+      // itself. checkOutflow has already proved slot 1 IS this mint.
+      const mintKp = Keypair.fromSecretKey(launchMintSecret);
+      if (mintKp.publicKey.toBase58() !== policy.launchMint) {
+        return { ok: false, message: 'Launch mint key does not match the mint the policy named — refusing to sign' };
+      }
+      tx.sign([kp, mintKp]);
+    } else {
+      tx.sign([kp]);
+    }
     return { ok: true, message: 'signed', signed: tx.serialize() };
   } catch (err) {
     return { ok: false, message: `Signing failed: ${(err as Error).message}` };

@@ -12,9 +12,12 @@
 // copy-trading look profitable when it is not.
 
 import fs from 'node:fs';
+import { type ChainKind } from '@shared/evm';
+import { logger } from '../system/logger';
 import path from 'node:path';
 import {
   copySize,
+  DEFAULT_COPIES_PER_MINUTE,
   emptyLeaderStats,
   validateConfig,
   type CopyConfig,
@@ -24,8 +27,7 @@ import {
   type CopyTrade,
   type CopyWatchStatus,
   type LeaderRoundTrip,
-  type LeaderStats,
-} from '@shared/copytrade';
+  type LeaderStats, chainOf } from '@shared/copytrade';
 import { FEE_BPS } from '@shared/fees';
 import * as recorder from './recorder';
 
@@ -39,19 +41,64 @@ let trades: CopyTrade[] = [];
 let leaders: Record<string, LeaderBook> = {};
 let filePath = '';
 let saveTimer: NodeJS.Timeout | null = null;
+/** Set when the store existed but could not be read; persisting stays off. */
+let loadFailure: string | null = null;
+
+/** What a host may tell us about an execution it just ran. */
+export interface CopyExecResult {
+  ok: boolean;
+  message: string;
+  signature?: string;
+  /** Broadcast, not yet confirmed. The position is real (copy-5). */
+  pending?: boolean;
+  /** SOL actually spent, when the host knows it. Trusted over the request. */
+  spentSol?: number;
+  /** The fill price in SOL per token, when the host knows it. */
+  fillPriceSol?: number;
+}
+
+/** Per-execution overrides. A host free to ignore them still type-checks. */
+export interface CopyExecOpts {
+  /** This config's `maxSlippagePct`, which the host is asked to honour. */
+  slippagePct?: number;
+  /** The wallet this config signs with; absent = the active wallet. */
+  walletId?: string;
+  /** The chain the copy goes out on; absent = Solana. */
+  chain?: ChainKind;
+}
 
 export interface CopyHost {
   /** Fire a real buy. Only called for a `live` config. */
-  buy(mint: string, sol: number): Promise<{ ok: boolean; message: string; signature?: string }>;
+  buy(mint: string, sol: number, opts?: CopyExecOpts): Promise<CopyExecResult>;
   /** Sell `pct`% of what THIS wallet holds of `mint`. Only called for a
    *  `live` config, and only a confirmed fill may answer `ok`. */
-  sell(mint: string, pct: number): Promise<{ ok: boolean; message: string; signature?: string }>;
+  sell(mint: string, pct: number, opts?: CopyExecOpts): Promise<CopyExecResult>;
   /** Why a LIVE copy cannot execute, or null. Paper ignores this. */
-  liveBlockedReason(): string | null;
+  liveBlockedReason(chain?: ChainKind): string | null;
+  /**
+   * Why a LIVE BUY specifically cannot execute, or null (copy-11).
+   *
+   * `liveBlockedReason` deliberately omits the entry breakers — an exit must
+   * stay possible while entries are paused — so without this a copy would
+   * open a position during a decoder hard-pause or on a stale feed. Optional:
+   * a host that does not implement it is treated as "nothing extra to say".
+   */
+  buyBlockedReason?(chain?: ChainKind): string | null;
+  /**
+   * What THIS wallet paid for everything it holds of `mint`, SOL (copy-2).
+   *
+   * A sell is placed as a percentage of the whole token account, so mirroring
+   * "they sold 40 %" as 40 % sells 40 % of a hand-bought bag too. With this,
+   * the percentage is scaled by the copy's share of our own basis. Null or
+   * absent means "unknown", and the percentage is used unscaled.
+   */
+  ourCostBasisSol?(mint: string, chain?: ChainKind): number | null;
+  /** The live per-trade ceiling, SOL. A copy over it is REFUSED (copy-8). */
+  maxLiveSol?(chain?: ChainKind): number | null;
   /** Current spot price in SOL for a mint, if known. */
-  priceSol(mint: string): number | null;
+  priceSol(mint: string, chain?: ChainKind): number | null;
   /** Token facts used by the filters. */
-  tokenFacts(mint: string): Promise<{ liquidityUsd: number | null; marketCapUsd: number | null; kryptScore: number | null; isPumpfun: boolean }>;
+  tokenFacts(mint: string, chain?: ChainKind): Promise<{ liquidityUsd: number | null; marketCapUsd: number | null; kryptScore: number | null; isPumpfun: boolean }>;
   log(level: 'info' | 'warn' | 'error', line: string): void;
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   changed(): void;
@@ -67,8 +114,29 @@ export function attach(h: CopyHost): void {
 
 export function init(userDataDir: string): void {
   filePath = path.join(userDataDir, FILE);
+  loadFailure = null;
+  configs = [];
+  trades = [];
+  leaders = {};
+
+  // Fail CLOSED: "I could not read the file" is not "there is no file"
+  // (copy-6). A missing file is a first run; anything else means configs,
+  // history and the leaders' record may still be on disk, and overwriting
+  // them with an empty document destroys them. When the read fails the file
+  // becomes read-only for the session and every persist is a no-op — same
+  // shape as `ledger.init`.
+  let text: string;
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      loadFailure = `${filePath} could not be read (${(e as Error).message})`;
+      console.warn(`[sniper] copy: ${loadFailure} — copy trading is read-only this session`);
+    }
+    return;
+  }
+  try {
+    const raw = JSON.parse(text) as {
       version: 1;
       configs: CopyConfig[];
       trades: CopyTrade[];
@@ -77,24 +145,40 @@ export function init(userDataDir: string): void {
     configs = Array.isArray(raw?.configs) ? raw.configs : [];
     trades = Array.isArray(raw?.trades) ? raw.trades : [];
     leaders = raw?.leaders && typeof raw.leaders === 'object' && !Array.isArray(raw.leaders) ? raw.leaders : {};
-  } catch {
+  } catch (e) {
     configs = [];
     trades = [];
     leaders = {};
+    loadFailure = `${filePath} is corrupt (${(e as Error).message})`;
+    console.warn(`[sniper] copy: ${loadFailure} — copy trading is read-only this session`);
   }
+
   // A LIVE config never survives a restart armed. Same reasoning as orders:
   // an app that was closed for a week must not resume spending on wake.
   // Paper configs do resume, because paper costs nothing and an interrupted
   // experiment is a useless one.
+  let disarmed = 0;
   for (const c of configs) {
     if (c.mode === 'live' && c.enabled) {
       c.enabled = false;
+      disarmed += 1;
     }
+  }
+  if (!loadFailure) {
+    logger.info(
+      `copy: loaded ${configs.length} config(s), ${trades.length} record(s)` +
+        (disarmed > 0 ? ` — ${disarmed} LIVE config(s) disarmed on restart` : ''),
+    );
   }
 }
 
+/** Why the store could not be read, or null. Persisting is off while set. */
+export function failure(): string | null {
+  return loadFailure;
+}
+
 function persist(): void {
-  if (!filePath) return;
+  if (!filePath || loadFailure) return;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
@@ -116,6 +200,7 @@ const nextId = (p: string): string => {
 // ── Config CRUD ───────────────────────────────────────────────────────
 
 export function upsert(input: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: string }): { ok: boolean; message: string } {
+  if (chainOf(input) !== 'solana') input = { ...input, wallet: input.wallet.trim().toLowerCase() };
   const v = validateConfig(input);
   if (!v.ok) return { ok: false, message: v.message };
 
@@ -123,24 +208,38 @@ export function upsert(input: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: stri
     const existing = configs.find((c) => c.id === input.id);
     if (!existing) return { ok: false, message: 'Config not found' };
     const wasLive = existing.mode === 'live' && existing.enabled;
+    // Moving to live always disarms first — the same rule scripts follow, and
+    // the one the Wallets page has always claimed. Enforced HERE, in main, so
+    // one `copy:save` call can never create an armed live follower.
+    const toLive = existing.mode !== 'live' && input.mode === 'live';
     Object.assign(existing, input);
+    if (toLive) existing.enabled = false;
     persist();
     host?.changed();
     if (!wasLive && existing.mode === 'live' && existing.enabled) {
       host?.toast('warn', `LIVE copy trading armed for ${existing.label || existing.wallet.slice(0, 6)} — real SOL will be spent`);
     }
-    return { ok: true, message: 'Saved' };
+    return { ok: true, message: toLive ? 'Saved as live — re-enable it to arm it' : 'Saved' };
   }
 
   if (configs.length >= MAX_CONFIGS) return { ok: false, message: `Limit of ${MAX_CONFIGS} configs reached` };
-  if (configs.some((c) => c.wallet === input.wallet)) {
-    return { ok: false, message: 'You are already following that wallet' };
+  // The same address on another chain is another leader (2026-09-11).
+  if (configs.some((c) => c.wallet === input.wallet && chainOf(c) === chainOf(input))) {
+    return { ok: false, message: 'You are already following that wallet on that chain' };
   }
   const c: CopyConfig = { ...input, id: nextId('cp'), createdAt: Date.now() };
+  // A brand-new live follower is never born armed.
+  const bornLive = c.mode === 'live' && c.enabled;
+  if (bornLive) c.enabled = false;
   configs.unshift(c);
   persist();
   host?.changed();
-  return { ok: true, message: `Following ${c.label || c.wallet.slice(0, 6)}` };
+  return {
+    ok: true,
+    message: bornLive
+      ? `Following ${c.label || c.wallet.slice(0, 6)} — live, disarmed. Enable it when ready.`
+      : `Following ${c.label || c.wallet.slice(0, 6)}`,
+  };
 }
 
 export function remove(id: string): { ok: boolean; message: string } {
@@ -149,6 +248,17 @@ export function remove(id: string): { ok: boolean; message: string } {
   configs = configs.filter((c) => c.id !== id);
   if (configs.length === before) return { ok: false, message: 'Config not found' };
   trades = trades.filter((t) => t.configId !== id);
+  // Runtime state dies with the config (copy-9): an exit chain keyed to it
+  // would otherwise pin the map forever, and a reservation it never released
+  // would count against a config that no longer exists.
+  for (const key of [...exitChains.keys()]) {
+    if (key.startsWith(`${id}:`)) exitChains.delete(key);
+  }
+  pendingCopies.delete(id);
+  recentCopies.delete(id);
+  for (const key of [...supersededSkips.keys()]) {
+    if (key.startsWith(`${id}:`)) supersededSkips.delete(key);
+  }
   // Their record goes with the last config that followed them.
   if (gone && !configs.some((c) => c.wallet === gone.wallet)) delete leaders[gone.wallet];
   persist();
@@ -161,8 +271,8 @@ export function all(): CopyConfig[] {
 }
 
 /** Wallets with an enabled config — the engine's watch list. */
-export function activeWallets(): Set<string> {
-  return new Set(configs.filter((c) => c.enabled).map((c) => c.wallet));
+export function activeWallets(chain?: ChainKind): Set<string> {
+  return new Set(configs.filter((c) => c.enabled && (chain === undefined || chainOf(c) === chain)).map((c) => c.wallet));
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────
@@ -205,6 +315,7 @@ export function snapshot(): CopySnapshot {
     liveBlockedReason: blocked,
     watch: host?.watchStatus?.() ?? {},
     leaders: leaderStats,
+    loadFailure,
   };
 }
 
@@ -405,11 +516,54 @@ function todayFor(configId: string): CopyTrade[] {
   return trades.filter((t) => t.configId === configId && t.at >= from && t.state !== 'skipped');
 }
 
+/**
+ * Copies reserved but not yet recorded, per config (copy-1).
+ *
+ * A copy is only written to `trades` once the buy resolves, so a leader who
+ * fires eight swaps into one slot used to pass the daily check eight times
+ * before the first buy came back. A slot is now taken SYNCHRONOUSLY the
+ * moment the limits pass and given back in a `finally`.
+ */
+const pendingCopies = new Map<string, number>();
+/** When each slot was taken, per config — the rolling-minute wall. */
+const recentCopies = new Map<string, number[]>();
+const MINUTE = 60_000;
+
+function perMinuteCap(c: CopyConfig): number {
+  const v = c.maxCopiesPerMinute;
+  return typeof v === 'number' && v > 0 ? v : DEFAULT_COPIES_PER_MINUTE;
+}
+
+/** Timestamps inside the last minute, pruned in place. */
+function recentFor(configId: string, now: number): number[] {
+  const kept = (recentCopies.get(configId) ?? []).filter((at) => now - at < MINUTE);
+  if (kept.length) recentCopies.set(configId, kept);
+  else recentCopies.delete(configId);
+  return kept;
+}
+
+/** Take a copy slot. Synchronous, and paired with exactly one `release`. */
+function reserve(c: CopyConfig, now: number): void {
+  pendingCopies.set(c.id, (pendingCopies.get(c.id) ?? 0) + 1);
+  recentCopies.set(c.id, [...recentFor(c.id, now), now]);
+}
+
+function release(configId: string): void {
+  const n = (pendingCopies.get(configId) ?? 0) - 1;
+  if (n > 0) pendingCopies.set(configId, n);
+  else pendingCopies.delete(configId);
+}
+
 function limitHit(c: CopyConfig): string | null {
   const today = todayFor(c.id);
+  const now = Date.now();
   // Exits are not copies: a leader who scales out in four sells has not
   // used four of the day's copies. Their realised losses DO count below.
-  if (today.filter((t) => t.kind !== 'exit').length >= c.dailyTradeLimit) return `limit: ${c.dailyTradeLimit} copies today`;
+  // Copies still in flight count: they are already spending.
+  const used = today.filter((t) => t.kind !== 'exit').length + (pendingCopies.get(c.id) ?? 0);
+  if (used >= c.dailyTradeLimit) return `limit: ${c.dailyTradeLimit} copies today`;
+  const cap = perMinuteCap(c);
+  if (recentFor(c.id, now).length >= cap) return `limit: ${cap} copies per minute`;
   const realized = today
     .filter((t) => t.state === 'closed' && t.pnlSol !== null)
     .reduce((a, t) => a + (t.pnlSol as number), 0);
@@ -427,6 +581,8 @@ function record(t: CopyTrade): void {
 }
 
 export interface WalletTrade {
+  /** Absent = Solana. An EVM trade's wallet and mint are lower-cased on entry. */
+  chain?: ChainKind;
   wallet: string;
   mint: string;
   symbol: string;
@@ -439,7 +595,8 @@ export interface WalletTrade {
    *  evaluated once. */
   signature?: string;
   /** Sell: the share of their holding they sold, 0–1 (walletSwap). Null or
-   *  absent = unknown, mirrored as "all of it". */
+   *  absent = unknown, and an unknown share is NOT mirrored at all — the
+   *  exit is recorded as skipped with that reason. */
   soldFraction?: number | null;
   /** Tokens moved, UI units (walletSwap). Absent = derived from the price. */
   tokens?: number;
@@ -460,9 +617,55 @@ function alreadyHandled(signature: string | undefined): boolean {
   return false;
 }
 
+/**
+ * Sell signatures already routed, with the fraction each delivery carried
+ * (copy-13).
+ *
+ * A pump.fun leader's sell arrives TWICE: from the curve firehose, which
+ * reads a log and therefore has no pre-balance and no `soldFraction`, and
+ * from the wallet watcher, which has both but must fetch the transaction
+ * first and so always loses the race. Deduping on the signature alone threw
+ * away the only delivery that could be mirrored, which left the whole pump
+ * rail with the exact bug the mirrored sell was written to fix.
+ *
+ * So a sell signature is not simply "seen". It is remembered WITH its
+ * fraction, and a later delivery is let through exactly once, and only when
+ * it upgrades an unknown fraction to a known one.
+ */
+const handledSells = new Map<string, number | null>();
+
+type SellRoute = 'new' | 'upgrade' | 'drop';
+
+function routeSell(t: WalletTrade): SellRoute {
+  const sig = t.signature;
+  if (!sig) return 'new';
+  const fraction = fractionOf(t);
+  if (!handledSells.has(sig)) {
+    handledSells.set(sig, fraction);
+    if (handledSells.size > HANDLED_CAP) {
+      const oldest = handledSells.keys().next().value;
+      if (oldest !== undefined) handledSells.delete(oldest);
+    }
+    return 'new';
+  }
+  if ((handledSells.get(sig) ?? null) === null && fraction !== null) {
+    handledSells.set(sig, fraction);
+    return 'upgrade';
+  }
+  return 'drop';
+}
+
+/**
+ * `${configId}:${leaderSignature}` → the id of the "could not tell how much
+ * they sold" row that delivery wrote. When a later delivery of the SAME sell
+ * carries the fraction, that row is removed: the exit did happen, and a skip
+ * the history cannot explain is worse than no row at all.
+ */
+const supersededSkips = new Map<string, string>();
+
 /** Mints with an open copy, paper or live — the engine keeps them priced. */
-export function openMints(): string[] {
-  return [...new Set(trades.filter((t) => t.state === 'open').map((t) => t.mint))];
+export function openMints(chain?: ChainKind): string[] {
+  return [...new Set(trades.filter((t) => t.state === 'open' && (chain === undefined || (t.chain ?? 'solana') === chain)).map((t) => t.mint))];
 }
 
 /**
@@ -475,20 +678,29 @@ export function openMints(): string[] {
 export function onWalletTrade(t: WalletTrade): void {
   const h = host;
   if (!h) return;
-  const matching = configs.filter((c) => c.enabled && c.wallet === t.wallet);
+  // An EVM address is case-insensitive; a Solana one is not.
+  const chain = t.chain ?? 'solana';
+  if (chain !== 'solana') t = { ...t, wallet: t.wallet.toLowerCase(), mint: t.mint.toLowerCase() };
+  const matching = configs.filter((c) => c.enabled && chainOf(c) === chain && c.wallet === t.wallet);
   if (!matching.length) return;
-  if (alreadyHandled(t.signature)) return;
 
-  // Their record first: scored whatever the configs below decide.
-  trackLeader(t);
-  persist();
-  h.changed();
+  const route: SellRoute = t.isBuy ? (alreadyHandled(t.signature) ? 'drop' : 'new') : routeSell(t);
+  if (route === 'drop') return;
+
+  if (route === 'new') {
+    // Their record first: scored whatever the configs below decide. An
+    // upgrade is the SAME sell arriving again, so it is not scored twice.
+    trackLeader(t);
+    persist();
+    h.changed();
+  }
 
   for (const c of matching) {
     if (!t.isBuy) {
       if (c.copySells) queueExit(c, t);
       continue;
     }
+    if (route !== 'new') continue;
     void evaluateBuy(c, t);
   }
 }
@@ -599,58 +811,133 @@ function exitSkipped(x: CopyTrade, t: WalletTrade, pct: number, reason: string):
   };
 }
 
+/** Still followed? A config removed mid-flight must stop the copy (copy-9). */
+function stillConfigured(id: string): boolean {
+  return configs.some((c) => c.id === id);
+}
+
+/**
+ * The percentage of OUR TOKEN ACCOUNT that mirrors the leader's fraction.
+ *
+ * `h.sell` sells a percentage of everything this wallet holds of the mint,
+ * not a percentage of the copy. When the wallet also holds a hand-bought bag
+ * of the same token, mirroring "40 %" as 40 % sells 40 % of that bag too —
+ * SOL the copier was never given permission to spend (copy-2). Scaling by
+ * this config's share of our own basis fixes it. A host that cannot say what
+ * we paid leaves the ratio at 1, which is the old behaviour exactly.
+ */
+function walletPctFor(c: CopyConfig, open: CopyTrade[], mint: string, fraction: number): number {
+  let ratio = 1;
+  const basis = host?.ourCostBasisSol?.(mint) ?? null;
+  if (typeof basis === 'number' && Number.isFinite(basis) && basis > 0) {
+    const ours = open.reduce((a, x) => a + x.ourSol * ((x.remainingPct ?? 100) / 100), 0);
+    if (ours > 0) ratio = Math.min(1, ours / basis);
+  }
+  return Math.max(1, Math.min(100, Math.round(fraction * ratio * 100)));
+}
+
 async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
   const h = host;
   if (!h) return;
-  const open = trades.filter((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open' && x.kind !== 'exit');
-  if (!open.length) return;
+  const rows = trades.filter((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open' && x.kind !== 'exit');
+  if (!rows.length) return;
+  // A row is governed by the mode it was OPENED in, not by what the config is
+  // set to today (copy-3). Flipping a config from paper to live used to make
+  // the leader's next sell broadcast a real order against a paper row, and
+  // then label that broadcast "paper" in the history.
+  const paperRows = rows.filter((x) => x.mode === 'paper');
+  const liveRows = rows.filter((x) => x.mode === 'live');
+
   const who = c.label || c.wallet.slice(0, 6);
   const what = t.symbol || t.mint.slice(0, 8);
+  const skipKey = t.signature ? `${c.id}:${t.signature}` : null;
   const fraction = fractionOf(t);
   if (fraction === null) {
-    record(exitSkipped(open[0], t, 100, 'not executed — could not tell how much of their holding they sold'));
+    const row = exitSkipped(rows[0], t, 100, 'not executed — could not tell how much of their holding they sold');
+    // The wallet watcher may deliver this same sell again WITH the fraction
+    // (copy-13); if it does, this row is withdrawn rather than left standing.
+    if (skipKey) {
+      supersededSkips.set(skipKey, row.id);
+      // Bounded like `handled`: most of these are never superseded, because
+      // most leaders are not on a rail that delivers a sell twice.
+      if (supersededSkips.size > HANDLED_CAP) {
+        const oldest = supersededSkips.keys().next().value;
+        if (oldest !== undefined) supersededSkips.delete(oldest);
+      }
+    }
+    record(row);
     h.toast('warn', `Copy sell skipped — ${who} sold ${what}, but the share they sold could not be read`);
     return;
   }
   const pct = Math.max(1, Math.min(100, Math.round(fraction * 100)));
-  const exit = t.priceSol > 0 ? t.priceSol : (h.priceSol(t.mint) ?? null);
+  const exit = t.priceSol > 0 ? t.priceSol : (h.priceSol(t.mint, chainOf(c)) ?? null);
   let signature: string | null = null;
 
-  if (c.mode === 'live') {
-    const blocked = h.liveBlockedReason();
-    if (blocked) {
-      record(exitSkipped(open[0], t, pct, `not executed — ${blocked}`));
-      h.toast('warn', `Copy sell skipped — ${who} sold ${pct}% of ${what}, but ${blocked}`);
-      return;
-    }
-    const res = await h.sell(t.mint, pct);
-    if (!res.ok) {
-      if (/nothing to sell|zero token balance/i.test(res.message)) {
-        // Our own orders already emptied the bag. Nothing to mirror — say
-        // so on the record rather than invent a fill or leave it "open".
-        for (const x of open) {
-          x.state = 'closed';
-          x.closedAt = t.at;
-          x.remainingPct = 0;
-          x.reason = 'nothing left to sell — your own orders had already sold it';
+  // Paper rows are booked whatever happens below: bookkeeping costs nothing,
+  // needs no order, and is exactly what would have happened had the config
+  // never been flipped.
+  const booked: CopyTrade[] = [...paperRows];
+
+  if (liveRows.length) {
+    if (c.mode !== 'live') {
+      // Flipped to paper with a REAL position still open. The wallet holds
+      // those tokens; nothing may close them but a sell that happened.
+      record(
+        exitSkipped(
+          liveRows[0],
+          t,
+          pct,
+          'not executed — this config is in paper mode now, and the live position it opened is still held',
+        ),
+      );
+      h.toast('warn', `${who} sold ${pct}% of ${what} — your live position from this config is still open`);
+    } else {
+      const blocked = h.liveBlockedReason(chainOf(c));
+      if (blocked) {
+        record(exitSkipped(liveRows[0], t, pct, `not executed — ${blocked}`));
+        h.toast('warn', `Copy sell skipped — ${who} sold ${pct}% of ${what}, but ${blocked}`);
+      } else {
+        const sellPct = walletPctFor(c, liveRows, t.mint, fraction);
+        const res = await h.sell(t.mint, sellPct, { slippagePct: c.maxSlippagePct, walletId: c.walletId ?? undefined, chain: chainOf(c) });
+        if (!stillConfigured(c.id)) return;
+        if (res.ok) {
+          signature = res.signature ?? null;
+          booked.push(...liveRows);
+          h.toast('success', `Copied sell: ${pct}% of ${what} with ${who}`);
+        } else if (/nothing to sell|zero token balance/i.test(res.message)) {
+          // Our own orders already emptied the bag. Nothing to mirror — say
+          // so on the record rather than invent a fill or leave it "open".
+          for (const x of liveRows) {
+            x.state = 'closed';
+            x.closedAt = t.at;
+            x.remainingPct = 0;
+            x.reason = 'nothing left to sell — your own orders had already sold it';
+          }
+          persist();
+          h.changed();
+          h.log('info', `copy: ${who} sold ${what} but this wallet holds none — record closed`);
+        } else {
+          record(exitSkipped(liveRows[0], t, pct, res.message.slice(0, 160)));
+          h.log('warn', `copy sell FAILED (${who} sold ${pct}% of ${what}): ${res.message}`);
+          h.toast('error', `Copy sell failed — ${pct}% of ${what}: ${res.message}`);
         }
-        persist();
-        h.changed();
-        h.log('info', `copy: ${who} sold ${what} but this wallet holds none — record closed`);
-        return;
       }
-      record(exitSkipped(open[0], t, pct, res.message.slice(0, 160)));
-      h.log('warn', `copy sell FAILED (${who} sold ${pct}% of ${what}): ${res.message}`);
-      h.toast('error', `Copy sell failed — ${pct}% of ${what}: ${res.message}`);
-      return;
     }
-    signature = res.signature ?? null;
-    h.toast('success', `Copied sell: ${pct}% of ${what} with ${who}`);
   }
 
-  for (const x of open) {
-    const slice = applyExit(x, fraction, exit, t, signature);
+  if (!booked.length) return;
+  for (const x of booked) {
+    const slice = applyExit(x, fraction, exit, t, x.mode === 'live' ? signature : null);
     trades.unshift(slice);
+  }
+  // This sell DID happen, so an earlier "could not tell how much" row for the
+  // same leader transaction was never true (copy-13).
+  if (skipKey) {
+    const stale = supersededSkips.get(skipKey);
+    if (stale) {
+      trades = trades.filter((x) => x.id !== stale);
+      supersededSkips.delete(skipKey);
+    }
   }
   if (trades.length > MAX_TRADES) trades.length = MAX_TRADES;
   persist();
@@ -666,6 +953,7 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
     id: nextId('ct'),
     configId: c.id,
     mode: c.mode,
+    chain: chainOf(c),
     wallet: c.wallet,
     mint: t.mint,
     symbol: t.symbol,
@@ -685,39 +973,82 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
     record({ ...base, reason: limit });
     return;
   }
+  // The slot is taken NOW, before the first await, so the next swap in this
+  // same slot sees it (copy-1). Everything below runs inside the try.
+  reserve(c, Date.now());
+  try {
+    await copyOnce(c, t, base, h);
+  } finally {
+    release(c.id);
+  }
+}
 
+/**
+ * A filter is a REFUSAL, so it fails closed: "I could not read the
+ * liquidity" is not "the liquidity is fine" (copy-4).
+ *
+ * The engine must supply these facts for launch-feed tokens. While it
+ * returns null for the whole pump rail, every copy under the default config
+ * is refused rather than silently unfiltered — the safe half of the wrong
+ * pair, and one the user can see on the record.
+ */
+function unknownReason(label: string): string {
+  return `${label} unknown — the filter you set could not be checked`;
+}
+
+async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyHost): Promise<void> {
   // Filters. A rejected copy is RECORDED as skipped with its reason — the
   // paper scorecard must show what the filters kept you out of, or it is
   // only measuring the trades you happened to like.
   let facts: Awaited<ReturnType<CopyHost['tokenFacts']>>;
   try {
-    facts = await h.tokenFacts(t.mint);
+    facts = await h.tokenFacts(t.mint, chainOf(c));
   } catch {
     record({ ...base, reason: 'could not read token' });
     return;
   }
+  if (!stillConfigured(c.id)) return;
   if (c.onlyPumpfun && !facts.isPumpfun) {
     record({ ...base, reason: 'not a pump.fun token' });
     return;
   }
-  if (c.minLiquidityUsd !== null && facts.liquidityUsd !== null && facts.liquidityUsd < c.minLiquidityUsd) {
-    record({ ...base, reason: `liquidity below $${c.minLiquidityUsd.toLocaleString()}` });
-    return;
+  if (c.minLiquidityUsd !== null) {
+    if (facts.liquidityUsd === null) {
+      record({ ...base, reason: unknownReason('liquidity') });
+      return;
+    }
+    if (facts.liquidityUsd < c.minLiquidityUsd) {
+      record({ ...base, reason: `liquidity below $${c.minLiquidityUsd.toLocaleString()}` });
+      return;
+    }
   }
-  if (c.maxMarketCapUsd !== null && facts.marketCapUsd !== null && facts.marketCapUsd > c.maxMarketCapUsd) {
-    record({ ...base, reason: `market cap above $${c.maxMarketCapUsd.toLocaleString()}` });
-    return;
+  if (c.maxMarketCapUsd !== null) {
+    if (facts.marketCapUsd === null) {
+      record({ ...base, reason: unknownReason('market cap') });
+      return;
+    }
+    if (facts.marketCapUsd > c.maxMarketCapUsd) {
+      record({ ...base, reason: `market cap above $${c.maxMarketCapUsd.toLocaleString()}` });
+      return;
+    }
   }
-  if (c.minKryptScore !== null && facts.kryptScore !== null && facts.kryptScore < c.minKryptScore) {
-    record({ ...base, reason: `score ${facts.kryptScore} below ${c.minKryptScore}` });
-    return;
+  if (c.minKryptScore !== null) {
+    if (facts.kryptScore === null) {
+      record({ ...base, reason: unknownReason('score') });
+      return;
+    }
+    if (facts.kryptScore < c.minKryptScore) {
+      record({ ...base, reason: `score ${facts.kryptScore} below ${c.minKryptScore}` });
+      return;
+    }
   }
 
   // The configured delay is REAL, including in paper. Copy trading is a
   // latency game and a paper fill at their price is a fiction.
   if (c.delayMs > 0) await new Promise((r) => setTimeout(r, c.delayMs));
+  if (!stillConfigured(c.id)) return;
 
-  const entry = h.priceSol(t.mint) ?? t.priceSol;
+  const entry = h.priceSol(t.mint, chainOf(c)) ?? t.priceSol;
   if (!(entry > 0)) {
     record({ ...base, reason: 'no price at copy time' });
     return;
@@ -731,17 +1062,53 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
   }
 
   // Live.
-  const blocked = h.liveBlockedReason();
+  const blocked = h.liveBlockedReason(chainOf(c)) ?? h.buyBlockedReason?.(chainOf(c)) ?? null;
   if (blocked) {
     record({ ...base, reason: `not executed — ${blocked}` });
     h.toast('warn', `Copy skipped — ${blocked}`);
     return;
   }
-  const res = await h.buy(t.mint, base.ourSol);
-  if (res.ok) {
-    record({ ...base, state: 'open', entryPriceSol: entry });
-    h.toast('success', `Copied ${c.label || c.wallet.slice(0, 6)}: ${base.ourSol} SOL of ${t.symbol}`);
-    recorder.record('copy_open', { configId: c.id, mint: t.mint, mode: 'live', ourSol: base.ourSol, signature: res.signature ?? null });
+  // House rule 2: a budget is a refusal, not a clamp. Automation refuses over
+  // the live cap; a copy that silently shrank to fit would report a size it
+  // never traded and score the experiment against the wrong number (copy-8).
+  const cap = h.maxLiveSol?.(chainOf(c)) ?? null;
+  if (cap !== null && Number.isFinite(cap) && cap > 0 && base.ourSol > cap) {
+    record({ ...base, reason: `copy of ${base.ourSol} SOL is above your live cap of ${cap} SOL` });
+    h.toast('warn', `Copy skipped — ${base.ourSol} SOL is above your live max per trade (${cap} SOL)`);
+    return;
+  }
+  const res = await h.buy(t.mint, base.ourSol, { slippagePct: c.maxSlippagePct, walletId: c.walletId ?? undefined, chain: chainOf(c) });
+  if (!stillConfigured(c.id)) return;
+  if (res.ok || res.pending === true) {
+    // What was actually spent and actually filled, when the host knows it —
+    // the requested size is a wish, and scoring a copy against a wish makes
+    // every derived number wrong by asked over spent (copy-8).
+    const spent = typeof res.spentSol === 'number' && res.spentSol > 0 ? res.spentSol : base.ourSol;
+    const fill = typeof res.fillPriceSol === 'number' && res.fillPriceSol > 0 ? res.fillPriceSol : entry;
+    // A broadcast that has not confirmed still bought the token, so the
+    // position is real and must be openable — with the caveat ON the record,
+    // not hidden (copy-5).
+    const unconfirmed = !res.ok && res.pending === true;
+    record({
+      ...base,
+      ourSol: spent,
+      state: 'open',
+      entryPriceSol: fill,
+      reason: unconfirmed ? 'broadcast — not confirmed yet' : null,
+    });
+    h.toast(
+      unconfirmed ? 'info' : 'success',
+      `Copied ${c.label || c.wallet.slice(0, 6)}: ${spent} SOL of ${t.symbol}${unconfirmed ? ' (unconfirmed)' : ''}`,
+    );
+    recorder.record('copy_open', {
+      configId: c.id,
+      chain: chainOf(c),
+      mint: t.mint,
+      mode: 'live',
+      ourSol: spent,
+      signature: res.signature ?? null,
+      pending: unconfirmed,
+    });
   } else {
     record({ ...base, reason: res.message.slice(0, 160) });
     h.toast('error', `Copy failed: ${res.message}`);
@@ -749,10 +1116,11 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
 }
 
 /** Mark paper positions to market so open PnL is not stale. */
-export function markToMarket(mint: string, priceSol: number): void {
+export function markToMarket(mint: string, priceSol: number, chain?: ChainKind): void {
   if (!(priceSol > 0)) return;
   for (const t of trades) {
     if (t.state !== 'open' || t.mint !== mint || t.entryPriceSol === null) continue;
+    if (chain !== undefined && (t.chain ?? 'solana') !== chain) continue;
     t.exitPriceSol = priceSol;
   }
   for (const b of Object.values(leaders)) {
@@ -767,7 +1135,13 @@ export function _reset(): void {
   trades = [];
   leaders = {};
   filePath = '';
+  loadFailure = null;
   handled.clear();
+  handledSells.clear();
+  supersededSkips.clear();
+  pendingCopies.clear();
+  recentCopies.clear();
+  exitChains.clear();
 }
 
 export function _load(c: CopyConfig[], t: CopyTrade[], l: Record<string, LeaderBook> = {}): void {

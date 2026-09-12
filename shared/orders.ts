@@ -50,6 +50,11 @@ export type TriggerBasis =
   /** Percentage move from the order's reference price. */
   | 'pct';
 
+/** The whole set, so the renderer form, the IPC handler and the script bridge
+ *  all check against ONE list. Each kept its own copy until 2026-09-09, and
+ *  an unrecognised basis then silently behaved as `price_sol`. */
+export const TRIGGER_BASES: TriggerBasis[] = ['price_sol', 'mcap_usd', 'pct'];
+
 export type OrderState =
   /** Live and being evaluated. */
   | 'armed'
@@ -95,6 +100,18 @@ export interface AdvOrder {
 
   /** Trailing stops only: highest price seen since arming, SOL per token. */
   peakPriceSol: number | null;
+
+  /**
+   * Public key of the wallet this order was written over.
+   *
+   * An order sells "N% of the position", and the position it means is the one
+   * in the wallet the user was looking at. The active signer can change
+   * (disarm → switch → re-arm), and with multi-wallet fan-out several wallets
+   * hold the same mint — so an order that does not name its wallet would sell
+   * whichever bag happens to be active when it fires. Null means unknown (an
+   * order persisted before this field existed); those pause rather than fire.
+   */
+  owner: string | null;
 
   createdAt: number;
   updatedAt: number;
@@ -166,27 +183,46 @@ export function isPctKind(kind: OrderKind): boolean {
 }
 
 /**
+ * What a percentage order is measured FROM, spelled out.
+ *
+ * A "30% stop" is meaningless without saying 30% below what. The anchor is
+ * captured once when the order is written, so a stop written after the token
+ * has already halved is 30% below the halved price, not below the entry —
+ * that is a very different instruction and the user has to be able to see it.
+ * Appended, never prepended, so the leading text stays stable.
+ */
+function anchorText(o: AdvOrder): string {
+  const ref = o.kind === 'trailing_stop' ? (o.peakPriceSol ?? o.referencePriceSol) : o.referencePriceSol;
+  if (ref === null || !Number.isFinite(ref) || ref <= 0) return '';
+  const shown = ref >= 0.0001 ? String(Number(ref.toPrecision(4))) : ref.toExponential(2);
+  return ` (from ${shown} SOL)`;
+}
+
+/**
  * Human summary of what an order will do. Used in the orders list, the
  * confirmation dialog and the chart label, so all three always agree.
  */
 export function describeOrder(o: AdvOrder): string {
   const amt = isBuyKind(o.kind) ? `${o.amount} SOL` : `${o.amount}%`;
+  // An unknown trigger is an em dash, never 0: "$0 market cap" and "−0%"
+  // both read as a real instruction the user never wrote.
+  const num = (v: number | null): string => (v === null || !Number.isFinite(v) ? '—' : String(v));
   switch (o.kind) {
     case 'limit_buy':
     case 'limit_sell': {
       const dir = o.kind === 'limit_buy' ? 'at or below' : 'at or above';
       const target =
         o.triggerBasis === 'mcap_usd'
-          ? `$${Number(o.triggerValue ?? 0).toLocaleString()} market cap`
-          : `${o.triggerValue} SOL`;
+          ? `${o.triggerValue === null || !Number.isFinite(o.triggerValue) ? '—' : `$${o.triggerValue.toLocaleString()}`} market cap`
+          : `${num(o.triggerValue)} SOL`;
       return `${o.kind === 'limit_buy' ? 'Buy' : 'Sell'} ${amt} ${dir} ${target}`;
     }
     case 'take_profit':
-      return `Sell ${amt} at +${o.triggerValue}%`;
+      return `Sell ${amt} at +${num(o.triggerValue)}%${anchorText(o)}`;
     case 'stop_loss':
-      return `Sell ${amt} at −${Math.abs(o.triggerValue ?? 0)}%`;
+      return `Sell ${amt} at −${o.triggerValue === null || !Number.isFinite(o.triggerValue) ? '—' : Math.abs(o.triggerValue)}%${anchorText(o)}`;
     case 'trailing_stop':
-      return `Sell ${amt} if it falls ${o.triggerValue}% from its peak`;
+      return `Sell ${amt} if it falls ${num(o.triggerValue)}% from its peak${anchorText(o)}`;
     case 'sell_on_dev_sell':
       return `Sell ${amt} if the creator sells`;
     case 'sell_on_migration':
@@ -217,6 +253,9 @@ export function triggerPriceSol(o: AdvOrder): number | null {
 export function validateOrder(req: NewOrderRequest): { ok: boolean; message: string } {
   if (!req.mint || req.mint.length < 32) return { ok: false, message: 'Invalid mint address' };
   if (!ORDER_KINDS.includes(req.kind)) return { ok: false, message: 'Unknown order type' };
+  if (!TRIGGER_BASES.includes(req.triggerBasis)) {
+    return { ok: false, message: `Trigger basis must be one of ${TRIGGER_BASES.join(', ')}` };
+  }
 
   if (isBuyKind(req.kind)) {
     if (!(req.amount > 0)) return { ok: false, message: 'Buy amount must be greater than zero' };

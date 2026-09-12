@@ -14,7 +14,7 @@ import { ChevronRight, PlayCircle } from 'lucide-react';
 import { Card, Section } from './common';
 import { cls } from '../utils/format';
 
-interface Guide {
+export interface Guide {
   id: string;
   title: string;
   summary: string;
@@ -206,6 +206,24 @@ function GuideRow({ guide, open, onToggle }: { guide: Guide; open: boolean; onTo
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A guide block a PAGE can host, in the same visual language as the global
+ * Guides section. Pages that need explaining should explain themselves where
+ * the user is, rather than sending them to About and hoping.
+ */
+export function PageGuide({ title, description, guides }: { title?: string; description?: string; guides: Guide[] }) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  return (
+    <Section title={title ?? 'How this page works'} description={description}>
+      <Card padded={false} className="space-y-2 p-3">
+        {guides.map((g) => (
+          <GuideRow key={g.id} guide={g} open={openId === g.id} onToggle={() => setOpenId(openId === g.id ? null : g.id)} />
+        ))}
+      </Card>
+    </Section>
   );
 }
 

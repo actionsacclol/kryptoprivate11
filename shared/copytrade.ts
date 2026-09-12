@@ -1,3 +1,4 @@
+import { type ChainKind } from './evm';
 // ──────────────────────────────────────────────────────────────────────
 // Krypto Bot — copy trading (term.txt section 11).
 //
@@ -25,8 +26,20 @@ export type SizingMode =
   /** A percentage of what they spent, capped. */
   | 'proportional';
 
+/** Which chain a config lives on; absent (every config saved before 2026-09-11) is Solana. */
+export const chainOf = (c: { chain?: ChainKind | null }): ChainKind => c.chain ?? 'solana';
+
 export interface CopyConfig {
   id: string;
+  /**
+   * The chain the followed wallet trades on and the copies go out on.
+   * Solana leaders are watched through the wallet decoder on any DEX;
+   * Robinhood Chain and BNB leaders through the Observatory's trade feed —
+   * their launchpad-curve trades (Pons, four.meme) while a token is on its
+   * curve, which is where a memecoin's first hours happen. Amounts in the
+   * `…Sol` fields are in that chain's own coin.
+   */
+  chain?: ChainKind;
   /** Wallet being followed. */
   wallet: string;
   label: string;
@@ -51,14 +64,38 @@ export interface CopyConfig {
   maxSlippagePct: number;
   /** Mirror their sells too, proportionally to what we hold. */
   copySells: boolean;
+  /**
+   * Which of this install's Solana wallets signs the copies. Null (or
+   * absent, for a config saved before 2026-09-11) is the active wallet. With
+   * it, an active trading wallet and a copy wallet can be different, and two
+   * leaders can be followed on two wallets at once — every config is its own
+   * runner, and this is the wallet it runs on.
+   */
+  walletId?: string | null;
 
   /** Stop copying for the day after losing this much (paper or live). */
   dailyLossLimitSol: number;
   /** Stop after this many copies in a day. */
   dailyTradeLimit: number;
+  /**
+   * Burst wall: at most this many copies in any rolling 60 s (2026-09-09).
+   *
+   * The daily limit is checked against copies that have already RESOLVED, so
+   * a leader who fires eight swaps in one slot could out-run it. The engine
+   * now reserves a slot before it buys, and this is the second wall: it is a
+   * REFUSAL, never a clamp or a queue — the copy is skipped and recorded.
+   *
+   * Optional so a config persisted before this field, or one arriving from an
+   * IPC payload that does not carry it yet, still validates; the engine reads
+   * it as DEFAULT_COPIES_PER_MINUTE when absent.
+   */
+  maxCopiesPerMinute?: number | null;
 
   createdAt: number;
 }
+
+/** Applied when a config does not carry `maxCopiesPerMinute`. */
+export const DEFAULT_COPIES_PER_MINUTE = 10;
 
 export interface CopyStats {
   configId: string;
@@ -86,6 +123,8 @@ export interface CopyTrade {
   id: string;
   configId: string;
   mode: CopyMode;
+  /** The config's chain at the time; absent = Solana. */
+  chain?: ChainKind;
   wallet: string;
   mint: string;
   symbol: string;
@@ -126,8 +165,12 @@ export interface CopyTrade {
  * wallet has its own subscription on the live socket, and its swaps are
  * read from the transaction's balance deltas — so a leader trading through
  * Jupiter into Raydium or Meteora is seen, not only one on the pump.fun
- * curve. `over-cap` is the public socket's ten-subscription limit; a Helius
- * key lifts it.
+ * curve. `over-cap` means THE HOST refused a subscription and the watcher
+ * learned a ceiling from that refusal — it is never an invented number.
+ * Measured 2026-09-09: the public endpoint acked 16 subscriptions on ONE
+ * socket, and `x-ratelimit-pubsub-limit: 10` counts CONNECTIONS per IP, not
+ * subscriptions per socket. The old reading silently unwatched leaders past
+ * ten and told the user to buy a key for a limit that does not exist.
  */
 export interface CopyWatchStatus {
   state: 'watching' | 'connecting' | 'over-cap' | 'off';
@@ -150,6 +193,12 @@ export interface CopySnapshot {
   watch: Record<string, CopyWatchStatus>;
   /** Per followed wallet: THEIR record, from every swap seen (below). */
   leaders: Record<string, LeaderStats>;
+  /**
+   * The store existed but could not be read, so nothing is being saved this
+   * session (2026-09-09). Null on a healthy load. Optional so a snapshot
+   * built before this field still satisfies the type.
+   */
+  loadFailure?: string | null;
 }
 
 // ── The leader's own record ───────────────────────────────────────────
@@ -275,8 +324,9 @@ export function rankLeaders(list: LeaderStats[], by: LeaderRankKey): LeaderStats
   });
 }
 
-export function defaultConfig(wallet: string, label: string): Omit<CopyConfig, 'id' | 'createdAt'> {
+export function defaultConfig(wallet: string, label: string, chain: ChainKind = 'solana'): Omit<CopyConfig, 'id' | 'createdAt'> {
   return {
+    chain,
     wallet,
     label,
     enabled: false,
@@ -292,13 +342,50 @@ export function defaultConfig(wallet: string, label: string): Omit<CopyConfig, '
     delayMs: 0,
     maxSlippagePct: 15,
     copySells: true,
+    walletId: null,
     dailyLossLimitSol: 0.25,
     dailyTradeLimit: 20,
+    maxCopiesPerMinute: DEFAULT_COPIES_PER_MINUTE,
   };
 }
 
 export function validateConfig(c: Omit<CopyConfig, 'id' | 'createdAt'>): { ok: boolean; message: string } {
-  if (!c.wallet || c.wallet.length < 32) return { ok: false, message: 'Enter a valid wallet address' };
+  // The full base58 shape, not just a length: this string is handed to the
+  // wallet watcher to subscribe on, and `copy:resetStats` has always checked
+  // it properly while the save path did not.
+  const chain = chainOf(c);
+  if (chain === 'solana') {
+    const chain = chainOf(c);
+  if (chain === 'solana') {
+    const chain = chainOf(c);
+  if (chain === 'solana') {
+    const chain = chainOf(c);
+  if (chain === 'solana') {
+    const chain = chainOf(c);
+  if (chain === 'solana') {
+    const chain = chainOf(c);
+  if (chain === 'solana') {
+    if (!c.wallet || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.wallet)) return { ok: false, message: 'Enter a valid wallet address' };
+  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
+    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
+  }
+  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
+    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
+  }
+  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
+    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
+  }
+  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
+    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
+  }
+  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
+    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
+  }
+  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
+    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
+  }
+  if (c.walletId !== undefined && c.walletId !== null && (typeof c.walletId !== 'string' || !c.walletId)) return { ok: false, message: 'Pick a wallet to copy with, or leave it on the active one' };
+  if (c.walletId !== undefined && c.walletId !== null && (typeof c.walletId !== 'string' || !c.walletId)) return { ok: false, message: 'Pick a wallet to copy with, or leave it on the active one' };
   if (!(c.sizeValue > 0)) return { ok: false, message: 'Size must be greater than zero' };
   if (c.sizing === 'proportional' && c.sizeValue > 500) {
     return { ok: false, message: 'Proportional size cannot exceed 500% of their trade' };
@@ -316,6 +403,12 @@ export function validateConfig(c: Omit<CopyConfig, 'id' | 'createdAt'>): { ok: b
   if (!(c.dailyLossLimitSol > 0)) return { ok: false, message: 'Set a daily loss limit' };
   if (!(c.dailyTradeLimit > 0) || c.dailyTradeLimit > 500) {
     return { ok: false, message: 'Daily trade limit must be between 1 and 500' };
+  }
+  // Absent is allowed and means the default; present must be sane.
+  if (c.maxCopiesPerMinute !== undefined && c.maxCopiesPerMinute !== null) {
+    if (!(c.maxCopiesPerMinute > 0) || c.maxCopiesPerMinute > 120) {
+      return { ok: false, message: 'Copies per minute must be between 1 and 120' };
+    }
   }
   return { ok: true, message: 'ok' };
 }

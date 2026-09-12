@@ -13,9 +13,14 @@
 //
 // Left as plain JS on purpose:
 //   • main.js  — 3-line bootstrap, no secrets, and it is Electron's entry.
-//   • preload.js — Electron loads it by path as a preload, not via our require
-//     hook, so it cannot be .jsc; it stays obfuscated (and holds only
-//     contextBridge shims).
+//   • preload.js, scriptPreload.js — Electron loads a preload BY PATH, not via
+//     our require. A sandboxed preload (the script sandbox) has no Node
+//     `require` at all, so a bytenode stub throws on its first line and the
+//     bridge is never installed — every code script then fails to start with
+//     "no ready within 8000 ms". The .jsc would also be rejected anyway: V8
+//     cached data is locked to the process type it was compiled in (browser),
+//     and a preload runs in a renderer. Both stay obfuscated instead, and
+//     hold only contextBridge shims.
 
 // Runs as an Electron MAIN script (app mode) — see harden-bytecode.mjs for
 // why run-as-node bytecode is rejected from Electron 43 on. In app mode the
@@ -37,7 +42,7 @@ const path = require('node:path');
 
 try {
 const dir = path.join(__dirname, '..', 'dist-electron');
-const SKIP = new Set(['main.js', 'preload.js']);
+const SKIP = new Set(['main.js', 'preload.js', 'scriptPreload.js']);
 
 let count = 0;
 for (const f of fs.readdirSync(dir)) {

@@ -89,6 +89,16 @@ export type Launchpad =
   | 'boop'
   | 'raydium'
   | 'meteora'
+  /** Pons on Robinhood Chain — a bonding curve that graduates into a locked
+   *  Uniswap v4 pool at 4.2 ETH. The chain's pump.fun. */
+  | 'pons'
+  /** Any other Robinhood Chain listing (Uniswap, Pools.trade, Bags, …). */
+  | 'robinhood'
+  /** four.meme on BNB Smart Chain — a bonding curve that graduates into a
+   *  PancakeSwap v2 pair at 18 BNB. The chain's pump.fun. */
+  | 'fourmeme'
+  /** Any other BNB Smart Chain listing (PancakeSwap, Flap, GraFun, …). */
+  | 'bnb'
   | 'unknown';
 
 export interface TokenSocials {
@@ -141,6 +151,13 @@ export function windowExceedsAge(createdAt: number | null, w: StatsWindow, nowMs
  * user would trade on. `null` renders as an em dash.
  */
 export interface TokenSummary {
+  /**
+   * Which chain this row lives on. Absent means Solana (every row written
+   * before 2026-09-08). On Robinhood Chain `mint` is the 0x token address and
+   * `priceSol` is the price in ETH — the field names stayed so every panel
+   * that renders a row keeps working; the unit label follows `chain`.
+   */
+  chain?: import('./evm').ChainKind;
   mint: string;
   name: string;
   symbol: string;
@@ -168,6 +185,8 @@ export interface TokenSummary {
   bondingCurvePct: number | null;
   /** Pool address for the primary market — the chart's subject. */
   poolAddress: string | null;
+  /** Quote mint of `poolAddress`, when known. See TokenPool.quoteMint. */
+  poolQuoteMint: string | null;
   dexId: string | null;
 
   /** Supply concentration, all 0..100. Null where unmeasured. */
@@ -267,6 +286,7 @@ export function emptySummary(mint: string): TokenSummary {
     stats: {},
     bondingCurvePct: null,
     poolAddress: null,
+    poolQuoteMint: null,
     dexId: null,
     devHoldingPct: null,
     top10Pct: null,
@@ -646,6 +666,15 @@ export interface TokenPool {
   dexId: string;
   label: string;
   liquidityUsd: number | null;
+  /**
+   * The pool's QUOTE mint, when the provider named it.
+   *
+   * A pool quoted in USDC prices the token in dollars, not SOL. The live-tape
+   * watchers divide raw quote amounts by 1e9 (SOL's decimals), so handing them
+   * a non-SOL pool prices the whole tape — chart, rememberPrice and every
+   * advOrders trigger — in the wrong currency. Null means unknown.
+   */
+  quoteMint: string | null;
 }
 
 export interface TokenDetail {
@@ -672,6 +701,10 @@ export interface DataSettings {
   providers: Record<ProviderId, boolean>;
   /** BYO key. Empty = Birdeye stays unusable. */
   birdeyeApiKey: string;
+  /** BYO key. Empty = the keyless (and retiring) `lite-api.jup.ag`; set = the
+   *  successor `api.jup.ag` at its documented 1 rps. Jupiter works either
+   *  way — see electron/data/http.ts. */
+  jupiterApiKey: string;
   /** BYO keys for GIF backgrounds on cards and replays. Empty = that
    *  provider is not offered. Both are free and neither is required for
    *  anything else in the app. */
@@ -704,6 +737,7 @@ export const DEFAULT_DATA_SETTINGS: DataSettings = {
     rugcheck: true,
   },
   birdeyeApiKey: '',
+  jupiterApiKey: '',
   giphyApiKey: '',
   tenorApiKey: '',
   discoverRefreshSec: 8,

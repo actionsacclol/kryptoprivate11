@@ -88,11 +88,34 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
 
   const runningCount = runs.filter((r) => r.running).length;
 
+  // A run whose group was deleted still holds bags, and the engine still sells
+  // them on their timers — but this page renders runs THROUGH the group list,
+  // so those bags would simply vanish from the UI. They get their own card
+  // below instead, so nothing you still own goes invisible.
+  const groupIds = new Set(groups.map((g) => g.id));
+  const orphanRuns = runs.filter((r) => !groupIds.has(r.groupId) && r.open.length > 0);
+
+  // The run file could not be read, so nothing is being written to it either.
+  // Bags opened now would be forgotten by the next launch, which is exactly
+  // the thing the user needs to know BEFORE they arm anything.
+  const loadFailure = runs.find((r) => r.loadFailure)?.loadFailure ?? null;
+
   return (
     <Page
       title="Warmer"
       subtitle={`${groups.length} group${groups.length === 1 ? '' : 's'} · ${runningCount} run${runningCount === 1 ? '' : 's'} active`}
     >
+      {loadFailure && (
+        <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+          <div className="font-semibold">The warmer&rsquo;s record of open bags could not be read.</div>
+          <div className="mt-1 font-mono text-[11px] text-rose-300/90">{loadFailure}</div>
+          <div className="mt-1">
+            Nothing is being written to it this session, so the file is left intact — but a bag opened now is not remembered
+            across a restart. Fix or move that file before arming.
+          </div>
+        </div>
+      )}
+
       <RealMoneyBanner armed={armed} what="Nothing here is a strategy; the warmer is expected to lose fees and slippage. The loss cap is on realised cash of CLOSED trades — bags still held count at cost, so it stops when money has actually been lost, not for holding. Open bags survive a stop, a disarm and a restart, and keep selling on their timers." />
 
       {groups.length === 0 ? (
@@ -104,7 +127,13 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
             const dirty = !!draft[g.id];
             const run = runs.find((x) => x.groupId === g.id) ?? null;
             const running = run?.running === true;
-            const lossPct = run ? Math.min(100, Math.max(0, (-run.realizedSol / Math.max(1e-9, run.maxLossSol)) * 100)) : 0;
+            // A restored run has no realised figure it can honestly state and
+            // its cap is resolved lazily, so the bar is drawn only when both
+            // are real. Dividing by a 1e-9 floor used to pin it at 100 % next
+            // to a "cap 0.0000 SOL" label.
+            const capKnown = typeof run?.maxLossSol === 'number' && run.maxLossSol > 0;
+            const realKnown = run != null && run.realizedSol !== null && Number.isFinite(run.realizedSol);
+            const lossPct = run && capKnown && realKnown ? Math.min(100, Math.max(0, (-(run.realizedSol as number) / run.maxLossSol) * 100)) : null;
             const members = g.members.filter((m) => m.id !== active?.id);
             const scopeWallet = scope[g.id] || '';
             return (
@@ -194,13 +223,21 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
                         {running && <span className="font-mono text-krypt-muted">next action in {countdown(run.nextActionAt)}</span>}
                       </div>
                       <div className="mt-2 flex items-center gap-2">
-                        <span className={cls('font-mono', run.realizedSol >= 0 ? 'text-emerald-300' : 'text-rose-300')} title="Closed trades only; open bags are carried at cost">
-                          {run.realizedSol >= 0 ? '+' : ''}{fmtSol(run.realizedSol)} SOL realised on closed trades
-                        </span>
-                        <div className="flex-1 h-1.5 rounded-full bg-white/8 overflow-hidden" title="Realised loss on closed trades against the cap">
-                          <div className="h-full rounded-full bg-gradient-to-r from-arc-gold to-rose-400" style={{ width: `${lossPct}%` }} />
-                        </div>
-                        <span className="font-mono text-krypt-muted">cap {fmtSol(run.maxLossSol)} SOL</span>
+                        {realKnown ? (
+                          <span className={cls('font-mono', (run.realizedSol as number) >= 0 ? 'text-emerald-300' : 'text-rose-300')} title="Closed trades only; open bags are carried at cost">
+                            {(run.realizedSol as number) >= 0 ? '+' : ''}{fmtSol(run.realizedSol as number)} SOL realised on closed trades
+                          </span>
+                        ) : (
+                          <span className="font-mono text-krypt-muted" title="Some of this run's fills have not been read back from the chain yet, so the realised figure is unknown">
+                            — SOL realised on closed trades
+                          </span>
+                        )}
+                        {lossPct !== null && (
+                          <div className="flex-1 h-1.5 rounded-full bg-white/8 overflow-hidden" title="Realised loss on closed trades against the cap">
+                            <div className="h-full rounded-full bg-gradient-to-r from-arc-gold to-rose-400" style={{ width: `${lossPct}%` }} />
+                          </div>
+                        )}
+                        <span className="font-mono text-krypt-muted">cap {capKnown ? `${fmtSol(run.maxLossSol)} SOL` : '—'}</span>
                       </div>
                       {run.open.length > 0 && (
                         <div className="mt-2 space-y-0.5">
@@ -227,6 +264,39 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
             );
           })}
         </div>
+      )}
+
+      {/* A run is normally rendered through its group. If the group is gone
+          the run is not — and its bags keep selling on their timers with
+          nowhere to report a failure. Show them here so they stay visible. */}
+      {orphanRuns.length > 0 && (
+        <Section>
+          <Card>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-[13px] font-semibold text-white">Bags from deleted groups</span>
+              <Badge tone="warn">{orphanRuns.reduce((n, r) => n + r.open.length, 0)} held</Badge>
+            </div>
+            <div className="text-[11px] text-krypt-muted mb-3">
+              These runs belong to groups that no longer exist. Their bags still sell on their own timers; sell one by hand from its token page if you would rather not wait.
+            </div>
+            <div className="space-y-1 text-[11px]">
+              {orphanRuns.flatMap((r) =>
+                r.open.map((o) => (
+                  <div key={`${r.groupId}:${o.walletId}:${o.mint}`} className="flex items-center gap-2">
+                    <span className="text-krypt-muted">{labelOf.get(o.walletId) ?? shortAddr(o.walletId)}</span>
+                    <button onClick={() => onOpenToken(o.mint)} className="text-white hover:text-krypt-pink font-medium">
+                      {o.symbol || shortAddr(o.mint)}
+                    </button>
+                    <span className="font-mono text-krypt-muted">
+                      {o.costSol !== null ? `${fmtSol(o.costSol)} SOL · ` : ''}sells in {countdown(o.sellAt)}
+                      {o.tries ? ` · retry ${o.tries + 1}` : ''}
+                    </span>
+                  </div>
+                )),
+              )}
+            </div>
+          </Card>
+        </Section>
       )}
     </Page>
   );
