@@ -156,6 +156,7 @@
  "esbuild electron/engine/randomLab.ts --bundle --alias:@shared=./shared --format=esm --platform=node --outfile=test/.randomlab.mjs",
  "node test/randomlab.test.mjs",
  "node test/buildtarget.test.mjs",
+ "node test/asarlayout.test.mjs",
  "esbuild electron/system/wallet.ts --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --bundle --alias:@shared=./shared --alias:electron=./test/electron-stub.mjs --format=esm --platform=node --outfile=test/.wallet.mjs",
  "node test/walletintegrity.test.mjs",
  "esbuild src/components/terminal/cardLayout.ts --bundle --format=esm --platform=node --outfile=test/.cardlayout.mjs",

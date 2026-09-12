@@ -46,6 +46,21 @@ function assertBytecodeMatchesTarget(context) {
 }
 
 /**
+ * Where electron-builder put app.asar. Windows and Linux lay the app out flat
+ * (`<appOutDir>/resources/app.asar`); macOS wraps it in a bundle
+ * (`<appOutDir>/<Product>.app/Contents/Resources/app.asar`). The first macOS
+ * CI run (2026-09-12) failed in `assertBytecodeIsPackaged` with "no app.asar
+ * at release/mac-arm64/resources/app.asar" because only the flat layout was
+ * known — the asar was there, one directory deeper.
+ */
+function packagedAsarPath({ appOutDir, electronPlatformName, packager }) {
+  if (electronPlatformName === 'darwin') {
+    return path.join(appOutDir, `${packager.appInfo.productFilename}.app`, 'Contents', 'Resources', 'app.asar');
+  }
+  return path.join(appOutDir, 'resources', 'app.asar');
+}
+
+/**
  * The bytecode must be IN the package, not merely correct on disk.
  *
  * `assertBytecodeMatchesTarget` checks the bytecode's platform and arch. It
@@ -58,12 +73,12 @@ function assertBytecodeMatchesTarget(context) {
  * A stub without its bytecode is the one failure that looks like success all
  * the way to the user, so it is asserted against the artefact itself.
  */
-function assertBytecodeIsPackaged(appOutDir) {
+function assertBytecodeIsPackaged(context) {
   const stamp = path.join(process.cwd(), 'dist-electron', 'bytecode-target.json');
   // No stamp means a plain-JavaScript build: nothing to look for.
   if (!fs.existsSync(stamp)) return;
 
-  const asarPath = path.join(appOutDir, 'resources', 'app.asar');
+  const asarPath = packagedAsarPath(context);
   if (!fs.existsSync(asarPath)) {
     throw new Error(`[fuses] no app.asar at ${asarPath} — cannot verify the bytecode shipped`);
   }
@@ -118,7 +133,7 @@ function assertBytecodeIsPackaged(appOutDir) {
 module.exports = async function afterPack(context) {
   const { appOutDir, packager, electronPlatformName } = context;
   assertBytecodeMatchesTarget(context);
-  assertBytecodeIsPackaged(appOutDir);
+  assertBytecodeIsPackaged(context);
   // Linux binaries carry no extension; naming one anyway skipped the fuses
   // silently and shipped an unhardened build.
   const exeName =
@@ -150,3 +165,4 @@ module.exports = async function afterPack(context) {
 // Exported so a test can pin the rules without packaging anything.
 module.exports.assertBytecodeMatchesTarget = assertBytecodeMatchesTarget;
 module.exports.assertBytecodeIsPackaged = assertBytecodeIsPackaged;
+module.exports.packagedAsarPath = packagedAsarPath;
