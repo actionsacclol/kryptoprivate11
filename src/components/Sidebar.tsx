@@ -21,7 +21,7 @@ import {
   Sparkles,
   Telescope,
   BookMarked,
-  Wallet, Flame, Coins, Thermometer, Copy, FolderPlus, Receipt, Code2, Repeat, Shuffle } from 'lucide-react';
+  Wallet, Flame, Coins, Thermometer, Copy, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout } from 'lucide-react';
 import { groupsFor, workspaceSpec, type WorkspaceId } from '../workspaces';
 import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
@@ -54,6 +54,7 @@ export type RouteId =
   | 'orders'
   | 'wallets'
   | 'scripts'
+  | 'farming'
   | 'dashboard'
   | 'observatoryrobinhood'
   | 'observatorybnb'
@@ -123,6 +124,7 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   // keys — a collision that got worse once a single "Wallet" held several.
   { id: 'wallets', label: 'Copy Trading', hint: "Follow other traders' wallets", icon: Users },
   { id: 'scripts', label: 'Scripts', hint: 'Your own rules and code, under a budget — paper first', icon: Code2 },
+  { id: 'farming', label: 'Farming', hint: 'Not built yet — what it would be, and what has to be true first', icon: Sprout },
   { id: 'creator', label: 'Group Wallets', hint: 'Make a group of wallets to fund, warm or trade together', icon: FolderPlus },
   { id: 'funder', label: 'Funder', hint: 'Fund wallets from the active one, by group or individually; collect back', icon: Coins },
   { id: 'warmer', label: 'Warmer', hint: 'Random autotrading on a group or one wallet, under a loss cap', icon: Thermometer },
@@ -183,7 +185,7 @@ function NavButton({
       onFocus={() => void prefetchRoute(route.id)}
       title={route.hint}
       className={cls(
-        'group flex items-center gap-3 rounded-md px-3 py-2 text-[13px] font-medium transition relative',
+        'group flex items-center gap-3 rounded-md px-3 py-2 text-value font-medium transition relative',
         active
           ? 'bg-white/[0.07] text-white border border-white/10 shadow-[inset_0_1px_0_rgba(240,237,226,0.05)]'
           : 'text-krypt-muted hover:text-white hover:bg-white/5 border border-transparent',
@@ -192,7 +194,7 @@ function NavButton({
       <Icon className={cls('h-4 w-4 flex-shrink-0', active && 'text-krypt-purple')} />
       {route.label}
       {badge !== undefined && badge > 0 && (
-        <span className="ml-auto mr-3 rounded-full border border-arc-gold/40 bg-arc-gold/10 px-1.5 py-px font-mono text-[10px] text-arc-gold">
+        <span className="ml-auto mr-3 rounded-full border border-arc-gold/40 bg-arc-gold/10 px-1.5 py-px font-mono text-label text-arc-gold">
           {badge}
         </span>
       )}
@@ -209,7 +211,7 @@ function NavButton({
 function GroupLabel({ children }: { children: string }) {
   return (
     <div className="flex items-center gap-2 px-3 pt-3 pb-1.5">
-      <span className="font-display text-[9px] font-semibold uppercase tracking-[0.3em] text-krypt-muted/50 whitespace-nowrap">
+      <span className="font-display text-micro font-semibold uppercase tracking-heading text-krypt-muted/50 whitespace-nowrap">
         {children}
       </span>
       <div className="h-px flex-1 bg-gradient-to-r from-white/8 to-transparent" aria-hidden="true" />
@@ -284,8 +286,8 @@ export function Sidebar({
           onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
         />
         <div>
-          <div className="font-display text-[15px] font-bold tracking-[0.14em] text-krypt-gradient leading-none">KRYPTO</div>
-          <div className="font-display text-[9px] tracking-[0.36em] text-arc-gold/80 leading-none mt-1.5">TERMINAL</div>
+          <div className="font-display text-figure font-bold tracking-label text-krypt-gradient leading-none">KRYPTO</div>
+          <div className="font-display text-micro tracking-eyebrow text-arc-gold/80 leading-none mt-1.5">TERMINAL</div>
         </div>
       </div>
 
@@ -293,12 +295,12 @@ export function Sidebar({
 
       <button
         onClick={onHub}
-        className="mx-3 mt-3 flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-[12px] font-medium text-krypt-muted transition hover:border-krypt-purple/40 hover:bg-krypt-purple/10 hover:text-white"
+        className="mx-3 mt-3 flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-note font-medium text-krypt-muted transition hover:border-krypt-purple/40 hover:bg-krypt-purple/10 hover:text-white"
         title="Back to the Hub"
       >
         <Home className="h-3.5 w-3.5" />
         Hub
-        {spec && <span className="ml-auto truncate text-[10px] text-krypt-muted/60">{spec.title}</span>}
+        {spec && <span className="ml-auto truncate text-label text-krypt-muted/60">{spec.title}</span>}
       </button>
 
       <nav className="flex-1 px-3 pb-3 flex flex-col gap-0.5 overflow-y-auto">
@@ -329,7 +331,7 @@ export function Sidebar({
             running             ? 'bg-amber-400 animate-pulse-slow' :
                                   'bg-krypt-muted/40',
           )} />
-          <div className="font-display text-[10px] tracking-[0.24em] uppercase text-krypt-muted">
+          <div className="font-display text-label tracking-label uppercase text-krypt-muted">
             {running && feedLive ? 'Scanning' : running ? 'Attuning' : 'Dormant'}
           </div>
         </div>
@@ -354,7 +356,7 @@ export function Sidebar({
           </button>
         </div>
 
-        <div className="text-[10px] text-krypt-muted/45 px-1 leading-relaxed">
+        <div className="text-label text-krypt-muted/45 px-1 leading-relaxed">
           <div>Free · no ads, no telemetry</div>
           <button
             onClick={() => onNavigate('legal')}

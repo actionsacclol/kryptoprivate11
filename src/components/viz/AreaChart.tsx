@@ -102,7 +102,7 @@ export function AreaChart({
       </svg>
       {hover && hp && (
         <div
-          className="pointer-events-none absolute top-1 rounded-lg border border-white/10 bg-black/85 px-2.5 py-1.5 text-[11px] font-mono backdrop-blur-sm"
+          className="pointer-events-none absolute top-1 rounded-lg border border-white/10 bg-black/85 px-2.5 py-1.5 text-body font-mono backdrop-blur-sm"
           style={{ left: `${Math.min(86, Math.max(2, (hover.x / width) * 100))}%` }}
         >
           <span className="text-krypt-muted">{fmtClock(hp.t)} · </span>

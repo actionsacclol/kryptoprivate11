@@ -50,7 +50,7 @@ function ScannerButton({
       disabled={disabled}
       title={title}
       className={cls(
-        'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40',
+        'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-note font-semibold transition disabled:cursor-not-allowed disabled:opacity-40',
         running
           ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25'
           : 'border-white/10 bg-white/5 text-white/80 hover:border-white/20 hover:bg-white/10',
@@ -103,8 +103,8 @@ function useEvmScanners(): { running: Record<EvmChainKind, boolean | null>; refr
 function Readout({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-1.5">
-      <span className="text-[9px] font-display uppercase tracking-[0.24em] text-krypt-muted">{label}</span>
-      <span className="font-mono text-[12px] text-white/85">{value}</span>
+      <span className="text-micro font-display uppercase tracking-label text-krypt-muted">{label}</span>
+      <span className="font-mono text-note text-white/85">{value}</span>
     </div>
   );
 }
@@ -141,7 +141,7 @@ export function AutomationBar() {
   return (
     <div className="flex flex-wrap items-center gap-3 border-b border-white/8 bg-black/20 px-6 py-2.5">
       <span className="flex items-center gap-1.5">
-        <span className="text-[9px] font-display uppercase tracking-[0.24em] text-krypt-muted">Scanners</span>
+        <span className="text-micro font-display uppercase tracking-label text-krypt-muted">Scanners</span>
         <ScannerButton
           label="Solana"
           title={status.running ? 'Stop the Solana engine' : 'Start the Solana engine — it watches launches and never trades'}
@@ -174,7 +174,7 @@ export function AutomationBar() {
             ? 'Nothing is running, armed, or open'
             : 'Stop the engine, disarm live execution on every chain, and close every open paper position'
         }
-        className="inline-flex items-center gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-1.5 text-[13px] font-semibold text-rose-200 transition hover:bg-rose-500/20 hover:shadow-crimson-glow disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+        className="inline-flex items-center gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-1.5 text-value font-semibold text-rose-200 transition hover:bg-rose-500/20 hover:shadow-crimson-glow disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
       >
         <OctagonX className="h-3.5 w-3.5" />
         Kill switch
@@ -183,7 +183,7 @@ export function AutomationBar() {
       {status.running && status.entriesPaused && (
         <span
           title={status.pauseReason ?? ''}
-          className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-amber-300"
+          className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-label font-semibold uppercase tracking-wider text-amber-300"
         >
           entries paused
         </span>
@@ -201,7 +201,7 @@ export function AutomationBar() {
             ? 'The scanner judges every launch at +60 s and +120 s with the measured graduation-odds model and flags the top buckets to you. It never buys.'
             : 'Runner alerts are off (Strategy → Runner alerts). The scanner still tracks launches; it never buys.'
         }
-        className="inline-flex items-center gap-1.5 rounded-full border border-arc-gold/40 bg-arc-gold/10 px-3 py-1 font-display text-[10px] font-bold uppercase tracking-[0.2em] text-arc-gold"
+        className="inline-flex items-center gap-1.5 rounded-full border border-arc-gold/40 bg-arc-gold/10 px-3 py-1 font-display text-label font-bold uppercase tracking-label text-arc-gold"
       >
         {settings.strategy.runnerAlerts?.enabled ? 'Runner alerts on' : 'Runner alerts off'}
       </span>
@@ -217,7 +217,7 @@ export function AutomationBar() {
                 : 'bg-amber-400 animate-pulse-slow',
           )}
         />
-        <span className="text-[10px] font-display uppercase tracking-[0.24em] text-krypt-muted">{status.feed}</span>
+        <span className="text-label font-display uppercase tracking-label text-krypt-muted">{status.feed}</span>
       </div>
 
       <Readout label="Ev/s" value={status.running ? status.eventsPerSec.toFixed(1) : '—'} />

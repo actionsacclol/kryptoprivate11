@@ -19,6 +19,7 @@
 // ──────────────────────────────────────────────────────────────────────
 
 import type { ClosedTrade, Position, TradeHistoryRow } from './portfolio';
+import type { ChainKind } from './evm';
 
 /** Flat cost modelled on every paper sell, percent of gross proceeds. */
 export const PAPER_ROUND_TRIP_COST_PCT = 1;
@@ -67,6 +68,15 @@ export function modelledPaperFill(solIn: number, priceSol: number): { tokens: nu
 
 export interface PaperPosition {
   mint: string;
+  /**
+   * Which chain this simulated position is on. Absent on every position
+   * written before 2026-09-14, which were all Solana.
+   *
+   * It is part of the KEY, not decoration: the same 0x address can exist on
+   * both Robinhood Chain and BNB, so a book keyed on the address alone would
+   * merge two different tokens into one position and sell the wrong one.
+   */
+  chain?: ChainKind;
   symbol: string;
   /** Tokens still held. UI units when `decimalsKnown`, raw base units otherwise. */
   tokens: number;
@@ -112,14 +122,19 @@ const round = (v: number): number => Math.round(v * 1e9) / 1e9;
  * Open (or add to) a paper position from a successful dry run.
  * Adding to an existing position averages the cost, like the real portfolio.
  */
+/** Positions are identified by chain AND address — see PaperPosition.chain. */
+export function samePaperKey(a: { mint: string; chain?: ChainKind }, b: { mint: string; chain?: ChainKind }): boolean {
+  return a.mint === b.mint && (a.chain ?? 'solana') === (b.chain ?? 'solana');
+}
+
 export function openPaper(
   book: PaperBook,
-  p: { mint: string; symbol: string; tokens: number; costSol: number; decimalsKnown: boolean },
+  p: { mint: string; symbol: string; tokens: number; costSol: number; decimalsKnown: boolean; chain?: ChainKind },
   now = Date.now(),
 ): { ok: boolean; message: string; book: PaperBook; position: PaperPosition | null } {
   if (!(p.tokens > 0)) return { ok: false, message: 'Simulation reported no tokens received — no paper position opened', book, position: null };
   if (!(p.costSol > 0)) return { ok: false, message: 'Simulation reported no SOL spent — no paper position opened', book, position: null };
-  const existing = book.open.find((x) => x.mint === p.mint);
+  const existing = book.open.find((x) => samePaperKey(x, p));
   if (!existing && book.open.length >= MAX_OPEN_PAPER_POSITIONS) {
     return { ok: false, message: `Paper book is full (${MAX_OPEN_PAPER_POSITIONS} open) — close some first`, book, position: null };
   }
@@ -139,6 +154,7 @@ export function openPaper(
   } else {
     position = {
       mint: p.mint,
+      chain: p.chain ?? 'solana',
       symbol: p.symbol,
       tokens: p.tokens,
       costSol: p.costSol,
@@ -149,7 +165,7 @@ export function openPaper(
       fills: [fill],
     };
   }
-  const open = existing ? book.open.map((x) => (x.mint === p.mint ? position : x)) : [...book.open, position];
+  const open = existing ? book.open.map((x) => (samePaperKey(x, p) ? position : x)) : [...book.open, position];
   return { ok: true, message: 'ok', book: { ...book, open }, position };
 }
 
@@ -164,9 +180,10 @@ export function sellPaper(
   pct: number,
   priceSol: number | null,
   now = Date.now(),
+  chain: ChainKind = 'solana',
 ): PaperSellResult {
   const fail = (message: string): PaperSellResult => ({ ok: false, message, book, tokensSold: 0, proceedsSol: 0, realizedSol: 0, closed: false });
-  const pos = book.open.find((x) => x.mint === mint);
+  const pos = book.open.find((x) => samePaperKey(x, { mint, chain }));
   if (!pos) return fail('No paper position in this token');
   const share = Math.max(1, Math.min(100, Math.round(pct))) / 100;
   const tokensSold = share >= 1 ? pos.tokens : round(pos.tokens * share);
@@ -191,7 +208,7 @@ export function sellPaper(
   let open: PaperPosition[];
   let closed = book.closed;
   if (closedAll) {
-    open = book.open.filter((x) => x.mint !== mint);
+    open = book.open.filter((x) => !samePaperKey(x, { mint, chain }));
     const totalCost = pos.fills.filter((f) => f.side === 'buy').reduce((a, f) => a + f.sol, 0);
     const totalProceeds = pos.fills.filter((f) => f.side === 'sell').reduce((a, f) => a + f.sol, 0) + proceeds;
     const pnl = round(totalProceeds - totalCost);
@@ -228,7 +245,7 @@ export function sellPaper(
       realizedSol: round(pos.realizedSol + realized),
       fills: [...pos.fills, fill],
     };
-    open = book.open.map((x) => (x.mint === mint ? next : x));
+    open = book.open.map((x) => (samePaperKey(x, { mint, chain }) ? next : x));
   }
   const what = closedAll ? 'closed' : `sold ${Math.round(share * 100)}% of`;
   const message = pos.decimalsKnown

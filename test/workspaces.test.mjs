@@ -54,13 +54,23 @@ test('a borrowed route still reports its real home', () => {
 });
 
 test('the three workspaces asked for exist and hold the right pages', () => {
-  const copy = routesFor('copy');
-  assert.ok(copy.includes('wallets'), 'copy trading holds the follow-a-wallet page');
+  // Was "Copy Trading" and held one page. Renamed to Automation on
+  // 2026-09-13 and given the other two things that act without a click.
+  const automation = routesFor('automation');
+  for (const r of ['wallets', 'scripts', 'farming']) {
+    assert.ok(automation.includes(r), `automation holds ${r}`);
+  }
 
   const engine = routesFor('engine');
-  for (const r of ['dashboard', 'launches', 'scripts', 'strategy', 'execution']) {
+  for (const r of ['dashboard', 'launches', 'strategy', 'execution']) {
     assert.ok(engine.includes(r), `main engine holds ${r}`);
   }
+  // Scripts LEFT Main Engine — home and listing both. Two menus showing one
+  // page is how the flat sidebar became unreadable, so this is not an
+  // `extraRoutes` case and a future edit that re-lists it should have to
+  // delete this line.
+  assert.ok(!engine.includes('scripts'), 'scripts is not listed in Main Engine any more');
+  assert.equal(workspaceOf('scripts'), 'automation', 'and its home is Automation');
 
   const utils = routesFor('wallets');
   for (const r of ['creator', 'funder', 'warmer', 'copier']) {
@@ -152,10 +162,28 @@ test('sidebar sections cover every page the workspace lists, exactly once', () =
 });
 
 test('a workspace with no sections of its own still renders one plain list', () => {
-  const copy = groupsFor('copy');
-  assert.equal(copy.length, 1);
-  assert.equal(copy[0].label, null, 'no heading over a single-item menu');
-  assert.deepEqual(copy[0].routes, routesFor('copy'));
+  // Automation names no groups: three items do not need headings, and "a lone
+  // heading over every item in the menu is decoration".
+  const automation = groupsFor('automation');
+  assert.equal(automation.length, 1);
+  assert.equal(automation[0].label, null, 'no headings over a three-item menu');
+  assert.deepEqual(automation[0].routes, routesFor('automation'));
+});
+
+test('Farming is reachable but ships with nothing running', () => {
+  // It is a placeholder in Automation so the shape of the workspace is
+  // visible while the feature is designed. Two separate pieces of work in
+  // this repo (2026-08-15 returns ceiling; the 2026-09-09 airdrop swarm)
+  // found the obvious versions do not pay, and the page says so rather than
+  // pretending to be a feature.
+  assert.equal(workspaceOf('farming'), 'automation');
+  assert.ok(routesFor('automation').includes('farming'));
+  const src = fs.readFileSync(new URL('../src/pages/Farming.tsx', import.meta.url), 'utf8');
+  assert.match(src, /Not built yet/, 'the page says plainly that nothing runs');
+  // It prices a run but must not BE one: no trade call, nothing armed.
+  for (const forbidden of ['live.buy', 'live.sell', 'live.sellToken', 'lab.start', 'setLive']) {
+    assert.ok(!src.includes(forbidden), `the preset page must not call ${forbidden}`);
+  }
 });
 
 test('Rewards states what you earn — it is not an airdrop hunter', () => {

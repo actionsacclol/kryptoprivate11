@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Copy, Download, ExternalLink, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
+import { AlertTriangle, Download, ExternalLink, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
 import { EVM_CHAIN_META, EVM_CHAINS, explorerTx, VENUE_LABEL, walletVisibleOn, type EvmChainKind, type EvmFill, type EvmHolding, type EvmState, type EvmWalletSummary } from '@shared/evm';
-import { Card, GhostButton, PrimaryButton, Section } from '../common';
+import { Card, Copyable, GhostButton, PrimaryButton, Section } from '../common';
 import { useToast } from '../../state/ToastProvider';
 import { useModal } from '../../state/ModalProvider';
 import { useEvmState } from '../../state/useEvmState';
@@ -32,22 +32,6 @@ import { fmtNative, fmtTokens, isPendingResult, PENDING_TOAST, weiToNumber } fro
 // one line rather than silently dropping it. Which one is the caller's call —
 // the first ENABLED chain — because a chain switched off in Settings has no
 // panel at all.
-
-function Copyable({ value }: { value: string }) {
-  const toast = useToast();
-  return (
-    <button
-      onClick={() => {
-        void navigator.clipboard.writeText(value);
-        toast.success('Copied');
-      }}
-      className="group inline-flex items-center gap-2 rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm text-white hover:border-krypt-purple/40 transition w-full"
-    >
-      <span className="truncate">{value}</span>
-      <Copy className="h-3.5 w-3.5 text-krypt-muted group-hover:text-krypt-purple flex-shrink-0 ml-auto" />
-    </button>
-  );
-}
 
 const DEPOSIT_NOTE: Record<EvmChainKind, string> = {
   robinhood: 'Only ETH on Robinhood Chain (chain id 4663). Bridge at robinhood.com/chain/bridging. Start small — 0.01–0.05 ETH is plenty to test with.',
@@ -96,15 +80,15 @@ function ChainStrip({ chain, evm, refresh }: { chain: EvmChainKind; evm: EvmStat
   return (
     <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
       <div>
-        <div className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted">{meta.name}</div>
+        <div className="text-label uppercase tracking-label text-krypt-muted">{meta.name}</div>
         <div className="mt-1 text-2xl font-bold font-mono text-white">
           {evm === null ? '…' : fmtNative(info?.balanceNative ?? null, meta.nativeSymbol, 5)}
         </div>
-        {info?.balanceCheckedAt ? <div className="text-[11px] text-krypt-muted/60">checked {fmtClock(info.balanceCheckedAt)}</div> : null}
-        {disarmNote && <div className="text-[11px] text-krypt-muted/70 mt-0.5">{disarmNote}</div>}
+        {info?.balanceCheckedAt ? <div className="text-body text-krypt-muted/60">checked {fmtClock(info.balanceCheckedAt)}</div> : null}
+        {disarmNote && <div className="text-body text-krypt-muted/70 mt-0.5">{disarmNote}</div>}
       </div>
       <div className="flex items-center gap-2">
-        <div className="inline-flex rounded-lg border border-white/12 overflow-hidden text-[10px] font-bold uppercase tracking-[0.14em]">
+        <div className="inline-flex rounded-lg border border-white/12 overflow-hidden text-label font-bold uppercase tracking-label">
           <button
             onClick={() => void setMode(false)}
             className={cls('px-3 py-1.5 transition', !armed ? 'bg-emerald-500/20 text-emerald-200' : 'text-krypt-muted hover:text-white')}
@@ -387,16 +371,16 @@ export function EvmWalletPanel({
         {walletFailure ? (
           <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-3 py-2.5 flex items-start gap-2">
             <AlertTriangle className="h-4 w-4 text-rose-300 flex-shrink-0 mt-0.5" />
-            <p className="text-[11px] text-rose-200 leading-relaxed">
+            <p className="text-body text-rose-200 leading-relaxed">
               Wallet file could not be read — <span className="font-semibold">nothing was overwritten</span>. {walletFailure} Fix or move that
               file and restart; generating or importing is blocked until then so the existing keys stay safe.
             </p>
           </div>
         ) : !loaded ? (
-          <div className="text-[11px] text-krypt-muted">Reading wallet…</div>
+          <div className="text-body text-krypt-muted">Reading wallet…</div>
         ) : !exists ? (
           !showWallet ? (
-            <div className="text-[11px] text-krypt-muted leading-relaxed">
+            <div className="text-body text-krypt-muted leading-relaxed">
               No {meta.name} wallet yet. Make one in the {EVM_CHAIN_META[otherChain].shortName} panel, or here once this panel owns the key block.
             </div>
           ) : (
@@ -437,13 +421,13 @@ export function EvmWalletPanel({
             <div>
               {showWallet ? (
                 <>
-                  <div className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted mb-1">Deposit address · {meta.name}</div>
+                  <div className="text-label uppercase tracking-label text-krypt-muted mb-1">Deposit address · {meta.name}</div>
                   <Copyable value={info?.address ?? ''} />
-                  <div className="text-[11px] text-krypt-muted/70 mt-1">{DEPOSIT_NOTE[tab]}</div>
+                  <div className="text-body text-krypt-muted/70 mt-1">{DEPOSIT_NOTE[tab]}</div>
                   {sharedSigner && (
                     <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2">
                       <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-amber-300" />
-                      <p className="text-[11px] leading-relaxed text-amber-200">
+                      <p className="text-body leading-relaxed text-amber-200">
                         Robinhood Chain and BNB Smart Chain are signing with the <span className="font-semibold">same key</span> — one from before the
                         chains were split. Press <span className="font-semibold">New {meta.shortName} wallet</span> below to give {meta.name} its own;{' '}
                         {otherMeta.shortName} keeps this one.
@@ -453,12 +437,12 @@ export function EvmWalletPanel({
                 </>
               ) : (
                 // Not an omission — say whose key this is and where it lives.
-                <div className="text-[11px] text-krypt-muted/70">
+                <div className="text-body text-krypt-muted/70">
                   Same wallet as {EVM_CHAIN_META[otherChain].name} — one EVM key, the same address on both. Manage it (generate, import, switch,
                   rename, remove) in the {EVM_CHAIN_META[otherChain].shortName} panel. Deposits to that address arrive on {meta.name} too.
                 </div>
               )}
-              <div className="text-[11px] text-krypt-muted/60 mt-1">
+              <div className="text-body text-krypt-muted/60 mt-1">
                 Each EVM chain starts in Paper and is armed by hand; there are no per-trade or balance caps here yet. To move {meta.nativeSymbol} out,
                 export the key and use MetaMask or Rabby — this page has no withdraw.
               </div>
@@ -470,7 +454,7 @@ export function EvmWalletPanel({
                 the wallets made for its chain. A pre-split key (no home) is
                 listed on both until the user assigns it. The dot means
                 "signs on the chain in the tab above". */}
-            <div className="mb-1.5 text-[10px] leading-relaxed text-krypt-muted/70">
+            <div className="mb-1.5 text-label leading-relaxed text-krypt-muted/70">
               The dot marks the wallet that signs on <span className="text-white/70">{meta.shortName}</span>. Wallets made here are{' '}
               {meta.shortName} wallets; {otherMeta.shortName} wallets live on their own page. A key from before the split shows on both until you
               say where it belongs.
@@ -497,7 +481,7 @@ export function EvmWalletPanel({
                           : `Make this the signing wallet on ${meta.shortName}`
                     }
                     className={cls(
-                      'h-6 w-6 flex-shrink-0 rounded-full border flex items-center justify-center text-[10px]',
+                      'h-6 w-6 flex-shrink-0 rounded-full border flex items-center justify-center text-label',
                       w.active ? 'border-krypt-purple bg-krypt-purple/30 text-white' : 'border-white/20 text-krypt-muted hover:border-white/40',
                       tabArmed && !w.active ? 'opacity-40 cursor-not-allowed' : '',
                     )}
@@ -515,7 +499,7 @@ export function EvmWalletPanel({
                           if (e.key === 'Enter') void doRename(w.id);
                           if (e.key === 'Escape') setRenaming(null);
                         }}
-                        className="w-40 rounded bg-black/40 border border-white/15 px-2 py-0.5 text-[12px] text-white outline-none"
+                        className="w-40 rounded bg-black/40 border border-white/15 px-2 py-0.5 text-note text-white outline-none"
                       />
                     ) : (
                       <button
@@ -524,30 +508,30 @@ export function EvmWalletPanel({
                           setRenameText(w.label);
                         }}
                         title="Rename"
-                        className="text-[12px] font-medium text-white/90 hover:text-white"
+                        className="text-note font-medium text-white/90 hover:text-white"
                       >
                         {w.label}
                       </button>
                     )}
-                    <div className="font-mono text-[10px] text-krypt-muted truncate">{w.address}</div>
+                    <div className="font-mono text-label text-krypt-muted truncate">{w.address}</div>
                     {w.createdFor === null && (
                       <span
-                        className="mt-0.5 inline-block rounded-full border border-white/10 bg-white/5 px-1.5 text-[9px] text-krypt-muted"
+                        className="mt-0.5 inline-block rounded-full border border-white/10 bg-white/5 px-1.5 text-micro text-krypt-muted"
                         title="Made before the chains were split — the same address on both, listed on both until you say where it belongs"
                       >
                         pre-split · both chains
                       </span>
                     )}
                     {w.createdFor !== null && w.createdFor !== tab && (
-                      <span className="mt-0.5 inline-block rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 text-[9px] text-amber-300" title={`Made for ${EVM_CHAIN_META[w.createdFor].name} but signing here`}>
+                      <span className="mt-0.5 inline-block rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 text-micro text-amber-300" title={`Made for ${EVM_CHAIN_META[w.createdFor].name} but signing here`}>
                         made for {EVM_CHAIN_META[w.createdFor].shortName}
                       </span>
                     )}
                   </div>
-                  <div className="text-right font-mono text-[12px] text-white/85">{fmtNative(w.balanceNative, meta.nativeSymbol)}</div>
+                  <div className="text-right font-mono text-note text-white/85">{fmtNative(w.balanceNative, meta.nativeSymbol)}</div>
                   {w.createdFor === null && !w.active && (
                     <span title={`Keep this wallet under ${otherMeta.shortName} Wallet only — it leaves this page; the key and its balances are unchanged`}>
-                      <GhostButton onClick={() => void doAssignAway(w)} className="!py-1 !px-2 text-[10px]">
+                      <GhostButton onClick={() => void doAssignAway(w)} className="!py-1 !px-2 text-label">
                         {otherMeta.shortName} only
                       </GhostButton>
                     </span>
@@ -559,7 +543,7 @@ export function EvmWalletPanel({
               ))}
             </div>
             {hiddenFunded.length > 0 && (
-              <div className="text-[10px] leading-relaxed text-amber-300/90">
+              <div className="text-label leading-relaxed text-amber-300/90">
                 {hiddenFunded.length} {otherMeta.shortName} wallet{hiddenFunded.length === 1 ? '' : 's'} also hold{hiddenFunded.length === 1 ? 's' : ''} {meta.nativeSymbol} on{' '}
                 {meta.name}: {hiddenFunded.map((w) => `${shortAddr(w.address, 6)} (${fmtNative(w.balanceNative, meta.nativeSymbol)})`).join(', ')} — listed under{' '}
                 {otherMeta.shortName} Wallet.
@@ -613,7 +597,7 @@ export function EvmWalletPanel({
                     `only` there is by definition one. The rows below name the
                     chain in their own words either way. */}
                 {shownChains.length > 1 && (
-                  <div className="inline-flex rounded-md border border-white/10 overflow-hidden text-[9px] font-bold uppercase tracking-[0.14em]">
+                  <div className="inline-flex rounded-md border border-white/10 overflow-hidden text-micro font-bold uppercase tracking-label">
                     {shownChains.map((c) => (
                       <button
                         key={c}
@@ -638,7 +622,7 @@ export function EvmWalletPanel({
                   <button
                     onClick={() => void sellEverything()}
                     disabled={sellingAll}
-                    className="rounded-md border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-rose-200 transition hover:bg-rose-400/20 disabled:opacity-50"
+                    className="rounded-md border border-rose-400/30 bg-rose-400/10 px-2 py-0.5 text-micro font-bold uppercase tracking-label text-rose-200 transition hover:bg-rose-400/20 disabled:opacity-50"
                     title={`Sell every position on ${meta.name}`}
                   >
                     {sellingAll ? 'Selling…' : 'Sell all'}
@@ -650,18 +634,18 @@ export function EvmWalletPanel({
               </div>
             </div>
             {holdings === null ? (
-              <p className="text-[11px] text-krypt-muted">Reading…</p>
+              <p className="text-body text-krypt-muted">Reading…</p>
             ) : holdings.length === 0 ? (
-              <p className="text-[11px] text-krypt-muted">No tokens held on {meta.name} that this app knows about. Tokens bought here appear automatically.</p>
+              <p className="text-body text-krypt-muted">No tokens held on {meta.name} that this app knows about. Tokens bought here appear automatically.</p>
             ) : (
               <div className="space-y-1">
                 {holdings.map((h) => (
-                  <div key={h.token} className="flex items-center gap-3 rounded-md px-2 py-1.5 text-[11px] hover:bg-white/[0.04] transition">
+                  <div key={h.token} className="flex items-center gap-3 rounded-md px-2 py-1.5 text-body hover:bg-white/[0.04] transition">
                     <span className="font-semibold text-white/90 w-20 truncate">{h.symbol || shortAddr(h.token, 4)}</span>
                     <span className="font-mono text-krypt-muted w-24 text-right">{fmtTokens(h.amount)}</span>
                     <span className="font-mono text-white/80 w-28 text-right">{fmtNative(h.valueNative, meta.nativeSymbol)}</span>
-                    <span className="text-[9px] uppercase tracking-wider text-krypt-muted/60 flex-1 truncate">{VENUE_LABEL[h.venue]}</span>
-                    <GhostButton onClick={() => void sellOne(h)} destructive disabled={selling !== null} className="!py-1 !px-2 text-[10px]">
+                    <span className="text-micro uppercase tracking-wider text-krypt-muted/60 flex-1 truncate">{VENUE_LABEL[h.venue]}</span>
+                    <GhostButton onClick={() => void sellOne(h)} destructive disabled={selling !== null} className="!py-1 !px-2 text-label">
                       {selling === h.token ? '…' : armed ? 'Sell 100%' : 'Sim sell'}
                     </GhostButton>
                   </div>
@@ -678,13 +662,13 @@ export function EvmWalletPanel({
               {fills.map((f) => {
                 const delta = weiToNumber(f.nativeDeltaWei);
                 return (
-                  <div key={f.id} className="flex items-center gap-3 rounded-md px-2 py-1 text-[11px] font-mono hover:bg-white/[0.04] transition">
-                    <span className={cls('w-9 uppercase text-[9px] font-bold', f.side === 'buy' ? 'text-emerald-300' : 'text-rose-300')}>{f.side}</span>
+                  <div key={f.id} className="flex items-center gap-3 rounded-md px-2 py-1 text-body font-mono hover:bg-white/[0.04] transition">
+                    <span className={cls('w-9 uppercase text-micro font-bold', f.side === 'buy' ? 'text-emerald-300' : 'text-rose-300')}>{f.side}</span>
                     <span className="text-white/85 w-20 truncate">{f.symbol || shortAddr(f.token, 4)}</span>
                     <span className="text-krypt-muted w-28 text-right">
                       {f.requested === 0 ? 'fee' : delta === null ? (f.state === 'pending' ? 'pending' : '—') : fmtNative(delta, meta.nativeSymbol, 5)}
                     </span>
-                    <span className={cls('text-[9px] uppercase tracking-wider w-20', f.state === 'reconciled' ? 'text-krypt-muted/60' : f.state === 'pending' ? 'text-amber-300/80' : 'text-rose-300/80')}>
+                    <span className={cls('text-micro uppercase tracking-wider w-20', f.state === 'reconciled' ? 'text-krypt-muted/60' : f.state === 'pending' ? 'text-amber-300/80' : 'text-rose-300/80')}>
                       {f.state}
                     </span>
                     <span className="flex-1 text-right text-krypt-muted/60">{fmtClock(f.at)}</span>

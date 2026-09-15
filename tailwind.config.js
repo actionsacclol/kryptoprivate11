@@ -27,6 +27,35 @@ export default {
         pixel: ['Cinzel', 'Georgia', 'serif'],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
       },
+      // ── The type scale ────────────────────────────────────────────
+      //
+      // Added 2026-09-14. Before it, the app used EIGHT arbitrary pixel
+      // sizes across 1,126 class names and TEN letter-spacings, with no
+      // names — so "the uppercase label above a number" was written four
+      // different ways depending on which page you were on. That reads as
+      // carelessness long before anyone can say why.
+      //
+      // The values are the ones already in use, so naming them changes
+      // nothing on screen. What changes is that there is now a right answer
+      // to reach for, and `text-[10px]` in a review is a question.
+      fontSize: {
+        nano: ['8px', { lineHeight: '1.35' }],    // badge text, nothing else
+        micro: ['9px', { lineHeight: '1.4' }],    // dense table furniture
+        label: ['10px', { lineHeight: '1.45' }],  // THE uppercase micro-label
+        body: ['11px', { lineHeight: '1.55' }],   // the workhorse
+        note: ['12px', { lineHeight: '1.6' }],    // descriptions, prose
+        value: ['13px', { lineHeight: '1.4' }],   // a number you read
+        figure: ['15px', { lineHeight: '1.35' }], // a number that is the point
+      },
+      // Three, down from ten. `label` is the uppercase micro-label, `heading`
+      // is a Section's rule-and-title, `display` is a page title.
+      letterSpacing: {
+        label: '0.14em',    // the uppercase micro-label above a value
+        heading: '0.3em',   // a Section's rule-and-title
+        display: '0.06em',  // a page title
+        eyebrow: '0.34em',  // the gold overline: "The Vault", "WELCOME TO"
+        action: '0.1em',    // large uppercase buttons — Buy, Sell
+      },
       boxShadow: {
         'krypt-glow': '0 0 22px rgba(139, 124, 232, 0.28)',
         'krypt-card': '0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(240, 237, 226, 0.04)',

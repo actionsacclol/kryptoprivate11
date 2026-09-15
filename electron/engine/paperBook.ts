@@ -14,12 +14,14 @@ import {
   openPaper,
   paperRealizedSol,
   parsePaperBook,
+  samePaperKey,
   sellPaper,
   type PaperBook,
   type PaperPosition,
   type PaperSellResult,
 } from '@shared/paper';
 import type { ClosedTrade } from '@shared/portfolio';
+import type { ChainKind } from '@shared/evm';
 
 const FILE = 'paper-positions.json';
 let filePath: string | null = null;
@@ -76,7 +78,7 @@ function save(): void {
   }
 }
 
-export function open(p: { mint: string; symbol: string; tokens: number; costSol: number; decimalsKnown: boolean }): { ok: boolean; message: string; position: PaperPosition | null } {
+export function open(p: { mint: string; symbol: string; tokens: number; costSol: number; decimalsKnown: boolean; chain?: ChainKind }): { ok: boolean; message: string; position: PaperPosition | null } {
   // A buy is refused while the book is unreadable, because it could not be
   // recorded and the user would be told they hold something they do not. A
   // SELL is deliberately NOT gated the same way (see below): a limit never
@@ -92,8 +94,8 @@ export function open(p: { mint: string; symbol: string; tokens: number; costSol:
   return { ok: r.ok, message: r.message, position: r.position };
 }
 
-export function sell(mint: string, pct: number, priceSol: number | null): PaperSellResult {
-  const r = sellPaper(book, mint, pct, priceSol);
+export function sell(mint: string, pct: number, priceSol: number | null, chain: ChainKind = 'solana'): PaperSellResult {
+  const r = sellPaper(book, mint, pct, priceSol, Date.now(), chain);
   if (r.ok) {
     book = r.book;
     save();
@@ -105,8 +107,8 @@ export function list(): PaperPosition[] {
   return book.open;
 }
 
-export function get(mint: string): PaperPosition | undefined {
-  return book.open.find((p) => p.mint === mint);
+export function get(mint: string, chain: ChainKind = 'solana'): PaperPosition | undefined {
+  return book.open.find((p) => samePaperKey(p, { mint, chain }));
 }
 
 export function closed(): ClosedTrade[] {

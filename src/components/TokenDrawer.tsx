@@ -14,7 +14,7 @@ import { cls, fmtAgo, fmtPrice, shortAddr } from '../utils/format';
 function Field({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' | 'gold' }) {
   return (
     <div className="rounded-md border border-white/10 bg-black/25 px-2.5 py-2">
-      <div className="text-[9px] font-display uppercase tracking-[0.22em] text-krypt-muted/80">{label}</div>
+      <div className="text-micro font-display uppercase tracking-label text-krypt-muted/80">{label}</div>
       <div className={cls(
         'mt-0.5 text-xs font-mono tabular-nums',
         tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : tone === 'gold' ? 'text-arc-gold' : 'text-white/90',
@@ -40,10 +40,10 @@ function SealGauge({ label, share, dangerAt }: { label: string; share: number; d
           strokeDasharray={`${c * pct} ${c}`}
         />
       </svg>
-      <div className={cls('-mt-9 mb-3 text-[10px] font-mono font-semibold', danger ? 'text-rose-300' : 'text-white/90')}>
+      <div className={cls('-mt-9 mb-3 text-label font-mono font-semibold', danger ? 'text-rose-300' : 'text-white/90')}>
         {Math.round(pct * 100)}%
       </div>
-      <div className="text-[8px] font-display uppercase tracking-[0.18em] text-krypt-muted/80 text-center leading-tight">{label}</div>
+      <div className="text-nano font-display uppercase tracking-label text-krypt-muted/80 text-center leading-tight">{label}</div>
     </div>
   );
 }
@@ -88,7 +88,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
           >
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
               <div>
-                <div className="font-display text-[10px] uppercase tracking-[0.32em] text-arc-gold/80">Token Divination</div>
+                <div className="font-display text-label uppercase tracking-eyebrow text-arc-gold/80">Token Divination</div>
                 <div className="mt-1 flex items-baseline gap-2">
                   <span className="text-lg font-bold text-white">{launch.symbol || '—'}</span>
                   <span className="text-xs text-krypt-muted truncate max-w-[180px]">{launch.name}</span>
@@ -132,7 +132,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
               </div>
 
               <div>
-                <div className="font-display text-[10px] uppercase tracking-[0.28em] text-krypt-muted mb-2">Concentration wards</div>
+                <div className="font-display text-label uppercase tracking-heading text-krypt-muted mb-2">Concentration wards</div>
                 <div className="grid grid-cols-3 gap-2">
                   <SealGauge label="Top holder" share={launch.flow.topHolderTokenShare} dangerAt={0.25} />
                   <SealGauge label="Bundled supply" share={launch.flow.earlyBuyerShare ?? 0} dangerAt={0.45} />
@@ -142,7 +142,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
 
               {launch.score && (
                 <div>
-                  <div className="font-display text-[10px] uppercase tracking-[0.28em] text-krypt-muted mb-2">Score breakdown</div>
+                  <div className="font-display text-label uppercase tracking-heading text-krypt-muted mb-2">Score breakdown</div>
                   <div className="grid grid-cols-4 gap-1.5">
                     {(
                       [
@@ -157,7 +157,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
                       ] as Array<[string, number, number]>
                     ).map(([label, v, max]) => (
                       <div key={label} className="rounded-md border border-white/10 bg-black/25 px-2 py-1.5">
-                        <div className="text-[9px] uppercase tracking-wider text-krypt-muted">{label}</div>
+                        <div className="text-micro uppercase tracking-wider text-krypt-muted">{label}</div>
                         <div className={cls('text-xs font-mono font-semibold', v < 0 ? 'text-rose-300' : 'text-white/90')}>
                           {v}{max > 0 && <span className="text-krypt-muted">/{max}</span>}
                         </div>
@@ -169,7 +169,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
 
               {launch.riskFlags.length > 0 && (
                 <div>
-                  <div className="font-display text-[10px] uppercase tracking-[0.28em] text-krypt-muted mb-2">Warnings</div>
+                  <div className="font-display text-label uppercase tracking-heading text-krypt-muted mb-2">Warnings</div>
                   <div className="flex flex-wrap gap-1.5">
                     {launch.riskFlags.map((f) => (
                       <Badge key={f.id} tone={f.hard ? 'danger' : 'warn'}>{f.label}</Badge>
@@ -185,7 +185,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
               )}
 
               <div>
-                <div className="font-display text-[10px] uppercase tracking-[0.28em] text-krypt-muted mb-2">Creator</div>
+                <div className="font-display text-label uppercase tracking-heading text-krypt-muted mb-2">Creator</div>
                 <div className="rounded-md border border-white/10 bg-black/25 px-3 py-2.5 space-y-1.5 text-xs font-mono">
                   <div className="text-white/90 break-all">{launch.creator}</div>
                   <div className="text-krypt-muted">
@@ -206,7 +206,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
               </div>
 
               <div>
-                <div className="font-display text-[10px] uppercase tracking-[0.28em] text-krypt-muted mb-2">Mint</div>
+                <div className="font-display text-label uppercase tracking-heading text-krypt-muted mb-2">Mint</div>
                 <div className="rounded-md border border-white/10 bg-black/25 px-3 py-2.5 text-xs font-mono text-krypt-muted break-all">
                   {launch.mint}
                 </div>

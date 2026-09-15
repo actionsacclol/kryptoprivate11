@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, GhostButton, Page, PrimaryButton, Section, Switch } from '../components/common';
+import { Card, GhostButton, Page, PrimaryButton, Section, Switch, TextInput } from '../components/common';
 import { MarketDataSettings } from '../components/terminal/MarketDataSettings';
 import { HotkeySettings } from '../components/terminal/HotkeySettings';
 import { useAppState } from '../state/AppStateProvider';
@@ -56,7 +56,7 @@ function RecorderStatsPanel({ enabled }: { enabled: boolean }) {
     .map(([k, n]) => `${k} ${n.toLocaleString()}`)
     .join(', ');
   return (
-    <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-[11px] font-mono text-krypt-muted space-y-0.5">
+    <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-body font-mono text-krypt-muted space-y-0.5">
       <div>
         <span className="text-white">{st.mode === 'launch' ? 'Launch tape' : 'Firehose'}</span>
         {' · '}
@@ -85,25 +85,6 @@ function RecorderStatsPanel({ enabled }: { enabled: boolean }) {
   );
 }
 
-function TextInput({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <input
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      spellCheck={false}
-      className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm font-mono text-white placeholder-krypt-muted/50 outline-none focus:border-krypt-purple/60"
-    />
-  );
-}
 
 export function SettingsPage() {
   const { settings, updateSettings, status } = useAppState();
@@ -185,14 +166,14 @@ export function SettingsPage() {
               </div>
               <button
                 onClick={() => void window.krypt.app.openExternal('https://dashboard.helius.dev')}
-                className="text-[11px] font-semibold text-krypt-purple hover:text-white transition-colors"
+                className="text-body font-semibold text-krypt-purple hover:text-white transition-colors"
               >
                 Get a free key at helius.dev →
               </button>
             </div>
             <TextInput value={heliusKey} onChange={setHeliusKey} placeholder="Paste your Helius API key" />
             <RpcKeyWarning />
-            <div className="text-[11px] text-krypt-muted/70 mt-1">
+            <div className="text-body text-krypt-muted/70 mt-1">
               Used where it matters — live trade simulation, sending, confirmation, send-time fee estimates,
               and the holder and token-account reads the free public RPC refuses outright (it answers those
               with HTTP 429). Launch scanning and plain account reads stay on the free public endpoints,
@@ -229,7 +210,7 @@ export function SettingsPage() {
               rows={3}
               className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm font-mono text-white placeholder-krypt-muted/50 outline-none focus:border-krypt-purple/60 resize-y"
             />
-            <div className="text-[11px] text-krypt-muted/70 mt-1">
+            <div className="text-body text-krypt-muted/70 mt-1">
               All sockets subscribe at once; duplicates are dropped, first arrival wins. A single public socket
               silently loses ~20% of events under load — every extra free endpoint cuts that loss.
             </div>
@@ -340,7 +321,7 @@ export function SettingsPage() {
         description="What Krypt charges, and who gets credit for bringing you here."
       >
         <Card>
-          <p className="text-[11px] leading-relaxed text-krypt-muted">
+          <p className="text-body leading-relaxed text-krypt-muted">
             {feesEnabled() ? (
               <>
                 Krypt takes <span className="text-white">{feePctLabel()} of each trade</span>, both sides — about half
@@ -352,7 +333,7 @@ export function SettingsPage() {
               <>This build has no fee address configured, so Krypt charges nothing on your trades.</>
             )}
           </p>
-          <label className="mt-3 block text-[11px] text-krypt-muted">
+          <label className="mt-3 block text-body text-krypt-muted">
             Referrer&apos;s SOL address — whoever sent you here is rewarded automatically as you trade, out of
             Krypt&apos;s share, never as an extra cost to you.
           </label>
@@ -361,14 +342,14 @@ export function SettingsPage() {
             onChange={(e) => void updateSettings({ referrer: e.target.value })}
             spellCheck={false}
             placeholder="Nobody referred you"
-            className="mt-1.5 w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+            className="mt-1.5 w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
           />
           {(() => {
             const why = referralProblem(settings.referrer ?? '', {
               ownAddresses: [],
               treasury: TREASURY_ADDRESS,
             });
-            return why ? <p className="mt-1.5 text-[11px] text-rose-300">{why}</p> : null;
+            return why ? <p className="mt-1.5 text-body text-rose-300">{why}</p> : null;
           })()}
         </Card>
       </Section>
@@ -441,9 +422,9 @@ export function SettingsPage() {
               <GhostButton onClick={saveDir}>Save</GhostButton>
               <GhostButton onClick={() => void window.krypt.app.openRecordingsFolder()}>Open</GhostButton>
             </div>
-            <div className="text-[11px] text-krypt-muted/70 mt-1">Point this at a big empty drive to mass-collect. Applies immediately.</div>
+            <div className="text-body text-krypt-muted/70 mt-1">Point this at a big empty drive to mass-collect. Applies immediately.</div>
           </div>
-          <div className="text-[11px] text-krypt-muted/80 leading-relaxed">
+          <div className="text-body text-krypt-muted/80 leading-relaxed">
             <span className="text-white/80">Two modes.</span>{' '}
             <span className="text-white">Launch tape</span> (default) — every create, the first 30 minutes of each mint's trades
             (max 3,000 per mint), every graduation, metadata and feed-health rows; ~{LAUNCH_GB_PER_DAY} GB/day, a week is

@@ -1,4 +1,5 @@
 import RPC from 'discord-rpc';
+import { logger } from './logger';
 import { canonicalPresence } from '@shared/presenceIntegrity';
 
 /**
@@ -19,33 +20,89 @@ let connected = false;
 let desired = false;
 let last: { state: string; details: string } | null = null;
 let startedAt = Date.now();
+let retry: NodeJS.Timeout | null = null;
+
+/**
+ * How often to try again while presence is wanted but not connected.
+ *
+ * Presence used to be attempted exactly ONCE, at boot. Discord is very often
+ * not running at that moment — someone opens the trading app first, or Discord
+ * restarts to update — and there was nothing that ever tried again, so the
+ * presence simply never appeared for the rest of the session. `disconnected`
+ * set a flag and did nothing else, so losing Discord once was permanent too.
+ *
+ * Thirty seconds is cheap: a failed connect is a named-pipe open that fails
+ * immediately, entirely local, and it stops the moment presence is switched
+ * off or a connection succeeds.
+ */
+const RETRY_MS = 30_000;
+
+function scheduleRetry(): void {
+  if (retry || !desired) return;
+  retry = setTimeout(() => {
+    retry = null;
+    if (!desired || connected) return;
+    void startDiscordRpc();
+  }, RETRY_MS);
+  retry.unref?.();
+}
 
 export async function startDiscordRpc(): Promise<void> {
   desired = true;
   if (connected) return;
   const id = identity();
-  if (!id) return; // unverifiable identity — publish nothing
+  if (!id) {
+    logger.warn('discord presence: identity blob failed its checksum — publishing nothing');
+    return;
+  }
+  // A previous attempt may have left a client behind; never stack them.
   try {
-    client = new RPC.Client({ transport: 'ipc' });
-    client.on('ready', () => {
+    client?.destroy();
+  } catch {
+    /* ignore */
+  }
+  client = null;
+  try {
+    const c = new RPC.Client({ transport: 'ipc' });
+    client = c;
+    c.on('ready', () => {
       connected = true;
       startedAt = Date.now();
+      logger.info('discord presence: connected');
       pushActivity();
     });
-    client.on('disconnected', () => {
+    // Discord closed, restarted, or the pipe dropped. Presence is still
+    // WANTED, so go back to trying — this is the whole difference between
+    // "on" and "on for as long as Discord happened to be up at boot".
+    c.on('disconnected', () => {
       connected = false;
+      logger.info('discord presence: disconnected — retrying');
+      scheduleRetry();
     });
-    await client.login({ clientId: id.clientId });
+    await c.login({ clientId: id.clientId });
   } catch (err) {
-    // Discord may simply not be running. Not an error.
-    // eslint-disable-next-line no-console
-    console.warn('[discord] login skipped:', (err as Error)?.message);
+    // Discord is simply not running yet. Not an error, and not final. Logged
+    // rather than written to the console: a console line in a packaged build
+    // reaches nobody, and "is presence actually on" has to be answerable after
+    // the fact from the app log.
+    logger.info(`discord presence: not connected (${(err as Error)?.message ?? 'no reason given'}) — retrying in 30s`);
     connected = false;
+    try {
+      client?.destroy();
+    } catch {
+      /* ignore */
+    }
+    client = null;
+    scheduleRetry();
   }
 }
 
 export function stopDiscordRpc(): void {
   desired = false;
+  if (retry) {
+    clearTimeout(retry);
+    retry = null;
+  }
   try {
     client?.destroy();
   } catch {

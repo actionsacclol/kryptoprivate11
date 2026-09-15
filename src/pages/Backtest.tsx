@@ -96,9 +96,9 @@ export function Backtest() {
                 const better = i === 1 ? result.winPct >= baseline.winPct : i === 2 ? result.pnl >= baseline.pnl : i === 4 ? result.creatorSells <= baseline.creatorSells : true;
                 return (
                   <Card key={label}>
-                    <div className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted">{label}</div>
+                    <div className="text-label uppercase tracking-label text-krypt-muted">{label}</div>
                     <div className={cls('mt-1 text-xl font-bold font-mono', i >= 1 && i <= 2 ? (better ? 'text-emerald-300' : 'text-rose-300') : 'text-white')}>{val}</div>
-                    <div className="text-[10px] text-krypt-muted/60 mt-0.5">{sub}</div>
+                    <div className="text-label text-krypt-muted/60 mt-0.5">{sub}</div>
                   </Card>
                 );
               })}

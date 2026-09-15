@@ -15,6 +15,7 @@
 
 import { BLOCK_FEED_WSS_URLS, DEFAULT_SETTINGS, type AppSettings } from '@shared/types';
 import { evmRpcUrlProblem } from '@shared/evm';
+import { webhookUrlProblem } from '@shared/webhook';
 
 export interface Validated {
   ok: boolean;
@@ -114,6 +115,17 @@ const SECRET_FIELDS = new Set([
 /** Long enough for the longest key any of these providers issues (Anthropic's
  *  `sk-ant-api03-…` is the outlier at ~110 chars) with room to spare. */
 const MAX_SECRET_CHARS = 400;
+
+/**
+ * Discord webhook URLs. Checked against Discord's hosts by
+ * `webhookUrlProblem` — see discordWebhook.ts for why the allowlist is the
+ * whole point of the feature's safety, not a nicety.
+ */
+const WEBHOOK_FIELDS = new Set([
+  'strategy.runnerAlerts.webhookUrl',
+  'evm.robinhood.runnerAlerts.webhookUrl',
+  'evm.bnb.runnerAlerts.webhookUrl',
+]);
 
 /** Fields that may only take one of a fixed set of values. */
 const ENUMS: Record<string, readonly unknown[]> = {
@@ -219,6 +231,17 @@ function checkLeaf(path: string, value: unknown, def: unknown): string | null {
     if (/[\s\u0000-\u001f\u007f]/.test(value)) {
       return `${path}: an API key cannot contain spaces or line breaks`;
     }
+  }
+  // The one field in the whole app that takes a URL from the renderer.
+  //
+  // Everything else refuses on principle (the block-feed host is a pick from
+  // a hardcoded list for exactly this reason), but a Discord webhook is per
+  // user and unguessable by us, so it has to be typed in. It is pinned to
+  // Discord's own hosts instead: without that, this is a field that makes the
+  // app POST your flagged tokens to any host on the internet.
+  if (typeof value === 'string' && WEBHOOK_FIELDS.has(path)) {
+    const problem = webhookUrlProblem(value);
+    if (problem) return `${path}: ${problem}`;
   }
   const e = ENUMS[path];
   if (e && !e.includes(value)) {

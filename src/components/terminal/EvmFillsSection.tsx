@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowDownRight, ArrowUpRight, ExternalLink, RefreshCw } from 'lucide-react';
 import { EVM_CHAIN_META, type ChainKind, type EvmChainKind, type EvmFill, type EvmPortfolio } from '@shared/evm';
-import { Card, Empty, IconButton, Section } from '../common';
+import { Card, Empty, IconButton, Section, Stat } from '../common';
 import { cls } from '../../utils/format';
 
 const fmtNative = (wei: string | null, decimals = 18, places = 6): string => {
@@ -88,12 +88,12 @@ export function EvmFillsSection({ chain, onOpenToken }: { chain: EvmChainKind; o
         )}
         <Card>
           {fills === null ? (
-            <div className="px-3 py-6 text-center text-[12px] text-krypt-muted">Reading the ledger…</div>
+            <div className="px-3 py-6 text-center text-note text-krypt-muted">Reading the ledger…</div>
           ) : fills.length === 0 ? (
             <Empty title={`No ${meta.name} fills yet`} message={`Buys and sells made through Krypt on ${meta.name} are recorded here and reconciled against the chain.`} />
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-[11px]">
+              <table className="w-full text-body">
                 <thead className="text-krypt-muted">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">When</th>
@@ -135,7 +135,7 @@ export function EvmFillsSection({ chain, onOpenToken }: { chain: EvmChainKind; o
                         <td className="px-3 py-1.5">
                           <span
                             className={cls(
-                              'rounded-full border px-1.5 py-0.5 text-[10px]',
+                              'rounded-full border px-1.5 py-0.5 text-label',
                               f.state === 'reconciled'
                                 ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
                                 : f.state === 'pending'
@@ -147,7 +147,7 @@ export function EvmFillsSection({ chain, onOpenToken }: { chain: EvmChainKind; o
                             {f.state}
                           </span>
                         </td>
-                        <td className="px-3 py-1.5 font-mono text-[10px] text-krypt-muted">
+                        <td className="px-3 py-1.5 font-mono text-label text-krypt-muted">
                           <a href={`${meta.explorer}/tx/${f.hash}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-white">
                             {f.hash.slice(0, 10)}… <ExternalLink className="h-3 w-3" />
                           </a>
@@ -161,7 +161,7 @@ export function EvmFillsSection({ chain, onOpenToken }: { chain: EvmChainKind; o
           )}
         </Card>
         {totals && (
-          <p className="mt-2 text-[10px] text-krypt-muted">
+          <p className="mt-2 text-label text-krypt-muted">
             {totals.buys} buy{totals.buys === 1 ? '' : 's'}, {totals.sells} sell{totals.sells === 1 ? '' : 's'}
             {totals.pending ? ` · ${totals.pending} still waiting for a receipt` : ''}. A pending or unreconciled fill counts toward nothing until the chain has answered for it.
           </p>
@@ -171,11 +171,3 @@ export function EvmFillsSection({ chain, onOpenToken }: { chain: EvmChainKind; o
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-krypt-muted">{label}</div>
-      <div className={cls('font-mono text-[13px]', tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : 'text-white')}>{value}</div>
-    </div>
-  );
-}

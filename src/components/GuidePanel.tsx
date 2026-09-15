@@ -181,8 +181,8 @@ function GuideRow({ guide, open, onToggle }: { guide: Guide; open: boolean; onTo
       <button onClick={onToggle} className="flex w-full items-center gap-3 px-4 py-3 text-left">
         <ChevronRight className={cls('h-4 w-4 flex-shrink-0 text-krypt-muted transition-transform', open && 'rotate-90')} />
         <span className="min-w-0 flex-1">
-          <span className="block text-[13px] font-semibold text-white">{guide.title}</span>
-          <span className="block text-[11px] text-krypt-muted">{guide.summary}</span>
+          <span className="block text-value font-semibold text-white">{guide.title}</span>
+          <span className="block text-body text-krypt-muted">{guide.summary}</span>
         </span>
       </button>
       {open && (
@@ -191,14 +191,14 @@ function GuideRow({ guide, open, onToggle }: { guide: Guide; open: boolean; onTo
             Array.isArray(block) ? (
               <ul key={i} className="space-y-1">
                 {block.map((line, j) => (
-                  <li key={j} className="flex gap-2 text-[12px] leading-relaxed text-krypt-muted">
+                  <li key={j} className="flex gap-2 text-note leading-relaxed text-krypt-muted">
                     <span className="mt-[7px] h-1 w-1 flex-shrink-0 rotate-45 bg-krypt-purple/70" />
                     <span>{line}</span>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p key={i} className="text-[12px] leading-relaxed text-krypt-muted">
+              <p key={i} className="text-note leading-relaxed text-krypt-muted">
                 {block}
               </p>
             ),
@@ -242,8 +242,8 @@ export function GuidePanel() {
         >
           <PlayCircle className="h-5 w-5 flex-shrink-0 text-krypt-purple" />
           <span>
-            <span className="block text-[13px] font-semibold text-white">Watch the guide</span>
-            <span className="block text-[11px] text-krypt-muted">Everything below, in about ten minutes. Opens in your browser.</span>
+            <span className="block text-value font-semibold text-white">Watch the guide</span>
+            <span className="block text-body text-krypt-muted">Everything below, in about ten minutes. Opens in your browser.</span>
           </span>
         </button>
         {GUIDES.map((g) => (

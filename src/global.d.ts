@@ -27,6 +27,7 @@ import type { AlertsSnapshot, NewAlertRequest } from '@shared/alerts';
 import type { PortfolioSummary, TradeHistoryRow } from '@shared/portfolio';
 import type { CopyConfig, CopySnapshot } from '@shared/copytrade';
 import type { EvmScanLaunch, EvmScanStatus } from '@shared/evmScan';
+import type { EvmRunnerFlag } from '@shared/evmRunners';
 import type { RunnerModel } from '@shared/evmRunners';
 import type { LaunchDraft, LaunchOutcome } from '@shared/launch';
 import type { UpdateStatus } from '@shared/version';
@@ -56,6 +57,14 @@ interface LogLine {
 declare global {
   interface Window {
     krypt: {
+      /** Popped-out panels — see src/panels/PanelWindow.tsx. Optional so a
+       *  window whose preload predates it degrades to an inert control
+       *  rather than throwing. */
+      panels?: {
+        popout: (panelId: string) => Promise<IpcResult<void>>;
+        close: () => Promise<IpcResult<void>>;
+        openToken: (mint: string, chain?: string) => Promise<IpcResult<void>>;
+      };
       legal: {
         status: () => Promise<
           IpcResult<{
@@ -204,6 +213,18 @@ declare global {
         resume: () => Promise<IpcResult<OrdersSnapshot>>;
         clearCompleted: () => Promise<IpcResult<OrdersSnapshot>>;
       };
+      farming: {
+        /** Measure a pair's real round-trip friction. Quotes only — spends nothing. */
+        probe: (
+          mint: string,
+          sizeSol: number,
+        ) => Promise<IpcResult<{ frictionPct: number | null; route: string; sizeSol: number }>>;
+      };
+      runners: {
+        /** Post a test message to this chain's saved runner webhook. The URL
+         *  is read from the store, never sent from here. */
+        testWebhook: (chain: ChainKind) => Promise<IpcResult<void>>;
+      };
       alerts: {
         list: () => Promise<IpcResult<AlertsSnapshot>>;
         create: (req: NewAlertRequest) => Promise<IpcResult<AlertsSnapshot>>;
@@ -217,6 +238,9 @@ declare global {
         remove: (id: string) => Promise<IpcResult<CopySnapshot>>;
         /** Start a followed wallet's own record over; configs and copies stay. */
         resetStats: (wallet: string) => Promise<IpcResult<CopySnapshot>>;
+        /** Clear PAPER results — one config, or all when omitted. Settings,
+         *  live history, leader records and real holdings are untouched. */
+        resetPaper: (configId?: string) => Promise<IpcResult<CopySnapshot>>;
       };
       automation: {
         list: () => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
@@ -258,6 +282,8 @@ declare global {
         scan: (chain: ScoutChain, hours: ScoutScanHours) => Promise<IpcResult<ScoutScanStatus>>;
         scanStatus: (chain: ScoutChain) => Promise<IpcResult<ScoutScanStatus>>;
         scanCancel: (chain: ScoutChain) => Promise<IpcResult<ScoutScanStatus>>;
+        /** Forget every tracked wallet on a chain; saved ones survive. */
+        clear: (chain: ScoutChain) => Promise<IpcResult<number>>;
       };
       bridge: {
         state: () => Promise<
@@ -315,6 +341,7 @@ declare global {
         scan: {
           status: (chain: EvmChainKind) => Promise<IpcResult<EvmScanStatus>>;
           launches: (chain: EvmChainKind) => Promise<IpcResult<EvmScanLaunch[]>>;
+          flagged: (chain: EvmChainKind) => Promise<IpcResult<EvmRunnerFlag[]>>;
           model: (chain: EvmChainKind) => Promise<IpcResult<RunnerModel>>;
           start: (chain: EvmChainKind) => Promise<IpcResult<EvmScanStatus>>;
           stop: (chain: EvmChainKind) => Promise<IpcResult<EvmScanStatus>>;

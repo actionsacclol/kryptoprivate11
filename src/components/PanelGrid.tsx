@@ -29,7 +29,7 @@
 
 import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import GridLayout, { WidthProvider, type Layout } from 'react-grid-layout';
-import { RotateCcw, X } from 'lucide-react';
+import { ExternalLink, RotateCcw, X } from 'lucide-react';
 import { clearBoxes, deriveLayout, loadBoxes, mergeBoxes, saveBoxes, type Box } from '../panels/layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -48,6 +48,10 @@ export interface PanelDef {
   title: string;
   /** Right of the title, e.g. a count or a small control. */
   badge?: ReactNode;
+  /** One control, centred in the header. A chain picker for panels whose rows
+   *  belong to a chain, a token picker for the chart — the grid does not care
+   *  which, it just gives it the middle. */
+  headerControl?: ReactNode;
   body: ReactNode;
   /** Grid placement. `w`/`h` are columns and rows, not pixels. */
   layout: Omit<Layout, 'i'>;
@@ -58,6 +62,7 @@ export function PanelGrid({
   panels,
   className = '',
   onRemove,
+  onPopOut,
 }: {
   /** Namespaces the saved arrangement. One per workspace surface. */
   id: string;
@@ -65,6 +70,8 @@ export function PanelGrid({
   className?: string;
   /** When given, each panel gets a close button that calls this with its key. */
   onRemove?: (key: string) => void;
+  /** When given, each panel gets a pop-out button that calls this with its key. */
+  onPopOut?: (key: string) => void;
 }) {
   // Only what the user moved. Keyed by grid id so switching surfaces reloads.
   const [boxes, setBoxes] = useState<Record<string, Box>>(() => loadBoxes(id));
@@ -109,7 +116,7 @@ export function PanelGrid({
         {dirty && (
           <button
             onClick={reset}
-            className="flex items-center gap-1 rounded border border-white/10 bg-krypt-panel px-2 py-1 text-[10px] text-krypt-muted transition hover:text-white"
+            className="flex items-center gap-1 rounded border border-white/10 bg-krypt-panel px-2 py-1 text-label text-krypt-muted transition hover:text-white"
             title="Put the panels back where they started"
           >
             <RotateCcw className="h-3 w-3" /> Reset layout
@@ -124,6 +131,13 @@ export function PanelGrid({
         margin={[MARGIN, MARGIN]}
         containerPadding={[0, 0]}
         draggableHandle=".panel-head"
+        // Buttons live INSIDE the drag handle, and react-draggable decides
+        // from e.target: anything matching the handle starts a drag and gets
+        // preventDefault(), which kills the click that would have followed. So
+        // `onPointerDown` + stopPropagation was never enough — it stops React's
+        // synthetic bubble, not the native default. `draggableCancel` is the
+        // supported way to say "this bit of the handle is not a grab".
+        draggableCancel=".panel-action"
         // Only the bottom-right corner. More handles on a dark, dense UI is
         // more ways to grab the wrong thing.
         resizeHandles={['se']}
@@ -136,21 +150,42 @@ export function PanelGrid({
         isResizable
       >
         {panels.map((p) => (
-          <div key={p.key} className="group/panel flex flex-col overflow-hidden rounded-xl border border-white/10 bg-krypt-panel shadow-krypt-card">
+          // Translucent so the app's own animated backdrop shows THROUGH the
+          // panel rather than each panel running a field of its own — one
+          // WebGL context for the window instead of one per widget, which a
+          // browser would refuse at about sixteen anyway. The blur keeps text
+          // crisp over a moving ground; lite mode strips it (index.css).
+          <div key={p.key} className="group/panel flex flex-col overflow-hidden rounded-xl border border-white/10 bg-krypt-panel/70 backdrop-blur-md shadow-krypt-card">
             <div
               className="panel-head flex shrink-0 cursor-move items-center justify-between border-b border-white/10 px-3 select-none"
               style={{ height: HEAD_PX }}
             >
-              <span className="truncate text-[11px] font-semibold tracking-wide text-white/90">{p.title}</span>
+              <span className="truncate text-body font-semibold tracking-wide text-white/90">{p.title}</span>
+              {/* Centred, between the title and the icons — the one control a
+                  chain-aware panel needs often enough to be worth the room. */}
+              {p.headerControl && <span className="mx-2 flex min-w-0 flex-1 justify-center">{p.headerControl}</span>}
               <span className="flex shrink-0 items-center gap-2">
                 {p.badge}
+                {onPopOut && (
+                  <button
+                    // Same rule as the close button: the header is the drag
+                    // handle, so a click here must not also start a drag.
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => onPopOut(p.key)}
+                    className="panel-action text-krypt-muted opacity-0 transition hover:text-white group-hover/panel:opacity-100"
+                    title={`Pop ${p.title} out into its own window`}
+                    aria-label={`Pop ${p.title} out`}
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 {onRemove && (
                   <button
                     // The header is the drag handle, so a click inside it must
                     // not also start a drag.
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => onRemove(p.key)}
-                    className="text-krypt-muted opacity-0 transition hover:text-white group-hover/panel:opacity-100"
+                    className="panel-action text-krypt-muted opacity-0 transition hover:text-white group-hover/panel:opacity-100"
                     title={`Remove ${p.title}`}
                     aria-label={`Remove ${p.title}`}
                   >

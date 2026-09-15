@@ -3,6 +3,7 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import type { Position } from '@shared/portfolio';
 import { cls, fmtNum, fmtSol, fmtUsd } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
+import { DataRow } from '../common';
 
 // Your position in THIS token, on the token page (2026-08-29).
 //
@@ -19,15 +20,6 @@ import { useToast } from '../../state/ToastProvider';
 // dash rather than a made-up zero when the basis is missing.
 
 const SELL_PCTS = [25, 50, 100] as const;
-
-function Row({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3 text-[11px]">
-      <span className="text-krypt-muted/80">{label}</span>
-      <span className={cls('font-mono tabular-nums', tone ?? 'text-white/90')}>{value}</span>
-    </div>
-  );
-}
 
 export function PositionPanel({
   mint,
@@ -141,13 +133,13 @@ export function PositionPanel({
   return (
     <div className="plate rounded-lg p-3 mt-4 space-y-2.5">
       <div className="flex items-center gap-2">
-        <h3 className="font-display text-[11px] font-semibold uppercase tracking-[0.28em] text-arc-gold/90">
+        <h3 className="font-display text-body font-semibold uppercase tracking-heading text-arc-gold/90">
           Your position
         </h3>
         {isPaper && (
           <span
             title={`Simulated fill — never held on chain. Exit: ${paperModel}`}
-            className="rounded border border-amber-400/50 bg-amber-500/15 px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.18em] text-amber-300"
+            className="rounded border border-amber-400/50 bg-amber-500/15 px-1.5 py-px text-micro font-bold uppercase tracking-label text-amber-300"
           >
             Paper
           </span>
@@ -165,12 +157,12 @@ export function PositionPanel({
       {/* The headline: what it is worth right now, and how that compares. */}
       <div className="rounded-lg border border-white/10 bg-black/25 px-3 py-2.5">
         <div className="flex items-baseline justify-between gap-3">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted/70 flex items-center gap-1.5">
+          <span className="text-label uppercase tracking-label text-krypt-muted/70 flex items-center gap-1.5">
             Value
             {pos.valueSource === 'quote' && (
               <span
                 title="What selling the whole position would fetch right now — a live sell quote, price impact included"
-                className="rounded border border-emerald-400/30 px-1 py-px text-[8px] tracking-[0.12em] text-emerald-300/80 normal-case"
+                className="rounded border border-emerald-400/30 px-1 py-px text-nano tracking-label text-emerald-300/80 normal-case"
               >
                 sell quote
               </span>
@@ -178,7 +170,7 @@ export function PositionPanel({
             {pos.valueSource === 'spot' && (
               <span
                 title="No sell route quoted — this is the provider's spot price × your amount, which can be far off for a thin token"
-                className="rounded border border-amber-400/30 px-1 py-px text-[8px] tracking-[0.12em] text-amber-300/80 normal-case"
+                className="rounded border border-amber-400/30 px-1 py-px text-nano tracking-label text-amber-300/80 normal-case"
               >
                 spot × amount
               </span>
@@ -186,11 +178,11 @@ export function PositionPanel({
           </span>
           <span className="font-mono text-base text-white tabular-nums">
             {pos.valueSol === null ? '—' : `${fmtSol(pos.valueSol)} SOL`}
-            <span className="text-[11px] text-krypt-muted/70">{usd(pos.valueSol)}</span>
+            <span className="text-body text-krypt-muted/70">{usd(pos.valueSol)}</span>
           </span>
         </div>
         <div className="flex items-baseline justify-between gap-3 mt-1">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted/70">Unrealized</span>
+          <span className="text-label uppercase tracking-label text-krypt-muted/70">Unrealized</span>
           <span className={cls('font-mono text-sm tabular-nums', tone)}>
             {pnl === null
               ? '—'
@@ -200,13 +192,17 @@ export function PositionPanel({
       </div>
 
       <div className="space-y-1">
-        <Row label="Holding" value={`${fmtNum(pos.amount, pos.amount < 1000 ? 2 : 0)} ${pos.symbol || ''}`} />
-        <Row label="Cost" value={pos.costSol === null ? '—' : `${fmtSol(pos.costSol)} SOL${usd(pos.costSol)}`} />
-        <Row label="Entry MC" value={pos.entryMcapUsd === null ? '—' : fmtUsd(pos.entryMcapUsd)} />
-        <Row label="Now MC" value={pos.marketCapUsd === null ? '—' : fmtUsd(pos.marketCapUsd)} />
+        <DataRow label="Holding" value={`${fmtNum(pos.amount, pos.amount < 1000 ? 2 : 0)} ${pos.symbol || ''}`} />
+        <DataRow label="Cost" value={pos.costSol === null ? '—' : `${fmtSol(pos.costSol)} SOL${usd(pos.costSol)}`} />
+        {/* Entry is THIS position's entry. A mint bought, sold out and bought
+            back reads its re-entry, not a blend with the first round — the
+            ledger scopes cost basis to the run of fills since the wallet last
+            held none of it (user report, 2026-09-13). */}
+        <DataRow label="Entry MC" value={pos.entryMcapUsd === null ? '—' : fmtUsd(pos.entryMcapUsd)} />
+        <DataRow label="Now MC" value={pos.marketCapUsd === null ? '—' : fmtUsd(pos.marketCapUsd)} />
         {pos.realizedPnlSol !== null && pos.realizedPnlSol !== 0 && (
-          <Row
-            label="Realized so far"
+          <DataRow
+            label="Realized on this position"
             value={`${pos.realizedPnlSol >= 0 ? '+' : ''}${fmtSol(pos.realizedPnlSol)} SOL`}
             tone={pos.realizedPnlSol >= 0 ? 'text-emerald-300/90' : 'text-rose-300/90'}
           />
@@ -214,26 +210,26 @@ export function PositionPanel({
       </div>
 
       {isPaper && (
-        <p className="text-[10px] text-amber-300/70 leading-relaxed">
+        <p className="text-label text-amber-300/70 leading-relaxed">
           Paper position: entry is the simulated fill&rsquo;s real cost and token count. Exit is modelled —{' '}
           {paperModel || 'paper fill at last price'}. Nothing was broadcast.
         </p>
       )}
 
       {isLive && paperPos && !isPaper && (
-        <p className="text-[10px] text-amber-300/70 leading-relaxed">
+        <p className="text-label text-amber-300/70 leading-relaxed">
           A paper position is also open in this token — switch to Paper to manage it.
         </p>
       )}
 
       {!isLive && !isPaper && (
-        <p className="text-[10px] text-krypt-muted/60 leading-relaxed">
+        <p className="text-label text-krypt-muted/60 leading-relaxed">
           Real holding — switch to Live to sell it. A Paper buy opens a separate paper position.
         </p>
       )}
 
       {!pos.basisKnown && (
-        <p className="text-[10px] text-krypt-muted/60 leading-relaxed">
+        <p className="text-label text-krypt-muted/60 leading-relaxed">
           {pending > 0 || pos.unreconciledFills > 0
             ? 'Cost basis is still being read from the chain — PnL appears once the fill is confirmed.'
             : 'Cost basis unknown: these tokens were not bought through this install, so PnL cannot be shown.'}
@@ -248,7 +244,7 @@ export function PositionPanel({
               disabled={busy !== null}
               onClick={() => void sell(p)}
               className={cls(
-                'rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition disabled:opacity-50',
+                'rounded-lg border px-2 py-1.5 text-body font-semibold transition disabled:opacity-50',
                 isPaper
                   ? p === 100
                     ? 'border-amber-400/60 bg-amber-500/20 text-amber-100 hover:bg-amber-500/30'

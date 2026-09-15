@@ -11,6 +11,7 @@ import {
   type VolatilityNote,
 } from '@shared/rugrules';
 import { cls, fmtPctOrDash, fmtUsd, scoreTone, shortAddr } from '../../utils/format';
+import { SectionHeader, Stat } from '../common';
 
 // The rug panel from term.txt section 6, with one deliberate difference from
 // every competitor: an UNKNOWN is rendered as an unknown.
@@ -60,17 +61,6 @@ const SOURCE_LABEL: Record<string, string> = {
 const SCORE_TOOLTIP =
   'Weighted gates only — measured rug rules and volatility are shown separately. No hit rate is claimed for this number.';
 
-function SectionHeader({ title, hint }: { title: string; hint?: string }) {
-  return (
-    <div className="flex items-center gap-3" title={hint}>
-      <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted whitespace-nowrap">
-        {title}
-      </h3>
-      <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
-    </div>
-  );
-}
-
 /**
  * One distribution row, drawn as a PROPORTION and nothing more. It used to
  * turn red past a "danger" share; on the held-out day every such threshold
@@ -81,7 +71,7 @@ function SectionHeader({ title, hint }: { title: string; hint?: string }) {
 function ConcentrationRow({ label, pct, held = null }: { label: string; pct: number | null; held?: number | null }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="w-20 text-[10px] uppercase tracking-[0.12em] text-krypt-muted">{label}</span>
+      <span className="w-20 text-label uppercase tracking-label text-krypt-muted">{label}</span>
       <div className="relative flex-1 h-1.5 rounded-full bg-white/8 overflow-hidden">
         {pct !== null && (
           <div
@@ -97,21 +87,13 @@ function ConcentrationRow({ label, pct, held = null }: { label: string; pct: num
         )}
       </div>
       <span
-        className="w-24 text-right text-[11px] font-mono text-white/85"
+        className="w-24 text-right text-body font-mono text-white/85"
         title={held !== null ? 'bought at launch → still held now' : undefined}
       >
         {fmtPctOrDash(pct)}
         {held !== null && <span className="text-krypt-muted"> → {fmtPctOrDash(held)}</span>}
       </span>
     </div>
-  );
-}
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <span className="text-krypt-muted">
-      {label}: <span className={cls('font-mono', tone ?? 'text-white/90')}>{value}</span>
-    </span>
   );
 }
 
@@ -135,12 +117,12 @@ function FlagRow({ flag }: { flag: RugFlag }) {
         ) : (
           <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-arc-gold" />
         )}
-        <span className={cls('text-[12px] font-medium', hide ? 'text-rose-200' : 'text-arc-gold')}>{flag.label}</span>
-        <span className="text-[9px] uppercase tracking-[0.12em] text-krypt-muted/60">
+        <span className={cls('text-note font-medium', hide ? 'text-rose-200' : 'text-arc-gold')}>{flag.label}</span>
+        <span className="text-micro uppercase tracking-label text-krypt-muted/60">
           {hide ? 'hidden from Discover by default' : 'shown only'}
         </span>
       </div>
-      <p className={cls('mt-1 text-[11px] leading-snug', hide ? 'text-rose-100/80' : 'text-white/75')}>{flag.detail}</p>
+      <p className={cls('mt-1 text-body leading-snug', hide ? 'text-rose-100/80' : 'text-white/75')}>{flag.detail}</p>
     </div>
   );
 }
@@ -150,7 +132,7 @@ function RugRulesSection({ rug }: { rug: RugReport | null }) {
     return (
       <div className="space-y-2">
         <SectionHeader title="Rug rules (measured)" />
-        <p className="text-[11px] text-krypt-muted/60 leading-relaxed">
+        <p className="text-body text-krypt-muted/60 leading-relaxed">
           Not judged — the first trades of this token have not been read yet. Nothing is assumed in their place.
         </p>
       </div>
@@ -170,7 +152,7 @@ function RugRulesSection({ rug }: { rug: RugReport | null }) {
           ))}
         </div>
       ) : (
-        <p className="text-[11px] text-white/80">
+        <p className="text-body text-white/80">
           No measured rug rule fired —{' '}
           <span className="font-mono">{judged.length}</span> of {RUG_RULES.length} rules judged.
         </p>
@@ -178,13 +160,13 @@ function RugRulesSection({ rug }: { rug: RugReport | null }) {
       {notJudged.length > 0 && (
         <div className="space-y-0.5">
           {notJudged.map((r) => (
-            <p key={r.id} className="text-[11px] text-krypt-muted/60">
+            <p key={r.id} className="text-body text-krypt-muted/60">
               — not judged: {r.label}
             </p>
           ))}
         </div>
       )}
-      <p className="text-[9px] text-krypt-muted/50 leading-relaxed">
+      <p className="text-micro text-krypt-muted/50 leading-relaxed">
         Rates: {RUG_RULES_POPULATION}. This judgement is from{' '}
         <span className="font-mono text-krypt-muted/80">{rug.tradesSeen.toLocaleString('en-US')}</span> trades seen at{' '}
         <span className="font-mono text-krypt-muted/80">{window}</span>. A rule that did not fire is not a pass —
@@ -201,25 +183,25 @@ function VolatilitySection({ notes }: { notes: VolatilityNote[] }) {
     <div className="pt-3 border-t border-white/5 space-y-2">
       <SectionHeader title="Volatility — both directions" hint={VOLATILITY_POPULATION} />
       {notes.length === 0 ? (
-        <p className="text-[11px] text-krypt-muted/60">No concentration note — or the shares are not measured yet.</p>
+        <p className="text-body text-krypt-muted/60">No concentration note — or the shares are not measured yet.</p>
       ) : (
         <div className="space-y-1.5">
           {notes.map((n) => (
             <div key={n.id} className="rounded-md border border-arc-gold/20 bg-white/[0.02] px-2.5 py-2">
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                <span className="text-[12px] font-medium text-arc-gold">{n.label}</span>
-                <span className="text-[10px] font-mono text-krypt-muted">
+                <span className="text-note font-medium text-arc-gold">{n.label}</span>
+                <span className="text-label font-mono text-krypt-muted">
                   <span className="text-white/80">{fmtPctOrDash(n.dumpedPct, 0)}</span> dumped ·{' '}
                   <span className="text-white/80">{fmtPctOrDash(n.gradPct, n.gradPct < 1 ? 1 : 0)}</span> graduated · n ={' '}
                   {n.n.toLocaleString('en-US')}
                 </span>
               </div>
-              <p className="mt-0.5 text-[11px] leading-snug text-white/70">{n.detail}</p>
+              <p className="mt-0.5 text-body leading-snug text-white/70">{n.detail}</p>
             </div>
           ))}
         </div>
       )}
-      <p className="text-[9px] text-krypt-muted/50 leading-relaxed">
+      <p className="text-micro text-krypt-muted/50 leading-relaxed">
         Concentration moves the price both ways; it is never a hide criterion. Population: {VOLATILITY_POPULATION}.
       </p>
     </div>
@@ -238,12 +220,12 @@ function GateRow({ c }: { c: SecurityCheck }) {
       <Icon className={cls('h-3.5 w-3.5 mt-0.5 flex-shrink-0', TONE[c.verdict])} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <span className="text-[12px] font-medium text-white/90">{c.label}</span>
-          <span className="text-[9px] uppercase tracking-[0.12em] text-krypt-muted/50">
+          <span className="text-note font-medium text-white/90">{c.label}</span>
+          <span className="text-micro uppercase tracking-label text-krypt-muted/50">
             {SOURCE_LABEL[c.source] ?? c.source}
           </span>
         </div>
-        <div className={cls('text-[11px] mt-0.5 leading-snug', c.verdict === 'unknown' ? 'text-krypt-muted/60' : 'text-krypt-muted')}>
+        <div className={cls('text-body mt-0.5 leading-snug', c.verdict === 'unknown' ? 'text-krypt-muted/60' : 'text-krypt-muted')}>
           {c.detail}
         </div>
       </div>
@@ -258,10 +240,10 @@ function FactRow({ c }: { c: SecurityCheck }) {
       <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-white/20" />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <span className="text-[12px] text-white/80">{c.label}</span>
-          <span className="text-[9px] uppercase tracking-[0.12em] text-krypt-muted/50">{SOURCE_LABEL[c.source] ?? c.source}</span>
+          <span className="text-note text-white/80">{c.label}</span>
+          <span className="text-micro uppercase tracking-label text-krypt-muted/50">{SOURCE_LABEL[c.source] ?? c.source}</span>
         </div>
-        <div className="text-[11px] mt-0.5 leading-snug text-krypt-muted">{c.detail}</div>
+        <div className="text-body mt-0.5 leading-snug text-krypt-muted">{c.detail}</div>
       </div>
     </div>
   );
@@ -288,7 +270,7 @@ function DescriptiveSection({ d }: { d: SecurityReport['descriptive'] }) {
         className="flex w-full items-center gap-3 text-left"
         title={NO_EDGE_NOTE}
       >
-        <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted whitespace-nowrap">
+        <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">
           Descriptive — no measured edge
         </h3>
         <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -305,19 +287,19 @@ function DescriptiveSection({ d }: { d: SecurityReport['descriptive'] }) {
       </button>
       {open && (
         <div className="mt-2 space-y-2 animate-ink">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-body">
             <Stat label="Socials" value={triState(d.socials.hasAny)} />
             <Stat label="X" value={triState(d.socials.twitter)} />
             <Stat label="Telegram" value={triState(d.socials.telegram)} />
             <Stat label="Website" value={triState(d.socials.website)} />
           </div>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]" title={SOURCE_LABEL[d.dexPaid.source] ?? d.dexPaid.source}>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-body" title={SOURCE_LABEL[d.dexPaid.source] ?? d.dexPaid.source}>
             <Stat label="DEX paid" value={d.dexPaid.paid === null ? '—' : d.dexPaid.paid ? `yes${paidAt ? ` (${paidAt})` : ''}` : 'no'} />
             <Stat label="Boosts" value={numOrDash(d.dexPaid.boosts)} />
             <Stat label="Community takeover" value={triState(d.dexPaid.communityTakeover)} />
           </div>
-          {d.note && <p className="text-[10px] text-krypt-muted/60 leading-relaxed">{d.note}</p>}
-          <p className="text-[9px] text-krypt-muted/50 leading-relaxed">{NO_EDGE_NOTE}</p>
+          {d.note && <p className="text-label text-krypt-muted/60 leading-relaxed">{d.note}</p>}
+          <p className="text-micro text-krypt-muted/50 leading-relaxed">{NO_EDGE_NOTE}</p>
         </div>
       )}
     </div>
@@ -359,12 +341,12 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
             <span className={cls('font-display text-xl font-bold leading-none', scoreTone(score))}>
               {score === null ? '—' : score}
             </span>
-            <span className="text-[8px] uppercase tracking-[0.18em] text-krypt-muted mt-0.5">/100</span>
+            <span className="text-nano uppercase tracking-label text-krypt-muted mt-0.5">/100</span>
           </div>
         </div>
         <div className="min-w-0">
-          <div className="font-display text-[11px] uppercase tracking-[0.28em] text-arc-gold/80">Krypt Score</div>
-          <p className="text-[11px] text-krypt-muted mt-1 leading-relaxed">
+          <div className="font-display text-body uppercase tracking-heading text-arc-gold/80">Krypt Score</div>
+          <p className="text-body text-krypt-muted mt-1 leading-relaxed">
             {score === null ? (
               <>
                 Not scored. Only <span className="text-white">{checksResolved}</span> of {checksTotal} gates
@@ -377,7 +359,7 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
               </>
             )}
           </p>
-          <p className="text-[9px] text-krypt-muted/50 mt-1 leading-relaxed">{SCORE_TOOLTIP}</p>
+          <p className="text-micro text-krypt-muted/50 mt-1 leading-relaxed">{SCORE_TOOLTIP}</p>
         </div>
       </div>
 
@@ -408,13 +390,13 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
           </div>
         )}
         {(report.concentration.bundledHeldPct !== null || report.concentration.sniperHeldPct !== null) && (
-          <p className="text-[10px] text-krypt-muted/55 leading-relaxed pt-1">
+          <p className="text-label text-krypt-muted/55 leading-relaxed pt-1">
             Solid bar is what those wallets <span className="text-white/70">still hold</span>; the faint bar is what
             they bought at launch. See the launch panel for the wallets behind these numbers.
           </p>
         )}
         {report.concentration.bundledPct === null && (
-          <p className="text-[10px] text-krypt-muted/55 leading-relaxed pt-1">
+          <p className="text-label text-krypt-muted/55 leading-relaxed pt-1">
             Bundle and sniper shares could not be measured for this token — the launch panel says why. Nothing is
             guessed in their place.
           </p>
@@ -426,7 +408,7 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
         <SectionHeader title="Creator record" />
         {rec && (
           <div
-            className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]"
+            className="flex flex-wrap items-center gap-x-4 gap-y-1 text-body"
             title={SOURCE_LABEL[rec.source] ?? rec.source}
           >
             <Stat label="Launches" value={numOrDash(rec.launches)} />
@@ -442,7 +424,7 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
         )}
         {report.creator.address ? (
           <div className="space-y-2">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-body">
               <span className="font-mono text-white/80">{shortAddr(report.creator.address, 6)}</span>
               <span className="text-krypt-muted">
                 Seen by this app: <span className="text-white/90">{report.creator.priorLaunches ?? '—'}</span> launches,{' '}
@@ -458,7 +440,7 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
                 a creator's launches on other launchpads are invisible here. */}
             {report.creator.history ? (
               <div className="rounded-md border border-white/8 bg-white/[0.02] px-2.5 py-2 space-y-1.5">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-body">
                   <Stat label="Launches" value={String(report.creator.history.launches)} />
                   <Stat
                     label="Graduated"
@@ -481,7 +463,7 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
                           l.graduated ? 'graduated' : 'never graduated'
                         }`}
                         className={cls(
-                          'rounded px-1.5 py-0.5 text-[9px] font-mono border',
+                          'rounded px-1.5 py-0.5 text-micro font-mono border',
                           l.graduated
                             ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
                             : 'border-white/8 bg-white/[0.03] text-krypt-muted',
@@ -492,19 +474,19 @@ export function SecurityPanel({ report }: { report: SecurityReport }) {
                     ))}
                   </div>
                 )}
-                <p className="text-[9px] text-krypt-muted/50 leading-relaxed">
+                <p className="text-micro text-krypt-muted/50 leading-relaxed">
                   pump.fun launches only{report.creator.history.truncated ? ', capped at 200' : ''}. Launches on other
                   platforms are not counted.
                 </p>
               </div>
             ) : (
-              <p className="text-[11px] text-krypt-muted/60">
+              <p className="text-body text-krypt-muted/60">
                 No wider creator record — pump.fun lists no other launches from this wallet.
               </p>
             )}
           </div>
         ) : (
-          <p className="text-[11px] text-krypt-muted/60">No creator address available for this token.</p>
+          <p className="text-body text-krypt-muted/60">No creator address available for this token.</p>
         )}
       </div>
 

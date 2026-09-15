@@ -21,7 +21,7 @@
 //
 // Nothing here throws, blocks, or touches the sell/exit path. It only reports.
 
-import { FEE_BPS, REFERRAL_SHARE_BPS, TREASURY_ADDRESS, splitFee, feesEnabled } from './fees';
+import { FARM_FEE_BPS, FEE_BPS, REFERRAL_SHARE_BPS, TREASURY_ADDRESS, feesEnabled, splitFee } from './fees';
 import { resolveTreasury, canonicalTreasury } from './feeIntegrity';
 import { PRESENCE, packIdentity } from './presence';
 import { resolvePresence, canonicalPresence } from './presenceIntegrity';
@@ -58,6 +58,13 @@ export function tamperFlags(): boolean[] {
     FEE_BPS !== 50,
     // 4. The referral share is untouched.
     REFERRAL_SHARE_BPS !== 2000,
+    // 4b. The farming rate is untouched, and is still a REDUCTION of the main
+    //     rate rather than a way around it. A build where the farm rate has
+    //     been widened to cover ordinary trades is a cracked build.
+    FARM_FEE_BPS !== 5,
+    FARM_FEE_BPS >= FEE_BPS,
+    // 4c. The farm rate reaches the arithmetic: 5 bps of 1 SOL = 500,000.
+    splitFee(SOL, false, FARM_FEE_BPS).treasuryLamports !== 500_000,
     // 5. Fees are still enabled (treasury present and verified).
     !feesEnabled(),
     // 6. The fee arithmetic still produces the right treasury cut.
@@ -75,7 +82,8 @@ export function tamperFlags(): boolean[] {
     // 10. The Discord application is still ours.
     ident?.clientId !== '1495323918234423406',
     // 11. Both buttons still point where they should, in order.
-    packIdentity(PRESENCE).split('|').slice(1, 5).join('|') !== 'Free Tools|https://krypt.cc/tools|Krypt.cc|https://discord.gg/muzFKR657F',
+    packIdentity(PRESENCE).split('|').slice(1, 5).join('|') !==
+      'Free Tools|https://krypt.cc/tools|$KRYPTO|https://pump.fun/coin/2qEubd7GwtZbCqDu1uQwNC4kNaJLBdRUcWKpckTypump',
     // 12. The art and the product name are unchanged.
     ident?.largeImageKey !== 'krypt' || ident?.largeImageText !== 'Krypto Bot',
 

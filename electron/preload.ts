@@ -22,6 +22,14 @@ const api = {
     logPaths: () => ipcRenderer.invoke('app:logPaths'),
     integrity: () => ipcRenderer.invoke('app:integrity'),
   },
+    panels: {
+      /** Open one panel in its own frameless window. */
+      popout: (panelId: string) => ipcRenderer.invoke('panel:popout', panelId),
+      /** Close the window this call comes from, when it is a panel window. */
+      close: () => ipcRenderer.invoke('panel:close'),
+      /** Open a coin in the MAIN window from a popped-out panel. */
+      openToken: (mint: string, chain?: string) => ipcRenderer.invoke('panel:openToken', mint, chain),
+    },
   legal: {
     status: () => ipcRenderer.invoke('legal:status'),
     accept: () => ipcRenderer.invoke('legal:accept'),
@@ -155,6 +163,14 @@ const api = {
     resume: () => ipcRenderer.invoke('orders:resume'),
     clearCompleted: () => ipcRenderer.invoke('orders:clearCompleted'),
   },
+  farming: {
+    /** Measure a pair's real round-trip friction. Quotes only — spends nothing. */
+    probe: (mint: string, sizeSol: number) => ipcRenderer.invoke('farming:probe', mint, sizeSol),
+  },
+  runners: {
+    /** Post a test message to this chain's saved runner webhook. */
+    testWebhook: (chain: string) => ipcRenderer.invoke('runners:testWebhook', chain),
+  },
   alerts: {
     list: () => ipcRenderer.invoke('alerts:list'),
     create: (req: NewAlertRequest) => ipcRenderer.invoke('alerts:create', req),
@@ -174,6 +190,7 @@ const api = {
     save: (config: Partial<CopyConfig>) => ipcRenderer.invoke('copy:save', config),
     remove: (id: string) => ipcRenderer.invoke('copy:remove', id),
     resetStats: (wallet: string) => ipcRenderer.invoke('copy:resetStats', wallet),
+    resetPaper: (configId?: string) => ipcRenderer.invoke('copy:resetPaper', configId),
   },
   portfolio: {
     summary: (opts?: { stale?: boolean }) => ipcRenderer.invoke('portfolio:summary', opts),
@@ -199,6 +216,7 @@ const api = {
     scan: (chain: string, hours: number) => ipcRenderer.invoke('scout:scan', chain, hours),
     scanStatus: (chain: string) => ipcRenderer.invoke('scout:scanStatus', chain),
     scanCancel: (chain: string) => ipcRenderer.invoke('scout:scanCancel', chain),
+    clear: (chain: string) => ipcRenderer.invoke('scout:clear', chain),
   },
 
   // Creating a token. `pickImage` and `upload` touch no chain; `preview` asks
@@ -243,6 +261,7 @@ const api = {
     scan: {
       status: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:status', chain),
       launches: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:launches', chain),
+      flagged: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:flagged', chain),
       model: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:model', chain),
       start: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:start', chain),
       stop: (chain: EvmChainKind) => ipcRenderer.invoke('evm:scan:stop', chain),

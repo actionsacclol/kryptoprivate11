@@ -124,7 +124,7 @@ export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string, cha
         <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-3">
           {note && (
             <div className="col-span-full rounded-md border border-arc-gold/25 bg-arc-gold/10 px-3 py-2">
-              <p className="text-[10px] text-arc-gold/90 leading-relaxed">{note}</p>
+              <p className="text-label text-arc-gold/90 leading-relaxed">{note}</p>
             </div>
           )}
           {term.watchlist.map((pin) => {
@@ -133,9 +133,9 @@ export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string, cha
             if (!t) {
               return (
                 <div key={pin} className="plate rounded-lg px-3 py-6 flex items-center justify-center gap-2">
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin text-krypt-purple" /> : <span className="text-[10px] text-krypt-muted">no data yet</span>}
-                  <span className="text-[11px] font-mono text-krypt-muted">{mint.slice(0, 10)}…</span>
-                  {chain !== 'solana' && <span className="text-[9px] uppercase tracking-wider text-krypt-muted/60">{chain}</span>}
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin text-krypt-purple" /> : <span className="text-label text-krypt-muted">no data yet</span>}
+                  <span className="text-body font-mono text-krypt-muted">{mint.slice(0, 10)}…</span>
+                  {chain !== 'solana' && <span className="text-micro uppercase tracking-wider text-krypt-muted/60">{chain}</span>}
                   <button
                     onClick={() => term.toggleWatch(mint, chain)}
                     className="ml-2 text-krypt-muted/50 hover:text-arc-gold"

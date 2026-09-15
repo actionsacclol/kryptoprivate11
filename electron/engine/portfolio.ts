@@ -149,28 +149,33 @@ export function build(inputs: PortfolioInputs): PortfolioSummary {
   }
   out.feesPaidSol = hasFees ? feesPaid : null;
 
+  // Closed rows are LIFETIME, deliberately: `basisByMint` scopes the plain
+  // fields to the position currently open (so a re-entry is priced at the
+  // re-entry), and after the last sell that scope is empty by construction.
+  // What "I traded this token and came out +2 SOL" means is every round trip
+  // on it, which is what the lifetime fields hold.
   for (const [mint, b] of basis) {
     if (held.has(mint)) continue;
-    if (b.sells === 0 || b.spentSol <= 0) continue;
-    const pnlSol = b.receivedSol - b.spentSol;
+    if (b.lifetimeSells === 0 || b.lifetimeSpentSol <= 0) continue;
+    const pnlSol = b.lifetimeReceivedSol - b.lifetimeSpentSol;
     closed.push({
       mint,
       symbol: b.symbol || mint.slice(0, 6),
-      openedAt: b.firstAt ?? 0,
+      openedAt: b.firstEverAt ?? 0,
       closedAt: b.lastAt ?? 0,
-      costSol: b.spentSol,
-      proceedsSol: b.receivedSol,
+      costSol: b.lifetimeSpentSol,
+      proceedsSol: b.lifetimeReceivedSol,
       pnlSol,
-      pnlPct: (pnlSol / b.spentSol) * 100,
-      holdMs: (b.lastAt ?? 0) - (b.firstAt ?? 0),
-      tokensBought: b.tokensBought,
-      tokensSold: b.tokensSold,
+      pnlPct: (pnlSol / b.lifetimeSpentSol) * 100,
+      holdMs: (b.lastAt ?? 0) - (b.firstEverAt ?? 0),
+      tokensBought: b.lifetimeTokensBought,
+      tokensSold: b.lifetimeTokensSold,
       // Average in and average out. Both come from amounts read off the
       // chain; when one is missing the price is null rather than a guess.
-      entryPriceSol: b.tokensBought > 0 ? b.spentSol / b.tokensBought : null,
-      exitPriceSol: b.tokensSold > 0 ? b.receivedSol / b.tokensSold : null,
-      buys: b.buys,
-      sells: b.sells,
+      entryPriceSol: b.lifetimeTokensBought > 0 ? b.lifetimeSpentSol / b.lifetimeTokensBought : null,
+      exitPriceSol: b.lifetimeTokensSold > 0 ? b.lifetimeReceivedSol / b.lifetimeTokensSold : null,
+      buys: b.lifetimeBuys,
+      sells: b.lifetimeSells,
     });
   }
   closed.sort((a, b2) => b2.closedAt - a.closedAt);

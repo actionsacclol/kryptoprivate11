@@ -42,7 +42,7 @@ function WalletAddress({ value }: { value: string }) {
       title="Copy this wallet's address"
       className="group/addr mt-0.5 flex w-full items-center gap-1.5 text-left"
     >
-      <span className="select-all truncate font-mono text-[10px] text-krypt-muted group-hover/addr:text-white/70">{value}</span>
+      <span className="select-all truncate font-mono text-label text-krypt-muted group-hover/addr:text-white/70">{value}</span>
       {copied ? (
         <Check className="h-3 w-3 shrink-0 text-emerald-400" />
       ) : (
@@ -181,7 +181,7 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
             </PrimaryButton>
           </div>
           {groups.length === 0 ? (
-            <div className="mt-3 text-[11px] text-krypt-muted">No groups yet — create one above, then fill it below.</div>
+            <div className="mt-3 text-body text-krypt-muted">No groups yet — create one above, then fill it below.</div>
           ) : (
             <div className="mt-3 grid gap-3 lg:grid-cols-2">
               {groups.map((g) => {
@@ -213,12 +213,12 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
                             setGroupRenameText(g.name);
                           }}
                           title="Rename group"
-                          className="text-[13px] font-semibold text-white hover:text-krypt-pink"
+                          className="text-value font-semibold text-white hover:text-krypt-pink"
                         >
                           {g.name}
                         </button>
                       )}
-                      <span className="text-[10px] font-mono text-krypt-muted">
+                      <span className="text-label font-mono text-krypt-muted">
                         {g.members.length} wallet{g.members.length === 1 ? '' : 's'} · {bal === null ? '—' : `${bal.toFixed(4)} SOL`}
                       </span>
                       <div className="flex-1" />
@@ -228,19 +228,19 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
                     </div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       {wallets.length === 0 ? (
-                        <span className="text-[11px] text-krypt-muted">No wallets yet.</span>
+                        <span className="text-body text-krypt-muted">No wallets yet.</span>
                       ) : (
                         wallets.map((w) => (
                           <label
                             key={w.id}
                             className={cls(
-                              'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] cursor-pointer transition',
+                              'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-body cursor-pointer transition',
                               memberIds.has(w.id) ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white' : 'border-white/10 text-krypt-muted hover:text-white',
                             )}
                           >
                             <input type="checkbox" className="accent-krypt-purple" checked={memberIds.has(w.id)} onChange={() => void toggleMember(g, w.id)} />
                             {w.label}
-                            {w.active && <span className="text-[9px] text-arc-gold">active</span>}
+                            {w.active && <span className="text-micro text-arc-gold">active</span>}
                           </label>
                         ))
                       )}
@@ -266,7 +266,7 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
                 <option key={g.id} value={g.id}>{g.name}</option>
               ))}
             </select>
-            <span className="text-[11px] text-krypt-muted">count</span>
+            <span className="text-body text-krypt-muted">count</span>
             <NumberInput value={createCount} min={1} max={20} onChange={setCreateCount} className="w-16" />
             <input
               value={createPrefix}
@@ -279,7 +279,7 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
               <KeyRound className="h-3.5 w-3.5" /> Create {Math.max(1, Math.min(20, Math.round(createCount)))} wallet{createCount === 1 ? '' : 's'}
             </PrimaryButton>
           </div>
-          {!target && <div className="mt-2 text-[11px] text-arc-gold">Create a group first, then choose it here.</div>}
+          {!target && <div className="mt-2 text-body text-arc-gold">Create a group first, then choose it here.</div>}
         </Card>
       </Section>
 
@@ -321,18 +321,18 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
                           setRenameText(w.label);
                         }}
                         title="Rename"
-                        className="text-[12px] font-medium text-white/90 hover:text-white"
+                        className="text-note font-medium text-white/90 hover:text-white"
                       >
                         {w.label}
                       </button>
                     )}
                     <WalletAddress value={w.publicKey} />
                   </div>
-                  <span className="min-w-0 shrink truncate text-[10px] text-krypt-muted/70">
+                  <span className="min-w-0 shrink truncate text-label text-krypt-muted/70">
                     {groups.filter((g) => g.members.some((m) => m.id === w.id)).map((g) => g.name).join(', ') || 'no group'}
                   </span>
                   {w.active && <Badge tone="gradient">active</Badge>}
-                  <div className="font-mono text-[12px] text-white/85 w-24 text-right">
+                  <div className="font-mono text-note text-white/85 w-24 text-right">
                     {w.balanceSol != null ? `${w.balanceSol.toFixed(4)} SOL` : '—'}
                   </div>
                   {!w.active && (

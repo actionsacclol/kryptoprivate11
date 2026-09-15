@@ -34,14 +34,14 @@ export function CreditMeter({ limit, onLimit }: { limit: number; onLimit: (v: nu
   return (
     <div className="mb-2 rounded-md border border-white/10 bg-black/25 px-3 py-2">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-[10px] uppercase tracking-[0.14em] text-krypt-muted">Credits this month</span>
-        <span className={cls('font-mono text-[12px]', tone)}>
+        <span className="text-label uppercase tracking-label text-krypt-muted">Credits this month</span>
+        <span className={cls('font-mono text-note', tone)}>
           {usage ? usage.used.toLocaleString() : '—'}
           {limit > 0 && <span className="text-krypt-muted"> / {limit.toLocaleString()}</span>}
         </span>
-        {pct !== null && <span className="font-mono text-[10px] text-krypt-muted">{pct.toFixed(1)}%</span>}
+        {pct !== null && <span className="font-mono text-label text-krypt-muted">{pct.toFixed(1)}%</span>}
         {left !== null && (
-          <span className="text-[10px] text-krypt-muted">≈ {left < 1 ? `${Math.round(left * 60)} min` : `${left.toFixed(1)} h`} left at this rate</span>
+          <span className="text-label text-krypt-muted">≈ {left < 1 ? `${Math.round(left * 60)} min` : `${left.toFixed(1)} h`} left at this rate</span>
         )}
       </div>
 
@@ -55,27 +55,27 @@ export function CreditMeter({ limit, onLimit }: { limit: number; onLimit: (v: nu
       )}
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <span className="text-[10px] text-krypt-muted">Monthly ceiling</span>
+        <span className="text-label text-krypt-muted">Monthly ceiling</span>
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value.replace(/[^\d]/g, ''))}
           onBlur={() => onLimit(Math.max(0, Number(draft) || 0))}
-          className="w-28 rounded bg-black/40 border border-white/15 px-2 py-0.5 font-mono text-[11px] text-white outline-none"
+          className="w-28 rounded bg-black/40 border border-white/15 px-2 py-0.5 font-mono text-body text-white outline-none"
         />
-        <span className="text-[10px] text-krypt-muted/70">0 = no guard</span>
+        <span className="text-label text-krypt-muted/70">0 = no guard</span>
         <button
           onClick={async () => {
             await window.krypt.rpc.resetCredits();
             void refresh();
           }}
-          className="rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-krypt-muted hover:text-white"
+          className="rounded border border-white/10 px-1.5 py-0.5 text-label text-krypt-muted hover:text-white"
         >
           Reset counter
         </button>
       </div>
 
       {limit > 0 && (
-        <p className="mt-1.5 text-[10px] leading-relaxed text-krypt-muted/60">
+        <p className="mt-1.5 text-label leading-relaxed text-krypt-muted/60">
           At the measured firehose rate (~780,000 pushes/hour, sampled 2026-08-24) this ceiling covers about{' '}
           <span className="text-white/80">{firehoseHoursFor(limit).toFixed(1)} hours</span> of feed-socket runtime. The
           socket switches itself off when the ceiling is reached.

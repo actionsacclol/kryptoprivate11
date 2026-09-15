@@ -20,6 +20,107 @@
 import type { LaunchRow } from './types';
 import type { RunnerFlag } from './runners';
 import type { AlertKind } from './alerts';
+import type { ChainKind } from './evm';
+import type { EvmLaunchWindow, EvmScanLaunch } from './evmScan';
+
+// ── Chains ────────────────────────────────────────────────────────────
+//
+// A script runs on ONE chain. That is not a limitation to route around, it is
+// what the facts allow: the launch intel behind most rule fields is pump's,
+// and the two EVM rails measure a different, smaller set of things about a
+// launch. Pretending otherwise would ship rules that silently never fire,
+// because an unknown fact never satisfies a rule (house rule 4).
+//
+// So the model says out loud which facts and which actions each chain can
+// supply, the editor hides the rest, and validation refuses a rule built on a
+// fact its chain cannot know.
+
+/**
+ * Fields only the Solana launch feed can fill.
+ *
+ * Most of these are pump-population intel with no EVM counterpart at all:
+ * `evmScan.ts` is explicit that the Krypt score "describes pump's population
+ * and nothing else". The rest — holder and creator history, smart-money
+ * counts, risk flags — come from Solana-only sources.
+ */
+export const SOLANA_ONLY_FIELDS: ReadonlySet<RuleField> = new Set<RuleField>([
+  'score',
+  'sellVolumeSol',
+  'buyerAcceleration',
+  'distinctSellers',
+  'topBuyerShare',
+  'topHolderShare',
+  'earlyBuyerShare',
+  'creatorPriorLaunches',
+  'creatorPriorRugs',
+  'smartBuyerCount',
+  'smartEarly',
+  'riskFlags',
+  'hardRisk',
+  'phase',
+  'launchpad',
+  // The EVM bridge's facts() carries liquidity and market cap and nothing
+  // else, so these two have no source on those rails.
+  'holders',
+  'priceUsd',
+  // Advanced orders and alerts are a Solana-side feature (shared/orders.ts and
+  // shared/alerts.ts carry no chain), so a rule cannot read their state on an
+  // EVM chain either.
+  'orderKind',
+  'orderState',
+  'orderAmount',
+  'alertKind',
+  'alertThreshold',
+]);
+
+/**
+ * Triggers that can only ever fire on Solana.
+ *
+ * `runner`, `order` and `alert` have no EVM event at all — an EVM chain's
+ * runner call rides on its launch window rather than arriving separately, and
+ * advanced orders and alerts are a Solana-side feature. `tick` has no EVM
+ * price stream reaching automation.
+ *
+ * A rule on one of these would sit armed forever without firing once, which is
+ * the failure this whole chain model exists to prevent.
+ */
+export const SOLANA_ONLY_TRIGGERS: ReadonlySet<RuleTrigger> = new Set<RuleTrigger>(['runner', 'tick', 'order', 'alert']);
+
+export function triggerAvailableOn(trigger: RuleTrigger, chain: ChainKind): boolean {
+  return chain === 'solana' || !SOLANA_ONLY_TRIGGERS.has(trigger);
+}
+
+/** Actions only Solana can carry out, for the same reason. */
+export const SOLANA_ONLY_ACTIONS: ReadonlySet<RuleActionType> = new Set<RuleActionType>([
+  'stop_loss',
+  'take_profit',
+  'trailing_stop',
+  'limit_buy',
+  'limit_sell',
+  'cancel_orders',
+  'apply_template',
+  'alert',
+]);
+
+/** A chain's name for a message. Kept here so shared/ has no UI import. */
+export function chainLabel(chain: ChainKind): string {
+  return chain === 'solana' ? 'Solana' : chain === 'bnb' ? 'BNB Smart Chain' : 'Robinhood Chain';
+}
+
+export function fieldAvailableOn(field: RuleField, chain: ChainKind): boolean {
+  return chain === 'solana' || !SOLANA_ONLY_FIELDS.has(field);
+}
+
+export function actionAvailableOn(type: RuleActionType, chain: ChainKind): boolean {
+  return chain === 'solana' || !SOLANA_ONLY_ACTIONS.has(type);
+}
+
+/** On an EVM chain the money is that chain's coin. The field IDS keep saying
+ *  `Sol` because they are a stored rule's schema and renaming them would break
+ *  every saved script; the LABELS follow the chain. */
+export function nativeFieldLabel(label: string, chain: ChainKind, symbol: string): string {
+  return chain === 'solana' ? label : label.replace(/\bSOL\b/g, symbol);
+}
 
 export type ScriptKind = 'rules' | 'code';
 export type ScriptMode = 'paper' | 'live';
@@ -335,6 +436,9 @@ export interface UserScript {
   id: string;
   name: string;
   kind: ScriptKind;
+  /** The chain this script watches and trades on. Absent on scripts saved
+   *  before 2026-09-14, which were all Solana — `scriptChain` reads it. */
+  chain?: ChainKind;
   enabled: boolean;
   mode: ScriptMode;
   /** kind = code. */
@@ -346,28 +450,47 @@ export interface UserScript {
   updatedAt: number;
 }
 
-export function defaultRules(): RuleSet {
+export function defaultRules(chain: ChainKind = 'solana'): RuleSet {
+  // The Solana default leans on the launch feed's intel. An EVM chain has no
+  // score and no risk flags, so its starter rule is built only from what its
+  // scanner actually measures — otherwise the first rule a user sees would be
+  // one that can never fire.
+  const conditions: RuleCondition[] =
+    chain === 'solana'
+      ? [
+          { field: 'score', op: 'gte', value: 70 },
+          { field: 'hardRisk', op: 'is_false', value: '' },
+          { field: 'uniqueBuyers', op: 'gte', value: 15 },
+        ]
+      : [
+          { field: 'uniqueBuyers', op: 'gte', value: 15 },
+          { field: 'creatorSold', op: 'is_false', value: '' },
+          { field: 'netInflowSol', op: 'gt', value: 0 },
+        ];
   return {
     trigger: 'launch_update',
-    conditions: [
-      { field: 'score', op: 'gte', value: 70 },
-      { field: 'hardRisk', op: 'is_false', value: '' },
-      { field: 'uniqueBuyers', op: 'gte', value: 15 },
-    ],
+    conditions,
     actions: [{ type: 'buy', sol: 0.02 }],
     oncePerMint: true,
     cooldownSec: 60,
   };
 }
 
-export function defaultScript(kind: ScriptKind): Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'> {
+/** The chain a script runs on. A script stored before chains existed is
+ *  Solana — the same "absent = solana" reading copy trading uses. */
+export function scriptChain(s: { chain?: ChainKind }): ChainKind {
+  return s.chain ?? 'solana';
+}
+
+export function defaultScript(kind: ScriptKind, chain: ChainKind = 'solana'): Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'> {
   return {
     name: kind === 'rules' ? 'New rule' : 'New script',
     kind,
+    chain,
     enabled: false,
     mode: 'paper',
     code: kind === 'code' ? SCRIPT_EXAMPLES[0].code : '',
-    rules: defaultRules(),
+    rules: defaultRules(chain),
     budget: { ...DEFAULT_BUDGET },
   };
 }
@@ -382,8 +505,10 @@ export interface ScriptPosition {
   symbol: string;
   name: string;
   openedAt: number;
-  /** SOL paid for what is still held (average cost). */
-  costSol: number;
+  /** Paid for what is still held (average cost), in the chain's own coin.
+   *  NULL when the basis is genuinely unknown — an unreconciled buy — rather
+   *  than 0, which would read as "free" and satisfy a rule about cost. */
+  costSol: number | null;
   tokens: number | null;
   entryPriceSol: number | null;
   currentPriceSol: number | null;
@@ -482,6 +607,42 @@ export function contextFromLaunch(row: LaunchRow, now: number): RuleContext {
   c.hardRisk = Array.isArray(row.riskFlags) ? row.riskFlags.some((r) => r.hard) : null;
   c.phase = row.phase ?? null;
   c.priceHistory = Array.isArray(row.priceHistory) ? row.priceHistory.slice(-120) : [];
+  return c;
+}
+
+/**
+ * A rule context from an EVM chain's scanner.
+ *
+ * Only the facts that chain actually measures are filled. Everything else is
+ * left NULL rather than defaulted, so a condition on it cannot hold — which is
+ * the point, and is why the editor refuses to build one in the first place.
+ *
+ * `netInflowSol` / `buyVolumeSol` keep their Solana-era ids but carry the
+ * CHAIN'S OWN COIN, and they stay null when the curve is not quoted in it.
+ * On 2026-09-11 only 22 % of live BNB launches were BNB-quoted (evmScan.ts),
+ * so summing the rest as if they were BNB is exactly the bug that audit found.
+ * A rule that asks about money on a non-native curve therefore gets an unknown
+ * and does not fire, which is the honest answer.
+ */
+export function contextFromEvmLaunch(launch: EvmScanLaunch, now: number): RuleContext {
+  const c = emptyContext(launch.token, launch.symbol ?? '', launch.name ?? '');
+  // Newest closed window — the chain measures in 60 s / 120 s blocks.
+  const w: EvmLaunchWindow | undefined = Array.isArray(launch.windows) && launch.windows.length
+    ? launch.windows[launch.windows.length - 1]
+    : undefined;
+  c.ageSec = num(launch.seenAt) !== null ? Math.max(0, (now - launch.seenAt) / 1000) : null;
+  if (w) {
+    c.uniqueBuyers = num(w.uniqueBuyers);
+    c.buys = num(w.buys);
+    c.sells = num(w.sells);
+    c.curvePct = num(w.curvePct);
+    c.creatorSold = typeof w.creatorSold === 'boolean' ? w.creatorSold : null;
+    // Native-quoted only. `netNative` is already null otherwise; num() keeps it null.
+    c.netInflowSol = num(w.netNative);
+    c.buyVolumeSol = num(w.volumeNative);
+  }
+  // This chain's own record of how launches that started like this one went.
+  c.runnerOddsPct = launch.call ? num(launch.call.ratePct) : null;
   return c;
 }
 
@@ -731,6 +892,34 @@ export function validateScript(
   } else {
     const r = validateRules(s.rules);
     if (!r.ok) return r;
+    // A condition its chain cannot answer is refused HERE rather than left to
+    // fail quietly at runtime. An unknown fact never satisfies a rule, so such
+    // a rule would look armed, cost nothing, and never once fire — the worst
+    // failure this feature has, because it is invisible.
+    const chain = scriptChain(s);
+    if (!triggerAvailableOn(s.rules.trigger, chain)) {
+      const t = RULE_TRIGGERS.find((x) => x.id === s.rules.trigger);
+      return {
+        ok: false,
+        message: `"${t?.label ?? s.rules.trigger}" never happens on ${chainLabel(chain)} — that rule could not fire. Pick another trigger or move this script to Solana.`,
+      };
+    }
+    for (const cond of s.rules.conditions) {
+      if (fieldAvailableOn(cond.field, chain)) continue;
+      const spec = RULE_FIELDS.find((f) => f.id === cond.field);
+      return {
+        ok: false,
+        message: `${spec?.label ?? cond.field} is not measured on ${chainLabel(chain)} — a rule on it could never fire. Remove the condition or move this script to Solana.`,
+      };
+    }
+    for (const a of s.rules.actions) {
+      if (actionAvailableOn(a.type, chain)) continue;
+      const spec = RULE_ACTIONS.find((x) => x.id === a.type);
+      return {
+        ok: false,
+        message: `${spec?.label ?? a.type} is Solana-only — ${chainLabel(chain)} has no advanced orders or alerts yet.`,
+      };
+    }
     for (const a of s.rules.actions) {
       if (a.type !== 'buy' && a.type !== 'limit_buy') continue;
       if (a.sol > s.budget.maxSolPerTrade) return { ok: false, message: `Buy ${a.sol} SOL is above this script's max per trade (${s.budget.maxSolPerTrade})` };
@@ -834,12 +1023,18 @@ export interface ApiSpec {
   notes: string;
   /** Counts as an action against the budget. */
   action: boolean;
+  /**
+   * Answered inside the sandbox, so it is NOT one of SCRIPT_METHODS and never
+   * crosses the wire. Handlers, the logger, the clock, and the two facts about
+   * the script's own chain, which ride along with the code in `init`.
+   */
+  local?: true;
 }
 
 /** The whole `bot` object. The harness, the dispatcher and the docs all
  *  follow this table. */
 export const SCRIPT_API: ApiSpec[] = [
-  { method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval. Handlers for one script run one at a time; one that runs past 3 s is killed and counts as an error.', action: false },
+  { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval. Handlers for one script run one at a time; one that runs past 3 s is killed and counts as an error.', action: false },
   { method: 'every', signature: 'bot.every(seconds, async () => {})', returns: 'Promise<number> (the seconds used)', notes: 'A timer. 5 s minimum, 3600 max.', action: false },
   { method: 'at', signature: "bot.at('HH:MM', async () => {})", returns: 'Promise<string>', notes: 'Once a day at that local time.', action: false },
   { method: 'buy', signature: 'await bot.buy(mint, sol)', returns: '{ok, message}', notes: 'Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over the per-trade cap, the daily buy cap, the open-position cap, the actions-per-minute cap, the execution cap, or while live is blocked.', action: true },
@@ -855,7 +1050,7 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'subscribe', signature: 'await bot.subscribe(mint)', returns: '{ok, message}', notes: 'Stream tick events for the token without pinning it. Positions the script holds are always streamed.', action: false },
   { method: 'unsubscribe', signature: 'await bot.unsubscribe(mint)', returns: '{ok, message}', notes: '', action: false },
   { method: 'notify', signature: "await bot.notify('text')", returns: '{ok, message}', notes: 'Desktop notification and a toast.', action: true },
-  { method: 'log', signature: "bot.log('text') / bot.warn('text')", returns: 'void', notes: 'A line on this script’s log (400 chars max).', action: false },
+  { local: true, method: 'log', signature: "bot.log('text') / bot.warn('text')", returns: 'void', notes: 'A line on this script’s log (400 chars max).', action: false },
   { method: 'price', signature: 'await bot.price(mint)', returns: 'number | null', notes: 'SOL per token from what the app already knows. Null when nothing local knows it.', action: false },
   { method: 'token', signature: 'await bot.token(mint)', returns: 'Token | null', notes: 'The same facts a rule sees (see the variable guide), from the launch feed and the cached market data. Null when the app has never seen the token.', action: false },
   { method: 'market', signature: 'await bot.market(mint)', returns: 'Market | null', notes: 'Asks the market providers (a network round trip inside the app): priceSol, priceUsd, marketCapUsd, liquidityUsd, holders, launchpad, symbol, name. Slow — a second or more; not for every tick.', action: false },
@@ -863,11 +1058,13 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'orders', signature: 'await bot.orders(mint?)', returns: 'Order[]', notes: '{id, mint, symbol, kind, state, triggerBasis, triggerValue, amount}. All orders, or the token’s.', action: false },
   { method: 'runners', signature: 'await bot.runners()', returns: 'Token[]', notes: 'Launches the scanner currently flags as runners.', action: false },
   { method: 'leaders', signature: 'await bot.leaders()', returns: 'Array<{wallet, label, enabled, mode}>', notes: 'Wallets followed on the Copy Trading page.', action: false },
-  { method: 'wallet', signature: 'await bot.wallet()', returns: '{sol: number | null, address: string | null}', notes: 'The active trading wallet.', action: false },
+  { method: 'wallet', signature: 'await bot.wallet()', returns: '{sol: number | null, address: string | null}', notes: "This script's chain's trading wallet — `sol` is that chain's own coin. Null when unknown.", action: false },
   { method: 'getState', signature: 'await bot.getState()', returns: 'object', notes: 'This script’s saved state.', action: false },
   { method: 'setState', signature: 'await bot.setState(obj)', returns: 'true', notes: 'Replace the saved state. 16 KB of JSON, survives restarts.', action: false },
   { method: 'disable', signature: "await bot.disable('reason')", returns: 'true', notes: 'The script turns itself off.', action: false },
-  { method: 'now', signature: 'bot.now()', returns: 'number', notes: 'Milliseconds since the epoch.', action: false },
+  { local: true, method: 'now', signature: 'bot.now()', returns: 'number', notes: 'Milliseconds since the epoch.', action: false },
+  { local: true, method: 'chain', signature: 'bot.chain', returns: "'solana' | 'robinhood' | 'bnb'", notes: 'The chain this script runs on. Not a call — a property, known before the first event.', action: false },
+  { local: true, method: 'nativeSymbol', signature: 'bot.nativeSymbol', returns: 'string', notes: "The coin every amount here is in: SOL, ETH or BNB. Use it in logs so a script reads correctly on whichever chain it is on.", action: false },
 ];
 
 export interface EventSpec {

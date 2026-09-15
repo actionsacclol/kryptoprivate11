@@ -127,7 +127,7 @@ export function TradePanel({
             key={s}
             onClick={() => setSide(s)}
             className={cls(
-              'rounded-md py-2 text-[12px] font-bold uppercase tracking-[0.12em] transition',
+              'rounded-md py-2 text-note font-bold uppercase tracking-label transition',
               side === s
                 ? s === 'buy'
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
@@ -141,7 +141,7 @@ export function TradePanel({
       </div>
 
       {side === 'sell' && sellPct < 100 && (
-        <p className="text-[10px] text-krypt-muted/70 leading-relaxed">
+        <p className="text-label text-krypt-muted/70 leading-relaxed">
           A partial sell is built locally like any other, but it keeps the token account open. A 100% sell closes it
           in the same transaction and reclaims the ~0.002 SOL of rent sitting in it.
         </p>
@@ -155,7 +155,7 @@ export function TradePanel({
                 key={p}
                 onClick={() => setAmountSol(p)}
                 className={cls(
-                  'rounded-md border py-1.5 text-[11px] font-mono font-semibold transition',
+                  'rounded-md border py-1.5 text-body font-mono font-semibold transition',
                   amountSol === p
                     ? 'border-krypt-purple/50 bg-krypt-purple/20 text-white'
                     : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -177,9 +177,9 @@ export function TradePanel({
               }}
               className="flex-1 bg-transparent px-3 py-2.5 text-sm font-mono text-white outline-none"
             />
-            <span className="px-3 text-[11px] uppercase text-krypt-muted">SOL</span>
+            <span className="px-3 text-body uppercase text-krypt-muted">SOL</span>
           </div>
-          <div className="text-[11px] text-krypt-muted text-right -mt-1">
+          <div className="text-body text-krypt-muted text-right -mt-1">
             {cost.usd !== null ? `≈ ${fmtUsd(cost.usd)}` : 'SOL price unavailable'}
           </div>
         </>
@@ -190,7 +190,7 @@ export function TradePanel({
               key={p}
               onClick={() => setSellPct(p)}
               className={cls(
-                'rounded-md border py-1.5 text-[11px] font-mono font-semibold transition',
+                'rounded-md border py-1.5 text-body font-mono font-semibold transition',
                 sellPct === p
                   ? 'border-rose-400/50 bg-rose-500/20 text-white'
                   : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -210,7 +210,7 @@ export function TradePanel({
       {side === 'buy' && (
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 px-0.5">
           <span
-            className="text-[11px] text-krypt-muted"
+            className="text-body text-krypt-muted"
             title={[
               `pump.fun protocol ${PROTOCOL_FEE_PCT}%: ${toUsd(cost.protocol)}`,
               cost.relayer > 0 ? `Relayer ${RELAYER_FEE_PCT}%: ${toUsd(cost.relayer)}` : null,
@@ -226,10 +226,10 @@ export function TradePanel({
             Est. fees <span className="font-mono text-white/80">{toUsd(cost.total)}</span>
             <span className="text-krypt-muted/60"> · incl. Krypt {(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side</span>
           </span>
-          <span className="text-[10px] text-krypt-muted/50">
+          <span className="text-label text-krypt-muted/50">
             slippage capped at {settings.execution.liveSlippagePct}%
           </span>
-          <span className="text-[10px]">
+          <span className="text-label">
             {(settings.execution.mevMode ?? 'fast') === 'private' ? (
               <span className="text-emerald-300/80">· private buy (bundle lane only)</span>
             ) : (
@@ -246,7 +246,7 @@ export function TradePanel({
         onClick={side === 'buy' ? doBuy : doSell}
         disabled={busy || blocked !== null}
         className={cls(
-          'w-full rounded-lg border py-3 text-sm font-bold uppercase tracking-[0.1em] transition flex items-center justify-center gap-2',
+          'w-full rounded-lg border py-3 text-sm font-bold uppercase tracking-action transition flex items-center justify-center gap-2',
           blocked !== null
             ? 'border-white/8 bg-white/5 text-krypt-muted/50 cursor-not-allowed'
             : side === 'buy'
@@ -259,13 +259,13 @@ export function TradePanel({
       </button>
 
       {blocked && (
-        <p className="text-[11px] text-arc-gold/80 leading-relaxed flex items-start gap-1.5">
+        <p className="text-body text-arc-gold/80 leading-relaxed flex items-start gap-1.5">
           <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-px" />
           {blocked}
         </p>
       )}
 
-      <div className="flex items-center justify-between text-[10px] text-krypt-muted/60 pt-1 border-t border-white/5">
+      <div className="flex items-center justify-between text-label text-krypt-muted/60 pt-1 border-t border-white/5">
         <span>{wallet?.publicKey ? shortAddr(wallet.publicKey, 4) : 'no wallet'}</span>
         <span>{wallet?.balanceSol !== null && wallet?.balanceSol !== undefined ? `${wallet.balanceSol.toFixed(4)} SOL` : '—'}</span>
       </div>

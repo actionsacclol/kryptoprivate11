@@ -37,7 +37,7 @@ export function IntegrityBanner() {
   return (
     <div className="flex items-start gap-2 border-b border-rose-500/40 bg-rose-500/15 px-4 py-2">
       <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-rose-400" />
-      <div className="text-[11px] leading-relaxed text-rose-100">{message}</div>
+      <div className="text-body leading-relaxed text-rose-100">{message}</div>
     </div>
   );
 }

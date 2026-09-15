@@ -3,6 +3,8 @@
 // across IPC; they return { ok, message, data? }.
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from 'electron';
+import { probeRoundTrip } from './engine/farmProbe';
+import { postFlag } from './system/discordWebhook';
 import fs from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -216,6 +218,23 @@ export function bridgeDeps(): bridge.BridgeDeps {
   return { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl };
 }
 
+/**
+ * Window control, injected by main.
+ *
+ * main.ts already imports this file (`registerIpc`, `bridgeDeps`), so
+ * importing back would be a cycle. The rest of the file takes its
+ * main-process capabilities the same way — see `bridgeDeps`.
+ */
+export interface WindowHost {
+  openPanel(panelId: string): { ok: boolean; message: string };
+  closePanel(win: BrowserWindow | null): boolean;
+  focusMain(): BrowserWindow | null;
+}
+let windows: WindowHost | null = null;
+export function setWindowHost(h: WindowHost): void {
+  windows = h;
+}
+
 export function registerIpc(): void {
   // Construct the engine eagerly. It is otherwise built on first use, and
   // the terminal's data layer gets its context from the engine constructor —
@@ -260,13 +279,49 @@ export function registerIpc(): void {
     runnerAlerts: (chain) => store.load().evm[chain].runnerAlerts,
     // Through the engine, so the desktop-notification switch and the chat
     // push mean the same thing here as they do for a Solana runner.
-    notify: (title, body) => getEngine().pushNotification(title, body),
+    notify: (title, body, target) => getEngine().pushNotification(title, body, target),
+    // User scripts on THIS chain see the launch (Automation → Scripts). The
+    // Solana feed reaches automation from `onEngineEvent`; the EVM rails have
+    // no equivalent event, so the scanner hands them over directly.
+    onLaunchWindow: (chain, launch) => automation.onEvmLaunch(chain, launch),
   });
   // Recorder mode follows the firehose switch: off = launch tape (creates,
   // first 30 min of trades per mint, completions, health), on = everything.
   recorder.setMode(store.load().recordFirehose ? 'firehose' : 'launch');
 
   // ── app ──────────────────────────────────────────────────────────
+  // ── Popped-out panels ────────────────────────────────────────────
+  //
+  // The renderer names a panel; main decides whether that is a panel and owns
+  // the window. `close` and `openToken` act on the CALLING window, taken from
+  // the event — never on a window id the renderer passes, which is the same
+  // rule the rest of this file follows for addresses and wallets.
+  ipcMain.handle('panel:popout', (_e, panelId: unknown) => {
+    if (typeof panelId !== 'string') return fail('Unknown panel');
+    if (!windows) return fail('Windows are not ready yet');
+    const r = windows.openPanel(panelId);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+
+  ipcMain.handle('panel:close', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    return windows?.closePanel(win) ? ok('Closed') : fail('Not a panel window');
+  });
+
+  // A coin opened from a popped-out panel belongs in the MAIN window: that is
+  // where the token page lives, and the panel keeps showing its panel.
+  ipcMain.handle('panel:openToken', (_e, mint: unknown, chain: unknown) => {
+    if (typeof mint !== 'string' || !mint) return fail('No token');
+    const c = chainOf(chain) ?? 'solana';
+    windows?.focusMain();
+    try {
+      getEngine().requestOpenToken(mint, c);
+    } catch {
+      return fail('Could not open that token');
+    }
+    return ok('ok');
+  });
+
   ipcMain.handle('app:version', () => ok('ok', app.getVersion()));
 
   // Is there a newer build? `status` is free and answers from memory;
@@ -948,6 +1003,12 @@ export function registerIpc(): void {
     return ok('ok', scoutScan.status(chain as ScoutChain));
   });
 
+  ipcMain.handle('scout:clear', (_e, chain: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    const r = walletScout.clearTracked(chain as ScoutChain);
+    return ok(r.message, r.cleared);
+  });
+
   ipcMain.handle('scout:scanCancel', (_e, chain: unknown) => {
     if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
     const asked = scoutScan.cancel(chain as ScoutChain);
@@ -1272,6 +1333,15 @@ export function registerIpc(): void {
     const c = chainOf(chain);
     if (!c) return fail('Unknown chain');
     return ok('ok', evmScanner.launches(c));
+  });
+
+  // Runner calls this chain flagged this session. Separate from `launches`,
+  // which purges a launch 130 s after it is seen — a flag has to outlive that
+  // or the Runner alerts panel can never show one.
+  ipcMain.handle('evm:scan:flagged', (_e, chain: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    return ok('ok', evmScanner.flagged(c));
   });
 
   ipcMain.handle('evm:scan:start', (_e, chain: unknown) => {
@@ -2219,6 +2289,47 @@ export function registerIpc(): void {
   });
 
   // ── alerts (term.txt §17) ────────────────────────────────────────
+  /**
+   * Send a test post to this chain's runner webhook.
+   *
+   * A webhook nobody has tested is a webhook nobody knows is working, and the
+   * failure mode is silence — indistinguishable from "no flags yet". The URL
+   * is NOT taken from the renderer: it is read from the store, so this cannot
+   * be used to make the app POST to an arbitrary host.
+   */
+  ipcMain.handle('runners:testWebhook', async (_e, chain: unknown) => {
+    const c = chain === 'solana' || chain === 'robinhood' || chain === 'bnb' ? chain : null;
+    if (!c) return fail('Unknown chain');
+    const cur = store.load();
+    const url = c === 'solana' ? (cur.strategy.runnerAlerts.webhookUrl ?? '') : (cur.evm[c]?.runnerAlerts?.webhookUrl ?? '');
+    if (!url.trim()) return fail('No webhook saved for this chain yet.');
+    const label = c === 'solana' ? 'Solana' : EVM_CHAIN_META[c].name;
+    const res = await postFlag(url, {
+      title: `Test from Krypto Bot — ${label} runner alerts`,
+      body:
+        `This is what a flagged runner will look like. Real posts carry the launch's buyer count, net inflow, ` +
+        `curve progress and the graduation rate that bucket actually achieved, plus a link to the token.`,
+      mint: '(test)',
+      chainLabel: label,
+      url: null,
+    });
+    return res.ok ? ok('Posted — check your Discord channel.') : fail(res.message);
+  });
+
+  /**
+   * Measure the real round-trip friction of a pair. Two Jupiter quotes; no
+   * wallet, no signing, nothing spent. The farming page refuses to show a
+   * cost until this has answered — the guessed version of this number was
+   * wrong by two orders of magnitude in the flattering direction.
+   */
+  ipcMain.handle('farming:probe', async (_e, mint: unknown, sizeSol: unknown) => {
+    if (typeof mint !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return fail('Invalid mint');
+    const n = Number(sizeSol);
+    if (!Number.isFinite(n) || n <= 0 || n > 1000) return fail('Size must be between 0 and 1000 SOL');
+    const r = await probeRoundTrip(mint, n);
+    return r.ok ? ok(r.message, r) : fail(r.message);
+  });
+
   ipcMain.handle('alerts:list', () => ok('ok', getEngine().alertsSnapshot()));
 
   ipcMain.handle('alerts:create', (_e, raw: unknown) => {
@@ -2396,6 +2507,38 @@ export function registerIpc(): void {
       const sum = await evmRail.summary(chain, token);
       return { liquidityUsd: sum.liquidityUsd, marketCapUsd: sum.marketCapUsd, kryptScore: null, isPumpfun: false };
     },
+    // The chain's own wallet, so a script's `walletSol` is that chain's coin
+    // and not the Solana balance. balanceWei is a cached read; null stays null
+    // so an unknown balance renders as an em dash and satisfies no rule.
+    wallet: (chain) => {
+      const addr = evmWallet.address(chain);
+      if (!addr) return null;
+      const wei = evmWallet.balanceWei(chain, addr);
+      return { native: wei === null ? null : Number(wei) / 1e18, address: addr };
+    },
+    // Positions WITH basis, from the EVM ledger, so a script on that chain
+    // can reason about its own PnL the way a Solana script does.
+    positions: async (chain) => {
+      const p = await evmRail.portfolio(chain);
+      return p.positions.map((x) => ({
+        token: x.token,
+        symbol: x.symbol,
+        amount: x.amount,
+        priceNative: x.priceNative,
+        basisKnown: x.basisKnown,
+        costNative: x.costNative,
+        avgEntryPriceNative: x.avgEntryPriceNative,
+        unrealizedPnlNative: x.unrealizedPnlNative,
+        unrealizedPnlPct: x.unrealizedPnlPct,
+        firstBuyAt: x.firstBuyAt,
+      }));
+    },
+    // What this install holds on the chain, so a live script on it lists its
+    // OWN positions rather than the Solana wallet's.
+    holdings: async (chain) => {
+      const rows = await evmRail.holdings(chain);
+      return rows.map((h) => ({ token: h.token, symbol: h.symbol, amount: h.amount, priceNative: h.priceNative }));
+    },
   });
   evmScanner.setCurveLookup((chain, curve) => evmDiscover.tokenForCurve(chain, curve));
 
@@ -2461,6 +2604,17 @@ export function registerIpc(): void {
   ipcMain.handle('copy:resetStats', (_e, wallet: unknown) => {
     if (typeof wallet !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) return fail('Invalid wallet');
     const r = getEngine().resetCopyLeader(wallet);
+    return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
+  });
+
+  // Clear PAPER results only. Deliberately separate from `copy:remove`,
+  // which deletes the config, its live history and the leader's record —
+  // three things that were only ever bundled because there was no other
+  // button (user report, 2026-09-13). Takes effect immediately; no restart.
+  ipcMain.handle('copy:resetPaper', (_e, configId: unknown) => {
+    if (configId !== undefined && configId !== null && typeof configId !== 'string') return fail('Invalid id');
+    const id = typeof configId === 'string' && configId ? configId : undefined;
+    const r = getEngine().resetCopyPaper(id);
     return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
   });
 

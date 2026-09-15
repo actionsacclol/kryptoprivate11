@@ -73,17 +73,17 @@ export function OrderRow({
       <div className="flex items-center gap-2">
         <span
           className={cls(
-            'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider',
+            'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-micro font-bold uppercase tracking-wider',
             STATE_STYLE[order.state],
           )}
         >
           <Icon className={cls('h-2.5 w-2.5', order.state === 'triggered' && 'animate-spin')} />
           {order.state}
         </span>
-        {showSymbol && <span className="text-[12px] font-semibold text-white">{order.symbol || order.mint.slice(0, 6)}</span>}
-        <span className="text-[11px] text-krypt-muted uppercase tracking-wider">{ORDER_LABEL[order.kind]}</span>
+        {showSymbol && <span className="text-note font-semibold text-white">{order.symbol || order.mint.slice(0, 6)}</span>}
+        <span className="text-body text-krypt-muted uppercase tracking-wider">{ORDER_LABEL[order.kind]}</span>
         <div className="flex-1" />
-        <span className="text-[10px] text-krypt-muted/50">{fmtAgo(order.createdAt)} ago</span>
+        <span className="text-label text-krypt-muted/50">{fmtAgo(order.createdAt)} ago</span>
         {cancellable && (
           <button
             onClick={() => onCancel(order.id)}
@@ -95,12 +95,12 @@ export function OrderRow({
         )}
       </div>
 
-      <div className="text-[12px] text-white/90 mt-1">{describeOrder(order)}</div>
+      <div className="text-note text-white/90 mt-1">{describeOrder(order)}</div>
 
       {order.note && (
         <div
           className={cls(
-            'text-[10px] mt-1 leading-relaxed',
+            'text-label mt-1 leading-relaxed',
             blockedWarning ? 'text-rose-200' : order.state === 'failed' ? 'text-rose-300/80' : 'text-krypt-muted/70',
           )}
         >
@@ -111,7 +111,7 @@ export function OrderRow({
       {order.signature && (
         <button
           onClick={() => void window.krypt.app.openExternal(`https://solscan.io/tx/${order.signature}`)}
-          className="text-[10px] font-mono text-krypt-purple hover:text-krypt-pink mt-1"
+          className="text-label font-mono text-krypt-purple hover:text-krypt-pink mt-1"
         >
           {order.signature.slice(0, 16)}… ↗
         </button>
@@ -232,7 +232,7 @@ export function OrdersPanel({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted whitespace-nowrap">
+        <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">
           Orders
         </h3>
         <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -243,7 +243,7 @@ export function OrdersPanel({
             if (!open) pickKind(anchorable ? kind : 'limit_sell');
             setOpen((o) => !o);
           }}
-          className="inline-flex items-center gap-1 rounded-md border border-krypt-purple/40 bg-krypt-purple/15 px-2 py-1 text-[10px] font-semibold text-white hover:bg-krypt-purple/25 transition"
+          className="inline-flex items-center gap-1 rounded-md border border-krypt-purple/40 bg-krypt-purple/15 px-2 py-1 text-label font-semibold text-white hover:bg-krypt-purple/25 transition"
         >
           <Plus className="h-3 w-3" />
           New
@@ -252,7 +252,7 @@ export function OrdersPanel({
 
       {paperBlocked ? (
         <div className="rounded-md border border-arc-gold/30 bg-arc-gold/10 px-2.5 py-2">
-          <p className="text-[10px] text-arc-gold/90 leading-relaxed">
+          <p className="text-label text-arc-gold/90 leading-relaxed">
             Orders are live-only — switch to Live to arm them. There is no paper version of a stop loss, so nothing
             created here would fire while you are in Paper.
           </p>
@@ -261,7 +261,7 @@ export function OrdersPanel({
         !executable &&
         blockedReason && (
           <div className="rounded-md border border-arc-gold/30 bg-arc-gold/10 px-2.5 py-2">
-            <p className="text-[10px] text-arc-gold/90 leading-relaxed">
+            <p className="text-label text-arc-gold/90 leading-relaxed">
               Orders will not execute right now — {blockedReason}. They stay armed and will fire when it is fixed,
               which may be at a much worse price.
             </p>
@@ -273,7 +273,7 @@ export function OrdersPanel({
         <div className="rounded-lg border border-white/12 bg-black/30 p-3 space-y-2.5 animate-ink">
           {KIND_GROUPS.map((g) => (
             <div key={g.label}>
-              <div className="text-[9px] uppercase tracking-[0.16em] text-krypt-muted/60 mb-1">{g.label}</div>
+              <div className="text-micro uppercase tracking-label text-krypt-muted/60 mb-1">{g.label}</div>
               <div className="grid grid-cols-3 gap-1">
                 {g.kinds.map((k) => {
                   const unavailable = isPctKind(k) && !anchorable;
@@ -284,7 +284,7 @@ export function OrdersPanel({
                       disabled={unavailable}
                       title={unavailable ? 'Needs a price to measure against' : undefined}
                       className={cls(
-                        'rounded-md border px-1.5 py-1.5 text-[10px] font-semibold transition leading-tight',
+                        'rounded-md border px-1.5 py-1.5 text-label font-semibold transition leading-tight',
                         unavailable
                           ? 'border-white/8 bg-white/[0.02] text-krypt-muted/35 cursor-not-allowed line-through'
                           : kind === k
@@ -303,7 +303,7 @@ export function OrdersPanel({
           {!isConditional(kind) && (
             <div>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-[9px] uppercase tracking-[0.16em] text-krypt-muted/60">Trigger</span>
+                <span className="text-micro uppercase tracking-label text-krypt-muted/60">Trigger</span>
                 {!isPctKind(kind) && (
                   <div className="flex rounded border border-white/10 overflow-hidden">
                     {(['mcap_usd', 'price_sol'] as TriggerBasis[]).map((b) => (
@@ -311,7 +311,7 @@ export function OrdersPanel({
                         key={b}
                         onClick={() => setBasis(b)}
                         className={cls(
-                          'px-1.5 py-0.5 text-[9px] font-semibold transition',
+                          'px-1.5 py-0.5 text-micro font-semibold transition',
                           basis === b ? 'bg-arc-gold/20 text-arc-gold' : 'text-krypt-muted hover:text-white',
                         )}
                       >
@@ -326,14 +326,14 @@ export function OrdersPanel({
                   type="number"
                   value={triggerValue}
                   onChange={(e) => setTriggerValue(e.target.value)}
-                  className="flex-1 bg-transparent px-2 py-1.5 text-[12px] font-mono text-white outline-none"
+                  className="flex-1 bg-transparent px-2 py-1.5 text-note font-mono text-white outline-none"
                 />
-                <span className="px-2 text-[10px] uppercase text-krypt-muted">
+                <span className="px-2 text-label uppercase text-krypt-muted">
                   {isPctKind(kind) ? '%' : basis === 'mcap_usd' ? 'USD' : 'SOL'}
                 </span>
               </div>
               {basis === 'mcap_usd' && token.marketCapUsd !== null && (
-                <div className="text-[10px] text-krypt-muted/60 mt-1">
+                <div className="text-label text-krypt-muted/60 mt-1">
                   Now: {fmtUsd(token.marketCapUsd)}
                 </div>
               )}
@@ -341,7 +341,7 @@ export function OrdersPanel({
           )}
 
           <div>
-            <div className="text-[9px] uppercase tracking-[0.16em] text-krypt-muted/60 mb-1">
+            <div className="text-micro uppercase tracking-label text-krypt-muted/60 mb-1">
               {isBuyKind(kind) ? 'Buy amount' : 'Sell amount'}
             </div>
             {!isBuyKind(kind) && (
@@ -351,7 +351,7 @@ export function OrdersPanel({
                     key={p}
                     onClick={() => setAmount(String(p))}
                     className={cls(
-                      'rounded border py-1 text-[10px] font-mono transition',
+                      'rounded border py-1 text-label font-mono transition',
                       Number(amount) === p
                         ? 'border-krypt-purple/50 bg-krypt-purple/20 text-white'
                         : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -367,19 +367,19 @@ export function OrdersPanel({
                 type="number"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
-                className="flex-1 bg-transparent px-2 py-1.5 text-[12px] font-mono text-white outline-none"
+                className="flex-1 bg-transparent px-2 py-1.5 text-note font-mono text-white outline-none"
               />
-              <span className="px-2 text-[10px] uppercase text-krypt-muted">{isBuyKind(kind) ? 'SOL' : '%'}</span>
+              <span className="px-2 text-label uppercase text-krypt-muted">{isBuyKind(kind) ? 'SOL' : '%'}</span>
             </div>
           </div>
 
-          {!validity.ok && <p className="text-[10px] text-rose-300">{validity.message}</p>}
+          {!validity.ok && <p className="text-label text-rose-300">{validity.message}</p>}
 
           <button
             onClick={() => void submit()}
             disabled={!validity.ok || busy}
             className={cls(
-              'w-full rounded-md border py-2 text-[11px] font-bold uppercase tracking-wider transition',
+              'w-full rounded-md border py-2 text-body font-bold uppercase tracking-wider transition',
               validity.ok && !busy
                 ? 'border-krypt-purple/50 bg-krypt-gradient text-white hover:brightness-110'
                 : 'border-white/8 bg-white/5 text-krypt-muted/50 cursor-not-allowed',
@@ -387,7 +387,7 @@ export function OrdersPanel({
           >
             {busy ? 'Creating…' : 'Create order'}
           </button>
-          <p className="text-[10px] text-krypt-muted/55 leading-relaxed">
+          <p className="text-label text-krypt-muted/55 leading-relaxed">
             Orders survive a restart but come back <span className="text-arc-gold">paused</span> — you resume them
             deliberately, so a stop loss can never fire into a market the app was not watching.
           </p>
@@ -395,7 +395,7 @@ export function OrdersPanel({
       )}
 
       {active.length === 0 && done.length === 0 ? (
-        <p className="text-[11px] text-krypt-muted/60">
+        <p className="text-body text-krypt-muted/60">
           No orders on this token. Use <span className="text-white">New</span> for a stop loss, take profit,
           trailing stop or limit order.
         </p>

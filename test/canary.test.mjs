@@ -46,8 +46,11 @@ function ok(name, fn) {
 
 ok('a genuine build trips ZERO canaries', () => {
   // Runs against the REAL compiled constants — this is the false-positive guard.
-  // 12 Solana + attribution canaries, 6 Robinhood Chain fee canaries.
-  assert.deepEqual(tamperFlags(), new Array(18).fill(false));
+  // 12 Solana + attribution canaries, 3 farming-rate canaries, 6 Robinhood
+  // Chain fee canaries. The COUNT is pinned deliberately: a flag silently
+  // dropped is a check that stopped running, which looks identical to a check
+  // that passes.
+  assert.deepEqual(tamperFlags(), new Array(21).fill(false));
   assert.equal(tamperCount(), 0);
   assert.equal(isIntact(), true);
 });
@@ -154,7 +157,7 @@ ok('editing the readable identity changes a decoy — the real one is still publ
   // …and the canonical identity is what gets published regardless.
   assert.equal(r.identity.clientId, '1495323918234423406');
   assert.equal(r.identity.buttons[0].url, 'https://krypt.cc/tools');
-  assert.equal(r.identity.buttons[1].url, 'https://discord.gg/muzFKR657F');
+  assert.equal(r.identity.buttons[1].url, 'https://pump.fun/coin/2qEubd7GwtZbCqDu1uQwNC4kNaJLBdRUcWKpckTypump');
   assert.equal(r.identity.largeImageText, 'Krypto Bot');
 });
 

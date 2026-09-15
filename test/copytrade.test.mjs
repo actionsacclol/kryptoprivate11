@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as copy from './.copytrade.mjs';
-import { copySize, defaultConfig, emptyLeaderStats, leaderWinRate, rankLeaders, validateConfig, winRate } from './.copyshared.mjs';
+import { COPY_LATENCY_FLOOR_MS, MIN_TRIPS_FOR_RANK, TOO_FAST_FLAG_PCT, copySize, defaultConfig, emptyLeaderStats, leaderTooFast, leaderWinRate, rankLeaders, validateConfig, winRate } from './.copyshared.mjs';
 
 let passed = 0;
 const cases = [];
@@ -53,6 +53,14 @@ function makeHost(over = {}) {
   if (over.ourCostBasisSol !== undefined) host.ourCostBasisSol = () => over.ourCostBasisSol;
   if (over.buyBlockedReason !== undefined) host.buyBlockedReason = () => over.buyBlockedReason;
   if (over.maxLiveSol !== undefined) host.maxLiveSol = () => over.maxLiveSol;
+  if (over.leaderHolding !== undefined) {
+    calls.holdingReads = [];
+    host.leaderHolding = async (w, m) => {
+      calls.holdingReads.push({ wallet: w, mint: m });
+      if (typeof over.leaderHolding === 'function') return over.leaderHolding();
+      return over.leaderHolding;
+    };
+  }
   return { calls, host };
 }
 
@@ -350,14 +358,73 @@ test('LIVE: when our own orders already emptied the bag, the copy closes with th
   assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0);
 });
 
-test('LIVE: an unknown fraction is NOT mirrored — a trim must never become a dump', async () => {
+test('LIVE: an unrecoverable fraction is NOT mirrored — a trim must never become a dump', async () => {
   const h = await openLiveCopy();
   copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: null, signature: 'sell1' }));
   await tick();
   assert.equal(h.calls.sells.length, 0);
   const snap = copy.snapshot();
   assert.equal(snap.recent.find((t) => t.kind !== 'exit').state, 'open');
-  assert.match(snap.recent.find((t) => t.kind === 'exit').reason, /could not tell how much/);
+  assert.match(snap.recent.find((t) => t.kind === 'exit').reason, /could not be read/);
+  // And the user is TOLD they still hold it — this is the case where doing
+  // nothing leaves them fully exposed, so it must not be a quiet warning.
+  const said = h.calls.toasts.at(-1);
+  assert.equal(said.level, 'error');
+  assert.match(said.message, /still hold it|sell by hand/i);
+});
+
+// ── Recovering a sell size the transaction did not carry ──────────────
+//
+// The user-facing bug (2026-09-13): "when someone sells and they can't tell
+// how much it is, it just doesn't sell". `soldFraction` is decoded from the
+// transaction's pre-balances, which carry an `owner` only on newer RPC
+// replies; without it the fraction is null and the mirror gave up. Their
+// holding AFTER the sell plus the tokens it moved is what they held before,
+// so one balance read recovers the exact fraction.
+
+test('an unreadable sell size is RECOVERED from the leader’s balance', async () => {
+  // They sold 600 and have 400 left → they sold 60 % of their bag.
+  const h = await openLiveCopy({ leaderHolding: 400 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: null, tokens: 600, signature: 'sell1' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1, 'the sell is mirrored, not skipped');
+  assert.equal(h.calls.sells[0].pct, 60);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').remainingPct, 40);
+});
+
+test('a leader who fully exits is mirrored as a FULL exit', async () => {
+  // Nothing left: the case that matters most, and the one that used to sell
+  // nothing at all.
+  const h = await openLiveCopy({ leaderHolding: 0 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: null, tokens: 1000, signature: 'sell1' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1);
+  assert.equal(h.calls.sells[0].pct, 100);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'closed');
+});
+
+test('recovery needs the token count — without it nothing is guessed', async () => {
+  const h = await openLiveCopy({ leaderHolding: 0 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: null, signature: 'sell1' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 0, 'no count, no read, no mirror');
+  assert.equal(h.calls.holdingReads.length, 0, 'and no request spent on it');
+});
+
+test('an unreadable balance leaves the sell unmirrored — never a guessed dump', async () => {
+  const h = await openLiveCopy({ leaderHolding: null });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: null, tokens: 600, signature: 'sell1' }));
+  await tick();
+  assert.equal(h.calls.holdingReads.length, 1, 'it tried');
+  assert.equal(h.calls.sells.length, 0, 'and refused to invent a size');
+});
+
+test('a fraction the transaction DID carry is used as-is, with no balance read', async () => {
+  const h = await openLiveCopy({ leaderHolding: 0 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 0.25, tokens: 250, signature: 'sell1' }));
+  await tick();
+  assert.equal(h.calls.sells[0].pct, 25);
+  assert.equal(h.calls.holdingReads.length, 0, 'the cheap path stays cheap');
 });
 
 test('PAPER: a partial sell is bookkeeping only — same slices, no order', async () => {
@@ -670,6 +737,56 @@ test('rankLeaders: the chosen key, small samples last, unknowns after everything
   assert.equal(leaderWinRate(emptyLeaderStats('x')), null);
 });
 
+// ── Followability (2026-09-14) ────────────────────────────────────────
+//
+// Measured over 9.3M curve trades across two day-pairs six weeks apart
+// (docs/wallet-convergence-2026-09-14.md), the MEDIAN profitable pump wallet
+// holds six seconds. Its edge is latency, and a copy cannot take it: the trade
+// is over before the follower's buy lands. Ranking by the wallet's own profit
+// therefore surfaces exactly the wallets a user cannot copy, which is why the
+// flag exists — and why it must stay a WARNING and never become a score.
+
+test('leaderTooFast: flags wallets whose trips end before a copy could join', () => {
+  const mk = (wallet, over) => ({ ...emptyLeaderStats(wallet), ...over });
+  const sniper = mk('sniper', { roundTrips: 10, tooFastPct: 90, medianHoldMs: 6_000 });
+  const slow = mk('slow', { roundTrips: 10, tooFastPct: 5, medianHoldMs: 20 * 60_000 });
+  assert.equal(leaderTooFast(sniper), true);
+  assert.equal(leaderTooFast(slow), false);
+
+  // Unmeasured is NOT fast. A wallet with no closed trips must never be
+  // labelled — the honest-null rule; an em dash, never an accusation.
+  assert.equal(leaderTooFast(mk('fresh', { roundTrips: 10, tooFastPct: null })), false);
+  assert.equal(leaderTooFast(emptyLeaderStats('empty')), false);
+
+  // Too small a sample cannot earn the flag either, same floor as the ranking.
+  assert.equal(leaderTooFast(mk('tiny', { roundTrips: MIN_TRIPS_FOR_RANK - 1, tooFastPct: 100 })), false);
+
+  // The boundary is inclusive, and it is the documented constant.
+  assert.equal(leaderTooFast(mk('edge', { roundTrips: 5, tooFastPct: TOO_FAST_FLAG_PCT })), true);
+  assert.equal(leaderTooFast(mk('under', { roundTrips: 5, tooFastPct: TOO_FAST_FLAG_PCT - 0.1 })), false);
+});
+
+test('Hold time ranks longest first, and an unmeasured hold sorts last', () => {
+  const mk = (wallet, over) => ({ ...emptyLeaderStats(wallet), ...over });
+  const list = [
+    mk('sniper', { roundTrips: 9, medianHoldMs: 6_000 }),
+    mk('swing', { roundTrips: 9, medianHoldMs: 45 * 60_000 }),
+    mk('unknown', { roundTrips: 9, medianHoldMs: null }),
+    mk('scalp', { roundTrips: 9, medianHoldMs: 90_000 }),
+  ];
+  assert.deepEqual(
+    rankLeaders(list, 'medianHoldMs').map((l) => l.wallet),
+    ['swing', 'scalp', 'sniper', 'unknown'],
+  );
+});
+
+test('the copy-latency floor stays a minute, and above any realistic sniper hold', () => {
+  // Pinned because lowering it would quietly un-flag the six-second wallets
+  // the measurement was about.
+  assert.equal(COPY_LATENCY_FLOOR_MS, 60_000);
+  assert.ok(COPY_LATENCY_FLOOR_MS > 6_000, 'must exceed the measured median sniper hold');
+});
+
 // ── The pump rail's mirrored sell (copy-13, 2026-09-09) ───────────────
 //
 // A leader's pump.fun sell arrives twice. The curve firehose reads a LOG,
@@ -954,6 +1071,358 @@ test('a first run writes normally — a missing file is not a failure', () => {
       r();
     }, 400),
   );
+});
+
+// ── The leader exits while our buy is still in flight ─────────────────
+//
+// `copyOnce` is slow on purpose: token facts, the configured delay, then a
+// broadcast. The copy row does not exist until all of it returns, and a
+// leader who sold inside that window used to hit `closeOpen`, find no open
+// row, and return — the sell dropped on the floor, the buy landing a moment
+// later into a position with no exit queued. A user reported 15 of 16
+// matched buys recorded AFTER the leader had already exited (2026-09-13).
+
+test('a leader sell during an in-flight buy is REMEMBERED, not dropped', async () => {
+  // The buy takes 120 ms; the sell lands 20 ms in, while it is unrecallable.
+  const h = setup({ priceSol: 0.001, buyMs: 120, leaderHolding: 0 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await new Promise((r) => setTimeout(r, 20));
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(h.calls.buys.length, 1, 'the buy was already sent — it cannot be recalled');
+  assert.equal(h.calls.sells.length, 1, 'and the parked sell fires the moment the row exists');
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'closed');
+});
+
+test('a buy the leader exited BEFORE we sent is abandoned, not bought', async () => {
+  // The delay is the window: nothing has been broadcast yet, so there is
+  // still a real choice to make, and entering a position they have already
+  // left is not copying them.
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 120 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await new Promise((r) => setTimeout(r, 20));
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(h.calls.buys.length, 0, 'no real money went into a position they had left');
+  const row = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(row.state, 'skipped');
+  assert.match(row.reason, /already sold before this copy was sent/);
+});
+
+test('PAPER honours the same staleness rule, or the scorecard measures a strategy live would refuse', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'paper', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 120 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await new Promise((r) => setTimeout(r, 20));
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(h.calls.buys.length, 0);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'skipped');
+});
+
+// ── Rows whose tokens left through some other door ────────────────────
+
+test('a live copy whose tokens are gone from the wallet is closed, not left open forever', async () => {
+  const h = await openLiveCopy();
+  const row = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(row.state, 'open');
+  // Sold by hand, or by a stop-loss: the wallet holds none of it now.
+  const n = copy.reconcileHoldings(new Set(), { graceMs: 0 });
+  assert.equal(n, 1);
+  const after = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(after.state, 'closed');
+  assert.equal(after.pnlSol, null, 'we never saw the exit price — a made-up one would poison the scorecard');
+  assert.match(after.reason, /no longer in the wallet/);
+  assert.equal(h.calls.sells.length, 0, 'nothing is sold by a reconcile');
+});
+
+test('a copy whose tokens ARE still held is left alone', async () => {
+  await openLiveCopy();
+  assert.equal(copy.reconcileHoldings(new Set([MINT]), { graceMs: 0 }), 0);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'open');
+});
+
+test('a freshly broadcast copy is inside the grace window and is NOT closed', async () => {
+  await openLiveCopy();
+  // The default grace: a buy that has not landed yet is not a sold position.
+  assert.equal(copy.reconcileHoldings(new Set()), 0);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'open');
+});
+
+test('a PAPER copy is never reconciled against the chain — it was never on it', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'paper', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await tick();
+  assert.equal(copy.reconcileHoldings(new Set(), { graceMs: 0 }), 0);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'open');
+  assert.equal(h.calls.sells.length, 0);
+});
+
+test('a reconcile scoped to other configs leaves this one alone', async () => {
+  // A config can sign with a wallet that is not the active one; that
+  // wallet's holdings say nothing about these tokens. Closing on them would
+  // be the same bug pointed the other way.
+  await openLiveCopy();
+  const mine = copy.all()[0];
+  assert.equal(copy.reconcileHoldings(new Set(), { graceMs: 0, configIds: new Set(['someone-else']) }), 0);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'open');
+  // Named explicitly, it closes.
+  assert.equal(copy.reconcileHoldings(new Set(), { graceMs: 0, configIds: new Set([mine.id]) }), 1);
+});
+
+// ── Clearing paper results without losing anything else ───────────────
+//
+// "Remove" was the only way to start a paper record over, and it takes the
+// config, the live history and the leader's own record with it — three
+// different things (user report, 2026-09-13).
+
+test('resetPaper clears paper rows and keeps configs, live rows and leader records', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'live1' }));
+  await tick();
+  assert.equal(h.calls.buys.length, 1);
+  const liveCfg = copy.all()[0];
+  // A paper config on a second wallet, with a copy of its own.
+  const W2 = 'Whae2222222222222222222222222222222222222';
+  copy.upsert({ ...cfg({ wallet: W2, label: 'Paper', mode: 'paper' }) });
+  const made = copy.all().find((c) => c.wallet === W2);
+  copy.upsert({ ...cfg({ wallet: W2, label: 'Paper', mode: 'paper' }), id: made.id });
+  copy.onWalletTrade(trade({ wallet: W2, isBuy: true, signature: 'paper1' }));
+  await tick();
+
+  const leadersBefore = Object.keys(copy._leaders()).length;
+  assert.ok(leadersBefore > 0, 'the leaders have a record to preserve');
+
+  const r = copy.resetPaper();
+  assert.equal(r.ok, true);
+  assert.equal(r.cleared, 1, 'only the paper row went');
+
+  const snap = copy.snapshot();
+  assert.equal(copy.all().length, 2, 'both configs stay');
+  assert.equal(copy.all().find((c) => c.wallet === W2).mode, 'paper', 'and their paper/live setting stays');
+  assert.equal(snap.recent.filter((t) => t.mode === 'paper').length, 0);
+  assert.equal(snap.recent.filter((t) => t.mode === 'live').length, 1, 'real money history is never rewritten');
+  assert.equal(Object.keys(copy._leaders()).length, leadersBefore, 'their record is theirs, not a function of your paper run');
+  assert.equal(snap.stats[liveCfg.id].trades, 1, 'the live scorecard is untouched');
+});
+
+test('resetPaper can target ONE config', async () => {
+  setup({ priceSol: 0.001 });
+  save({ mode: 'paper', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  const W2 = 'Whae2222222222222222222222222222222222222';
+  copy.upsert({ ...cfg({ wallet: W2, label: 'Other', mode: 'paper' }) });
+  const other = copy.all().find((c) => c.wallet === W2);
+  copy.upsert({ ...cfg({ wallet: W2, label: 'Other', mode: 'paper' }), id: other.id });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'p1' }));
+  copy.onWalletTrade(trade({ wallet: W2, isBuy: true, signature: 'p2' }));
+  await tick();
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind !== 'exit').length, 2);
+  const mine = copy.all().find((c) => c.wallet === WALLET);
+  copy.resetPaper(mine.id);
+  const left = copy.snapshot().recent.filter((t) => t.kind !== 'exit');
+  assert.equal(left.length, 1);
+  assert.equal(left[0].configId, other.id, "the other wallet's run keeps going");
+});
+
+test('resetPaper refuses an id that does not exist, and clears nothing', () => {
+  setup({ priceSol: 0.001 });
+  save({ mode: 'paper' });
+  const r = copy.resetPaper('nope');
+  assert.equal(r.ok, false);
+  assert.equal(r.cleared, 0);
+  assert.equal(copy.all().length, 1);
+});
+
+// ── Restarts during pending orders ────────────────────────────────────
+//
+// Explicitly asked for in the 2026-09-13 report, and the gap the in-memory
+// fix left behind: a sell the leader made while our buy was in flight is an
+// INSTRUCTION, and it has to survive the process, not just the async gap.
+// A crash or a quit at the wrong moment used to drop it, leaving the
+// position open with nothing left remembering it was meant to close.
+
+/** Round-trip the module through disk, the way a restart does. */
+async function restart(dir) {
+  await new Promise((r) => setTimeout(r, 400)); // the 300 ms debounced write
+  copy._reset();
+  copy.init(dir);
+  return dir;
+}
+
+test('a parked exit SURVIVES a restart and is mirrored on the way back up', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-restart-'));
+  copy._reset();
+  copy.init(dir);
+  const h1 = makeHost({ priceSol: 0.001, buyMs: 60, leaderHolding: 0 });
+  copy.attach(h1.host);
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await new Promise((r) => setTimeout(r, 10));
+  // The leader exits mid-buy; the buy is already out, so the exit parks.
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }));
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(h1.calls.sells.length, 1, 'in one process it mirrors immediately');
+
+  // Now the same race, but the process dies before the buy returns.
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-restart2-'));
+  copy._reset();
+  copy.init(dir2);
+  const h2 = makeHost({ priceSol: 0.001, buyMs: 5_000, leaderHolding: 0 });
+  copy.attach(h2.host);
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b2' }));
+  await new Promise((r) => setTimeout(r, 10));
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's2' }));
+  await new Promise((r) => setTimeout(r, 450)); // persisted, buy still hanging
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir2, 'copytrade.json'), 'utf8'));
+  assert.equal(onDisk.pendingExits.length, 1, 'the instruction reached disk');
+  assert.equal(onDisk.pendingExits[0].trade.mint, MINT);
+});
+
+test('after a restart a FRESH parked exit fires, once a position exists to close', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-resume-'));
+  copy._reset();
+  copy.init(dir);
+  const h = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h.host);
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await tick();
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'open');
+  // Hand-write the state a crash would have left: an open row, and an exit
+  // parked against it. After the 300 ms debounced write, or there is no file.
+  await new Promise((r) => setTimeout(r, 400));
+  const cfgId = copy.all()[0].id;
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'copytrade.json'), 'utf8'));
+  raw.pendingExits = [
+    { key: `${cfgId}:${MINT}`, trade: { ...trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }), at: Date.now() } },
+  ];
+  fs.writeFileSync(path.join(dir, 'copytrade.json'), JSON.stringify(raw), 'utf8');
+
+  await restart(dir);
+  const h2 = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h2.host);
+  const out = copy.resumePendingExits();
+  await tick();
+  assert.equal(out.fired, 1);
+  assert.equal(h2.calls.sells.length, 1, 'the exit the crash interrupted is honoured');
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'closed');
+});
+
+test('an exit resumed on a config the restart PAUSED still fires, and says so', async () => {
+  // The restart disarm is about not resuming ENTRIES. An exit must stay
+  // possible while entries are paused — but the panel is showing "Paused"
+  // while this sells, so the toast has to explain the pair or a user is
+  // right to distrust both.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-paused-'));
+  copy._reset();
+  copy.init(dir);
+  const h = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h.host);
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await tick();
+  await new Promise((r) => setTimeout(r, 400));
+  const cfgId = copy.all()[0].id;
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'copytrade.json'), 'utf8'));
+  raw.pendingExits = [
+    { key: `${cfgId}:${MINT}`, trade: { ...trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }), at: Date.now() } },
+  ];
+  fs.writeFileSync(path.join(dir, 'copytrade.json'), JSON.stringify(raw), 'utf8');
+
+  await restart(dir);
+  const h2 = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h2.host);
+  assert.equal(copy.all()[0].enabled, false, 'the restart disarmed the live config');
+  const out = copy.resumePendingExits();
+  await tick();
+  assert.equal(out.fired, 1, 'the exit still runs — entries are what a restart pauses');
+  assert.equal(h2.calls.sells.length, 1);
+  const said = h2.calls.toasts.find((t) => /paused/i.test(t.message));
+  assert.ok(said, 'the user is told why a paused config just sold');
+});
+
+test('a STALE parked exit is never traded on late — it is recorded, and says you still hold it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-stale-'));
+  copy._reset();
+  copy.init(dir);
+  const h = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h.host);
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await tick();
+  await new Promise((r) => setTimeout(r, 400));
+  const cfgId = copy.all()[0].id;
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'copytrade.json'), 'utf8'));
+  // The app was shut for an hour.
+  raw.pendingExits = [
+    {
+      key: `${cfgId}:${MINT}`,
+      trade: { ...trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }), at: Date.now() - 60 * 60_000 },
+    },
+  ];
+  fs.writeFileSync(path.join(dir, 'copytrade.json'), JSON.stringify(raw), 'utf8');
+
+  await restart(dir);
+  const h2 = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h2.host);
+  const out = copy.resumePendingExits();
+  await tick();
+  assert.equal(out.fired, 0, 'an hour-old sell is not a trade anyone made today');
+  assert.equal(out.expired, 1);
+  assert.equal(h2.calls.sells.length, 0);
+  const exit = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.match(exit.reason, /while the app was closed/);
+  assert.match(exit.reason, /still hold it/);
+  const said = h2.calls.toasts.at(-1);
+  assert.equal(said.level, 'error', 'never silent — the user is still holding the bag');
+});
+
+test('a parked exit whose buy never opened a row does nothing on restore', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-norow-'));
+  copy._reset();
+  copy.init(dir);
+  const h = makeHost({ priceSol: 0.001 });
+  copy.attach(h.host);
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  const cfgId = copy.all()[0].id;
+  await new Promise((r) => setTimeout(r, 400));
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'copytrade.json'), 'utf8'));
+  raw.pendingExits = [
+    { key: `${cfgId}:${MINT}`, trade: { ...trade({ isBuy: false, soldFraction: 1, signature: 's1' }), at: Date.now() } },
+  ];
+  fs.writeFileSync(path.join(dir, 'copytrade.json'), JSON.stringify(raw), 'utf8');
+
+  await restart(dir);
+  const h2 = makeHost({ priceSol: 0.001 });
+  copy.attach(h2.host);
+  const out = copy.resumePendingExits();
+  await tick();
+  // The buy died with the process and never opened anything, so there is
+  // nothing held and nothing to sell. Selling here would be a phantom order.
+  assert.equal(out.fired, 0);
+  assert.equal(out.expired, 0);
+  assert.equal(h2.calls.sells.length, 0);
+});
+
+test('a corrupt pendingExits list does not stop the configs loading', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-badpending-'));
+  copy._reset();
+  copy.init(dir);
+  copy.attach(makeHost({ priceSol: 0.001 }).host);
+  save({ mode: 'paper' });
+  await new Promise((r) => setTimeout(r, 400));
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'copytrade.json'), 'utf8'));
+  raw.pendingExits = [null, 42, { key: 'x' }, { trade: {} }];
+  fs.writeFileSync(path.join(dir, 'copytrade.json'), JSON.stringify(raw), 'utf8');
+  await restart(dir);
+  copy.attach(makeHost({ priceSol: 0.001 }).host);
+  assert.equal(copy.all().length, 1, 'the configs still loaded');
+  assert.deepEqual(copy.resumePendingExits(), { fired: 0, expired: 0 });
 });
 
 await run();

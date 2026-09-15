@@ -17,6 +17,7 @@ import {
   PAPER_ROUND_TRIP_COST_PCT,
   MAX_OPEN_PAPER_POSITIONS,
   PAPER_FILL_MODEL,
+  samePaperKey,
 } from './.paper.mjs';
 
 let passed = 0;
@@ -242,3 +243,36 @@ await run();
   assert.equal(paperHistoryRows(raw)[0].tokenDelta, null);
   console.log('ok  paper fills become labelled trade-history rows');
 }
+
+// ── Chains (2026-09-14) ───────────────────────────────────────────────
+//
+// The book was keyed on the address alone. The SAME 0x address can be a
+// different token on Robinhood Chain and on BNB, so that key merged two
+// positions into one and would have sold the wrong token's bag.
+{
+  let b = emptyPaperBook();
+  b = openPaper(b, { mint: '0xabc', chain: 'robinhood', symbol: 'RH', tokens: 100, costSol: 1, decimalsKnown: true }, 1_000).book;
+  b = openPaper(b, { mint: '0xabc', chain: 'bnb', symbol: 'BNB', tokens: 200, costSol: 2, decimalsKnown: true }, 2_000).book;
+  assert.equal(b.open.length, 2, 'the same address on two chains is two positions');
+  assert.equal(b.open.find((p) => p.chain === 'robinhood').tokens, 100);
+  assert.equal(b.open.find((p) => p.chain === 'bnb').tokens, 200);
+
+  // Selling one leaves the other untouched.
+  const sold = sellPaper(b, '0xabc', 100, 0.02, 3_000, 'robinhood');
+  assert.equal(sold.ok, true, sold.message);
+  assert.equal(sold.book.open.length, 1);
+  assert.equal(sold.book.open[0].chain, 'bnb', 'the BNB bag is still there');
+  console.log('ok  the same address on two chains is two paper positions');
+}
+{
+  // A position written before chains existed is Solana, and a Solana buy still
+  // adds to it rather than opening a second one beside it.
+  const legacy = { version: 1, open: [{ mint: 'M1', symbol: 'OLD', tokens: 10, costSol: 1, decimalsKnown: true, openedAt: 1, lastFillAt: 1, realizedSol: 0, fills: [] }], closed: [] };
+  const after = openPaper(legacy, { mint: 'M1', symbol: 'OLD', tokens: 10, costSol: 1, decimalsKnown: true }, 2_000).book;
+  assert.equal(after.open.length, 1, 'a chainless position is Solana, not a separate token');
+  assert.equal(after.open[0].tokens, 20);
+  assert.equal(samePaperKey({ mint: 'M1' }, { mint: 'M1', chain: 'solana' }), true);
+  assert.equal(samePaperKey({ mint: 'M1' }, { mint: 'M1', chain: 'bnb' }), false);
+  console.log('ok  a position saved before chains existed still reads as Solana');
+}
+

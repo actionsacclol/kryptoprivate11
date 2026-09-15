@@ -131,7 +131,7 @@ export function About() {
       <Section title="Onboarding">
         <Card>
           <div className="flex items-center justify-between gap-3 flex-wrap">
-            <p className="text-[12px] text-krypt-muted leading-relaxed flex-1 min-w-[200px]">
+            <p className="text-note text-krypt-muted leading-relaxed flex-1 min-w-[200px]">
               Want the welcome walkthrough again — the fee summary, API keys, wallet setup and the
               quick tour? Replay it any time.
             </p>
@@ -144,7 +144,7 @@ export function About() {
 
       <Section title="Market data">
         <Card>
-          <div className="text-[12px] text-krypt-muted leading-relaxed space-y-2">
+          <div className="text-note text-krypt-muted leading-relaxed space-y-2">
             <p>
               Prices, pools and token facts come from providers this app queries directly from your
               machine. Two of them ask to be credited where their data is shown, and this is that
@@ -170,14 +170,14 @@ export function About() {
       <Section title="Logs & diagnostics">
         <Card>
           <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="text-[12px] text-krypt-muted leading-relaxed flex-1 min-w-[200px] space-y-1">
+            <div className="text-note text-krypt-muted leading-relaxed flex-1 min-w-[200px] space-y-1">
               <p>
                 Everything the app logs is kept on disk (API keys redacted) so a problem can be
                 reported after the fact. Attach <span className="text-white">app.log</span> and any
                 crash file when asking for help.
               </p>
-              <p className="font-mono text-[11px] break-all">Log: {paths.logs ?? '—'}</p>
-              <p className="font-mono text-[11px] break-all">Crash files: {paths.crashes ?? '—'}</p>
+              <p className="font-mono text-body break-all">Log: {paths.logs ?? '—'}</p>
+              <p className="font-mono text-body break-all">Crash files: {paths.crashes ?? '—'}</p>
             </div>
             <GhostButton onClick={() => void openLogs()}>
               <FolderOpen className="h-3.5 w-3.5" /> Open logs folder

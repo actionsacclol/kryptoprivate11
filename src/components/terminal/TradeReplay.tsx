@@ -521,7 +521,7 @@ export function TradeReplay({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center gap-2">
-          <h3 className="font-display text-[11px] font-semibold uppercase tracking-[0.28em] text-krypt-muted">
+          <h3 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted">
             Replay · {trade.symbol || trade.mint.slice(0, 6)}
           </h3>
           <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -533,7 +533,7 @@ export function TradeReplay({
                 onClick={() => setShape(k)}
                 title={SHAPES[k].hint}
                 className={cls(
-                  'px-2.5 py-1 text-[10px] font-semibold transition',
+                  'px-2.5 py-1 text-label font-semibold transition',
                   shape === k ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
                 )}
               >
@@ -547,7 +547,7 @@ export function TradeReplay({
                 key={s}
                 onClick={() => setSpeed(s)}
                 className={cls(
-                  'px-2 py-1 text-[10px] font-semibold transition',
+                  'px-2 py-1 text-label font-semibold transition',
                   speed === s ? 'bg-arc-gold/20 text-arc-gold' : 'text-krypt-muted hover:text-white',
                 )}
               >
@@ -558,7 +558,7 @@ export function TradeReplay({
           <button
             onClick={() => setGifOpen(true)}
             title="Search a GIF to play behind the chart"
-            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-krypt-muted transition hover:text-white"
+            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
           >
             <Sparkles className="h-3.5 w-3.5" />
             GIF
@@ -566,7 +566,7 @@ export function TradeReplay({
           <button
             onClick={() => fileRef.current?.click()}
             title="Use your own image behind the chart"
-            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-krypt-muted transition hover:text-white"
+            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
           >
             <ImageIcon className="h-3.5 w-3.5" />
             Upload
@@ -575,7 +575,7 @@ export function TradeReplay({
             <button
               onClick={clearBackground}
               title="Back to the plain background"
-              className="rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-krypt-muted transition hover:text-white"
+              className="rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
             >
               Clear
             </button>
@@ -606,7 +606,7 @@ export function TradeReplay({
             <Loader2 className="h-4 w-4 animate-spin" /> Reading the candles this trade lived through…
           </div>
         ) : problem ? (
-          <div className="rounded-lg border border-arc-gold/30 bg-arc-gold/10 px-4 py-3 text-[12px] leading-relaxed text-arc-gold">
+          <div className="rounded-lg border border-arc-gold/30 bg-arc-gold/10 px-4 py-3 text-note leading-relaxed text-arc-gold">
             {problem}
           </div>
         ) : (
@@ -614,14 +614,14 @@ export function TradeReplay({
         )}
 
         {!loading && !problem && path === 'illustrative' && (
-          <div className="mt-2 rounded-lg border border-arc-gold/30 bg-arc-gold/10 px-4 py-2 text-[11px] leading-relaxed text-arc-gold">
+          <div className="mt-2 rounded-lg border border-arc-gold/30 bg-arc-gold/10 px-4 py-2 text-body leading-relaxed text-arc-gold">
             No candle history survives for this token, so the price path is drawn, not fetched: a seeded random walk that
             starts at your real entry price and ends at your real exit price. The entry, exit and PnL are the actual
             fills; the shape in between is illustrative, and the frame says so.
           </div>
         )}
         {!loading && !problem && path === 'scaled' && (
-          <div className="mt-2 text-[10px] leading-relaxed text-krypt-muted/60">
+          <div className="mt-2 text-label leading-relaxed text-krypt-muted/60">
             The provider&rsquo;s history is in USD; it is scaled to {nativeSymbol} at your entry fill so the running PnL compares
             like with like. The realised figure at the end is from the fills themselves.
           </div>
@@ -647,7 +647,7 @@ export function TradeReplay({
               {recording ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
               {recording ? 'Recording…' : 'Save video'}
             </button>
-            <span className="text-[11px] leading-relaxed text-krypt-muted">
+            <span className="text-body leading-relaxed text-krypt-muted">
               {recording
                 ? 'Recording the animation — it saves when the replay ends.'
                 : 'Saves a WebM at the chosen shape.'}

@@ -77,6 +77,32 @@ test('break-even is not a loss and not a win', () => {
   assert.equal(nextConsecutiveLosses(2, 0), 2);
 });
 
+// ONE sale must move the streak ONCE. Until 2026-09-13 two independent
+// places counted the same sell: this rule, fed by the reconciled fill, and a
+// wallet-balance delta taken right after the exit broadcast. A user watched
+// a −0.0073 SOL loss land in the loss accounting twice and the app disarm
+// itself on `loss_limit` — with the default limit of 2, the first loser was
+// enough. The balance rule is gone; this is the only one. The engine holds
+// the counter, so what a test can pin is the shape of the rule it must be
+// driven by: fold ONCE per reconciled sell fill.
+test('one losing sale moves the streak by exactly one', () => {
+  const sells = [-0.0073];
+  // The ledger-driven path: fold each reconciled sell fill exactly once.
+  const streak = sells.reduce((n, pnl) => nextConsecutiveLosses(n, pnl), 0);
+  assert.equal(streak, 1, 'a single sale is a single count');
+  // What the removed balance-delta path did: the same sale, folded again.
+  const doubled = sells.reduce((n, pnl) => nextConsecutiveLosses(nextConsecutiveLosses(n, pnl), pnl), 0);
+  assert.equal(doubled, 2, 'the double-count that tripped a 2-loss limit on one trade');
+  assert.notEqual(streak, doubled, 'which is exactly why there is now one rule, not two');
+});
+
+test('a win still resets a streak built from real losses', () => {
+  let n = 0;
+  for (const pnl of [-0.0073, -0.006]) n = nextConsecutiveLosses(n, pnl);
+  assert.equal(n, 2);
+  assert.equal(nextConsecutiveLosses(n, 0.02), 0);
+});
+
 // ── 4: breaker reason ─────────────────────────────────────────────────
 
 const lim = { maxLiveSessionLossSol: 0.5, maxLiveConsecutiveLosses: 3 };

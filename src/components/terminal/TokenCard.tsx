@@ -26,8 +26,8 @@ function Metric({
 }) {
   return (
     <div className="min-w-0 overflow-hidden" title={title}>
-      <div className="text-[9px] uppercase tracking-[0.12em] text-krypt-muted/60 leading-none truncate">{label}</div>
-      <div className={cls('text-[11px] font-mono font-medium mt-0.5 truncate', tone ?? 'text-white/90')}>{value}</div>
+      <div className="text-micro uppercase tracking-label text-krypt-muted/60 leading-none truncate">{label}</div>
+      <div className={cls('text-body font-mono font-medium mt-0.5 truncate', tone ?? 'text-white/90')}>{value}</div>
     </div>
   );
 }
@@ -73,7 +73,7 @@ function RuleBadges({ token, compact }: { token: TokenSummary; compact?: boolean
           title={hideFlag.detail}
           className={cls(
             'inline-flex items-center rounded border border-rose-400/40 bg-rose-500/15 font-semibold text-rose-300 truncate',
-            compact ? 'px-1 text-[8px] max-w-[110px]' : 'px-1.5 py-px text-[9px] max-w-[160px]',
+            compact ? 'px-1 text-nano max-w-[110px]' : 'px-1.5 py-px text-micro max-w-[160px]',
           )}
         >
           {hideFlag.label}
@@ -85,7 +85,7 @@ function RuleBadges({ token, compact }: { token: TokenSummary; compact?: boolean
           className={cls(
             'inline-flex items-center rounded border font-semibold whitespace-nowrap',
             oddsChipClass(grad.bucket),
-            compact ? 'px-1 text-[8px]' : 'px-1.5 py-px text-[9px]',
+            compact ? 'px-1 text-nano' : 'px-1.5 py-px text-micro',
           )}
         >
           Grad · {ODDS_BUCKET_LABEL[grad.bucket]} · {Math.round(grad.observedPct)} in 100
@@ -96,7 +96,7 @@ function RuleBadges({ token, compact }: { token: TokenSummary; compact?: boolean
           title={vol[0].detail}
           className={cls(
             'inline-flex items-center rounded border border-arc-gold/40 bg-arc-gold/10 font-semibold text-arc-gold',
-            compact ? 'px-1 text-[8px]' : 'px-1.5 py-px text-[9px]',
+            compact ? 'px-1 text-nano' : 'px-1.5 py-px text-micro',
           )}
         >
           volatile
@@ -126,8 +126,8 @@ const LAUNCHPAD_LABEL: Record<string, string> = {
 function Cell({ label, value, tone, title, className }: { label: string; value: string; tone?: string; title?: string; className?: string }) {
   return (
     <div className={cls('min-w-0 overflow-hidden text-right', className)} title={title}>
-      <div className="text-[8px] uppercase tracking-[0.12em] text-krypt-muted/50 leading-none truncate">{label}</div>
-      <div className={cls('text-[11px] font-mono font-medium mt-0.5 truncate', tone ?? 'text-white/90')}>{value}</div>
+      <div className="text-nano uppercase tracking-label text-krypt-muted/50 leading-none truncate">{label}</div>
+      <div className={cls('text-body font-mono font-medium mt-0.5 truncate', tone ?? 'text-white/90')}>{value}</div>
     </div>
   );
 }
@@ -201,19 +201,19 @@ function TokenCardInner({
             {imageSrc(token.imageUrl) ? (
               <img src={imageSrc(token.imageUrl) as string} alt="" loading="lazy" className="h-full w-full object-cover" />
             ) : (
-              <div className="h-full w-full flex items-center justify-center text-[10px] font-display text-krypt-muted">
+              <div className="h-full w-full flex items-center justify-center text-label font-display text-krypt-muted">
                 {(token.symbol || '?').slice(0, 3)}
               </div>
             )}
           </div>
           <div className="min-w-0">
             <div className="flex items-baseline gap-1.5">
-              <span className="font-semibold text-[13px] text-white truncate">{token.symbol || shortAddr(token.mint)}</span>
-              <span className="text-[11px] text-krypt-muted truncate hidden sm:inline">{token.name}</span>
+              <span className="font-semibold text-value text-white truncate">{token.symbol || shortAddr(token.mint)}</span>
+              <span className="text-body text-krypt-muted truncate hidden sm:inline">{token.name}</span>
             </div>
             <div className="flex items-center gap-2 mt-0.5">
-              <span className="text-[10px] font-mono text-krypt-muted/70">{fmtAge(token.createdAt)}</span>
-              <span className="text-[9px] font-display tracking-[0.12em] text-arc-gold/70">
+              <span className="text-label font-mono text-krypt-muted/70">{fmtAge(token.createdAt)}</span>
+              <span className="text-micro font-display tracking-label text-arc-gold/70">
                 {LAUNCHPAD_LABEL[token.launchpad] ?? '—'}
               </span>
               {token.socials.twitter && (
@@ -272,7 +272,7 @@ function TokenCardInner({
             disabled={!canQuickBuy}
             title={canQuickBuy ? `Quick buy ${quickBuySol} ${unit}` : quickBuyHint ?? 'Arm live execution on the Wallet page to quick-buy'}
             className={cls(
-              'inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold transition',
+              'inline-flex items-center gap-1 rounded-md px-2 py-1 text-label font-semibold transition',
               canQuickBuy
                 ? 'bg-krypt-purple/20 text-krypt-pink hover:bg-krypt-purple/30 border border-krypt-purple/30'
                 : 'bg-white/5 text-krypt-muted/50 border border-white/10 cursor-not-allowed',
@@ -311,7 +311,7 @@ function TokenCardInner({
               }}
             />
           ) : (
-            <div className="h-full w-full flex items-center justify-center text-[10px] font-display text-krypt-muted">
+            <div className="h-full w-full flex items-center justify-center text-label font-display text-krypt-muted">
               {(token.symbol || '?').slice(0, 3)}
             </div>
           )}
@@ -325,12 +325,12 @@ function TokenCardInner({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-1.5">
-            <span className="font-semibold text-[13px] text-white truncate">{token.symbol || shortAddr(token.mint)}</span>
-            <span className="text-[11px] text-krypt-muted truncate">{token.name}</span>
+            <span className="font-semibold text-value text-white truncate">{token.symbol || shortAddr(token.mint)}</span>
+            <span className="text-body text-krypt-muted truncate">{token.name}</span>
           </div>
           <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-[10px] font-mono text-krypt-muted/70">{fmtAge(token.createdAt)}</span>
-            <span className="text-[9px] font-display tracking-[0.12em] text-arc-gold/70">
+            <span className="text-label font-mono text-krypt-muted/70">{fmtAge(token.createdAt)}</span>
+            <span className="text-micro font-display tracking-label text-arc-gold/70">
               {LAUNCHPAD_LABEL[token.launchpad] ?? token.launchpad.toUpperCase()}
             </span>
             {token.socials.twitter && (
@@ -350,7 +350,7 @@ function TokenCardInner({
             )}
             {token.socials.dexPaid && (
               <span
-                className="text-[9px] font-semibold text-krypt-muted/70"
+                className="text-micro font-semibold text-krypt-muted/70"
                 title="Creator paid for DexScreener enhanced info — descriptive, no measured edge"
               >
                 DEX
@@ -364,7 +364,7 @@ function TokenCardInner({
 
         <div className="flex flex-col items-end gap-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <span className={cls('text-[13px] font-mono font-semibold', toneFor(change))}>{fmtChange(change)}</span>
+            <span className={cls('text-value font-mono font-semibold', toneFor(change))}>{fmtChange(change)}</span>
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -384,7 +384,7 @@ function TokenCardInner({
             disabled={!canQuickBuy}
             title={canQuickBuy ? `Buy ${quickBuySol} ${unit}` : quickBuyHint ?? 'Quick buy needs a funded wallet with live execution armed'}
             className={cls(
-              'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-bold transition',
+              'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-label font-bold transition',
               canQuickBuy
                 ? 'border-krypt-purple/45 bg-krypt-purple/15 text-white hover:bg-krypt-purple/30 hover:shadow-krypt-glow'
                 : 'border-white/8 bg-white/5 text-krypt-muted/50 cursor-not-allowed',
@@ -428,29 +428,29 @@ function TokenCardInner({
       <div className="grid grid-cols-4 gap-x-2 gap-y-1 mt-2">
         <div>
           <div className="flex items-baseline justify-between">
-            <span className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Dev</span>
-            <span className="text-[10px] font-mono text-white/80">{fmtPctOrDash(token.devHoldingPct)}</span>
+            <span className="text-micro uppercase tracking-label text-krypt-muted/60">Dev</span>
+            <span className="text-label font-mono text-white/80">{fmtPctOrDash(token.devHoldingPct)}</span>
           </div>
           <PctBar pct={token.devHoldingPct} danger={10} />
         </div>
         <div>
           <div className="flex items-baseline justify-between">
-            <span className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Top 10</span>
-            <span className="text-[10px] font-mono text-white/80">{fmtPctOrDash(token.top10Pct)}</span>
+            <span className="text-micro uppercase tracking-label text-krypt-muted/60">Top 10</span>
+            <span className="text-label font-mono text-white/80">{fmtPctOrDash(token.top10Pct)}</span>
           </div>
           <PctBar pct={token.top10Pct} danger={50} />
         </div>
         <div>
           <div className="flex items-baseline justify-between">
-            <span className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Bundle</span>
-            <span className="text-[10px] font-mono text-white/80">{fmtPctOrDash(token.bundledPct)}</span>
+            <span className="text-micro uppercase tracking-label text-krypt-muted/60">Bundle</span>
+            <span className="text-label font-mono text-white/80">{fmtPctOrDash(token.bundledPct)}</span>
           </div>
           <PctBar pct={token.bundledPct} danger={20} />
         </div>
         <div>
           <div className="flex items-baseline justify-between">
-            <span className="text-[9px] uppercase tracking-[0.12em] text-krypt-muted/60 truncate">Curve</span>
-            <span className="text-[10px] font-mono text-white/80">
+            <span className="text-micro uppercase tracking-label text-krypt-muted/60 truncate">Curve</span>
+            <span className="text-label font-mono text-white/80">
               {token.bondingCurvePct === null ? '—' : token.bondingCurvePct >= 100 ? 'DEX' : fmtPctOrDash(token.bondingCurvePct, 0)}
             </span>
           </div>

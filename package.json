@@ -1,7 +1,7 @@
 {
   "name": "krypto-terminal",
   "productName": "Krypto Bot",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "A free, local-first Solana memecoin trading terminal. Discover, analyse and trade — with a live launch scanner and automation engine built in. Part of the Krypt free tools suite.",
   "main": "dist-electron/main.js",
   "author": {
@@ -36,7 +36,8 @@
     "deploy:router": "node scripts/build-router.mjs && node scripts/deploy-router.mjs",
     "test:sandbox": "node test/scriptsandbox.live.mjs",
     "test:scripts:e2e": "node test/scripts.e2e.mjs",
-    "test:nav:e2e": "node test/navperf.e2e.mjs"
+    "test:nav:e2e": "node test/navperf.e2e.mjs",
+    "test:gradorders": "esbuild electron/engine/engine.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.engine.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.engine.mjs && esbuild shared/types.ts --bundle --format=esm --platform=node --outfile=test/.sharedtypes.mjs && node test/gradorders.live.mjs"
   },
   "dependencies": {
     "@fontsource/cinzel": "^5.3.0",

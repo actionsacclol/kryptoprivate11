@@ -11,6 +11,7 @@ import { useTerminal } from '../state/TerminalProvider';
 import { useToast } from '../state/ToastProvider';
 import { cls, fmtAge, fmtChange, fmtNum, fmtPctOrDash, fmtPriceUsd, fmtUsd, shortAddr, toneFor } from '../utils/format';
 import { fmtNative, fmtPriceNative, weiToNumber } from '../utils/evm';
+import { Stat } from '../components/common';
 
 // The EVM token page — one page for Robinhood Chain and BNB Smart Chain,
 // told which by `chain` (an 0x address alone cannot say). Deliberately
@@ -45,15 +46,6 @@ const CURVE_COPY: Record<EvmChainKind, { title: string; graduates: string; note:
     note: 'At 18 BNB the curve closes and the raised BNB pairs with the remaining tokens as a PancakeSwap v2 pair with permanent liquidity. Trades then route through PancakeSwap.',
   },
 };
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div>
-      <div className="text-[9px] uppercase tracking-[0.16em] text-krypt-muted/60">{label}</div>
-      <div className={cls('text-[13px] font-mono font-semibold mt-0.5', tone ?? 'text-white')}>{value}</div>
-    </div>
-  );
-}
 
 export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; address: string; onBack: () => void }) {
   const toast = useToast();
@@ -173,7 +165,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
         <p className="text-sm text-rose-300">{error}</p>
-        <button onClick={onBack} className="text-[12px] text-krypt-muted hover:text-white underline underline-offset-2">
+        <button onClick={onBack} className="text-note text-krypt-muted hover:text-white underline underline-offset-2">
           Back to Discover
         </button>
       </div>
@@ -203,7 +195,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
             {imageSrc(s?.imageUrl) ? (
               <img src={imageSrc(s?.imageUrl) as string} alt="" className="h-full w-full object-cover" />
             ) : (
-              <div className="h-full w-full flex items-center justify-center text-[11px] font-display text-krypt-muted">
+              <div className="h-full w-full flex items-center justify-center text-body font-display text-krypt-muted">
                 {(s?.symbol || '?').slice(0, 3)}
               </div>
             )}
@@ -213,31 +205,31 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
             <div className="flex items-center gap-2">
               <h1 className="font-display text-xl font-semibold text-white truncate">{s?.symbol || shortAddr(address)}</h1>
               <span className="text-sm text-krypt-muted truncate max-w-[240px]">{s?.name}</span>
-              <span className="rounded-full border border-arc-gold/30 bg-arc-gold/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-arc-gold/90">
+              <span className="rounded-full border border-arc-gold/30 bg-arc-gold/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-arc-gold/90">
                 {isLaunchpad ? meta.launchpadLabel : meta.shortName}
               </span>
               <span
-                className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-krypt-muted/70"
+                className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-krypt-muted/70"
                 title={`${meta.name}, chain id ${meta.id}`}
               >
                 {meta.name}
               </span>
             </div>
             <div className="flex items-center gap-2 mt-0.5">
-              <button onClick={copyAddress} className="flex items-center gap-1 text-[11px] font-mono text-krypt-muted hover:text-white transition">
+              <button onClick={copyAddress} className="flex items-center gap-1 text-body font-mono text-krypt-muted hover:text-white transition">
                 {shortAddr(address, 6)}
                 <Copy className="h-3 w-3" />
               </button>
               <button
                 onClick={() => void window.krypt.app.openExternal(explorerToken(chain, address))}
-                className="flex items-center gap-1 text-[11px] text-krypt-muted hover:text-krypt-purple transition"
+                className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
               >
                 {explorerName}
                 <ExternalLink className="h-3 w-3" />
               </button>
               <button
                 onClick={() => void window.krypt.app.openExternal(`https://dexscreener.com/${meta.dexscreenerChain}/${address}`)}
-                className="flex items-center gap-1 text-[11px] text-krypt-muted hover:text-krypt-purple transition"
+                className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
               >
                 DexScreener
                 <ExternalLink className="h-3 w-3" />
@@ -279,7 +271,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
         {detail?.warnings.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
             {detail.warnings.map((w) => (
-              <span key={w} className="rounded border border-arc-gold/25 bg-arc-gold/10 px-2 py-0.5 text-[10px] text-arc-gold/90">
+              <span key={w} className="rounded border border-arc-gold/25 bg-arc-gold/10 px-2 py-0.5 text-label text-arc-gold/90">
                 {w}
               </span>
             ))}
@@ -294,9 +286,9 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
           {curve && (
             <div className="plate rounded-lg p-3">
               <div className="flex items-center gap-3 mb-2">
-                <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted whitespace-nowrap">{copy.title}</h3>
+                <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">{copy.title}</h3>
                 <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
-                <span className="text-[10px] font-mono text-white/80">
+                <span className="text-label font-mono text-white/80">
                   {curve.graduated ? 'Graduated' : `${fmtPctOrDash(curve.progressPct, 1)} to graduation`}
                 </span>
               </div>
@@ -306,7 +298,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
                   style={{ width: `${Math.max(0, Math.min(100, curve.progressPct))}%` }}
                 />
               </div>
-              <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-krypt-muted">
+              <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-body text-krypt-muted">
                 <span>
                   In the curve{' '}
                   <span className="font-mono text-white/85">
@@ -327,7 +319,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
                 {!curve.isNativeQuote && <span className="text-arc-gold/80">Paired with {shortAddr(curve.pairToken, 4)}, not {sym}</span>}
                 {curve.readyToGraduate && !curve.graduated && <span className="text-emerald-300">{copy.graduates}</span>}
               </div>
-              <p className="mt-1.5 text-[10px] text-krypt-muted/60 leading-relaxed">{copy.note}</p>
+              <p className="mt-1.5 text-label text-krypt-muted/60 leading-relaxed">{copy.note}</p>
             </div>
           )}
 
@@ -340,7 +332,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
                     key={iv}
                     onClick={() => setInterval_(iv)}
                     className={cls(
-                      'px-2 py-1 text-[10px] font-mono font-semibold transition',
+                      'px-2 py-1 text-label font-mono font-semibold transition',
                       interval === iv ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white hover:bg-white/5',
                     )}
                   >
@@ -354,7 +346,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
                     key={m}
                     onClick={() => setChartMode(m)}
                     className={cls(
-                      'px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition',
+                      'px-2.5 py-1 text-label font-semibold uppercase tracking-wider transition',
                       chartMode === m ? 'bg-arc-gold/20 text-arc-gold' : 'text-krypt-muted hover:text-white hover:bg-white/5',
                     )}
                   >
@@ -364,7 +356,7 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
               </div>
               {chartLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-krypt-purple" />}
               <div className="flex-1" />
-              {series && <span className="text-[10px] text-krypt-muted/60 uppercase tracking-[0.14em]">via {series.source}</span>}
+              {series && <span className="text-label text-krypt-muted/60 uppercase tracking-label">via {series.source}</span>}
             </div>
 
             {series && series.candles.length > 0 ? (
@@ -378,26 +370,26 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
               />
             ) : (
               <div className="h-[360px] flex items-center justify-center rounded-md border border-dashed border-white/10">
-                <p className="max-w-md text-center text-[12px] text-krypt-muted leading-relaxed px-6">
+                <p className="max-w-md text-center text-note text-krypt-muted leading-relaxed px-6">
                   {series?.note ?? chartError ?? (chartLoading ? 'Loading candles…' : 'No chart data for this token yet.')}
                 </p>
               </div>
             )}
-            {series?.note && series.candles.length > 0 && <p className="text-[10px] text-krypt-muted/60 mt-2 leading-relaxed">{series.note}</p>}
+            {series?.note && series.candles.length > 0 && <p className="text-label text-krypt-muted/60 mt-2 leading-relaxed">{series.note}</p>}
           </div>
 
           {/* Route + pools */}
           <div className="plate rounded-lg p-3">
             <div className="flex items-center gap-3 mb-2">
-              <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted whitespace-nowrap">Where it trades</h3>
+              <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">Where it trades</h3>
               <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
-              <span className="text-[10px] font-mono text-white/80">{st ? VENUE_LABEL[st.venue] : '—'}</span>
+              <span className="text-label font-mono text-white/80">{st ? VENUE_LABEL[st.venue] : '—'}</span>
             </div>
             {detail && detail.pools.length > 0 ? (
               <div className="space-y-1">
                 {detail.pools.slice(0, 6).map((p) => (
-                  <div key={p.address} className="flex items-center gap-2 text-[11px]">
-                    <span className="text-krypt-muted uppercase text-[9px] tracking-wider w-24 truncate">{p.dexId}</span>
+                  <div key={p.address} className="flex items-center gap-2 text-body">
+                    <span className="text-krypt-muted uppercase text-micro tracking-wider w-24 truncate">{p.dexId}</span>
                     <span className="font-mono text-white/80 truncate flex-1">{p.label}</span>
                     <span className="font-mono text-krypt-muted/70 hidden md:inline">{shortAddr(p.address, 4)}</span>
                     <span className="font-mono text-krypt-muted">{fmtUsd(p.liquidityUsd)}</span>
@@ -405,10 +397,10 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
                 ))}
               </div>
             ) : (
-              <p className="text-[11px] text-krypt-muted">No pool listed by any provider yet.</p>
+              <p className="text-body text-krypt-muted">No pool listed by any provider yet.</p>
             )}
             {st?.launch && (
-              <p className="mt-2 text-[10px] text-krypt-muted/60 font-mono">
+              <p className="mt-2 text-label text-krypt-muted/60 font-mono">
                 {/* Unknown deployer is an em dash, never the zero address — that
                     reads as "renounced". `phase` is Pons vocabulary, so BNB
                     says where the token actually is instead. */}

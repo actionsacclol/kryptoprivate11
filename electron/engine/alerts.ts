@@ -32,7 +32,9 @@ let saveTimer: NodeJS.Timeout | null = null;
 
 export interface AlertHost {
   /** Show a desktop notification. */
-  notify(title: string, body: string): void;
+  /** `mint` is what the alert is about — the click target for the desktop
+   *  notification, and the link in a webhook post. */
+  notify(title: string, body: string, mint?: string): void;
   settings(): AlertSettings;
   log(level: 'info' | 'warn' | 'error', line: string): void;
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
@@ -216,7 +218,7 @@ function fire(a: Alert, title: string, body: string): void {
   a.note = body;
   persist();
   recorder.record('alert_fire', { id: a.id, kind: a.kind, mint: a.mint, threshold: a.threshold });
-  host?.notify(title, body);
+  host?.notify(title, body, a.mint);
   host?.toast('info', `${title} — ${body}`);
   host?.log('info', `alert: ${title} — ${body}`);
   host?.changed();

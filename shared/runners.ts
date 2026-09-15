@@ -20,9 +20,29 @@ export interface RunnerAlertSettings {
   minBucket: RunnerBucketFloor;
   /** Alerts per rolling hour; the rest are still recorded, just not pushed. */
   maxPerHour: number;
+  /**
+   * Discord webhook to post flags to. Empty = off, which is the default.
+   *
+   * This is OUTBOUND ONLY and is not the chat bot: the bot in system/bots.ts
+   * is read-only, paired by code, and silent to strangers. A webhook is a URL
+   * the user pasted from their own server's settings, and the only thing that
+   * ever travels down it is the same flag the desktop notification carries.
+   *
+   * Validated at the IPC boundary against Discord's own hosts (see
+   * settingsValidation.ts). That matters more than usual here: everywhere
+   * else the app refuses to take a URL from the renderer at all, and this is
+   * the one field that has to, so it is pinned to a host that cannot be used
+   * to post your flags somewhere you did not choose.
+   */
+  webhookUrl: string;
 }
 
-export const DEFAULT_RUNNER_ALERTS: RunnerAlertSettings = { enabled: true, minBucket: 'top1_5', maxPerHour: 12 };
+export const DEFAULT_RUNNER_ALERTS: RunnerAlertSettings = {
+  enabled: true,
+  minBucket: 'top1_5',
+  maxPerHour: 12,
+  webhookUrl: '',
+};
 
 export const RUNNER_BUCKET_LABEL: Record<RunnerBucketFloor, string> = {
   top1: 'Top 1 % only',

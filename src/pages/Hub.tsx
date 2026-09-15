@@ -11,7 +11,7 @@
 // number is only shown when it was actually read.
 
 import { useEffect, useState } from 'react';
-import { Compass, Cpu, Gauge, Gift, LayoutGrid, Rocket, Settings as SettingsIcon, Users, Wallet, ZapOff, type LucideIcon } from 'lucide-react';
+import { Bot, Compass, Cpu, Gauge, Gift, LayoutGrid, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, ZapOff, type LucideIcon } from 'lucide-react';
 import { WORKSPACES, type WorkspaceId, type WorkspaceSpec } from '../workspaces';
 import { useAppState } from '../state/AppStateProvider';
 import { useToast } from '../state/ToastProvider';
@@ -20,6 +20,7 @@ import { KryptoCard } from '../components/KryptoCard';
 const ICONS: Record<WorkspaceSpec['icon'], LucideIcon> = {
   compass: Compass,
   users: Users,
+  automation: Bot,
   cpu: Cpu,
   wallet: Wallet,
   gift: Gift,
@@ -34,6 +35,10 @@ interface CardStatus {
   line: string | null;
   tone: 'live' | 'idle' | 'warn';
 }
+
+/** The tutorial. A constant so there is one place to change it, and so the
+ *  markup does not carry a bare URL. */
+const TUTORIAL_URL = 'https://www.youtube.com/watch?v=BIvWbqcKgf4';
 
 export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void; onOpenToken: (mint: string) => void }) {
   const { status, positions, settings, updateSettings } = useAppState();
@@ -95,11 +100,14 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
         const open = positions.filter((p) => p.state !== 'closed').length;
         return { line: open > 0 ? `${open} open position${open === 1 ? '' : 's'}` : 'Ready', tone: open > 0 ? 'live' : 'idle' };
       }
-      case 'copy':
+      case 'automation':
+        // The workspace holds more than copy trading now, but followed
+        // wallets are the only part of it that has a number worth a glance.
+        // An em dash still means "could not read it", never zero.
         if (copyCount === null) return { line: '—', tone: 'idle' };
         return copyCount > 0
           ? { line: `${copyCount} wallet${copyCount === 1 ? '' : 's'} followed`, tone: 'live' }
-          : { line: 'Not set up', tone: 'idle' };
+          : { line: 'Nothing running', tone: 'idle' };
       case 'engine':
         return status.running
           ? { line: `Scanning — ${status.launchesSeen} launches seen`, tone: 'live' }
@@ -118,7 +126,7 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
         <h1 className="text-3xl font-semibold tracking-tight text-white">
           <span className="text-krypt-purple">$Krypto</span> Bot
         </h1>
-        <p className="mt-2 text-[13px] text-krypt-muted">Pick what you are here to do.</p>
+        <p className="mt-2 text-value text-krypt-muted">Pick what you are here to do.</p>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -139,7 +147,7 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
                 {w.ready ? (
                   st.line && (
                     <span
-                      className={`rounded-full border px-2 py-0.5 text-[10px] ${
+                      className={`rounded-full border px-2 py-0.5 text-label ${
                         st.tone === 'live'
                           ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
                           : st.tone === 'warn'
@@ -151,12 +159,12 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
                     </span>
                   )
                 ) : (
-                  <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-krypt-muted">soon</span>
+                  <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-label text-krypt-muted">soon</span>
                 )}
               </div>
               <div>
-                <div className="text-[15px] font-semibold text-white">{w.title}</div>
-                <div className="mt-1 text-[12px] leading-relaxed text-krypt-muted">{w.blurb}</div>
+                <div className="text-figure font-semibold text-white">{w.title}</div>
+                <div className="mt-1 text-note leading-relaxed text-krypt-muted">{w.blurb}</div>
               </div>
             </button>
           );
@@ -176,7 +184,7 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
             ? 'Lite mode is on: no animations, blur or 3D scenes. Click to turn effects back on. Also in Settings › Display.'
             : 'Slow or stuttering? Lite mode turns off every animation, blur and the 3D scenes so the app is as light as it gets. Also in Settings › Display.'
         }
-        className={`fixed bottom-4 right-4 z-20 flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] transition disabled:opacity-50 ${
+        className={`fixed bottom-4 right-4 z-20 flex items-center gap-2 rounded-full border px-3 py-1.5 text-body transition disabled:opacity-50 ${
           lite
             ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:border-emerald-400/60'
             : 'border-white/10 bg-krypt-panel text-krypt-muted hover:border-krypt-purple/50 hover:text-white'
@@ -184,6 +192,22 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
       >
         {lite ? <ZapOff className="h-3.5 w-3.5" /> : <Gauge className="h-3.5 w-3.5" />}
         {lite ? 'Lite mode on' : 'Laggy? Lite mode'}
+      </button>
+
+      {/* The tutorial, opposite its sibling. Bottom LEFT so the two corners
+          read as a pair without crowding each other, and on the first screen
+          because that is where someone who has never used this is standing.
+
+          `openExternal` through main, never a bare href: the renderer must not
+          navigate — guardWebContents would refuse it anyway — and a link that
+          silently does nothing is worse than no link. */}
+      <button
+        onClick={() => void window.krypt.app.openExternal(TUTORIAL_URL)}
+        title="Watch the tutorial on YouTube — opens in your browser"
+        className="fixed bottom-4 left-4 z-20 flex items-center gap-2 rounded-full border border-white/10 bg-krypt-panel px-3 py-1.5 text-body text-krypt-muted transition hover:border-krypt-purple/50 hover:text-white"
+      >
+        <PlayCircle className="h-3.5 w-3.5" />
+        Tutorial
       </button>
     </div>
   );

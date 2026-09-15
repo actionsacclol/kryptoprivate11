@@ -101,7 +101,7 @@ export function SortBar({
             onClick={() => onChange(nextSort(state, k.key))}
             title={`${k.title} — click to sort lowest → highest, again for highest → lowest, again to clear`}
             className={cls(
-              'inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-display tracking-[0.12em] uppercase transition',
+              'inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-micro font-display tracking-label uppercase transition',
               active ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted/70 hover:text-white hover:bg-white/5',
             )}
           >

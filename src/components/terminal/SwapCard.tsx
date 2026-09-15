@@ -33,7 +33,7 @@ import { useToast } from '../../state/ToastProvider';
 import { cls } from '../../utils/format';
 
 const inputCls =
-  'w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-[12px] text-white placeholder:text-krypt-muted/60 focus:border-krypt-purple/60 focus:outline-none';
+  'w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-note text-white placeholder:text-krypt-muted/60 focus:border-krypt-purple/60 focus:outline-none';
 
 const CHAIN_LABEL: Record<SwapChain, string> = {
   solana: 'Solana',
@@ -65,7 +65,7 @@ function MintField({
             key={m.mint}
             onClick={() => onChange(m.mint)}
             className={cls(
-              'rounded-md border px-2 py-0.5 text-[10px] font-semibold transition',
+              'rounded-md border px-2 py-0.5 text-label font-semibold transition',
               value === m.mint
                 ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white'
                 : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -79,7 +79,7 @@ function MintField({
         value={known ? '' : value}
         onChange={(e) => onChange(e.target.value.trim())}
         placeholder={known ? `${known.symbol} — or paste any token` : chain === 'solana' ? 'Paste a mint address' : 'Paste a token address (0x…)'}
-        className={cls(inputCls, 'font-mono text-[11px]')}
+        className={cls(inputCls, 'font-mono text-body')}
       />
     </div>
   );
@@ -194,7 +194,7 @@ export function SwapCard() {
 
   return (
     <div className="rounded-xl border border-white/10 bg-krypt-panel p-4">
-      <div className="mb-1 flex items-center gap-2 text-[13px] font-semibold text-white">
+      <div className="mb-1 flex items-center gap-2 text-value font-semibold text-white">
         <Repeat className="h-3.5 w-3.5 text-krypt-purple" /> Swap
       </div>
       {/* Chain first: everything below it means something different per
@@ -205,7 +205,7 @@ export function SwapCard() {
             key={c}
             onClick={() => setChain(c)}
             className={cls(
-              'flex-1 rounded-lg border px-2 py-1 text-[11px] font-semibold transition',
+              'flex-1 rounded-lg border px-2 py-1 text-body font-semibold transition',
               draft.chain === c
                 ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white'
                 : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -216,7 +216,7 @@ export function SwapCard() {
         ))}
       </div>
 
-      <p className="mb-3 text-[11px] leading-relaxed text-krypt-muted">
+      <p className="mb-3 text-body leading-relaxed text-krypt-muted">
         {SWAP_ABILITY[draft.chain] === 'any' ? (
           <>
             Any token for any other, routed through Jupiter — the same routing every buy and sell uses. A utility, not a trade: it
@@ -235,11 +235,11 @@ export function SwapCard() {
       <div className="space-y-2">
         <div>
           <div className="mb-1 flex items-baseline justify-between">
-            <span className="text-[11px] font-semibold text-white/80">From</span>
+            <span className="text-body font-semibold text-white/80">From</span>
             <button
               onClick={() => held.amount !== null && set('amount', held.amount)}
               disabled={held.amount === null}
-              className="text-[10px] text-krypt-muted transition hover:text-white disabled:opacity-40"
+              className="text-label text-krypt-muted transition hover:text-white disabled:opacity-40"
             >
               {/* Unknown renders as a dash, never as 0 — an unreadable balance
                   must not read as "you hold none". */}
@@ -270,9 +270,9 @@ export function SwapCard() {
         </div>
 
         <div>
-          <span className="mb-1 block text-[11px] font-semibold text-white/80">To</span>
+          <span className="mb-1 block text-body font-semibold text-white/80">To</span>
           <MintField chain={draft.chain} value={draft.outputMint} onChange={(m) => set('outputMint', m)} exclude={draft.inputMint} />
-          <div className="mt-1 rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 font-mono text-[12px] text-white">
+          <div className="mt-1 rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 font-mono text-note text-white">
             {quoting ? (
               <span className="text-krypt-muted">pricing…</span>
             ) : outAmount === null ? (
@@ -289,9 +289,9 @@ export function SwapCard() {
             history, and a control that did nothing would be a lie. */}
         <div className={cls(SWAP_ABILITY[draft.chain] === 'any' ? '' : 'hidden')}>
           <div className="mb-1 flex items-baseline justify-between">
-            <span className="text-[11px] font-semibold text-white/80">Speed</span>
+            <span className="text-body font-semibold text-white/80">Speed</span>
             {quote && quote.prioritySource === 'fallback' && (
-              <span className="text-[10px] text-krypt-muted/70">estimate unavailable — these are defaults</span>
+              <span className="text-label text-krypt-muted/70">estimate unavailable — these are defaults</span>
             )}
           </div>
           <div className="grid grid-cols-3 gap-1">
@@ -309,22 +309,22 @@ export function SwapCard() {
                       : 'border-white/10 bg-white/[0.02] hover:bg-white/5',
                   )}
                 >
-                  <span className="block text-[11px] font-semibold text-white/90">{SPEED_LABEL[sp]}</span>
-                  <span className="block font-mono text-[10px] text-krypt-muted">
+                  <span className="block text-body font-semibold text-white/90">{SPEED_LABEL[sp]}</span>
+                  <span className="block font-mono text-label text-krypt-muted">
                     {lamports === undefined ? '—' : `≤ ${(lamports / 1e9).toFixed(6)}`}
                   </span>
                 </button>
               );
             })}
           </div>
-          <p className="mt-1 text-[10px] leading-relaxed text-krypt-muted/80">
+          <p className="mt-1 text-label leading-relaxed text-krypt-muted/80">
             A network fee paid to validators, not to us, and a ceiling rather than a charge — a short route consumes less and
             costs less than shown. It buys position in a block; it does not get you a better price.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-krypt-muted">Slippage</span>
+          <span className="text-body text-krypt-muted">Slippage</span>
           <input
             type="number"
             step="0.1"
@@ -334,9 +334,9 @@ export function SwapCard() {
             onChange={(e) => set('slippagePct', Number(e.target.value))}
             className={cls(inputCls, 'w-20 font-mono')}
           />
-          <span className="text-[11px] text-krypt-muted">%</span>
+          <span className="text-body text-krypt-muted">%</span>
           {draft.slippagePct !== DEFAULT_SLIPPAGE_PCT && (
-            <button onClick={() => set('slippagePct', DEFAULT_SLIPPAGE_PCT)} className="text-[10px] text-krypt-muted hover:text-white">
+            <button onClick={() => set('slippagePct', DEFAULT_SLIPPAGE_PCT)} className="text-label text-krypt-muted hover:text-white">
               reset
             </button>
           )}
@@ -344,7 +344,7 @@ export function SwapCard() {
       </div>
 
       {quote && (
-        <div className="mt-3 space-y-0.5 rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-[10px] leading-relaxed text-krypt-muted">
+        <div className="mt-3 space-y-0.5 rounded-lg border border-white/10 bg-white/[0.02] p-2.5 text-label leading-relaxed text-krypt-muted">
           <div>
             Route: <span className="text-white/70">{quote.route.length ? quote.route.join(' → ') : 'direct'}</span>
           </div>
@@ -378,7 +378,7 @@ export function SwapCard() {
       )}
 
       {problems.length > 0 && draft.amount > 0 && (
-        <ul className="mt-3 space-y-0.5 text-[10px] text-krypt-muted">
+        <ul className="mt-3 space-y-0.5 text-label text-krypt-muted">
           {problems.map((p) => (
             <li key={p}>· {p}</li>
           ))}
@@ -389,7 +389,7 @@ export function SwapCard() {
         <button
           onClick={() => void run(true)}
           disabled={busy || !quote || problems.length > 0}
-          className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[12px] text-white/90 transition hover:bg-white/10 disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-note text-white/90 transition hover:bg-white/10 disabled:opacity-40"
         >
           {busy && !checked && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           Check it first
@@ -398,7 +398,7 @@ export function SwapCard() {
           onClick={() => void run(false)}
           disabled={busy || !quote || problems.length > 0 || !checked}
           title={!checked ? 'Check it first — a swap cannot be undone' : undefined}
-          className="flex items-center gap-1.5 rounded-lg border border-krypt-purple/40 bg-krypt-purple/15 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-krypt-purple/25 disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-lg border border-krypt-purple/40 bg-krypt-purple/15 px-3 py-1.5 text-note font-semibold text-white transition hover:bg-krypt-purple/25 disabled:opacity-40"
         >
           {busy && checked ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Repeat className="h-3.5 w-3.5" />}
           Swap {draft.amount > 0 ? `${draft.amount} ${label(draft.chain, draft.inputMint)}` : ''}
@@ -406,7 +406,7 @@ export function SwapCard() {
       </div>
 
       {draft.inputMint.toLowerCase() === nativeOf(draft.chain).toLowerCase() && (
-        <p className="mt-2 text-[10px] leading-relaxed text-krypt-muted/80">
+        <p className="mt-2 text-label leading-relaxed text-krypt-muted/80">
           Swapping from {nativeSymbol(draft.chain)} leaves less of it for gas. Keep enough back to sign your next transaction.
         </p>
       )}

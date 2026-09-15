@@ -205,7 +205,10 @@ ok('default settings: shared slippage + referrer, one enabled block per chain, n
       // The runner filter is per chain, and its defaults are the conservative
       // ones — pinned in full here so a loosened default cannot slip in as a
       // one-word change (evmrunners.test.mjs pins what they mean).
-      { enabled: true, rpcUrl: '', apiKey: '', runnerAlerts: { enabled: true, minBucket: 11, maxPerHour: 12, requireBeatsBase: true } },
+      // `webhookUrl: ''` is OFF. It must ship empty: it is the one field in
+      // the app that accepts a URL from the renderer, and a default pointing
+      // anywhere would be a default that posts your flags somewhere.
+      { enabled: true, rpcUrl: '', apiKey: '', runnerAlerts: { enabled: true, minBucket: 11, maxPerHour: 12, requireBeatsBase: true, webhookUrl: '' } },
       chain,
     );
     assert.equal(resolveEvmRpcUrl(chain, cs), EVM_CHAIN_META[chain].publicRpc, `${chain} default resolves to the public endpoint`);

@@ -180,7 +180,16 @@ console.log('settingsvalidation: all tests passed');
   assert.match(src, /s\.execution\.localTxBuild = true;/, 'revision 4 turns the local builder on');
   const types = fs.readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /if \(fromRevision < 5\) \{/, 'revision-5 step exists');
-  assert.match(types, /SETTINGS_REVISION = 5;/);
+  // Revision 6: Discord presence is on by default from 3.0.0, and revision 2
+  // had turned it off for everyone — without this step the feature would be
+  // "default on" for new installs only and silently off for every existing
+  // user. The pinned number is what forces a migration to be WRITTEN when the
+  // default changes, rather than the default quietly diverging from what is
+  // already on disk.
+  assert.match(src, /if \(fromRevision < 6\) \{/, 'revision-6 step exists');
+  assert.match(src, /s\.discordRpcEnabled = true;/, 'revision 6 turns presence on');
+  assert.match(types, /SETTINGS_REVISION = 6;/);
+  assert.match(types, /discordRpcEnabled: true,/, 'presence is the default');
   assert.match(types, /localTxBuild: true,/, 'local builder is the default');
   console.log('ok  revision-3 migration disables only the old breaker defaults, gated by revision');
   console.log('ok  revision-4 migration turns the local builder on; default is on');
@@ -290,4 +299,84 @@ console.log('settingsvalidation: all tests passed');
   const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8');
   assert.match(ipc, /'engine:snapshot'[^\n]*settings: store\.load\(\)/, 'the renderer hydrates from the raw store, not the resolved rpc');
   console.log('ok  the derived Helius socket never round-trips into settings.json');
+}
+
+// ── Discord webhooks: the ONE field that takes a URL from the renderer ─
+//
+// Everywhere else the main process refuses (the block-feed host is a pick
+// from a hardcoded list for exactly this reason). A webhook is per user and
+// unguessable by us, so it has to be typed in — and is pinned to Discord's
+// own hosts instead. Without the allowlist this is a settings field that
+// makes the app POST your flagged tokens to any host on the internet.
+
+{
+  const url = 'https://discord.com/api/webhooks/123456789012345678/AbCdEf-ghijkl_MNOP';
+  for (const patch of [
+    { strategy: { runnerAlerts: { webhookUrl: url } } },
+    { evm: { robinhood: { runnerAlerts: { webhookUrl: url } } } },
+    { evm: { bnb: { runnerAlerts: { webhookUrl: url } } } },
+  ]) {
+    const r = v(patch);
+    assert.equal(r.ok, true, r.message);
+  }
+  console.log('ok  a real Discord webhook URL is accepted on every chain');
+}
+
+{
+  for (const url of [
+    'https://discord.com/api/v10/webhooks/123456789012345678/tok',
+    'https://discordapp.com/api/webhooks/123456789012345678/tok',
+    'https://canary.discord.com/api/webhooks/123456789012345678/tok',
+  ]) {
+    const r = v({ strategy: { runnerAlerts: { webhookUrl: url } } });
+    assert.equal(r.ok, true, `${url}: ${r.message}`);
+  }
+  console.log('ok  versioned paths, discordapp.com and canary. are accepted');
+}
+
+{
+  // The field ships empty and every panel saves by spreading the stored
+  // block, so the default has to pass its own rule (the 2026-09-08 trap).
+  const r = v({ strategy: { runnerAlerts: { webhookUrl: '' } } });
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  the empty string is OFF, not an error');
+}
+
+{
+  for (const url of [
+    'https://example.com/api/webhooks/1/2',
+    'https://discord.com.evil.test/api/webhooks/1/2',
+    'https://notdiscord.com/api/webhooks/1/2',
+    'https://hooks.slack.com/services/T/B/x',
+    'http://discord.com/api/webhooks/1/2',
+    'https://127.0.0.1/api/webhooks/1/2',
+    'https://localhost:8080/api/webhooks/1/2',
+  ]) {
+    const r = v({ strategy: { runnerAlerts: { webhookUrl: url } } });
+    assert.equal(r.ok, false, `${url} MUST be refused`);
+  }
+  console.log('ok  every other host is refused — the whole safety of the feature');
+}
+
+{
+  for (const url of [
+    'https://discord.com/channels/123/456',
+    'https://discord.com/api/users/@me',
+    'https://discord.com/api/webhooks/123',
+    'not a url at all',
+  ]) {
+    const r = v({ strategy: { runnerAlerts: { webhookUrl: url } } });
+    assert.equal(r.ok, false, `${url} MUST be refused`);
+  }
+  console.log('ok  a Discord URL that is not a webhook is refused');
+}
+
+{
+  // A refusal has to NAME the field. The panels all save by spreading the
+  // stored block, and an unexplained rejection is the shape of the bug that
+  // made execution settings unsaveable for a whole release (2026-09-06).
+  const r = v({ strategy: { runnerAlerts: { webhookUrl: 'https://evil.test/x', maxPerHour: 5 } } });
+  assert.equal(r.ok, false);
+  assert.match(r.message, /webhookUrl/);
+  console.log('ok  a webhook refusal names the field');
 }

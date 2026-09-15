@@ -66,7 +66,7 @@ function ComboCapture({
           setError(null);
         }}
         className={cls(
-          'rounded-md border px-2.5 py-1 font-mono text-[11px] transition min-w-[80px]',
+          'rounded-md border px-2.5 py-1 font-mono text-body transition min-w-[80px]',
           capturing
             ? 'border-krypt-purple/60 bg-krypt-purple/20 text-white animate-pulse-slow'
             : 'border-white/12 bg-black/40 text-white/85 hover:border-white/25',
@@ -74,7 +74,7 @@ function ComboCapture({
       >
         {capturing ? 'press a key…' : binding.combo}
       </button>
-      {error && <span className="text-[9px] text-rose-300 mt-0.5">{error}</span>}
+      {error && <span className="text-micro text-rose-300 mt-0.5">{error}</span>}
     </div>
   );
 }
@@ -165,7 +165,7 @@ export function HotkeySettings({
         {hk.enabled && !hk.confirm && (
           <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-3 py-2.5 flex items-start gap-2">
             <TriangleAlert className="h-4 w-4 text-rose-300 flex-shrink-0 mt-0.5" />
-            <p className="text-[11px] text-rose-200 leading-relaxed">
+            <p className="text-body text-rose-200 leading-relaxed">
               With confirmation off, pressing an armed key on an open Solana token buys or sells immediately. The keys are
               still ignored while a text field has focus, and still respect the live-execution switch and
               arming — but nothing else stands between the keystroke and the transaction. A key is a manual
@@ -175,7 +175,7 @@ export function HotkeySettings({
         )}
 
         {overCap.length > 0 && (
-          <div className="rounded-lg border border-arc-gold/35 bg-arc-gold/10 px-3 py-2 text-[11px] text-arc-gold/90">
+          <div className="rounded-lg border border-arc-gold/35 bg-arc-gold/10 px-3 py-2 text-body text-arc-gold/90">
             {overCap.length} armed buy key{overCap.length === 1 ? ' is' : 's are'} above your per-trade cap of{' '}
             {settings.execution.maxLiveSol} SOL. Keys are manual trades and are NOT capped — each press buys the
             full amount on the key. Lower the key if that is not what you want.
@@ -194,9 +194,9 @@ export function HotkeySettings({
               <Keyboard className={cls('h-3.5 w-3.5 flex-shrink-0', b.enabled ? 'text-krypt-purple' : 'text-krypt-muted/40')} />
 
               <div className="min-w-0 flex-1">
-                <div className="text-[12px] text-white/90">{describeAction(b.action)}</div>
+                <div className="text-note text-white/90">{describeAction(b.action)}</div>
                 {b.action.kind === 'emergency_sell' && (
-                  <div className="text-[10px] text-krypt-muted/70">Sells the whole position in the open token.</div>
+                  <div className="text-label text-krypt-muted/70">Sells the whole position in the open token.</div>
                 )}
               </div>
 
@@ -213,9 +213,9 @@ export function HotkeySettings({
                       if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                     }}
                     step={b.action.kind === 'buy' ? 0.05 : 5}
-                    className="w-16 bg-transparent px-2 py-1 text-[11px] font-mono text-white outline-none text-right"
+                    className="w-16 bg-transparent px-2 py-1 text-body font-mono text-white outline-none text-right"
                   />
-                  <span className="px-1.5 text-[9px] uppercase text-krypt-muted">
+                  <span className="px-1.5 text-micro uppercase text-krypt-muted">
                     {b.action.kind === 'buy' ? 'SOL' : '%'}
                   </span>
                 </div>
@@ -245,7 +245,7 @@ export function HotkeySettings({
           ))}
         </div>
 
-        <p className="text-[10px] text-krypt-muted/55 leading-relaxed">
+        <p className="text-label text-krypt-muted/55 leading-relaxed">
           Hotkeys act on the token currently open and nothing else — there is no key that trades whatever is
           highlighted in a list. They are ignored whenever an input, textarea or search box has focus, so typing a
           number into a filter can never buy.

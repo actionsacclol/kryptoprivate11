@@ -38,7 +38,7 @@ function Stat({
 }) {
   return (
     <div className="plate rounded-lg px-4 py-3" title={hint}>
-      <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/70">{label}</div>
+      <div className="text-micro uppercase tracking-label text-krypt-muted/70">{label}</div>
       <div className={cls('text-lg font-mono font-semibold mt-1', tone ?? 'text-white')}>{value}</div>
     </div>
   );
@@ -66,44 +66,44 @@ function PositionRow({
             )}
           </div>
           <div className="min-w-0">
-            <div className="text-[13px] font-semibold text-white truncate flex items-center gap-1.5">
+            <div className="text-value font-semibold text-white truncate flex items-center gap-1.5">
               {p.symbol}
               {p.paper && (
-                <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-[0.18em] text-amber-300">
+                <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-nano font-bold uppercase tracking-label text-amber-300">
                   Paper
                 </span>
               )}
             </div>
-            <div className="text-[10px] font-mono text-krypt-muted">{shortAddr(p.mint, 4)}</div>
+            <div className="text-label font-mono text-krypt-muted">{shortAddr(p.mint, 4)}</div>
           </div>
         </button>
 
         <div className="hidden md:block w-24 text-right">
-          <div className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Holding</div>
-          <div className="text-[11px] font-mono text-white/85">{fmtNum(p.amount, 0)}</div>
+          <div className="text-micro uppercase tracking-label text-krypt-muted/60">Holding</div>
+          <div className="text-body font-mono text-white/85">{fmtNum(p.amount, 0)}</div>
         </div>
         <div className="w-20 text-right">
-          <div className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Price</div>
-          <div className="text-[11px] font-mono text-white/85">{fmtPriceUsd(p.priceUsd)}</div>
+          <div className="text-micro uppercase tracking-label text-krypt-muted/60">Price</div>
+          <div className="text-body font-mono text-white/85">{fmtPriceUsd(p.priceUsd)}</div>
         </div>
         <div className="w-24 text-right">
-          <div className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Value</div>
-          <div className="text-[12px] font-mono text-white">{fmtUsd(p.valueUsd)}</div>
+          <div className="text-micro uppercase tracking-label text-krypt-muted/60">Value</div>
+          <div className="text-note font-mono text-white">{fmtUsd(p.valueUsd)}</div>
         </div>
         <div className="w-24 text-right">
-          <div className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Cost</div>
-          <div className="text-[11px] font-mono text-white/85">
+          <div className="text-micro uppercase tracking-label text-krypt-muted/60">Cost</div>
+          <div className="text-body font-mono text-white/85">
             {p.costSol === null ? '—' : `${sol(p.costSol)} SOL`}
           </div>
         </div>
         <div className="w-28 text-right">
-          <div className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">Unrealized</div>
-          <div className={cls('text-[12px] font-mono font-semibold', toneFor(p.unrealizedPnlSol))}>
+          <div className="text-micro uppercase tracking-label text-krypt-muted/60">Unrealized</div>
+          <div className={cls('text-note font-mono font-semibold', toneFor(p.unrealizedPnlSol))}>
             {p.unrealizedPnlSol === null
               ? '—'
               : `${p.unrealizedPnlSol >= 0 ? '+' : ''}${sol(p.unrealizedPnlSol)}`}
             {p.unrealizedPnlPct !== null && (
-              <span className="text-[10px] ml-1 opacity-80">
+              <span className="text-label ml-1 opacity-80">
                 ({p.unrealizedPnlPct >= 0 ? '+' : ''}
                 {p.unrealizedPnlPct.toFixed(0)}%)
               </span>
@@ -126,7 +126,7 @@ function PositionRow({
       </div>
 
       {!p.basisKnown && (
-        <p className="text-[10px] text-krypt-muted/60 mt-1.5 pl-11">
+        <p className="text-label text-krypt-muted/60 mt-1.5 pl-11">
           No cost basis in this install — {p.unreconciledFills > 0
             ? `${p.unreconciledFills} fill(s) could not be read from the chain.`
             : 'these tokens were not bought through Krypt.'}{' '}
@@ -237,11 +237,11 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
     >
       {data && data.warnings.length > 0 && (
         <div className="mb-5 rounded-lg border border-arc-gold/30 bg-arc-gold/10 px-4 py-3">
-          <div className="flex items-center gap-2 text-arc-gold text-[12px] font-semibold mb-1">
+          <div className="flex items-center gap-2 text-arc-gold text-note font-semibold mb-1">
             <TriangleAlert className="h-4 w-4" />
             What these numbers do not cover
           </div>
-          <ul className="text-[11px] text-arc-gold/85 space-y-0.5 leading-relaxed">
+          <ul className="text-body text-arc-gold/85 space-y-0.5 leading-relaxed">
             {data.warnings.map((w) => (
               <li key={w}>• {w}</li>
             ))}
@@ -294,7 +294,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
             key={id}
             onClick={() => setTab(id)}
             className={cls(
-              'rounded-md px-3 py-1.5 text-[12px] font-semibold transition',
+              'rounded-md px-3 py-1.5 text-note font-semibold transition',
               tab === id ? 'bg-white/8 text-white' : 'text-krypt-muted hover:text-white hover:bg-white/5',
             )}
           >
@@ -312,7 +312,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
         <div className="mb-3">
           <button
             onClick={() => setPreviewOpen((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1.5 text-[11px] font-semibold text-krypt-muted hover:text-white hover:border-white/25 transition"
+            className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1.5 text-body font-semibold text-krypt-muted hover:text-white hover:border-white/25 transition"
           >
             <ImageIcon className="h-3.5 w-3.5" />
             Preview share card
@@ -324,12 +324,12 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
                   key={sc.id}
                   title={sc.note}
                   onClick={() => setShare({ kind: 'position', position: demoPosition(sc.id) })}
-                  className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-[10px] font-mono text-krypt-muted hover:text-white hover:border-krypt-purple/40 transition"
+                  className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-label font-mono text-krypt-muted hover:text-white hover:border-krypt-purple/40 transition"
                 >
                   {sc.label}
                 </button>
               ))}
-              <span className="self-center text-[10px] text-krypt-muted/50">
+              <span className="self-center text-label text-krypt-muted/50">
                 demo data — the mint is deliberately fake
               </span>
             </div>
@@ -352,7 +352,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
               <PositionRow key={`paper-${p.mint}`} p={p} onOpen={() => onOpenToken(p.mint)} onShare={() => setShare({ kind: 'position', position: p })} />
             ))}
             {data.paper.positions.length > 0 && (
-              <p className="text-[10px] text-krypt-muted/55 px-3 pt-1 leading-relaxed">
+              <p className="text-label text-krypt-muted/55 px-3 pt-1 leading-relaxed">
                 Rows marked <span className="text-amber-300/80">paper</span> are simulated fills, never broadcast; exits are
                 modelled ({data.paper.model}) and they count toward none of the totals above.
               </p>
@@ -377,19 +377,19 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
                     key={f}
                     onClick={() => setHistFilter(f)}
                     className={cls(
-                      'rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] transition',
+                      'rounded px-2 py-0.5 text-label uppercase tracking-label transition',
                       histFilter === f ? 'bg-white/10 text-white' : 'text-krypt-muted/60 hover:text-white',
                     )}
                   >
                     {f}
                   </button>
                 ))}
-                <span className="ml-2 text-[10px] text-krypt-muted/50">
+                <span className="ml-2 text-label text-krypt-muted/50">
                   {history.filter((r) => r.paper).length} paper · {history.filter((r) => !r.paper).length} live
                 </span>
               </div>
             )}
-            <div className="flex items-center gap-2 px-3 text-[10px] uppercase tracking-[0.14em] text-krypt-muted/60">
+            <div className="flex items-center gap-2 px-3 text-label uppercase tracking-label text-krypt-muted/60">
               <span className="w-32">Time</span>
               <span className="w-16">Side</span>
               <span className="flex-1">Token</span>
@@ -401,7 +401,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
             {shownHistory.map((r, i) => (
               <div
                 key={`${r.signature ?? i}-${i}`}
-                className="flex items-center gap-2 rounded-md px-3 py-1.5 text-[11px] font-mono hover:bg-white/[0.04] transition"
+                className="flex items-center gap-2 rounded-md px-3 py-1.5 text-body font-mono hover:bg-white/[0.04] transition"
               >
                 <span className="w-32 text-krypt-muted/70">{new Date(r.at).toLocaleString()}</span>
                 <span className={cls('w-16 font-bold', r.side === 'buy' ? 'text-emerald-400' : 'text-rose-400')}>
@@ -413,7 +413,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
                 >
                   <span className="truncate">{r.symbol || shortAddr(r.mint, 5)}</span>
                   {r.paper && (
-                    <span className="shrink-0 rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-[0.18em] text-amber-300">
+                    <span className="shrink-0 rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-nano font-bold uppercase tracking-label text-amber-300">
                       Paper
                     </span>
                   )}
@@ -429,7 +429,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
                 </span>
                 <span
                   className={cls(
-                    'w-24 text-right text-[10px]',
+                    'w-24 text-right text-label',
                     r.paper
                       ? 'text-amber-300/80'
                       : r.state === 'reconciled' ? 'text-emerald-400/80' : r.state === 'pending' ? 'text-arc-gold/80' : 'text-rose-400/80',
@@ -441,9 +441,9 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
               </div>
             ))}
             {shownHistory.length === 0 && (
-              <p className="text-[11px] text-krypt-muted/60 px-3 py-4">No {histFilter} trades yet.</p>
+              <p className="text-body text-krypt-muted/60 px-3 py-4">No {histFilter} trades yet.</p>
             )}
-            <p className="text-[10px] text-krypt-muted/55 px-3 pt-2 leading-relaxed">
+            <p className="text-label text-krypt-muted/55 px-3 pt-2 leading-relaxed">
               &ldquo;SOL moved&rdquo; is the actual change in your wallet balance for that transaction, read back from
               the chain — it includes the priority fee, any tip, the relayer&rsquo;s cut, rent and slippage. It is not
               the amount that was requested. Rows marked <span className="text-amber-300/80">paper</span> never touched
@@ -462,7 +462,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
             {data.closed.slice(0, 25).map((c) => (
               <div
                 key={`${c.mint}-${c.closedAt}`}
-                className="flex items-center gap-3 rounded-md px-3 py-1.5 text-[11px] font-mono hover:bg-white/[0.04] transition"
+                className="flex items-center gap-3 rounded-md px-3 py-1.5 text-body font-mono hover:bg-white/[0.04] transition"
               >
                 <button onClick={() => onOpenToken(c.mint)} className="w-28 text-left text-white/85 hover:text-krypt-purple truncate">
                   {c.symbol}

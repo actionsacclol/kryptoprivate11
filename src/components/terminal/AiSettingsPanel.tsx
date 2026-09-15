@@ -53,9 +53,9 @@ function KeyRow({
   return (
     <div className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2">
       <div className="flex items-center gap-2">
-        <span className="text-[12px] font-semibold text-white">{label}</span>
+        <span className="text-note font-semibold text-white">{label}</span>
         {keyValue && (
-          <span className="font-mono text-[10px] text-krypt-muted" title="Your key is never shown in full">
+          <span className="font-mono text-label text-krypt-muted" title="Your key is never shown in full">
             {redactToken(keyValue)}
           </span>
         )}
@@ -79,7 +79,7 @@ function KeyRow({
             placeholder={`${label} API key`}
             spellCheck={false}
             type="password"
-            className="flex-1 rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+            className="flex-1 rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
           />
           <PrimaryButton
             onClick={() => {
@@ -95,13 +95,13 @@ function KeyRow({
         </div>
       )}
 
-      <label className="block text-[10px] uppercase tracking-wider text-krypt-muted/60">Model</label>
+      <label className="block text-label uppercase tracking-wider text-krypt-muted/60">Model</label>
       <input
         value={model}
         onChange={(e) => onModel(e.target.value)}
         placeholder={defaultModel}
         spellCheck={false}
-        className="w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+        className="w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
       />
     </div>
   );
@@ -119,7 +119,7 @@ export function AiSettingsPanel({
 
   return (
     <Card className="space-y-3">
-      <p className="text-[11px] leading-relaxed text-krypt-muted">
+      <p className="text-body leading-relaxed text-krypt-muted">
         Plug in your own OpenAI or Anthropic key and get a model&apos;s read on a token from the token page&apos;s
         <span className="text-white"> AI</span> tab — a score and a short take. It is a second opinion on the same
         on-chain facts the app already shows, <span className="text-white">not financial advice</span>. Off by default;
@@ -132,7 +132,7 @@ export function AiSettingsPanel({
             key={p.id}
             onClick={() => patch({ provider: p.id })}
             className={cls(
-              'rounded-md px-3 py-1.5 text-[11px] font-semibold transition',
+              'rounded-md px-3 py-1.5 text-body font-semibold transition',
               ai.provider === p.id ? 'bg-white/8 text-white' : 'text-krypt-muted hover:text-white hover:bg-white/5',
             )}
           >

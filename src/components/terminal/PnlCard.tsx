@@ -501,7 +501,7 @@ export function PnlCard({
     >
       <div className="plate rounded-xl p-4 max-w-3xl w-full animate-pop-in" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2 mb-3">
-          <h3 className="font-display text-[11px] font-semibold uppercase tracking-[0.28em] text-krypt-muted">
+          <h3 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted">
             {subject.kind === 'trade' ? 'Trade card' : 'PnL card'}
           </h3>
           <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -511,7 +511,7 @@ export function PnlCard({
                 key={k}
                 onClick={() => setStyle(k)}
                 className={cls(
-                  'px-2.5 py-1 text-[10px] font-semibold transition',
+                  'px-2.5 py-1 text-label font-semibold transition',
                   style === k ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
                 )}
               >
@@ -522,7 +522,7 @@ export function PnlCard({
           <button
             onClick={() => setGifOpen(true)}
             title="Search a GIF to sit behind the card"
-            className="ml-1 inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-krypt-muted transition hover:text-white"
+            className="ml-1 inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
           >
             <Sparkles className="h-3.5 w-3.5" />
             GIF
@@ -530,7 +530,7 @@ export function PnlCard({
           <button
             onClick={() => fileRef.current?.click()}
             title="Use your own image behind the card"
-            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-krypt-muted transition hover:text-white"
+            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
           >
             <ImageIcon className="h-3.5 w-3.5" />
             {bg ? 'Change' : 'Upload'}
@@ -539,7 +539,7 @@ export function PnlCard({
             <button
               onClick={clearBackground}
               title="Back to the plain card"
-              className="rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-krypt-muted transition hover:text-white"
+              className="rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
             >
               Clear
             </button>
@@ -638,7 +638,7 @@ export function PnlCard({
             <Download className="h-4 w-4" />
             Save PNG
           </button>
-          <p className="text-[10px] text-krypt-muted/60 ml-2 leading-relaxed">
+          <p className="text-label text-krypt-muted/60 ml-2 leading-relaxed">
             Rendered locally. The card is marked <span className="text-white/80">unrealized</span> because the
             position is still open.
           </p>

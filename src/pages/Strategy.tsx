@@ -123,11 +123,11 @@ export function Strategy() {
                 )}
               >
                 <div className="flex items-center justify-between">
-                  <span className={cls('font-display text-sm font-semibold tracking-[0.14em] text-white')}>
+                  <span className={cls('font-display text-sm font-semibold tracking-label text-white')}>
                     <span className={cls('mr-2', tone.glyph)}>{p.glyph}</span>
                     {p.name}
                   </span>
-                  <span className="text-[9px] font-display uppercase tracking-[0.2em] text-krypt-muted/70 opacity-0 group-hover:opacity-100 transition">
+                  <span className="text-micro font-display uppercase tracking-label text-krypt-muted/70 opacity-0 group-hover:opacity-100 transition">
                     Inscribe
                   </span>
                 </div>
@@ -153,7 +153,7 @@ export function Strategy() {
             <select
               value={s.runnerAlerts?.minBucket ?? 'top1_5'}
               onChange={(e) => patch({ runnerAlerts: { ...(s.runnerAlerts ?? { enabled: true, maxPerHour: 12 }), minBucket: e.target.value as 'top1' | 'top1_5' | 'top5_10' } })}
-              className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-[12px] text-white"
+              className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-note text-white"
             >
               <option value="top1">Top 1 % only</option>
               <option value="top1_5">Top 5 %</option>

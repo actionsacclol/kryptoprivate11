@@ -273,3 +273,20 @@ html.lite [class*=' blur-'] {
   z-index: 20;
   cursor: grabbing;
 }
+
+/* Frameless pop-out panels (src/panels/PanelWindow.tsx).
+   With no title bar the window has nothing to grab, so the shell is the drag
+   handle and everything usable inside it opts back out. Without the `no-drag`
+   half, a click on a row would move the window instead of activating the row —
+   Chromium gives the drag region the event first. */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.no-drag,
+.no-drag button,
+.no-drag a,
+.no-drag input,
+.no-drag select,
+.no-drag textarea {
+  -webkit-app-region: no-drag;
+}

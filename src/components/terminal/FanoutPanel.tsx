@@ -38,9 +38,9 @@ function GroupEditor({
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={() => name.trim() && name !== group.name && onRename(name.trim())}
-          className="flex-1 min-w-0 rounded bg-black/40 border border-white/15 px-2 py-1 text-[12px] font-semibold text-white outline-none focus:border-krypt-purple/60"
+          className="flex-1 min-w-0 rounded bg-black/40 border border-white/15 px-2 py-1 text-note font-semibold text-white outline-none focus:border-krypt-purple/60"
         />
-        <span className="text-[10px] text-krypt-muted">{group.members.length} wallet(s)</span>
+        <span className="text-label text-krypt-muted">{group.members.length} wallet(s)</span>
         <GhostButton destructive onClick={onDelete} className="!px-2 !py-1">
           <Trash2 className="h-3.5 w-3.5" />
         </GhostButton>
@@ -53,7 +53,7 @@ function GroupEditor({
               key={w.id}
               onClick={() => onToggle(w.id)}
               className={cls(
-                'rounded-md border px-2 py-1 text-[10px] font-medium transition',
+                'rounded-md border px-2 py-1 text-label font-medium transition',
                 on
                   ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white'
                   : 'border-white/10 bg-black/25 text-krypt-muted hover:text-white',
@@ -63,7 +63,7 @@ function GroupEditor({
             </button>
           );
         })}
-        {wallets.length === 0 && <span className="text-[10px] text-krypt-muted">Add wallets first.</span>}
+        {wallets.length === 0 && <span className="text-label text-krypt-muted">Add wallets first.</span>}
       </div>
     </Card>
   );
@@ -179,7 +179,7 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
             onKeyDown={(e) => e.key === 'Enter' && void createGroup()}
             placeholder="New group name"
             maxLength={32}
-            className="flex-1 rounded bg-black/40 border border-white/15 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60"
+            className="flex-1 rounded bg-black/40 border border-white/15 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60"
           />
           <PrimaryButton onClick={() => void createGroup()} disabled={!newGroup.trim()} className="!py-1.5">
             <Plus className="h-3.5 w-3.5" /> Create
@@ -211,15 +211,15 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
             onChange={(e) => setMint(e.target.value)}
             spellCheck={false}
             placeholder="Token mint address"
-            className="w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+            className="w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
           />
 
           {/* Target: a group, or ad-hoc wallets */}
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[10px] uppercase tracking-wider text-krypt-muted">Buy from</span>
+            <span className="text-label uppercase tracking-wider text-krypt-muted">Buy from</span>
             <button
               onClick={() => setTargetGroup('')}
-              className={cls('rounded-md border px-2 py-1 text-[10px] font-medium', !targetGroup ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white' : 'border-white/10 bg-black/25 text-krypt-muted')}
+              className={cls('rounded-md border px-2 py-1 text-label font-medium', !targetGroup ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white' : 'border-white/10 bg-black/25 text-krypt-muted')}
             >
               <Users className="inline h-3 w-3 mr-1" /> Pick wallets
             </button>
@@ -227,7 +227,7 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
               <button
                 key={g.id}
                 onClick={() => setTargetGroup(g.id)}
-                className={cls('rounded-md border px-2 py-1 text-[10px] font-medium', targetGroup === g.id ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white' : 'border-white/10 bg-black/25 text-krypt-muted')}
+                className={cls('rounded-md border px-2 py-1 text-label font-medium', targetGroup === g.id ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white' : 'border-white/10 bg-black/25 text-krypt-muted')}
               >
                 <Layers className="inline h-3 w-3 mr-1" /> {g.name}
               </button>
@@ -248,7 +248,7 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
                         return next;
                       })
                     }
-                    className={cls('rounded-md border px-2 py-1 text-[10px] font-medium', on ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white' : 'border-white/10 bg-black/25 text-krypt-muted hover:text-white')}
+                    className={cls('rounded-md border px-2 py-1 text-label font-medium', on ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white' : 'border-white/10 bg-black/25 text-krypt-muted hover:text-white')}
                   >
                     {w.label}
                   </button>
@@ -260,10 +260,10 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
           {/* Sizing */}
           <div className="flex items-center gap-2 flex-wrap">
             <div className="inline-flex rounded-md border border-white/10 overflow-hidden">
-              <button onClick={() => setMode('same')} className={cls('px-2.5 py-1 text-[10px] font-semibold', mode === 'same' ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted')}>
+              <button onClick={() => setMode('same')} className={cls('px-2.5 py-1 text-label font-semibold', mode === 'same' ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted')}>
                 Same each
               </button>
-              <button onClick={() => setMode('total')} className={cls('px-2.5 py-1 text-[10px] font-semibold', mode === 'total' ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted')}>
+              <button onClick={() => setMode('total')} className={cls('px-2.5 py-1 text-label font-semibold', mode === 'total' ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted')}>
                 Split a total
               </button>
             </div>
@@ -271,26 +271,26 @@ export function FanoutPanel({ wallets, armed }: { wallets: WalletSummary[]; arme
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               inputMode="decimal"
-              className="w-24 rounded bg-black/40 border border-white/15 px-2 py-1 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+              className="w-24 rounded bg-black/40 border border-white/15 px-2 py-1 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
             />
-            <span className="text-[10px] text-krypt-muted">{mode === 'same' ? 'SOL per wallet' : 'SOL total'}</span>
+            <span className="text-label text-krypt-muted">{mode === 'same' ? 'SOL per wallet' : 'SOL total'}</span>
           </div>
 
           {mode === 'total' && (
             <div className="flex items-center gap-2">
-              <span className="text-[10px] uppercase tracking-wider text-krypt-muted w-16">Randomise</span>
+              <span className="text-label uppercase tracking-wider text-krypt-muted w-16">Randomise</span>
               <input type="range" min={0} max={80} value={jitter} onChange={(e) => setJitter(Number(e.target.value))} className="flex-1 accent-krypt-purple" />
-              <span className="text-[10px] font-mono text-white/80 w-10 text-right">{jitter}%</span>
+              <span className="text-label font-mono text-white/80 w-10 text-right">{jitter}%</span>
             </div>
           )}
 
-          <label className="flex items-center gap-2 text-[11px] text-krypt-muted cursor-pointer">
+          <label className="flex items-center gap-2 text-body text-krypt-muted cursor-pointer">
             <input type="checkbox" checked={stagger} onChange={(e) => setStagger(e.target.checked)} className="h-3.5 w-3.5 accent-krypt-purple" />
             Stagger the buys by a small random delay (less obviously coordinated on-chain)
           </label>
 
           <div className="flex items-center gap-2 pt-1">
-            {!armed && <span className="text-[10px] text-arc-gold/80">Arm live execution above to fan out.</span>}
+            {!armed && <span className="text-label text-arc-gold/80">Arm live execution above to fan out.</span>}
             <div className="flex-1" />
             <PrimaryButton onClick={() => void fanoutBuy()} disabled={busy || !armed}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}

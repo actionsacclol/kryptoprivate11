@@ -99,7 +99,7 @@ function EvmTradesPage({ chain, onOpenToken }: { chain: EvmChainKind; onOpenToke
       >
         <Card>
           {fills === null ? (
-            <div className="px-3 py-6 text-center text-[12px] text-krypt-muted">Reading the ledger…</div>
+            <div className="px-3 py-6 text-center text-note text-krypt-muted">Reading the ledger…</div>
           ) : trips.length === 0 ? (
             <Empty title={`No ${meta.name} round trips yet`} message="A round trip is a buy and the sells that closed it. Open positions and every fill are listed below." />
           ) : (
@@ -183,16 +183,16 @@ function ClosedRow({
         <div className="flex items-baseline gap-2">
           <span className="truncate text-[14px] font-semibold text-white">{t.symbol || shortAddr(t.mint)}</span>
           {paper && (
-            <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-[0.18em] text-amber-300">
+            <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-nano font-bold uppercase tracking-label text-amber-300">
               Paper
             </span>
           )}
-          <span className="whitespace-nowrap font-mono text-[10px] text-krypt-muted/60">
+          <span className="whitespace-nowrap font-mono text-label text-krypt-muted/60">
             {when(t.closedAt)} · held {holdLabel(t.holdMs)} · {t.buys} buy{t.buys === 1 ? '' : 's'} / {t.sells} sell
             {t.sells === 1 ? '' : 's'}
           </span>
         </div>
-        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 font-mono text-[11px]">
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 font-mono text-body">
           <span className="text-krypt-muted">
             in <span className="text-white/85">{t.costSol.toFixed(4)} {unit}</span>
             {t.entryPriceSol !== null && <span className="text-krypt-muted/60"> @ {price(t.entryPriceSol)}</span>}
@@ -205,11 +205,11 @@ function ClosedRow({
       </button>
 
       <div className="flex flex-shrink-0 flex-col items-end">
-        <span className={cls('font-mono text-[15px] font-semibold', up ? 'text-emerald-300' : 'text-rose-300')}>
+        <span className={cls('font-mono text-figure font-semibold', up ? 'text-emerald-300' : 'text-rose-300')}>
           {up ? '+' : ''}
           {t.pnlSol.toFixed(4)} {unit}
         </span>
-        <span className={cls('font-mono text-[11px]', up ? 'text-emerald-300/70' : 'text-rose-300/70')}>
+        <span className={cls('font-mono text-body', up ? 'text-emerald-300/70' : 'text-rose-300/70')}>
           {up ? '+' : ''}
           {t.pnlPct.toFixed(1)} %{solUsd !== null ? ` · ${up ? '+' : '-'}${fmtUsd(Math.abs(t.pnlSol) * solUsd)}` : ''}
         </span>
@@ -233,9 +233,9 @@ function OpenRow({ p, onOpen, onShare }: { p: Position; onOpen: () => void; onSh
       <button onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex items-baseline gap-2">
           <span className="truncate text-[14px] font-semibold text-white">{p.symbol || shortAddr(p.mint)}</span>
-          <span className="font-mono text-[10px] text-krypt-muted/60">still held</span>
+          <span className="font-mono text-label text-krypt-muted/60">still held</span>
         </div>
-        <div className="mt-1 flex flex-wrap gap-x-4 font-mono text-[11px] text-krypt-muted">
+        <div className="mt-1 flex flex-wrap gap-x-4 font-mono text-body text-krypt-muted">
           <span>
             in <span className="text-white/85">{p.costSol !== null ? `${p.costSol.toFixed(4)} SOL` : '—'}</span>
           </span>
@@ -246,10 +246,10 @@ function OpenRow({ p, onOpen, onShare }: { p: Position; onOpen: () => void; onSh
         </div>
       </button>
       <div className="flex flex-shrink-0 flex-col items-end">
-        <span className={cls('font-mono text-[15px] font-semibold', pnl === null ? 'text-krypt-muted' : up ? 'text-emerald-300' : 'text-rose-300')}>
+        <span className={cls('font-mono text-figure font-semibold', pnl === null ? 'text-krypt-muted' : up ? 'text-emerald-300' : 'text-rose-300')}>
           {pnl === null ? '—' : `${up ? '+' : ''}${pnl.toFixed(4)} SOL`}
         </span>
-        <span className="font-mono text-[11px] text-krypt-muted/70">unrealized</span>
+        <span className="font-mono text-body text-krypt-muted/70">unrealized</span>
       </div>
       <IconButton onClick={onShare} title="Make a share card (marked as an open position)">
         <Share2 className="h-4 w-4" />

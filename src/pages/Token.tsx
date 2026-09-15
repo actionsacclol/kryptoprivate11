@@ -33,6 +33,7 @@ import { useTerminal } from '../state/TerminalProvider';
 import { lastRows } from '../state/routeCache';
 import { useToast } from '../state/ToastProvider';
 import { cls, fmtAge, fmtChange, fmtNum, fmtPriceUsd, fmtUsd, scoreTone, shortAddr, toneFor } from '../utils/format';
+import { Stat } from '../components/common';
 
 // The token page — chart, security, holders, trades and the trade panel on
 // one screen (term.txt sections 5–8).
@@ -55,15 +56,6 @@ const BUCKET_SEC: Record<CandleInterval, number> = {
   '1h': 3_600,
   '4h': 14_400,
 };
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div>
-      <div className="text-[9px] uppercase tracking-[0.16em] text-krypt-muted/60">{label}</div>
-      <div className={cls('text-[13px] font-mono font-semibold mt-0.5', tone ?? 'text-white')}>{value}</div>
-    </div>
-  );
-}
 
 export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }) {
   const term = useTerminal();
@@ -350,6 +342,25 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
         emptyDelayMs = 1_000;
         const r = await window.krypt.market.candlesTail(mint, interval, lastCandleTimeRef.current);
         if (cancelled || !r.ok || !r.data || r.data.candles.length === 0) return;
+        // UNIT GUARD. The tail is APPENDED to bars already on screen, so it
+        // must be priced the same way they are. It is not always: a chart
+        // that first painted from the local tape with no SOL/USD rate is in
+        // SOL, and the next tail — by then the rate is cached, or a provider
+        // answered — comes back in USD. Appending that drew one series with
+        // two scales ~1e9 apart: the y-axis blew out to 1e11+ and every real
+        // candle squashed into the baseline (user report, 2026-09-13). A
+        // changed unit (or a changed effective interval) is a different
+        // series, so redraw it instead of gluing it on.
+        const cur2 = seriesRef.current;
+        const unitChanged = !!cur2 && (r.data.unit !== cur2.unit || r.data.effectiveInterval !== cur2.effectiveInterval);
+        if (unitChanged) {
+          const full = await window.krypt.market.candles(mint, interval, 500);
+          if (cancelled || !full.ok || !full.data) return;
+          setSeries(full.data);
+          const fc = full.data.candles;
+          lastCandleTimeRef.current = fc.length ? fc[fc.length - 1].time : 0;
+          return;
+        }
         chartApiRef.current?.appendCandles(r.data.candles);
         lastCandleTimeRef.current = r.data.candles[r.data.candles.length - 1].time;
       } finally {
@@ -492,6 +503,11 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   // is the same judgement carried on the Discover row.
   const odds = detail?.security.odds ?? s?.odds ?? null;
 
+  /** What the drawn chart is priced in. USD when a provider (or a converted
+   *  tape) supplied it; SOL when the only source we had was our own
+   *  SOL-priced feed and no SOL/USD rate. The axis says which. */
+  const chartUnit = series?.unit ?? 'usd';
+
   const markers = useMemo(() => [], []);
 
   // Draw every armed order that has a knowable SOL trigger.
@@ -560,7 +576,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3">
         <p className="text-sm text-rose-300">{error}</p>
-        <button onClick={onBack} className="text-[12px] text-krypt-muted hover:text-white underline underline-offset-2">
+        <button onClick={onBack} className="text-note text-krypt-muted hover:text-white underline underline-offset-2">
           Back to Discover
         </button>
       </div>
@@ -583,7 +599,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
             {imageSrc(s?.imageUrl) ? (
               <img src={imageSrc(s?.imageUrl) as string} alt="" className="h-full w-full object-cover" />
             ) : (
-              <div className="h-full w-full flex items-center justify-center text-[11px] font-display text-krypt-muted">
+              <div className="h-full w-full flex items-center justify-center text-body font-display text-krypt-muted">
                 {(s?.symbol || '?').slice(0, 3)}
               </div>
             )}
@@ -595,14 +611,14 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
               <span className="text-sm text-krypt-muted truncate max-w-[240px]">{s?.name}</span>
               {s?.liveTracked ? (
                 <span
-                  className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300"
+                  className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-emerald-300"
                   title="Krypt is receiving this token’s trades on its own feed — 1s candles, live trades and Trader Scan all work."
                 >
                   Taped live
                 </span>
               ) : (
                 <span
-                  className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-krypt-muted/70"
+                  className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-krypt-muted/70"
                   title="Krypt is not receiving this token’s trades. Press Start scanning to tape it — that is what enables 1s candles, live trades and Trader Scan."
                 >
                   Not taped
@@ -612,14 +628,14 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
             <div className="flex items-center gap-2 mt-0.5">
               <button
                 onClick={copyMint}
-                className="flex items-center gap-1 text-[11px] font-mono text-krypt-muted hover:text-white transition"
+                className="flex items-center gap-1 text-body font-mono text-krypt-muted hover:text-white transition"
               >
                 {shortAddr(mint, 6)}
                 <Copy className="h-3 w-3" />
               </button>
               <button
                 onClick={() => void window.krypt.app.openExternal(`https://solscan.io/token/${mint}`)}
-                className="flex items-center gap-1 text-[11px] text-krypt-muted hover:text-krypt-purple transition"
+                className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
               >
                 Solscan
                 <ExternalLink className="h-3 w-3" />
@@ -667,7 +683,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
         {detail?.warnings.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
             {detail.warnings.map((w) => (
-              <span key={w} className="rounded border border-arc-gold/25 bg-arc-gold/10 px-2 py-0.5 text-[10px] text-arc-gold/90">
+              <span key={w} className="rounded border border-arc-gold/25 bg-arc-gold/10 px-2 py-0.5 text-label text-arc-gold/90">
                 {w}
               </span>
             ))}
@@ -687,7 +703,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                     key={iv}
                     onClick={() => setInterval(iv)}
                     className={cls(
-                      'px-2 py-1 text-[10px] font-mono font-semibold transition',
+                      'px-2 py-1 text-label font-mono font-semibold transition',
                       interval === iv ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white hover:bg-white/5',
                     )}
                   >
@@ -701,12 +717,26 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                   <button
                     key={m}
                     onClick={() => setChartMode(m)}
+                    title={
+                      m === 'mcap'
+                        ? chartUnit === 'sol'
+                          ? 'Market cap in SOL — this chart is SOL-priced because no SOL/USD rate was available when it loaded'
+                          : 'Market cap: the chart price multiplied by circulating supply'
+                        : chartUnit === 'sol'
+                          ? 'Price in SOL per token'
+                          : 'Price in USD per token'
+                    }
                     className={cls(
-                      'px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider transition',
+                      'px-2.5 py-1 text-label font-semibold uppercase tracking-wider transition',
                       chartMode === m ? 'bg-arc-gold/20 text-arc-gold' : 'text-krypt-muted hover:text-white hover:bg-white/5',
                     )}
                   >
                     {m === 'mcap' ? 'MC' : 'Price'}
+                    {/* Say which currency the axis is in. A SOL-priced series
+                        multiplied by supply is a market cap in SOL, and
+                        showing it bare next to a $-denominated header read as
+                        a broken chart (user report, 2026-09-13). */}
+                    {chartUnit === 'sol' && <span className="ml-1 normal-case text-krypt-muted/70">SOL</span>}
                   </button>
                 ))}
               </div>
@@ -715,7 +745,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
 
               <div className="flex-1" />
               {series && (
-                <span className="text-[10px] text-krypt-muted/60 uppercase tracking-[0.14em]">
+                <span className="text-label text-krypt-muted/60 uppercase tracking-label">
                   via {series.source}
                 </span>
               )}
@@ -736,14 +766,14 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
               />
             ) : (
               <div className="h-[360px] flex items-center justify-center rounded-md border border-dashed border-white/10">
-                <p className="max-w-md text-center text-[12px] text-krypt-muted leading-relaxed px-6">
+                <p className="max-w-md text-center text-note text-krypt-muted leading-relaxed px-6">
                   {series?.note ?? chartError ?? (chartLoading ? 'Loading candles…' : 'No chart data for this token yet.')}
                 </p>
               </div>
             )}
 
             {series?.note && series.candles.length > 0 && (
-              <p className="text-[10px] text-krypt-muted/60 mt-2 leading-relaxed">{series.note}</p>
+              <p className="text-label text-krypt-muted/60 mt-2 leading-relaxed">{series.note}</p>
             )}
           </div>
 
@@ -762,7 +792,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                   key={id}
                   onClick={() => setTab(id)}
                   className={cls(
-                    'rounded-md px-3 py-1.5 text-[11px] font-semibold transition',
+                    'rounded-md px-3 py-1.5 text-body font-semibold transition',
                     tab === id ? 'bg-white/8 text-white' : 'text-krypt-muted hover:text-white hover:bg-white/5',
                   )}
                 >
@@ -788,7 +818,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                 ) : (
                   <div className="flex flex-col items-center gap-3 py-10 text-center">
                     <Loader2 className="h-5 w-5 animate-spin text-krypt-purple" />
-                    <p className="text-[11px] text-krypt-muted max-w-sm leading-relaxed">
+                    <p className="text-body text-krypt-muted max-w-sm leading-relaxed">
                       Reading the mint and holder accounts from your RPC. The free public endpoint rate-limits these
                       calls heavily — a free Helius key in Settings makes this near-instant.
                     </p>
@@ -803,7 +833,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                         key={v}
                         onClick={() => setHolderView(v)}
                         className={cls(
-                          'px-3 py-1 text-[10px] font-semibold uppercase tracking-wider transition',
+                          'px-3 py-1 text-label font-semibold uppercase tracking-wider transition',
                           holderView === v ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
                         )}
                       >
@@ -927,15 +957,15 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
           {detail && detail.pools.length > 0 && (
             <div className="plate rounded-lg p-3 mt-4">
               <div className="flex items-center gap-3 mb-2">
-                <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted whitespace-nowrap">
+                <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">
                   Pools
                 </h3>
                 <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
               </div>
               <div className="space-y-1">
                 {detail.pools.slice(0, 5).map((p) => (
-                  <div key={p.address} className="flex items-center gap-2 text-[11px]">
-                    <span className="text-krypt-muted uppercase text-[9px] tracking-wider w-16 truncate">{p.dexId}</span>
+                  <div key={p.address} className="flex items-center gap-2 text-body">
+                    <span className="text-krypt-muted uppercase text-micro tracking-wider w-16 truncate">{p.dexId}</span>
                     <span className="font-mono text-white/80 truncate flex-1">{p.label}</span>
                     <span className="font-mono text-krypt-muted">{fmtUsd(p.liquidityUsd)}</span>
                   </div>

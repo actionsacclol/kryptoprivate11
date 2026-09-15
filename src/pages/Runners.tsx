@@ -14,6 +14,7 @@ import { useAppState } from '../state/AppStateProvider';
 import { useTerminal } from '../state/TerminalProvider';
 import { EVM_CHAIN_META, isEvmChain, type ChainKind } from '@shared/evm';
 import { EvmRunnersSection } from '../components/terminal/EvmRunnersSection';
+import { RunnerWebhook } from '../components/terminal/RunnerWebhook';
 import { useToast } from '../state/ToastProvider';
 import { Card, Empty, IconButton, NumberInput, Page, Section } from '../components/common';
 import { cls } from '../utils/format';
@@ -87,19 +88,19 @@ function RunnerRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
           <span className="font-semibold text-[14px] text-white truncate">{r.symbol || r.mint.slice(0, 6)}</span>
-          <span className="text-[11px] text-krypt-muted truncate">{r.name}</span>
-          <span className="text-[10px] font-mono text-krypt-muted/60 whitespace-nowrap">
+          <span className="text-body text-krypt-muted truncate">{r.name}</span>
+          <span className="text-label font-mono text-krypt-muted/60 whitespace-nowrap">
             {ago(r.flaggedAt)} · judged at +{r.windowS} s
           </span>
         </div>
-        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-body">
           <span className="text-arc-gold font-semibold">
             {bucketLabel(r.bucket)} · {r.observedPct.toFixed(0)} % graduated
           </span>
           <span className="text-krypt-muted">base {r.basePct.toFixed(1)} % · {failPct.toFixed(0)} % did not · n={r.n}</span>
           {r.regime === 'mixed' && (
             <span
-              className="rounded border border-amber-400/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300"
+              className="rounded border border-amber-400/40 bg-amber-500/10 px-1.5 py-0.5 text-label font-semibold text-amber-300"
               title="Mixed curve: its reserves do not follow the constant product. On the measured day these graduated into a pool seeded with about 0.16 SOL (a classic curve seeds 85) and held a median 0.008x of the flag price an hour later. 76 % of flags were mixed on 2026-07-27, 91 % live in September."
             >
               mixed curve
@@ -107,14 +108,14 @@ function RunnerRow({
           )}
           {r.creatorSoldAt != null && (
             <span
-              className="rounded border border-rose-400/40 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300"
+              className="rounded border border-rose-400/40 bg-rose-500/10 px-1.5 py-0.5 text-label font-semibold text-rose-300"
               title="The creator sold after this flag. Decided 60 s after the flag on the measured day (2026-07-27), flags whose creator had not sold graduated 22 %; those whose creator had, 5 %."
             >
               creator sold {Math.max(0, Math.round((r.creatorSoldAt - r.flaggedAt) / 1000))} s after the flag
             </span>
           )}
         </div>
-        <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11px] font-mono text-white/75">
+        <div className="mt-0.5 flex flex-wrap gap-x-3 text-body font-mono text-white/75">
           <span title="Share of the curve's sellable supply already sold (the completion condition)">{r.curvePct.toFixed(0)} % of supply sold</span>
           <span>{r.uniqueBuyers} buyers</span>
           <span className={r.netInflowSol >= 0 ? 'text-emerald-300' : 'text-rose-300'}>
@@ -123,7 +124,7 @@ function RunnerRow({
           <span>{r.tradesSeen} trades</span>
         </div>
         {FLAG_FORWARD_LINE[r.windowS] && (
-          <div className="mt-0.5 text-[10px] text-krypt-muted/80">{FLAG_FORWARD_LINE[r.windowS]}</div>
+          <div className="mt-0.5 text-label text-krypt-muted/80">{FLAG_FORWARD_LINE[r.windowS]}</div>
         )}
       </div>
       <div
@@ -137,7 +138,7 @@ function RunnerRow({
           disabled={!canBuy || busy !== null}
           title={canBuy ? `Buy ${quickSol} SOL of ${r.symbol || 'this token'} now` : 'Needs a funded wallet with live execution armed'}
           className={cls(
-            'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition',
+            'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-body font-semibold transition',
             canBuy
               ? 'border-emerald-400/45 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
               : 'cursor-not-allowed border-white/8 bg-white/[0.02] text-krypt-muted/40',
@@ -151,7 +152,7 @@ function RunnerRow({
           disabled={!held || busy !== null}
           title={held ? 'Sell your whole position in this token' : 'You hold none of this token'}
           className={cls(
-            'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition',
+            'inline-flex items-center gap-1 rounded-md border px-2 py-1 text-body font-semibold transition',
             held
               ? 'border-rose-400/45 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
               : 'cursor-not-allowed border-white/8 bg-white/[0.02] text-krypt-muted/40',
@@ -167,14 +168,14 @@ function RunnerRow({
           <Sparkline data={live.priceHistory} width={96} height={24} positive={sinceFlag === null ? undefined : sinceFlag >= 0} />
         ) : (
           <span
-            className="text-[10px] text-krypt-muted/50"
+            className="text-label text-krypt-muted/50"
             title="The scanner has stopped tracking this launch, so there is no tape to draw here. Refresh pulls its price; open it for the full chart."
           >
             {refreshedPriceSol === null ? 'no live tape' : 'price only'}
           </span>
         )}
         <span
-          className={cls('font-mono text-[11px]', sinceFlag === null ? 'text-krypt-muted/50' : sinceFlag >= 0 ? 'text-emerald-300' : 'text-rose-300')}
+          className={cls('font-mono text-body', sinceFlag === null ? 'text-krypt-muted/50' : sinceFlag >= 0 ? 'text-emerald-300' : 'text-rose-300')}
           title="Price now vs price at the moment of the flag"
         >
           {sinceFlag === null ? '—' : `${sinceFlag >= 0 ? '+' : ''}${sinceFlag.toFixed(1)}% since flag`}
@@ -196,7 +197,7 @@ function RunnerRow({
             e.stopPropagation();
             onOpen();
           }}
-          className="rounded-md border border-krypt-purple/45 bg-krypt-purple/15 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-krypt-purple/30 hover:shadow-krypt-glow transition"
+          className="rounded-md border border-krypt-purple/45 bg-krypt-purple/15 px-3 py-1.5 text-body font-bold text-white hover:bg-krypt-purple/30 hover:shadow-krypt-glow transition"
         >
           Open
         </button>
@@ -227,6 +228,18 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const term = useTerminal();
   const toast = useToast();
   const cfg = settings.strategy.runnerAlerts;
+
+  // The webhook rides with the rest of this chain's runner-alert settings.
+  // Main validates the URL against Discord's hosts and rejects anything else,
+  // so a failure here is a real refusal worth showing.
+  const saveWebhook = async (webhookUrl: string): Promise<boolean> => {
+    const r = await window.krypt.settings.update({
+      strategy: { ...settings.strategy, runnerAlerts: { ...settings.strategy.runnerAlerts, webhookUrl } },
+    });
+    if (!r.ok) toast.error(r.message);
+    else refreshFromEngine();
+    return r.ok;
+  };
   const [refreshing, setRefreshing] = useState(false);
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
   /** Prices pulled for flags the scanner no longer tracks, by mint. */
@@ -349,7 +362,7 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
       subtitle={`${visible.length} active · flags expire after ${ttlMin} min · floor: ${cfg ? RUNNER_BUCKET_LABEL[cfg.minBucket] : '—'}${refreshedAt ? ` · refreshed ${ago(refreshedAt)}` : ''}`}
       actions={
         <div className="flex flex-shrink-0 items-center gap-2">
-          <span className="whitespace-nowrap text-[11px] text-krypt-muted">Quick buy</span>
+          <span className="whitespace-nowrap text-body text-krypt-muted">Quick buy</span>
           <NumberInput
             value={quickSol}
             min={0.001}
@@ -411,6 +424,15 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
           </Card>
         )}
       </Section>
+
+      {/* Per chain, on the tab where someone decides they want these pushed
+          somewhere — not buried in Settings. */}
+      <RunnerWebhook
+        chain="solana"
+        chainLabel="Solana"
+        webhookUrl={cfg?.webhookUrl ?? ''}
+        onSave={saveWebhook}
+      />
     </Page>
   );
 }

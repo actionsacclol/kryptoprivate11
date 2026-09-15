@@ -359,7 +359,7 @@ export interface WalletHolding {
  *  Saved settings are merged OVER defaults, so changing a default alone never
  *  reaches a user who already has the old value on disk — see
  *  `settings-store.ts` migrateUnsafe(). */
-export const SETTINGS_REVISION = 5;
+export const SETTINGS_REVISION = 6;
 
 import { defaultBotSettings, type BotSettings } from './bots';
 import { DEFAULT_EVM_SETTINGS, type EvmSettings } from './evm';
@@ -803,6 +803,18 @@ export interface ExecutionSnapshot {
 
 // ── Engine → renderer event stream ────────────────────────────────────
 
+/**
+ * What a desktop notification is ABOUT.
+ *
+ * Carried so a click can open the token (main owns the Notification and
+ * therefore the click; the engine owns the router channel) and so a Discord
+ * webhook post can link to it.
+ */
+export interface NotifyTarget {
+  mint: string;
+  chain: import('./evm').ChainKind;
+}
+
 export type EngineEvent =
   | { kind: 'status'; status: EngineStatus }
   | { kind: 'launch'; launch: LaunchRow }
@@ -821,6 +833,16 @@ export type EngineEvent =
   | { kind: 'automation'; snapshot: import('./automation').ScriptSnapshot }
   /** A script asked to pin (or unpin) a token on the renderer's Watchlist. */
   | { kind: 'pin'; mint: string; on: boolean }
+  /**
+   * Open this token's page. Sent when someone CLICKS a desktop notification.
+   *
+   * Until 2026-09-13 a notification was a dead end: it told you a runner had
+   * been flagged and clicking it did nothing at all, so the one action it was
+   * pushing you toward — look at the coin — still meant finding it by hand.
+   * The click handler lives in main (only main has the Notification), and
+   * this is how it reaches the router.
+   */
+  | { kind: 'openToken'; mint: string; chain: import('./evm').ChainKind }
   /** The portfolio was rebuilt (by any caller). Pages paint from it instead
    *  of each asking for their own build (2026-09-08: Portfolio took 5–7 s to
    *  show anything, every visit). */
@@ -929,7 +951,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     exitOnFlowReversal: true,
     maxSessionLossSol: 0.5,
     maxConsecutiveLosses: 4,
-    runnerAlerts: { enabled: true, minBucket: 'top1_5', maxPerHour: 12 },
+    runnerAlerts: { enabled: true, minBucket: 'top1_5', maxPerHour: 12, webhookUrl: '' },
     paperEntries: false,
   },
   execution: {
@@ -981,7 +1003,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shadowMigration: true,
   // Off by default: Rich Presence opens an outbound connection and publishes
   // engine state. "No telemetry" (README) must be true out of the box.
-  discordRpcEnabled: false,
+  discordRpcEnabled: true,
   autoStartEngine: false,
   shadowMode: true,
 };

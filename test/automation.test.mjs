@@ -10,10 +10,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as auto from './.automation.mjs';
+import { sandboxPageHtml } from './.scriptprotocol.mjs';
 import {
   conditionHolds,
+  actionAvailableOn,
+  triggerAvailableOn,
+  contextFromEvmLaunch,
   contextFromLaunch,
   contextFromPosition,
+  fieldAvailableOn,
+  scriptChain,
   defaultRules,
   defaultScript,
   describeRules,
@@ -68,7 +74,10 @@ function launchRow(over = {}) {
 }
 
 function makeHost(over = {}) {
-  const calls = { buys: [], sells: [], toasts: [], notifies: [], watches: [], replies: [], dispatched: [], started: [], stopped: [], orders: [], templates: [], alerts: [], subscribed: [], pins: [] };
+  // `buyChains` / `sellChains` are recorded SEPARATELY because several pinned
+  // assertions deepEqual `buys` against { mint, sol, mode } and must keep
+  // exactly that shape — the same rule copytrade.test.mjs follows for `opts`.
+  const calls = { buys: [], buyChains: [], sells: [], sellChains: [], toasts: [], notifies: [], watches: [], replies: [], dispatched: [], started: [], stopped: [], orders: [], templates: [], alerts: [], subscribed: [], pins: [] };
   const book = { paper: [], live: [] };
   const running = new Set();
   const launches = new Map();
@@ -79,14 +88,16 @@ function makeHost(over = {}) {
     launches,
     running,
     pos,
-    buy: async (mint, sol, mode) => {
+    buy: async (mint, sol, mode, chain) => {
       calls.buys.push({ mint, sol, mode });
+      calls.buyChains.push(chain ?? null);
       if (over.buyResult) return over.buyResult;
       book[mode].push(pos(mint, sol));
       return { ok: true, message: 'bought' };
     },
-    sell: async (mint, pct, mode) => {
+    sell: async (mint, pct, mode, chain) => {
       calls.sells.push({ mint, pct, mode });
+      calls.sellChains.push(chain ?? null);
       if (over.sellResult) return over.sellResult;
       if (pct >= 100) book[mode] = book[mode].filter((p) => p.mint !== mint);
       return { ok: true, message: 'sold', realizedSol: over.realized ?? -0.01 };
@@ -837,7 +848,11 @@ test('the AI prompt pack and the variable guide name every field, event and meth
   for (const a of SCRIPT_API) assert.ok(pack.includes(a.signature), `pack has ${a.method}`);
   for (const e of SCRIPT_EVENTS_DOC) assert.ok(pack.includes(`\`${e.event}\``), `pack has event ${e.event}`);
   for (const m of SCRIPT_METHODS) assert.ok(SCRIPT_API.some((a) => a.method === m || (m === 'on' && a.method === 'on')), `every sandbox method is documented: ${m}`);
-  for (const a of SCRIPT_API) if (a.method !== 'on' && a.method !== 'log' && a.method !== 'now') assert.ok(SCRIPT_METHODS.includes(a.method), `every documented method exists in the sandbox: ${a.method}`);
+  // `local` entries are answered inside the sandbox and never cross the wire,
+  // so they are documented without being SCRIPT_METHODS. The flag lives on the
+  // table rather than in a list of names here, which used to drift.
+  for (const a of SCRIPT_API) if (!a.local) assert.ok(SCRIPT_METHODS.includes(a.method), `every documented method exists in the sandbox: ${a.method}`);
+  for (const m of ['on', 'log', 'now', 'chain', 'nativeSymbol']) assert.ok(SCRIPT_API.find((a) => a.method === m)?.local, `${m} is marked local`);
   assert.ok(pack.includes('as **unknown, never as zero**'), 'the null rule is stated');
   assert.match(pack, /Output only the script/);
   assert.ok(pack.length > 8_000 && pack.length < 60_000, `a pasteable size (${pack.length} chars)`);
@@ -858,6 +873,153 @@ test('a refused buy ends the firing — the "log bought" after it never runs —
   assert.ok(lines.some((l) => /refused — buy TWO: 1 buys today already/.test(l)));
   assert.ok(!lines.some((l) => /^TWO bought/.test(l)), 'no "bought" line after a refused buy');
   assert.equal(h.calls.buys.length, 1);
+});
+
+// ── Chains (2026-09-14) ────────────────────────────────────
+//
+// A script runs on ONE chain. The failure that matters is money on the wrong
+// rail: a Solana launch firing a BNB script, or an EVM buy falling through to
+// the Solana pipeline. The second failure that matters is silent: a rule built
+// on a fact its chain cannot measure looks armed and can never fire.
+
+test('a script hears only its OWN chain — a Solana launch never fires a BNB script', async () => {
+  const h = setup();
+  const sol = saved(rulesScript({ name: 'S', chain: 'solana' }, { conditions: [], actions: [{ type: 'buy', sol: 0.005 }] }));
+  const bnb = saved(rulesScript({ name: 'B', chain: 'bnb' }, { conditions: [], actions: [{ type: 'buy', sol: 0.005 }] }));
+  auto.setEnabled(sol.id, true);
+  auto.setEnabled(bnb.id, true);
+  auto.onEngineEvent({ kind: 'launchUpdate', launch: launchRow({ mint: MINT }) });
+  await tick(30);
+  assert.equal(h.calls.buys.length, 1, 'exactly one script acted');
+  assert.equal(h.calls.buyChains[0], 'solana');
+});
+
+test('an EVM launch reaches its chain, and carries that chain to the buy', async () => {
+  const h = setup();
+  const bnb = saved(rulesScript({ name: 'B', chain: 'bnb' }, { conditions: [], actions: [{ type: 'buy', sol: 0.005 }] }));
+  const sol = saved(rulesScript({ name: 'S', chain: 'solana' }, { conditions: [], actions: [{ type: 'buy', sol: 0.005 }] }));
+  auto.setEnabled(bnb.id, true);
+  auto.setEnabled(sol.id, true);
+  auto.onEvmLaunch('bnb', {
+    chain: 'bnb', token: '0xabc', name: 'T', symbol: 'T', creator: '0xc', seenAt: Date.now(), blockNumber: 1,
+    windows: [
+      { windowS: 60, buys: 4, sells: 0, uniqueBuyers: 9, netNative: 0.4, volumeNative: 0.5, curvePct: 5, creatorSold: false },
+      { windowS: 120, buys: 9, sells: 1, uniqueBuyers: 20, netNative: 1.5, volumeNative: 2, curvePct: 12, creatorSold: false },
+    ],
+    graduatedAt: null, quote: 'native', call: null,
+  });
+  await tick(30);
+  assert.equal(h.calls.buys.length, 1, 'only the BNB script acted');
+  assert.equal(h.calls.buyChains[0], 'bnb', 'the buy goes out on the BNB rail');
+  assert.equal(h.calls.buys[0].mint, '0xabc');
+});
+
+test('an EVM context fills only what that chain measures, and leaves the rest unknown', () => {
+  const ctx = contextFromEvmLaunch({
+    chain: 'bnb', token: '0xabc', name: 'T', symbol: 'T', creator: '0xc', seenAt: Date.now() - 60_000, blockNumber: 1,
+    windows: [{ windowS: 60, buys: 9, sells: 1, uniqueBuyers: 20, netNative: 1.5, volumeNative: 2, curvePct: 12, creatorSold: false }],
+    graduatedAt: null, quote: 'native', call: null,
+  }, Date.now());
+  assert.equal(ctx.uniqueBuyers, 20);
+  assert.equal(ctx.buys, 9);
+  assert.equal(ctx.netInflowSol, 1.5);
+  assert.equal(ctx.creatorSold, false);
+  assert.ok(ctx.ageSec >= 59 && ctx.ageSec <= 61);
+  // Pump intel has no counterpart here and must stay UNKNOWN, never 0.
+  for (const f of ['score', 'hardRisk', 'topHolderShare', 'creatorPriorRugs', 'smartBuyerCount']) {
+    assert.equal(ctx[f], null, `${f} must be unknown on an EVM chain`);
+  }
+  assert.equal(conditionHolds({ field: 'score', op: 'gte', value: 0 }, ctx).ok, false);
+});
+
+test('money is unknown, not zero, when an EVM curve is not quoted in the chain coin', () => {
+  // 78% of BNB curves were not BNB-quoted when this was audited. Summing them
+  // as if they were is the bug; a null that cannot satisfy a rule is the fix.
+  const ctx = contextFromEvmLaunch({
+    chain: 'bnb', token: '0xabc', name: 'T', symbol: 'T', creator: '0xc', seenAt: Date.now(), blockNumber: 1,
+    windows: [{ windowS: 60, buys: 9, sells: 1, uniqueBuyers: 20, netNative: null, volumeNative: null, curvePct: 12, creatorSold: false }],
+    graduatedAt: null, quote: 'other', call: null,
+  }, Date.now());
+  assert.equal(ctx.netInflowSol, null);
+  assert.equal(ctx.buyVolumeSol, null);
+  assert.equal(ctx.uniqueBuyers, 20, 'a COUNT is still a count on any curve');
+  assert.equal(conditionHolds({ field: 'netInflowSol', op: 'gt', value: 0 }, ctx).ok, false);
+});
+
+test('a rule its chain could never answer is refused at save, not left to fail quietly', () => {
+  setup();
+  const bad = auto.upsert(rulesScript({ chain: 'bnb' }, { conditions: [{ field: 'score', op: 'gte', value: 70 }], actions: [{ type: 'buy', sol: 0.005 }] }));
+  assert.equal(bad.ok, false);
+  assert.match(bad.message, /not measured on BNB Smart Chain/);
+  const badAction = auto.upsert(rulesScript({ chain: 'bnb' }, { conditions: [], actions: [{ type: 'stop_loss', pct: 20 }] }));
+  assert.equal(badAction.ok, false);
+  assert.match(badAction.message, /Solana-only/);
+  // The same rule on Solana is fine.
+  assert.equal(auto.upsert(rulesScript({ chain: 'solana' }, { conditions: [{ field: 'score', op: 'gte', value: 70 }], actions: [{ type: 'buy', sol: 0.005 }] })).ok, true);
+});
+
+
+test('a trigger its chain never fires is refused too', () => {
+  setup();
+  for (const t of ['tick', 'runner', 'order', 'alert']) {
+    assert.equal(triggerAvailableOn(t, 'bnb'), false, `${t} cannot fire on BNB`);
+    const r = auto.upsert(rulesScript({ chain: 'bnb' }, { trigger: t, conditions: [], actions: [{ type: 'buy', sol: 0.005 }] }));
+    assert.equal(r.ok, false, `${t} should be refused on BNB`);
+    assert.match(r.message, /never happens on BNB Smart Chain/);
+  }
+  // The ones both rails really do fire.
+  for (const t of ['launch', 'launch_update', 'position', 'leader_trade', 'schedule']) {
+    assert.equal(triggerAvailableOn(t, 'bnb'), true, `${t} should be available on BNB`);
+  }
+  assert.equal(triggerAvailableOn('tick', 'solana'), true, 'Solana keeps every trigger');
+});
+
+test('facts with no source on a rail are not offered there', () => {
+  // The EVM bridge carries liquidity and market cap and nothing else, so
+  // holders and priceUsd must not be buildable into a rule on those chains.
+  for (const f of ['holders', 'priceUsd', 'launchpad']) assert.equal(fieldAvailableOn(f, 'bnb'), false, f);
+  for (const f of ['marketCapUsd', 'liquidityUsd']) assert.equal(fieldAvailableOn(f, 'bnb'), true, f);
+  for (const f of ['holders', 'priceUsd', 'launchpad', 'marketCapUsd', 'liquidityUsd']) {
+    assert.equal(fieldAvailableOn(f, 'solana'), true, `${f} on Solana`);
+  }
+});
+
+
+test('a code script is told its chain and its coin, without a round trip', () => {
+  // bot.chain / bot.nativeSymbol ride along with the code in `init`. They are
+  // getters because `bot` is frozen before init lands, and they exist before
+  // the first event so a handler can branch on them immediately.
+  const html = sandboxPageHtml();
+  assert.match(html, /get chain\(\)/);
+  assert.match(html, /get nativeSymbol\(\)/);
+  assert.match(html, /m\.chain === 'string'/, 'init carries the chain');
+  // Default before init, so a message that omits them is never undefined.
+  assert.match(html, /let chain = 'solana'/);
+  assert.match(html, /let nativeSymbol = 'SOL'/);
+  // The mode is deliberately absent: a script that behaves differently on
+  // paper is not a rehearsal of the live one.
+  assert.ok(!/get mode\(\)/.test(html), 'mode is not exposed');
+});
+
+test('the chain capability tables agree with themselves', () => {
+  assert.equal(fieldAvailableOn('score', 'solana'), true);
+  assert.equal(fieldAvailableOn('score', 'bnb'), false);
+  assert.equal(fieldAvailableOn('uniqueBuyers', 'bnb'), true, 'a count every chain measures');
+  assert.equal(actionAvailableOn('buy', 'robinhood'), true, 'buying and selling work on every rail');
+  assert.equal(actionAvailableOn('sell', 'robinhood'), true);
+  assert.equal(actionAvailableOn('alert', 'robinhood'), false);
+  // Absent chain reads as Solana, so every script saved before chains existed
+  // keeps every field it had.
+  assert.equal(scriptChain({}), 'solana');
+  assert.equal(scriptChain({ chain: 'bnb' }), 'bnb');
+});
+
+test("an EVM chain's starter rule is built only from facts it can measure", () => {
+  for (const chain of ['bnb', 'robinhood']) {
+    for (const c of defaultRules(chain).conditions) {
+      assert.ok(fieldAvailableOn(c.field, chain), `${c.field} must be measurable on ${chain}`);
+    }
+  }
 });
 
 // ── Release audit 2026-09-09: three walls that were not there ─────────

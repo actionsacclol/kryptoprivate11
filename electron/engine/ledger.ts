@@ -81,7 +81,33 @@ export function onSettled(fn: (fill: Fill) => void): () => void {
   return () => listeners.delete(fn);
 }
 
+/**
+ * Fills already announced, by id. A fill settles ONCE.
+ *
+ * Two reconcile paths can run against the same fill at the same time:
+ * `recordFill` kicks off one round itself, and `reconcilePending` sweeps
+ * anything still `pending` — which that first round's fill is, for the
+ * seconds it spends sleeping and fetching. `reconcileInFlight` guards
+ * `reconcilePending` against ITSELF, not against the other path, so both
+ * could reach `settled()` for one sale.
+ *
+ * Every listener then ran twice: the realised PnL was logged twice and the
+ * losing-streak counter advanced twice for a single sell. A user saw exactly
+ * that — "−0.0073 SOL ... appeared twice in loss-accounting logs, despite
+ * only one sell signature" — followed by an unearned `loss_limit` disarm
+ * (2026-09-13).
+ */
+const announced = new Set<string>();
+
 function settled(fill: Fill): void {
+  if (announced.has(fill.id)) return;
+  announced.add(fill.id);
+  // Bounded: this only ever grows by one per fill, and fills themselves are
+  // capped, but a long session should not hold ids forever.
+  if (announced.size > 5_000) {
+    const oldest = announced.values().next().value;
+    if (oldest !== undefined) announced.delete(oldest);
+  }
   for (const fn of listeners) {
     try {
       fn({ ...fill });
@@ -90,6 +116,12 @@ function settled(fill: Fill): void {
     }
   }
 }
+
+/** Fills with a reconcile round in flight RIGHT NOW, by id. A second round
+ *  for the same fill reads the same transaction to reach the same answer —
+ *  wasted requests against `getTransaction`, on an endpoint the user is
+ *  already being rate-limited by. */
+const reconciling = new Set<string>();
 let filePath = '';
 let saveTimer: NodeJS.Timeout | null = null;
 /** Set when fills.json exists but could not be read: the file then holds
@@ -205,6 +237,16 @@ export function recordFill(
 }
 
 async function reconcile(fill: Fill, httpUrl: string, owner: string): Promise<void> {
+  if (reconciling.has(fill.id)) return;
+  reconciling.add(fill.id);
+  try {
+    await reconcileOnce(fill, httpUrl, owner);
+  } finally {
+    reconciling.delete(fill.id);
+  }
+}
+
+async function reconcileOnce(fill: Fill, httpUrl: string, owner: string): Promise<void> {
   fill.attempts = (fill.attempts ?? 0) + 1;
   for (let attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt++) {
     await new Promise((r) => setTimeout(r, reconcileDelayMs));
@@ -317,21 +359,51 @@ const LAMPORTS = 1_000_000_000;
 export interface MintBasis {
   mint: string;
   symbol: string;
-  /** SOL actually spent on buys, fees included. */
+  // ── The CURRENT position (this episode) ─────────────────────────────
+  //
+  // Everything below is scoped to the run of fills since the wallet last
+  // held none of this mint. A trader who buys at 29k, sells the lot, and
+  // buys back at 93k is in a NEW position: their entry is 93k, and both the
+  // position card and every percentage order anchored on "entry" must say
+  // so. Averaging the two rounds together reported an entry the user had
+  // not taken and put a Runner ladder's take-profit below the current price
+  // (user reports, 2026-09-13).
+  /** SOL actually spent on buys in this episode, fees included. */
   spentSol: number;
-  /** SOL actually received from sells, fees deducted. */
+  /** SOL actually received from sells in this episode, fees deducted. */
   receivedSol: number;
-  /** Tokens bought, in whole units. */
+  /** Tokens bought in this episode, in whole units. */
   tokensBought: number;
-  /** Tokens sold, in whole units. */
+  /** Tokens sold in this episode, in whole units. */
   tokensSold: number;
   buys: number;
   sells: number;
+  /** First fill of THIS episode — when the position now held was opened. */
   firstAt: number | null;
   lastAt: number | null;
   /** Fills we could not read off the chain — excluded from every number above. */
   unreconciled: number;
+
+  // ── Lifetime, across every episode ──────────────────────────────────
+  //
+  // What the closed-trade history and the all-time PnL read. Never used to
+  // price a position that is open right now.
+  lifetimeSpentSol: number;
+  lifetimeReceivedSol: number;
+  lifetimeTokensBought: number;
+  lifetimeTokensSold: number;
+  lifetimeBuys: number;
+  lifetimeSells: number;
+  /** The very first fill on this mint, whatever episode it belonged to. */
+  firstEverAt: number | null;
+  /** Completed round trips: how many times the position went flat. */
+  roundTrips: number;
 }
+
+/** A sell that leaves no more than this share of the episode's tokens behind
+ *  closed the position. Pure dust (rounding, a trailing lamport of a token)
+ *  must not keep an episode open, or the next buy would average into it. */
+const FLAT_DUST_FRACTION = 0.005;
 
 /**
  * Cost basis per mint, from reconciled fills only.
@@ -340,9 +412,26 @@ export interface MintBasis {
  * is surfaced so the portfolio can say "3 fills could not be read" instead of
  * presenting a total that quietly omits them.
  */
-export function basisByMint(wallet?: string | null): Map<string, MintBasis> {
+export function basisByMint(
+  wallet?: string | null,
+  /** Stop the walk just BEFORE this fill — the basis as it stood when that
+   *  fill was about to be applied. Used to price a sell against the position
+   *  it actually closed, which the post-walk basis no longer describes once
+   *  the sell emptied the bag. */
+  stopBefore?: Fill,
+): Map<string, MintBasis> {
   const out = new Map<string, MintBasis>();
-  for (const f of fills) {
+  // Episode detection needs the fills in the order they happened; the array
+  // is append-on-arrival and a late reconcile can leave it out of order.
+  const ordered = [...fills].sort((a, b) => a.at - b.at);
+  /** mint -> tokens the wallet holds according to the fills walked so far. */
+  const running = new Map<string, number>();
+  for (const f of ordered) {
+    // `id` is the fill's own identity, not the transaction's: one signature
+    // can carry several fills, so matching on the signature would stop the
+    // walk at the wrong one (or, when every fill shares a stub signature, at
+    // the first). Identity is checked too, for a caller holding the original.
+    if (stopBefore && (f === stopBefore || f.id === stopBefore.id)) break;
     // Per-wallet basis: several wallets are held and only the active one's
     // holdings are on the page, so another wallet's buys must not price
     // them. Fills from before multi-wallet carry no wallet and are treated
@@ -354,10 +443,15 @@ export function basisByMint(wallet?: string | null): Map<string, MintBasis> {
         mint: f.mint, symbol: f.symbol, spentSol: 0, receivedSol: 0,
         tokensBought: 0, tokensSold: 0, buys: 0, sells: 0,
         firstAt: null, lastAt: null, unreconciled: 0,
+        lifetimeSpentSol: 0, lifetimeReceivedSol: 0,
+        lifetimeTokensBought: 0, lifetimeTokensSold: 0,
+        lifetimeBuys: 0, lifetimeSells: 0,
+        firstEverAt: null, roundTrips: 0,
       };
       out.set(f.mint, b);
     }
     if (f.symbol && !b.symbol) b.symbol = f.symbol;
+    b.firstEverAt = b.firstEverAt === null ? f.at : Math.min(b.firstEverAt, f.at);
     b.firstAt = b.firstAt === null ? f.at : Math.min(b.firstAt, f.at);
     b.lastAt = b.lastAt === null ? f.at : Math.max(b.lastAt, f.at);
 
@@ -373,13 +467,44 @@ export function basisByMint(wallet?: string | null): Map<string, MintBasis> {
 
     if (f.side === 'buy') {
       b.buys += 1;
+      b.lifetimeBuys += 1;
       // solDelta is negative on a buy; spend is its magnitude.
       b.spentSol += Math.max(0, -sol);
       b.tokensBought += Math.max(0, tokens);
+      b.lifetimeSpentSol += Math.max(0, -sol);
+      b.lifetimeTokensBought += Math.max(0, tokens);
+      running.set(f.mint, (running.get(f.mint) ?? 0) + Math.max(0, tokens));
     } else {
       b.sells += 1;
+      b.lifetimeSells += 1;
       b.receivedSol += Math.max(0, sol);
       b.tokensSold += Math.max(0, -tokens);
+      b.lifetimeReceivedSol += Math.max(0, sol);
+      b.lifetimeTokensSold += Math.max(0, -tokens);
+      const left = (running.get(f.mint) ?? 0) - Math.max(0, -tokens);
+      running.set(f.mint, Math.max(0, left));
+
+      // ── Did this sell close the position? ────────────────────────────
+      //
+      // Only a sell can, and only when the episode actually bought
+      // something we could price: a wallet whose buys are all unreconciled
+      // has an unknown balance, and declaring it flat would throw away the
+      // basis of a position it still holds. Dust left behind does not keep
+      // the episode alive — see FLAT_DUST_FRACTION.
+      if (b.tokensBought > 0 && left <= b.tokensBought * FLAT_DUST_FRACTION) {
+        b.roundTrips += 1;
+        running.set(f.mint, 0);
+        b.spentSol = 0;
+        b.receivedSol = 0;
+        b.tokensBought = 0;
+        b.tokensSold = 0;
+        b.buys = 0;
+        b.sells = 0;
+        b.firstAt = null;
+        // `unreconciled` deliberately survives: a fill we could not read may
+        // belong to either side of the line, and the portfolio uses the
+        // count only to say "some fills could not be read".
+      }
     }
   }
   return out;
@@ -431,7 +556,9 @@ export function cashDeltaFor(signatures: string[]): CashDelta {
 export function realizedPnlForSell(fill: Fill): number | null {
   if (fill.side !== 'sell' || fill.state !== 'reconciled' || fill.solDeltaLamports === null) return null;
   if (fill.tokenDeltaRaw === null || fill.decimals === null) return null;
-  const b = basisByMint(fill.wallet ?? undefined).get(fill.mint);
+  // As it stood BEFORE this sell: a sell that emptied the bag closes the
+  // episode, and the basis after the walk has nothing left to price it with.
+  const b = basisByMint(fill.wallet ?? undefined, fill).get(fill.mint);
   if (!b || b.tokensBought <= 0 || b.spentSol <= 0) return null;
   const sold = Math.max(0, -Number(BigInt(fill.tokenDeltaRaw)) / 10 ** fill.decimals);
   if (!(sold > 0)) return null;
@@ -452,6 +579,8 @@ export function stats(): { total: number; reconciled: number; unreconciled: numb
 export function _reset(): void {
   fills = [];
   filePath = '';
+  announced.clear();
+  reconciling.clear();
 }
 
 export function _load(list: Fill[]): void {

@@ -24,7 +24,7 @@ export function Swap() {
       </Section>
 
       <Section title="What this is">
-        <div className="max-w-xl space-y-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-[11px] leading-relaxed text-krypt-muted">
+        <div className="max-w-xl space-y-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-body leading-relaxed text-krypt-muted">
           <p className="flex items-center gap-1.5 font-semibold text-white/80">
             <Repeat className="h-3.5 w-3.5 text-krypt-purple" /> A utility, not a trade
           </p>

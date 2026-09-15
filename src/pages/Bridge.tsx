@@ -34,7 +34,7 @@ import { useToast } from '../state/ToastProvider';
 import { cls, fmtClock } from '../utils/format';
 
 const inputCls =
-  'w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-[12px] text-white placeholder:text-krypt-muted/60 focus:border-krypt-purple/60 focus:outline-none';
+  'w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-note text-white placeholder:text-krypt-muted/60 focus:border-krypt-purple/60 focus:outline-none';
 
 const fromRaw = (raw: string, dec: number): number => {
   const n = Number(raw);
@@ -183,10 +183,10 @@ export function Bridge() {
       {/* ── what you are agreeing to, before the switch ─────────────── */}
       <Section>
         <div className="rounded-xl border border-amber-400/25 bg-amber-400/[0.07] p-4">
-          <div className="mb-1 flex items-center gap-2 text-[12px] font-semibold text-amber-200">
+          <div className="mb-1 flex items-center gap-2 text-note font-semibold text-amber-200">
             <AlertTriangle className="h-3.5 w-3.5" /> Read this before you turn it on
           </div>
-          <ul className="space-y-1 text-[11px] leading-relaxed text-amber-100/80">
+          <ul className="space-y-1 text-body leading-relaxed text-amber-100/80">
             <li>
               <span className="text-white/90">A bridge is not a swap.</span> Your funds leave your wallet into a contract we do not
               control, and a different party sends you the coin on the other side. For a moment, someone else has your money and
@@ -217,8 +217,8 @@ export function Bridge() {
         <Card>
           <div className="flex items-center justify-between gap-4">
             <div>
-              <div className="text-[13px] font-semibold text-white">Allow this install to bridge</div>
-              <div className="mt-0.5 text-[11px] leading-relaxed text-krypt-muted">
+              <div className="text-value font-semibold text-white">Allow this install to bridge</div>
+              <div className="mt-0.5 text-body leading-relaxed text-krypt-muted">
                 Off: the signer refuses any transaction that sends funds to a contract this app did not build, which is every
                 bridge. On: it accepts only the bridges this build has measured, and nothing else.
               </div>
@@ -226,7 +226,7 @@ export function Bridge() {
             <button
               onClick={() => void updateSettings({ bridge: { enabled: !enabled } })}
               className={cls(
-                'shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition',
+                'shrink-0 rounded-lg border px-3 py-1.5 text-note font-semibold transition',
                 enabled
                   ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25'
                   : 'border-white/10 bg-white/5 text-white/80 hover:bg-white/10',
@@ -243,7 +243,7 @@ export function Bridge() {
         <Card className={cls('space-y-3', !enabled && 'opacity-50')}>
           <div className="flex items-end gap-2">
             <label className="flex-1">
-              <span className="mb-1 block text-[11px] font-semibold text-white/80">From</span>
+              <span className="mb-1 block text-body font-semibold text-white/80">From</span>
               <select value={draft.from} onChange={(e) => set('from', e.target.value as BridgeChain)} className={inputCls}>
                 {BRIDGE_CHAINS.map((c) => (
                   <option key={c} value={c}>{chainLabel(c)} · {nativeSymbolOf(c)}</option>
@@ -252,7 +252,7 @@ export function Bridge() {
             </label>
             <ArrowRight className="mb-2 h-4 w-4 shrink-0 text-krypt-muted" />
             <label className="flex-1">
-              <span className="mb-1 block text-[11px] font-semibold text-white/80">To</span>
+              <span className="mb-1 block text-body font-semibold text-white/80">To</span>
               <select value={draft.to} onChange={(e) => set('to', e.target.value as BridgeChain)} className={inputCls}>
                 {BRIDGE_CHAINS.filter((c) => c !== draft.from).map((c) => (
                   <option key={c} value={c}>{chainLabel(c)} · {nativeSymbolOf(c)}</option>
@@ -262,7 +262,7 @@ export function Bridge() {
           </div>
 
           <label className="block">
-            <span className="mb-1 block text-[11px] font-semibold text-white/80">Amount ({nativeSymbolOf(draft.from)})</span>
+            <span className="mb-1 block text-body font-semibold text-white/80">Amount ({nativeSymbolOf(draft.from)})</span>
             {/* The TEXT is the state while typing; the number is derived. A
                 box bound to the parsed number re-rendered "0" and "0." as
                 empty, so 0.1 could never be typed — found live 2026-09-11. */}
@@ -283,7 +283,7 @@ export function Bridge() {
           </label>
 
           {!routeOk && draft.from !== draft.to && (
-            <p className="text-[11px] leading-relaxed text-amber-200/80">
+            <p className="text-body leading-relaxed text-amber-200/80">
               {chainLabel(draft.from)} to {chainLabel(draft.to)} is not enabled in this build. That route hides accounts inside
               address lookup tables, and this app will not sign a payment to an address it cannot read.
             </p>
@@ -292,14 +292,14 @@ export function Bridge() {
           <button
             onClick={() => void getQuote()}
             disabled={!canQuote}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[12px] text-white/90 transition hover:bg-white/10 disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-note text-white/90 transition hover:bg-white/10 disabled:opacity-40"
           >
             {busy === 'quote' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             Get a quote
           </button>
 
           {quote && (
-            <div className="space-y-1.5 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-[11px] leading-relaxed">
+            <div className="space-y-1.5 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-body leading-relaxed">
               <div className="text-white/90">
                 You receive about{' '}
                 <span className="font-mono">{out === null ? '—' : out.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>{' '}
@@ -329,7 +329,7 @@ export function Bridge() {
               <button
                 onClick={() => void run(true)}
                 disabled={busy !== ''}
-                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[12px] text-white/90 transition hover:bg-white/10 disabled:opacity-40"
+                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-note text-white/90 transition hover:bg-white/10 disabled:opacity-40"
               >
                 {busy === 'check' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 Check it first
@@ -344,13 +344,13 @@ export function Bridge() {
                       ? 'Check it first — a transfer cannot be recalled'
                       : undefined
                 }
-                className="flex items-center gap-1.5 rounded-lg border border-krypt-pink/40 bg-krypt-pink/15 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-krypt-pink/25 disabled:opacity-40"
+                className="flex items-center gap-1.5 rounded-lg border border-krypt-pink/40 bg-krypt-pink/15 px-3 py-1.5 text-note font-semibold text-white transition hover:bg-krypt-pink/25 disabled:opacity-40"
               >
                 {busy === 'send' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shuffle className="h-3.5 w-3.5" />}
                 Send it
               </button>
               {checked && (
-                <span className="flex items-center gap-1 text-[11px] text-emerald-300">
+                <span className="flex items-center gap-1 text-body text-emerald-300">
                   <Check className="h-3 w-3" /> checked
                 </span>
               )}
@@ -365,7 +365,7 @@ export function Bridge() {
           {/* The single most important honest-null in this feature: an
               unreadable record must never render as "nothing pending". */}
           {recordFailure ? (
-            <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-3 py-2.5 text-[12px] text-rose-200">
+            <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-3 py-2.5 text-note text-rose-200">
               Could not read your in-flight transfers — {recordFailure}. This is not the same as having none. Nothing will be
               written to that file this session; copy it somewhere safe and check it.
             </div>
@@ -376,17 +376,17 @@ export function Bridge() {
               {inFlight.map((t) => (
                 <div key={t.id} className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2">
                   <div className="min-w-0">
-                    <div className="text-[12px] text-white/90">
+                    <div className="text-note text-white/90">
                       {amountLabel(t)} {nativeSymbolOf(t.from)} · {chainLabel(t.from)} → {chainLabel(t.to)}
                     </div>
-                    <div className="truncate font-mono text-[10px] text-krypt-muted">
+                    <div className="truncate font-mono text-label text-krypt-muted">
                       {t.tool} · {fmtClock(t.startedAt)} · {t.txHash.slice(0, 16)}…
                     </div>
-                    {t.note && <div className="text-[10px] text-amber-200/80">{t.note}</div>}
+                    {t.note && <div className="text-label text-amber-200/80">{t.note}</div>}
                   </div>
                   <span
                     className={cls(
-                      'shrink-0 rounded-full border px-2 py-0.5 text-[10px]',
+                      'shrink-0 rounded-full border px-2 py-0.5 text-label',
                       t.status === 'done'
                         ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
                         : t.status === 'unknown'
@@ -403,7 +403,7 @@ export function Bridge() {
           <button
             onClick={() => void refresh()}
             disabled={busy !== ''}
-            className="mt-2 flex items-center gap-1.5 text-[11px] text-krypt-muted transition hover:text-white disabled:opacity-40"
+            className="mt-2 flex items-center gap-1.5 text-body text-krypt-muted transition hover:text-white disabled:opacity-40"
           >
             {busy === 'refresh' && <Loader2 className="h-3 w-3 animate-spin" />}
             Check for updates
@@ -418,7 +418,7 @@ export function Bridge() {
               {history.map((t) => (
                 <div key={t.id} className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2">
                   <div className="min-w-0">
-                    <div className="text-[12px] text-white/90">
+                    <div className="text-note text-white/90">
                       {amountLabel(t)} {nativeSymbolOf(t.from)} · {chainLabel(t.from)} → {chainLabel(t.to)}
                       {t.deliveredRaw !== null && t.status !== 'refunded' && (
                         <span className="text-krypt-muted">
@@ -427,14 +427,14 @@ export function Bridge() {
                         </span>
                       )}
                     </div>
-                    <div className="truncate font-mono text-[10px] text-krypt-muted">
+                    <div className="truncate font-mono text-label text-krypt-muted">
                       {t.tool} · {fmtClock(t.startedAt)} · {t.txHash.slice(0, 16)}…
                     </div>
-                    {t.note && <div className="text-[10px] text-amber-200/80">{t.note}</div>}
+                    {t.note && <div className="text-label text-amber-200/80">{t.note}</div>}
                   </div>
                   <span
                     className={cls(
-                      'shrink-0 rounded-full border px-2 py-0.5 text-[10px]',
+                      'shrink-0 rounded-full border px-2 py-0.5 text-label',
                       t.status === 'done'
                         ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
                         : t.status === 'failed'
@@ -454,7 +454,7 @@ export function Bridge() {
       {disabledRoutes.length > 0 && (
         <Section title="Not enabled in this build">
           <Card>
-            <p className="text-[11px] leading-relaxed text-krypt-muted">
+            <p className="text-body leading-relaxed text-krypt-muted">
               {disabledRoutes.join(', ')}. Those routes hide accounts inside address lookup tables, and this app will not sign a
               payment to an address it cannot read. Enabling one means resolving those tables before signing, not relaxing the
               rule.

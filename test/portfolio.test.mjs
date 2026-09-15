@@ -348,6 +348,104 @@ test('realizedPnlForSell: proceeds vs the SAME wallet\'s average cost; null with
   assert.equal(ledger.realizedPnlForSell(orphan), null, 'no buys recorded → unknown, never 0');
 });
 
+// ── Re-entry: a new position, priced at the NEW entry ─────────────────
+//
+// The bug these pin (user report, 2026-09-13): cost basis was the average of
+// every buy the install had ever seen of a mint. A trader who bought at a
+// 29k market cap, sold the lot, and bought back at 93k was shown the 29k
+// entry — and, worse, every percentage order (`positionEntryPriceSol`)
+// anchored its take-profit and stop there, so a Runner ladder armed on the
+// re-entry put its targets below the price it was armed at.
+
+/** buy 1000 tokens for `sol`; then, optionally, sell them all for `out`. */
+const buyAt = (sol, tokens, at) =>
+  fill({ wallet: W1, side: 'buy', at, solDeltaLamports: -sol * LAM, tokenDeltaRaw: String(tokens * 1e6) });
+const sellAt = (sol, tokens, at) =>
+  fill({ wallet: W1, side: 'sell', at, solDeltaLamports: sol * LAM, tokenDeltaRaw: String(-tokens * 1e6) });
+
+test('a re-entry is priced at the re-entry, not blended with the round before it', () => {
+  ledger._load([
+    buyAt(1, 1000, 1_000),   // entry 0.001 SOL/token
+    sellAt(3, 1000, 2_000),  // out, flat
+    buyAt(4, 1000, 3_000),   // re-entry at 0.004 SOL/token
+  ]);
+  const b = ledger.basisByMint(W1).get(MINT);
+  assert.equal(b.spentSol, 4, 'only the open position');
+  assert.equal(b.tokensBought, 1000);
+  assert.equal(b.receivedSol, 0, 'the old round trip is not this position’s realised');
+  assert.equal(b.buys, 1);
+  assert.equal(b.roundTrips, 1);
+  assert.equal(b.firstAt, 3_000, 'this position opened at the re-entry');
+  assert.equal(b.spentSol / b.tokensBought, 0.004, 'the anchor every % order is built on');
+});
+
+test('lifetime still carries every round trip, for the closed history', () => {
+  ledger._load([buyAt(1, 1000, 1_000), sellAt(3, 1000, 2_000), buyAt(4, 1000, 3_000)]);
+  const b = ledger.basisByMint(W1).get(MINT);
+  assert.equal(b.lifetimeSpentSol, 5);
+  assert.equal(b.lifetimeReceivedSol, 3);
+  assert.equal(b.lifetimeBuys, 2);
+  assert.equal(b.lifetimeSells, 1);
+  assert.equal(b.firstEverAt, 1_000, 'the first time we ever touched the mint');
+});
+
+test('a PARTIAL sell does not start a new position', () => {
+  ledger._load([buyAt(1, 1000, 1_000), sellAt(1, 400, 2_000), buyAt(4, 1000, 3_000)]);
+  const b = ledger.basisByMint(W1).get(MINT);
+  assert.equal(b.roundTrips, 0, 'the wallet never went flat');
+  assert.equal(b.spentSol, 5, 'both buys are in the same position');
+  assert.equal(b.receivedSol, 1);
+});
+
+test('dust left behind still closes the position', () => {
+  // Sold all but 0.1% of the bag — a rounding remainder, not a holding.
+  ledger._load([buyAt(1, 1000, 1_000), sellAt(3, 999, 2_000), buyAt(4, 1000, 3_000)]);
+  const b = ledger.basisByMint(W1).get(MINT);
+  assert.equal(b.roundTrips, 1);
+  assert.equal(b.spentSol, 4, 'the re-entry alone');
+});
+
+test('the closed round trip covers BOTH rounds once the mint is gone', () => {
+  ledger._load([
+    buyAt(1, 1000, 1_000), sellAt(3, 1000, 2_000),
+    buyAt(4, 1000, 3_000), sellAt(6, 1000, 4_000),
+  ]);
+  const out = portfolio.build({ holdings: [], solBalance: 0, solUsd: null, prices: new Map(), wallet: W1 });
+  assert.equal(out.closed.length, 1);
+  const c = out.closed[0];
+  assert.equal(c.costSol, 5, 'both entries');
+  assert.equal(c.proceedsSol, 9, 'both exits');
+  assert.equal(c.pnlSol, 4);
+  assert.equal(c.buys, 2);
+  assert.equal(c.sells, 2);
+  assert.equal(c.openedAt, 1_000, 'the first time the mint was ever bought');
+});
+
+test('the open position after a re-entry reports the re-entry cost and ONLY its own realised', () => {
+  ledger._load([
+    buyAt(1, 1000, 1_000), sellAt(3, 1000, 2_000),   // +2 SOL, closed
+    buyAt(4, 1000, 3_000), sellAt(1, 250, 4_000),    // still holding 750
+  ]);
+  const out = portfolio.build({
+    holdings: [holding(MINT, 750)], solBalance: 0, solUsd: 100,
+    prices: priceMap(MINT, 0.005, 0.5), wallet: W1,
+  });
+  const pos = out.positions.find((p) => p.mint === MINT);
+  assert.equal(pos.avgEntryPriceSol, 0.004, 'the re-entry price, not 0.0025');
+  assert.equal(pos.costSol, 3, '750 tokens at the re-entry price');
+  // Realised on THIS position: 1 SOL out for 250 tokens that cost 0.004 each.
+  assert.ok(Math.abs(pos.realizedPnlSol - 0) < 1e-9, 'sold 250 at cost → flat, not +2 from the round before');
+});
+
+test('realizedPnlForSell prices the sell that emptied the bag', () => {
+  // The sell closes the position, so the basis AFTER the walk is empty —
+  // it has to be read as it stood just before the fill, or the most
+  // important sell of all reports "unknown".
+  const out = sellAt(3, 1000, 2_000);
+  ledger._load([buyAt(1, 1000, 1_000), out]);
+  assert.ok(Math.abs(ledger.realizedPnlForSell(out) - 2) < 1e-9);
+});
+
 // ── Reconciliation is bounded and never overlaps ──────────────────────
 
 /** Fake RPC: getTransaction returns null (not on chain yet) and counts calls. */
@@ -388,6 +486,33 @@ test('a pending fill stays pending across rounds, then becomes terminal', async 
   const calls = fakeChain();
   await ledger.reconcilePending('http://fake.invalid', W1);
   assert.equal(calls.getTransaction, 0, 'terminal → never polled again');
+});
+
+// ── A sale settles exactly once ───────────────────────────────────────
+//
+// `recordFill` starts a reconcile round itself, and `reconcilePending`
+// sweeps anything still `pending` — which that first round's fill is for the
+// seconds it spends sleeping and fetching. Both used to reach `settled()`,
+// so every listener ran twice for one sale: the realised PnL was logged
+// twice, and the losing-streak counter advanced twice. A user saw −0.0073
+// SOL counted twice and the app disarm on `loss_limit` (2026-09-13).
+
+test('one fill notifies onSettled exactly once, however many reconcile paths race it', async () => {
+  fakeChain();
+  const seen = [];
+  const off = ledger.onSettled((f) => seen.push(f.id));
+  const f = fill({ state: 'pending', wallet: W1, attempts: 0, side: 'sell' });
+  ledger._load([f]);
+  // Two sweeps back to back is the shape of the race: the second arrives
+  // while the first is still working on the same fill.
+  await Promise.all([
+    ledger.reconcilePending('http://fake.invalid', W1),
+    ledger.reconcilePending('http://fake.invalid', W1),
+  ]);
+  for (let i = 0; i < 12; i++) await ledger.reconcilePending('http://fake.invalid', W1);
+  off();
+  assert.equal(f.state, 'unreconciled', 'it reached a terminal state');
+  assert.equal(seen.filter((id) => id === f.id).length, 1, 'and announced it once');
 });
 
 test('at most ONE reconcile pass runs at a time', async () => {

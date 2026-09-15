@@ -134,7 +134,7 @@ export function HoldingsSection() {
       ) : (
         <Card padded={false} className="divide-y divide-white/5">
           {!liveEnabled && (
-            <div className="px-5 py-2 text-[11px] text-amber-300 border-b border-white/10">
+            <div className="px-5 py-2 text-body text-amber-300 border-b border-white/10">
               Switch to Live in the top bar to sell from here.
             </div>
           )}
@@ -145,8 +145,8 @@ export function HoldingsSection() {
                   <span className="text-sm font-semibold text-white">{h.symbol ?? shortAddr(h.mint, 6)}</span>
                   {h.warning ? <Badge tone="warn">airdrop?</Badge> : !h.symbol && <Badge tone="warn">previous run</Badge>}
                 </div>
-                <div className="text-[11px] font-mono text-krypt-muted truncate mt-0.5">{h.mint}</div>
-                {h.warning && <div className="text-[11px] text-amber-300/90 mt-1">{h.warning}</div>}
+                <div className="text-body font-mono text-krypt-muted truncate mt-0.5">{h.mint}</div>
+                {h.warning && <div className="text-body text-amber-300/90 mt-1">{h.warning}</div>}
               </div>
               <div className="flex items-center gap-4 flex-shrink-0">
                 <span className="text-sm font-mono tabular-nums text-white/90">
@@ -236,7 +236,7 @@ const PositionCard = memo(function PositionCard({ p, spark }: { p: PaperPosition
               ] as Array<[string, string]>
             ).map(([label, v]) => (
               <div key={label} className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
-                <div className="text-[10px] uppercase tracking-wider text-krypt-muted">{label}</div>
+                <div className="text-label uppercase tracking-wider text-krypt-muted">{label}</div>
                 <div className="font-mono text-white mt-0.5">{v}</div>
               </div>
             ))}

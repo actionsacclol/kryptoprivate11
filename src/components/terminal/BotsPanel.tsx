@@ -107,26 +107,26 @@ function BotRow({
   return (
     <Card>
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="font-display text-[12px] font-semibold uppercase tracking-[0.18em] text-white">
+        <span className="font-display text-note font-semibold uppercase tracking-label text-white">
           {SETUP[kind].title}
         </span>
         {status?.paired ? (
-          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300">
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-emerald-300">
             <Check className="h-3 w-3" /> paired
           </span>
         ) : cfg.token ? (
-          <span className="rounded-full border border-arc-gold/30 bg-arc-gold/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-arc-gold">
+          <span className="rounded-full border border-arc-gold/30 bg-arc-gold/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-arc-gold">
             not paired
           </span>
         ) : null}
         {status?.running && (
-          <span className="rounded-full border border-krypt-purple/30 bg-krypt-purple/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-krypt-pink">
+          <span className="rounded-full border border-krypt-purple/30 bg-krypt-purple/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-krypt-pink">
             connected
           </span>
         )}
         <div className="flex-1" />
         {cfg.token && (
-          <span className="font-mono text-[10px] text-krypt-muted" title="Your token is never shown in full">
+          <span className="font-mono text-label text-krypt-muted" title="Your token is never shown in full">
             {redactToken(cfg.token)}
           </span>
         )}
@@ -134,7 +134,7 @@ function BotRow({
 
       {!cfg.token ? (
         <div className="mt-2 space-y-2">
-          <ol className="list-decimal pl-4 text-[11px] leading-relaxed text-krypt-muted space-y-0.5">
+          <ol className="list-decimal pl-4 text-body leading-relaxed text-krypt-muted space-y-0.5">
             {SETUP[kind].steps.map((st) => (
               <li key={st}>{st}</li>
             ))}
@@ -145,7 +145,7 @@ function BotRow({
               value={token}
               onChange={(e) => setToken(e.target.value)}
               placeholder="Bot token"
-              className="flex-1 rounded bg-black/40 border border-white/15 px-2 py-1 font-mono text-[11px] text-white outline-none"
+              className="flex-1 rounded bg-black/40 border border-white/15 px-2 py-1 font-mono text-body text-white outline-none"
             />
             <PrimaryButton onClick={() => void saveToken()} disabled={busy || !token.trim()}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Verify & save'}
@@ -158,11 +158,11 @@ function BotRow({
             <div className="rounded-md border border-white/10 bg-black/25 px-3 py-2">
               {code ? (
                 <>
-                  <p className="text-[11px] text-krypt-muted">
+                  <p className="text-body text-krypt-muted">
                     Send this to your bot from the account that should control it:
                   </p>
-                  <p className="mt-1 font-mono text-xl tracking-[0.3em] text-white">/pair {code}</p>
-                  <p className="mt-1 text-[10px] text-krypt-muted/60">
+                  <p className="mt-1 font-mono text-xl tracking-heading text-white">/pair {code}</p>
+                  <p className="mt-1 text-label text-krypt-muted/60">
                     Valid for 10 minutes. Whoever sends it becomes the only account this bot answers.
                   </p>
                 </>
@@ -171,7 +171,7 @@ function BotRow({
                   <GhostButton onClick={() => void startPairing()}>
                     <Link2 className="h-3.5 w-3.5" /> Start pairing
                   </GhostButton>
-                  <span className="text-[10px] text-krypt-muted">Generates a code to send to your bot</span>
+                  <span className="text-label text-krypt-muted">Generates a code to send to your bot</span>
                 </div>
               )}
             </div>
@@ -214,7 +214,7 @@ function BotRow({
             </GhostButton>
           </div>
 
-          {status?.lastError && <p className="text-[11px] text-rose-300">{status.lastError}</p>}
+          {status?.lastError && <p className="text-body text-rose-300">{status.lastError}</p>}
         </div>
       )}
     </Card>
@@ -241,8 +241,8 @@ function TradingCard({
       <div className="flex items-start gap-3">
         <ShieldAlert className={cls('mt-0.5 h-4 w-4 flex-shrink-0', tr.enabled ? 'text-arc-gold' : 'text-krypt-muted')} />
         <div className="flex-1">
-          <div className="text-[13px] font-semibold text-white">Trade from your phone</div>
-          <p className="mt-1 text-[11px] leading-relaxed text-krypt-muted">
+          <div className="text-value font-semibold text-white">Trade from your phone</div>
+          <p className="mt-1 text-body leading-relaxed text-krypt-muted">
             Lets the paired chat place trades: <span className="font-mono text-white/80">/sell &lt;mint&gt; 50</span> or{' '}
             <span className="font-mono text-white/80">/buy &lt;mint&gt; 0.05</span>. Your key never leaves this machine —
             the chat asks, this app signs. Anyone who takes over that chat account can trade with it, which is why buys
@@ -274,23 +274,23 @@ function TradingCard({
           />
           {tr.allowBuys && (
             <div className="flex flex-wrap items-center gap-4">
-              <label className="flex items-center gap-2 text-[11px] text-krypt-muted">
+              <label className="flex items-center gap-2 text-body text-krypt-muted">
                 Max per buy
                 <NumberInput value={tr.maxBuySol} min={0.001} max={100} onChange={(n) => patch({ maxBuySol: n })} suffix="SOL" className="w-28" />
               </label>
-              <label className="flex items-center gap-2 text-[11px] text-krypt-muted">
+              <label className="flex items-center gap-2 text-body text-krypt-muted">
                 Max per hour
                 <NumberInput value={tr.hourlyCapSol} min={0.001} max={1000} onChange={(n) => patch({ hourlyCapSol: n })} suffix="SOL" className="w-28" />
               </label>
             </div>
           )}
           {!tr.requireConfirm && (
-            <div className="rounded-md border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+            <div className="rounded-md border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-body text-rose-200">
               With confirmation off, a single message from that chat trades immediately. One compromised account is
               enough.
             </div>
           )}
-          <p className="text-[10px] leading-relaxed text-krypt-muted/60">
+          <p className="text-label leading-relaxed text-krypt-muted/60">
             Every chat trade is logged, shown on this desktop as it happens, and still passes the same arming, loss
             guard and per-trade cap as a click here. Selling is never rationed by these limits — being unable to exit is
             the worse failure.
@@ -323,7 +323,7 @@ export function BotsPanel({
 
   return (
     <div className="space-y-3">
-      <p className={cls('text-[11px] leading-relaxed text-krypt-muted')}>
+      <p className={cls('text-body leading-relaxed text-krypt-muted')}>
         Bring your own bot. The app shows a pairing code, you send it from the account that should control the bot, and
         that account becomes the only one it answers — anyone else is ignored silently.{' '}
         <span className="text-white/80">

@@ -142,8 +142,8 @@ export function CopierPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
               return (
                 <Card key={g.id}>
                   <div className="flex items-center gap-2 mb-3">
-                    <span className="text-[13px] font-semibold text-white">{g.name}</span>
-                    <span className="text-[10px] font-mono text-krypt-muted">{followers} follower{followers === 1 ? '' : 's'}</span>
+                    <span className="text-value font-semibold text-white">{g.name}</span>
+                    <span className="text-label font-mono text-krypt-muted">{followers} follower{followers === 1 ? '' : 's'}</span>
                     {g.lab?.follow?.enabled && !dirty && <Badge tone="success">following</Badge>}
                     <div className="flex-1" />
                     <PrimaryButton onClick={() => void save(g)} disabled={!dirty} className="!py-1">Save</PrimaryButton>
@@ -175,7 +175,7 @@ export function CopierPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
                     </Row>
                     <Switch checked={f.followSells} onChange={(v) => patch(g, { followSells: v })} label="Copy sells" description="Followers sell the same share of their bag that you sell (25 % → 25 %)" />
                   </div>
-                  {!armed && <div className="mt-2 text-[11px] text-arc-gold">Following only fires while live execution is armed.</div>}
+                  {!armed && <div className="mt-2 text-body text-arc-gold">Following only fires while live execution is armed.</div>}
                 </Card>
               );
             })}
@@ -214,7 +214,7 @@ export function CopierPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
               <option value="total">Total, split evenly</option>
             </select>
             <NumberInput value={buySol} min={0.001} max={50} onChange={setBuySol} suffix="SOL" className="w-32" />
-            <span className="text-[11px] text-krypt-muted">stagger up to</span>
+            <span className="text-body text-krypt-muted">stagger up to</span>
             <NumberInput value={stagger} min={0} max={3000} onChange={setStagger} suffix="ms" className="w-28" />
             <div className="flex-1" />
             <PrimaryButton onClick={() => void doBuy()} disabled={!armed || !og || !mintOk || !!orderTooMany || orderWallets.length === 0 || busy !== null} className="!py-1.5">
@@ -224,11 +224,11 @@ export function CopierPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
               Sell 100 % on {orderWallets.length}
             </GhostButton>
           </div>
-          {armedReason && <div className="mt-2 text-[11px] text-arc-gold">{armedReason}</div>}
-          {orderTooMany && <div className="mt-2 text-[11px] text-arc-gold">{orderTooMany}</div>}
-          {mint.trim() && !mintOk && <div className="mt-2 text-[11px] text-rose-300">That is not a mint address (32–44 base58 characters).</div>}
+          {armedReason && <div className="mt-2 text-body text-arc-gold">{armedReason}</div>}
+          {orderTooMany && <div className="mt-2 text-body text-arc-gold">{orderTooMany}</div>}
+          {mint.trim() && !mintOk && <div className="mt-2 text-body text-rose-300">That is not a mint address (32–44 base58 characters).</div>}
           {results && (
-            <div className="mt-3 space-y-0.5 text-[11px] font-mono">
+            <div className="mt-3 space-y-0.5 text-body font-mono">
               <div className="text-krypt-muted">{results.kind === 'buy' ? 'Buy' : 'Sell'} results</div>
               {results.rows.map((r) => (
                 <div key={r.walletId} className={r.ok ? 'text-emerald-300/90' : 'text-rose-300/90'}>

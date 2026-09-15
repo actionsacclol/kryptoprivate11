@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import { PanelWindow, panelIdFromHash } from './panels/PanelWindow';
 import { ToastProvider } from './state/ToastProvider';
 import { ModalProvider } from './state/ModalProvider';
 import { AppStateProvider } from './state/AppStateProvider';
@@ -82,6 +83,12 @@ sessionStorage.removeItem('krypt.bridgeRetryAt');
 // launch while settings are still on their way over IPC.
 initLite();
 
+// A popped-out panel loads this same entry with `#panel=<id>`. It keeps every
+// provider — a panel reads the same state it does in the grid, and ipc.ts
+// broadcasts to every window — but renders one panel instead of the app. No
+// second HTML entry, no second bundle, and no copy of a panel to drift.
+const popout = panelIdFromHash(window.location.hash);
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
@@ -89,9 +96,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <ModalProvider>
           <AppStateProvider>
             <TerminalProvider>
-              <LiteMotion>
-                <App />
-              </LiteMotion>
+              <LiteMotion>{popout ? <PanelWindow panelId={popout} /> : <App />}</LiteMotion>
             </TerminalProvider>
           </AppStateProvider>
         </ModalProvider>

@@ -30,7 +30,11 @@ export const PRESENCE: PresenceIdentity = {
   clientId: '1495323918234423406',
   buttons: [
     { label: 'Free Tools', url: 'https://krypt.cc/tools' },
-    { label: 'Krypt.cc', url: 'https://discord.gg/muzFKR657F' },
+    // The token, not the Discord invite. Discord allows exactly two buttons,
+    // and the mint is the same one shared/krypto.ts pins for the Hub card —
+    // repeated as a literal rather than imported because this constant is
+    // hashed into the integrity blob and has to be readable on its own.
+    { label: '$KRYPTO', url: 'https://pump.fun/coin/2qEubd7GwtZbCqDu1uQwNC4kNaJLBdRUcWKpckTypump' },
   ],
   largeImageKey: 'krypt',
   largeImageText: 'Krypto Bot',

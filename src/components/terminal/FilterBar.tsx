@@ -40,13 +40,13 @@ function RangeInput({
     return Number.isFinite(n) ? n : null;
   };
   const box =
-    'w-full bg-black/40 border border-white/10 rounded px-1.5 py-1 text-[11px] font-mono text-white outline-none focus:border-krypt-purple/50 placeholder:text-krypt-muted/40';
+    'w-full bg-black/40 border border-white/10 rounded px-1.5 py-1 text-body font-mono text-white outline-none focus:border-krypt-purple/50 placeholder:text-krypt-muted/40';
 
   return (
     <div>
       <div className="flex items-baseline justify-between mb-1">
-        <span className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted">{label}</span>
-        {suffix && <span className="text-[9px] text-krypt-muted/50">{suffix}</span>}
+        <span className="text-micro uppercase tracking-label text-krypt-muted">{label}</span>
+        {suffix && <span className="text-micro text-krypt-muted/50">{suffix}</span>}
       </div>
       <div className="flex items-center gap-1">
         <input
@@ -57,7 +57,7 @@ function RangeInput({
           onChange={(e) => onChange({ ...value, min: parse(e.target.value) })}
           className={box}
         />
-        <span className="text-krypt-muted/40 text-[10px]">–</span>
+        <span className="text-krypt-muted/40 text-label">–</span>
         <input
           type="number"
           step={step}
@@ -84,7 +84,7 @@ function Toggle({
     <button
       onClick={() => onChange(!checked)}
       className={cls(
-        'rounded border px-2 py-1 text-[10px] font-semibold transition',
+        'rounded border px-2 py-1 text-label font-semibold transition',
         checked
           ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white'
           : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white hover:border-white/20',
@@ -188,7 +188,7 @@ export function FilterBar({
         <button
           onClick={() => setOpen((o) => !o)}
           className={cls(
-            'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition',
+            'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-body font-semibold transition',
             active > 0
               ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white'
               : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -197,7 +197,7 @@ export function FilterBar({
           <SlidersHorizontal className="h-3.5 w-3.5" />
           Filters
           {active > 0 && (
-            <span className="rounded-full bg-krypt-purple/40 px-1.5 text-[9px] font-bold text-white">{active}</span>
+            <span className="rounded-full bg-krypt-purple/40 px-1.5 text-micro font-bold text-white">{active}</span>
           )}
           <ChevronDown className={cls('h-3 w-3 transition', open && 'rotate-180')} />
         </button>
@@ -212,7 +212,7 @@ export function FilterBar({
               key={w}
               onClick={() => set('window', w)}
               className={cls(
-                'px-2 py-1 text-[10px] font-mono font-semibold transition',
+                'px-2 py-1 text-label font-mono font-semibold transition',
                 filters.window === w ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white hover:bg-white/5',
               )}
             >
@@ -234,7 +234,7 @@ export function FilterBar({
             onClick={() => set('launchpads', [])}
             title="Every launchpad, including tokens we could not identify"
             className={cls(
-              'rounded-md px-2 py-1 text-[10px] font-semibold uppercase tracking-wider transition border',
+              'rounded-md px-2 py-1 text-label font-semibold uppercase tracking-wider transition border',
               filters.launchpads.length === 0
                 ? 'border-krypt-purple/50 bg-krypt-purple/20 text-white'
                 : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -252,7 +252,7 @@ export function FilterBar({
                   set('launchpads', on ? filters.launchpads.filter((x) => x !== lp.id) : [...filters.launchpads, lp.id])
                 }
                 className={cls(
-                  'rounded-md px-2 py-1 text-[10px] font-semibold transition border',
+                  'rounded-md px-2 py-1 text-label font-semibold transition border',
                   on
                     ? 'border-krypt-purple/50 bg-krypt-purple/20 text-white'
                     : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white hover:border-white/25',
@@ -277,7 +277,7 @@ export function FilterBar({
               key={p.id}
               onClick={() => onApplyPreset(activePresetId === p.id ? null : p.id)}
               className={cls(
-                'rounded-md border px-2 py-1 text-[10px] font-semibold transition',
+                'rounded-md border px-2 py-1 text-label font-semibold transition',
                 activePresetId === p.id
                   ? 'border-arc-gold/50 bg-arc-gold/15 text-arc-gold'
                   : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white hover:border-white/20',
@@ -297,7 +297,7 @@ export function FilterBar({
           onClick={() => onHideFlagged(!hideFlagged)}
           title={HIDE_TRADEOFF.text}
           className={cls(
-            'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold transition',
+            'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-label font-semibold transition',
             hideFlagged
               ? 'border-rose-400/40 bg-rose-500/10 text-rose-200'
               : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white hover:border-white/20',
@@ -317,25 +317,25 @@ export function FilterBar({
             and the threshold drops not-judged rows because an unknown
             cannot clear a bar. */}
         <div className="flex items-center gap-1">
-          <label className="text-[9px] uppercase tracking-[0.12em] text-krypt-muted/60">Sort</label>
+          <label className="text-micro uppercase tracking-label text-krypt-muted/60">Sort</label>
           <select
             value={sortBy}
             onChange={(e) => onSortBy(e.target.value as DiscoverSort)}
             title="Provider order keeps each column as its source ranked it. Graduation odds orders by measured bucket, best first, not-judged rows last."
-            className="bg-black/40 border border-white/10 rounded-md px-1.5 py-1 text-[10px] text-white outline-none focus:border-krypt-purple/50"
+            className="bg-black/40 border border-white/10 rounded-md px-1.5 py-1 text-label text-white outline-none focus:border-krypt-purple/50"
           >
             <option value="provider">Provider order</option>
             <option value="odds">Graduation odds</option>
           </select>
         </div>
         <div className="flex items-center gap-1">
-          <label className="text-[9px] uppercase tracking-[0.12em] text-krypt-muted/60">Odds ≥</label>
+          <label className="text-micro uppercase tracking-label text-krypt-muted/60">Odds ≥</label>
           <select
             value={minOddsBucket ?? ''}
             onChange={(e) => onMinOddsBucket(e.target.value === '' ? null : (e.target.value as OddsBucket))}
             title="Keep only launches judged in this bucket or better. Launches not judged yet (under 60 s, graduated, or first trades unread) are dropped while this is on."
             className={cls(
-              'bg-black/40 border rounded-md px-1.5 py-1 text-[10px] outline-none focus:border-krypt-purple/50',
+              'bg-black/40 border rounded-md px-1.5 py-1 text-label outline-none focus:border-krypt-purple/50',
               minOddsBucket === null ? 'border-white/10 text-krypt-muted' : 'border-arc-gold/40 text-arc-gold',
             )}
           >
@@ -347,7 +347,7 @@ export function FilterBar({
             ))}
           </select>
           {minOddsBucket !== null && (
-            <span className="font-mono text-[10px] text-arc-gold/70">{hiddenByOdds} hidden</span>
+            <span className="font-mono text-label text-arc-gold/70">{hiddenByOdds} hidden</span>
           )}
         </div>
 
@@ -358,7 +358,7 @@ export function FilterBar({
             value={filters.search}
             onChange={(e) => set('search', e.target.value)}
             placeholder="Filter by name, symbol or mint…"
-            className="w-56 bg-black/40 border border-white/10 rounded-md pl-2.5 pr-7 py-1.5 text-[11px] text-white outline-none focus:border-krypt-purple/50 placeholder:text-krypt-muted/50"
+            className="w-56 bg-black/40 border border-white/10 rounded-md pl-2.5 pr-7 py-1.5 text-body text-white outline-none focus:border-krypt-purple/50 placeholder:text-krypt-muted/50"
           />
           {filters.search && (
             <button
@@ -374,7 +374,7 @@ export function FilterBar({
           <button
             onClick={() => onApplyPreset(null)}
             title="Clear all filters"
-            className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] text-krypt-muted hover:text-white"
+            className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-label text-krypt-muted hover:text-white"
           >
             <RotateCcw className="h-3 w-3" />
             Clear
@@ -411,7 +411,7 @@ export function FilterBar({
               className="flex items-center gap-1.5"
               title="Socials and DEX-paid have no measured edge: socials show no effect on dying (84 % vs 85 %) and hide half of graduations if used as a filter. Kept as descriptive filters only."
             >
-              <span className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted mr-1">Descriptive — requires</span>
+              <span className="text-micro uppercase tracking-label text-krypt-muted mr-1">Descriptive — requires</span>
               <Toggle label="X" checked={filters.requireTwitter} onChange={(v) => set('requireTwitter', v)} />
               <Toggle label="Telegram" checked={filters.requireTelegram} onChange={(v) => set('requireTelegram', v)} />
               <Toggle label="Website" checked={filters.requireWebsite} onChange={(v) => set('requireWebsite', v)} />
@@ -428,17 +428,17 @@ export function FilterBar({
             <div className="flex-1" />
             <button
               onClick={() => onChange({ ...emptyFilters(), window: filters.window, search: filters.search })}
-              className="text-[10px] text-krypt-muted hover:text-white underline underline-offset-2"
+              className="text-label text-krypt-muted hover:text-white underline underline-offset-2"
             >
               Reset all ranges
             </button>
           </div>
 
           <div className="space-y-1 pt-1 border-t border-white/5">
-            <p className="text-[10px] text-krypt-muted/60 leading-relaxed">
+            <p className="text-label text-krypt-muted/60 leading-relaxed">
               A range filter is skipped for any token where that metric is unknown, rather than hiding the token.
             </p>
-            <p className="text-[10px] text-krypt-muted/60 leading-relaxed">
+            <p className="text-label text-krypt-muted/60 leading-relaxed">
               <span className="text-krypt-muted">Hide flagged launches:</span> {HIDE_TRADEOFF.text} Launches whose
               first trades have not been read yet are never hidden — unknown is not flagged.
             </p>

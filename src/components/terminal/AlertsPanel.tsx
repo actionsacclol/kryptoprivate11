@@ -74,7 +74,7 @@ export function AlertRow({
     >
       <span
         className={cls(
-          'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider flex-shrink-0',
+          'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-micro font-bold uppercase tracking-wider flex-shrink-0',
           alert.state === 'armed'
             ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-300'
             : alert.state === 'fired'
@@ -87,19 +87,19 @@ export function AlertRow({
       </span>
 
       <div className="min-w-0 flex-1">
-        <div className="text-[12px] text-white/90 truncate">
+        <div className="text-note text-white/90 truncate">
           {showSymbol && alert.symbol && <span className="font-semibold mr-1.5">{alert.symbol}</span>}
           {describeAlert(alert)}
         </div>
         {alert.fireCount > 0 && (
-          <div className="text-[10px] text-krypt-muted/70">
+          <div className="text-label text-krypt-muted/70">
             Fired {alert.fireCount}× · last {alert.lastFiredAt ? fmtAgo(alert.lastFiredAt) : '—'} ago
           </div>
         )}
       </div>
 
       {alert.repeat && (
-        <span className="text-[9px] uppercase tracking-wider text-krypt-muted/50 flex-shrink-0">repeat</span>
+        <span className="text-micro uppercase tracking-wider text-krypt-muted/50 flex-shrink-0">repeat</span>
       )}
       <button
         onClick={() => onMute(alert.id, !muted)}
@@ -179,7 +179,7 @@ export function AlertsPanel({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted whitespace-nowrap">
+        <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">
           Alerts
         </h3>
         <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -188,7 +188,7 @@ export function AlertsPanel({
             if (!open) pick(kind);
             setOpen((o) => !o);
           }}
-          className="inline-flex items-center gap-1 rounded-md border border-white/12 bg-white/5 px-2 py-1 text-[10px] font-semibold text-krypt-muted hover:text-white transition"
+          className="inline-flex items-center gap-1 rounded-md border border-white/12 bg-white/5 px-2 py-1 text-label font-semibold text-krypt-muted hover:text-white transition"
         >
           <Plus className="h-3 w-3" />
           New
@@ -203,7 +203,7 @@ export function AlertsPanel({
                 key={k}
                 onClick={() => pick(k)}
                 className={cls(
-                  'rounded-md border px-2 py-1.5 text-[10px] font-semibold transition text-left leading-tight',
+                  'rounded-md border px-2 py-1.5 text-label font-semibold transition text-left leading-tight',
                   kind === k
                     ? 'border-krypt-purple/50 bg-krypt-purple/20 text-white'
                     : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -221,12 +221,12 @@ export function AlertsPanel({
                   type="number"
                   value={threshold}
                   onChange={(e) => setThreshold(e.target.value)}
-                  className="flex-1 bg-transparent px-2 py-1.5 text-[12px] font-mono text-white outline-none"
+                  className="flex-1 bg-transparent px-2 py-1.5 text-note font-mono text-white outline-none"
                 />
-                <span className="px-2 text-[10px] uppercase text-krypt-muted">{unit}</span>
+                <span className="px-2 text-label uppercase text-krypt-muted">{unit}</span>
               </div>
               {kind.startsWith('mcap') && token.marketCapUsd !== null && (
-                <div className="text-[10px] text-krypt-muted/60 mt-1">Now: {fmtUsd(token.marketCapUsd)}</div>
+                <div className="text-label text-krypt-muted/60 mt-1">Now: {fmtUsd(token.marketCapUsd)}</div>
               )}
             </div>
           )}
@@ -234,7 +234,7 @@ export function AlertsPanel({
           <button
             onClick={() => setRepeat((r) => !r)}
             className={cls(
-              'w-full rounded-md border px-2 py-1.5 text-[10px] font-semibold transition',
+              'w-full rounded-md border px-2 py-1.5 text-label font-semibold transition',
               repeat
                 ? 'border-krypt-purple/45 bg-krypt-purple/15 text-white'
                 : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -243,13 +243,13 @@ export function AlertsPanel({
             {repeat ? 'Repeating — fires every time (rate-limited)' : 'Fires once, then stops'}
           </button>
 
-          {!validity.ok && <p className="text-[10px] text-rose-300">{validity.message}</p>}
+          {!validity.ok && <p className="text-label text-rose-300">{validity.message}</p>}
 
           <button
             onClick={() => void submit()}
             disabled={!validity.ok}
             className={cls(
-              'w-full rounded-md border py-2 text-[11px] font-bold uppercase tracking-wider transition',
+              'w-full rounded-md border py-2 text-body font-bold uppercase tracking-wider transition',
               validity.ok
                 ? 'border-krypt-purple/50 bg-krypt-gradient text-white hover:brightness-110'
                 : 'border-white/8 bg-white/5 text-krypt-muted/50 cursor-not-allowed',
@@ -261,7 +261,7 @@ export function AlertsPanel({
       )}
 
       {alerts.length === 0 ? (
-        <p className="text-[11px] text-krypt-muted/60">
+        <p className="text-body text-krypt-muted/60">
           No alerts on this token. Alerts only notify — they never trade.
         </p>
       ) : (

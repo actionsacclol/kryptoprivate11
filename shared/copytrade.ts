@@ -248,6 +248,14 @@ export interface LeaderStats {
   /** Open positions at the last price known; null when none is priced. */
   unrealizedPnlSol: number | null;
   avgHoldMs: number | null;
+  /** MEDIAN hold across closed round trips, ms. `avgHoldMs` is dragged by one
+   *  long position; the median is what the wallet usually does, and on the
+   *  measured tape the two differ by orders of magnitude. */
+  medianHoldMs: number | null;
+  /** Share of closed round trips that opened AND closed faster than
+   *  `COPY_LATENCY_FLOOR_MS` — trips a copier could not have been inside.
+   *  Null before any trip closes. */
+  tooFastPct: number | null;
   bestSol: number | null;
   worstSol: number | null;
   /** Sells (or parts of sells) of tokens bought before we watched. */
@@ -276,6 +284,8 @@ export function emptyLeaderStats(wallet: string): LeaderStats {
     openCostSol: 0,
     unrealizedPnlSol: null,
     avgHoldMs: null,
+    medianHoldMs: null,
+    tooFastPct: null,
     bestSol: null,
     worstSol: null,
     unscoredSells: 0,
@@ -295,7 +305,39 @@ export function leaderWinRate(s: LeaderStats): number | null {
  *  wallet sorts after every wallet with a real sample, whatever its number. */
 export const MIN_TRIPS_FOR_RANK = 5;
 
-export type LeaderRankKey = 'realizedPnlSol' | 'returnPct' | 'winRatePct' | 'tradesPerDay' | 'unrealizedPnlSol';
+/**
+ * Below this hold, a round trip is not copyable — not "worse", NOT copyable.
+ *
+ * A copier has to see the leader's buy on the feed, decide, build, sign and
+ * land; then do the whole thing again to exit. A position that opens and
+ * closes inside this window was over before a follower could be in it, so the
+ * leader's profit on it is unreachable by construction.
+ *
+ * The number matters because of what the tape says. Measured over 9.3M curve
+ * trades across two day-pairs six weeks apart
+ * (docs/wallet-convergence-2026-09-14.md), the MEDIAN profitable pump wallet
+ * holds SIX SECONDS. Their edge is latency. Ranking them by their own PnL —
+ * which is what this file did until 2026-09-14 — therefore surfaces precisely
+ * the wallets a user cannot copy.
+ *
+ * One minute is deliberately generous: it is not a claim that a 61-second trip
+ * is comfortably copyable, only that a sub-minute one certainly is not.
+ */
+export const COPY_LATENCY_FLOOR_MS = 60_000;
+
+/**
+ * A wallet is flagged when most of its record is unreachable.
+ *
+ * Deliberately NOT a quality score. The same measurements found that longer
+ * holds are not more profitable to follow — the 1-10 minute bucket was WORSE
+ * than the sub-minute one, and no hold bucket was profitable in either period.
+ * So this says "you could not have been in these trades", never "these trades
+ * are good".
+ */
+export const TOO_FAST_FLAG_PCT = 50;
+
+export type LeaderRankKey =
+  | 'realizedPnlSol' | 'returnPct' | 'winRatePct' | 'tradesPerDay' | 'unrealizedPnlSol' | 'medianHoldMs';
 
 export const LEADER_RANK_KEYS: Array<{ key: LeaderRankKey; label: string }> = [
   { key: 'realizedPnlSol', label: 'Realized' },
@@ -303,7 +345,16 @@ export const LEADER_RANK_KEYS: Array<{ key: LeaderRankKey; label: string }> = [
   { key: 'winRatePct', label: 'Win rate' },
   { key: 'tradesPerDay', label: 'Trades / day' },
   { key: 'unrealizedPnlSol', label: 'Unrealized' },
+  // Longest first, so the wallets a copy could actually be inside are findable
+  // at all. A sort order, not a recommendation.
+  { key: 'medianHoldMs', label: 'Hold time' },
 ];
+
+/** True when most of this wallet's closed trips were over before a copy could
+ *  have joined them. Null-safe: an unmeasured wallet is never flagged. */
+export function leaderTooFast(s: LeaderStats): boolean {
+  return s.tooFastPct !== null && s.roundTrips >= MIN_TRIPS_FOR_RANK && s.tooFastPct >= TOO_FAST_FLAG_PCT;
+}
 
 /** Best first by the chosen key. Small samples rank after real ones;
  *  unknowns (null) after everything; ties broken by more round trips. */

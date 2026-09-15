@@ -34,12 +34,12 @@ export function SwitchToPaper({ reason, className }: { reason: string; className
 
   return (
     <span className={cls('inline-flex flex-wrap items-center gap-2', className)}>
-      <span className="text-[10px] leading-relaxed text-arc-gold">{reason}</span>
+      <span className="text-label leading-relaxed text-arc-gold">{reason}</span>
       <button
         onClick={() => void go()}
         disabled={busy}
         title="Switches the top bar to Paper, which disarms live execution"
-        className="inline-flex items-center gap-1 rounded-md border border-arc-gold/40 bg-arc-gold/10 px-2 py-1 text-[10px] font-semibold text-arc-gold transition hover:bg-arc-gold/20 disabled:opacity-50"
+        className="inline-flex items-center gap-1 rounded-md border border-arc-gold/40 bg-arc-gold/10 px-2 py-1 text-label font-semibold text-arc-gold transition hover:bg-arc-gold/20 disabled:opacity-50"
       >
         {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <ShieldOff className="h-3 w-3" />}
         Switch to Paper

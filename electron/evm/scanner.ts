@@ -42,6 +42,7 @@ import {
 import {
   BUYER_BUCKETS,
   DEFAULT_EVM_RUNNER_ALERTS,
+  EVM_RUNNER_FLAG_CAP,
   OUTCOME_HORIZON_MS,
   bucketOf,
   emptyModel,
@@ -50,6 +51,7 @@ import {
   judge,
   type BuyerBucket,
   type EvmRunnerAlerts,
+  type EvmRunnerFlag,
   type RunnerCall,
   type RunnerModel,
 } from '@shared/evmRunners';
@@ -170,6 +172,9 @@ interface ChainState {
   /** Trade key → token, so a chain-wide trade log finds its launch. */
   byKey: Map<string, string>;
   launches: EvmScanLaunch[];
+  /** Flagged runner calls, newest first, kept for the session — the launches
+   *  behind them are purged at 130 s. See EvmRunnerFlag. */
+  flagged: EvmRunnerFlag[];
   /** Rolling-hour cap on notifications. Per chain, like everything else. */
   limiter: RunnerRateLimit;
 }
@@ -185,8 +190,17 @@ export interface ScannerHost {
    * restart.
    */
   runnerAlerts?(chain: EvmChainKind): EvmRunnerAlerts;
-  /** Desktop notification, through the engine's own switch and chat push. */
-  notify?(title: string, body: string): void;
+  /**
+   * A measurement window just closed on a tracked launch — this chain's
+   * equivalent of Solana's `launchUpdate`, and the event user scripts on this
+   * chain react to. Fired AFTER the 60 s runner call is attached, so a script
+   * sees the call on the same launch the flag was made on.
+   */
+  onLaunchWindow?(chain: EvmChainKind, launch: EvmScanLaunch): void;
+  /** Desktop notification, through the engine's own switch and chat push.
+   *  `target` says what it is ABOUT: the click opens that token, and a
+   *  Discord webhook for the chain links to it. */
+  notify?(title: string, body: string, target?: { mint: string; chain: EvmChainKind }): void;
 }
 
 let host: ScannerHost | null = null;
@@ -208,6 +222,7 @@ function fresh(chain: EvmChainKind): ChainState {
     tracked: new Map(),
     byKey: new Map(),
     launches: [],
+    flagged: [],
     limiter: new RunnerRateLimit(),
   };
 }
@@ -218,6 +233,11 @@ export function attach(h: ScannerHost): void {
 
 export function status(chain: EvmChainKind): EvmScanStatus {
   return { ...state[chain].status, enabled: host?.enabled(chain) ?? false, tracking: state[chain].tracked.size };
+}
+
+/** Runner calls this chain flagged this session, newest first. */
+export function flagged(chain: EvmChainKind): EvmRunnerFlag[] {
+  return state[chain].flagged;
 }
 
 export function launches(chain: EvmChainKind): EvmScanLaunch[] {
@@ -723,6 +743,22 @@ function closeWindows(chain: EvmChainKind): void {
         if (call.flag) {
           st.status = { ...st.status, callsFlagged: st.status.callsFlagged + 1 };
           host?.log('info', `${chain} runner call: ${tr.launch.symbol || token.slice(0, 8)} — ${call.detail}`);
+          // Kept for the session so the Runner alerts panel can list it
+          // beside Solana's. The launch itself is purged at 130 s.
+          st.flagged.unshift({
+            chain,
+            token,
+            symbol: tr.launch.symbol ?? '',
+            name: tr.launch.name ?? '',
+            flaggedAt: now,
+            uniqueBuyers: measured.uniqueBuyers,
+            ratePct: call.ratePct,
+            otherRatePct: call.otherRatePct,
+            lowerPct: call.lowerPct,
+            samples: call.samples,
+            detail: call.detail,
+          });
+          if (st.flagged.length > EVM_RUNNER_FLAG_CAP) st.flagged.length = EVM_RUNNER_FLAG_CAP;
         }
         // The FILTER is a second, separate question from the measurement
         // above: the call is recorded either way, and only the notification
@@ -732,8 +768,16 @@ function closeWindows(chain: EvmChainKind): void {
         const verdict = evmRunnerVerdict(call, cfg);
         if (verdict.alert && host?.notify && st.limiter.allow(now, cfg.maxPerHour)) {
           const { title, body } = evmRunnerNotification(EVM_CHAIN_META[chain].name, tr.launch.symbol, token, call);
-          host.notify(title, body);
+          host.notify(title, body, { mint: token, chain });
         }
+      }
+      // Scripts on this chain hear the window, whatever it measured. Wrapped
+      // because a throwing script host must never stop the scanner: the
+      // measurement and its record are the chain's, the fan-out is a consumer.
+      try {
+        host?.onLaunchWindow?.(chain, tr.launch);
+      } catch (e) {
+        host?.log('warn', `${chain} scanner: script fan-out failed — ${(e as Error)?.message ?? e}`);
       }
     }
     if (age > EVM_SCAN_TRACK_MS) {

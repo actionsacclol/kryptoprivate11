@@ -291,6 +291,16 @@ export interface EvmRunnerAlerts {
    * for — the numbers shown are unchanged either way.
    */
   requireBeatsBase: boolean;
+  /**
+   * Discord webhook for THIS chain's flags. Empty = off.
+   *
+   * Per chain rather than global on purpose: someone watching Robinhood and
+   * BNB usually wants them in different places, and the chains have separate
+   * records, separate base rates and separate floors already. See
+   * RunnerAlertSettings in shared/runners.ts for why the URL is pinned to
+   * Discord's hosts at the IPC boundary.
+   */
+  webhookUrl: string;
 }
 
 export const DEFAULT_EVM_RUNNER_ALERTS: EvmRunnerAlerts = {
@@ -298,6 +308,7 @@ export const DEFAULT_EVM_RUNNER_ALERTS: EvmRunnerAlerts = {
   minBucket: 11,
   maxPerHour: 12,
   requireBeatsBase: true,
+  webhookUrl: '',
 };
 
 /** Bucket order, loosest last. Used to compare a call against the floor. */
@@ -365,3 +376,37 @@ export function evmRunnerNotification(
     `, and ${failPct.toFixed(0)} % did not. Open it to decide — nothing is bought for you.`;
   return { title, body };
 }
+
+// ── Flagged calls, kept for the session ───────────────────────────────
+//
+// `EvmScanLaunch` lives only while a launch is inside its measurement window
+// (EVM_SCAN_TRACK_MS, 130 s), so a flagged call vanished about two minutes
+// after it was made. Solana's runner flags are kept for the whole session and
+// the Runner alerts panel lists them; without this the same panel could not
+// show an EVM call at all, let alone say which chain it came from.
+//
+// Deliberately NOT shaped like Solana's `RunnerFlag`. That type carries curve
+// regime, net inflow, an odds bucket and a price — things these rails do not
+// measure. Filling them with zeroes to share one type is how a panel starts
+// showing numbers nobody measured.
+
+export interface EvmRunnerFlag {
+  chain: EvmChainKind;
+  token: string;
+  symbol: string;
+  name: string;
+  flaggedAt: number;
+  uniqueBuyers: number;
+  /** Observed rate for the bucket, and the rate it had to beat. */
+  ratePct: number | null;
+  otherRatePct: number | null;
+  /** Wilson 95 % lower bound — "at least this, with confidence". */
+  lowerPct: number | null;
+  samples: number;
+  /** The call's own sentence, verbatim. */
+  detail: string;
+}
+
+/** How many flagged calls are kept per chain. */
+export const EVM_RUNNER_FLAG_CAP = 50;
+

@@ -510,7 +510,7 @@ export function Radar3D({
     >
       {hover && hovered && (
         <div
-          className="pointer-events-none absolute z-20 w-52 rounded-md border border-krypt-purple/30 bg-black/90 px-3 py-2.5 font-mono text-[11px] leading-relaxed backdrop-blur-sm shadow-krypt-glow"
+          className="pointer-events-none absolute z-20 w-52 rounded-md border border-krypt-purple/30 bg-black/90 px-3 py-2.5 font-mono text-body leading-relaxed backdrop-blur-sm shadow-krypt-glow"
           style={{
             left: Math.min(hover.x + 14, (mountRef.current?.clientWidth ?? 300) - 216),
             top: Math.max(8, hover.y - 12),
@@ -519,7 +519,7 @@ export function Radar3D({
           <div className="flex items-baseline justify-between gap-2">
             <span className="font-semibold text-white">{hovered.symbol || '—'}</span>
             <span className={cls(
-              'text-[10px] uppercase tracking-wider',
+              'text-label uppercase tracking-wider',
               hovered.phase === 'entered' ? 'text-arc-gold' : hovered.phase === 'rejected' ? 'text-rose-300' : 'text-krypt-pink',
             )}>{hovered.phase}</span>
           </div>
@@ -535,10 +535,10 @@ export function Radar3D({
             <div>curve {hovered.flow.curveProgressPct.toFixed(1)}%</div>
             {hovered.reason && <div className="text-rose-300/85 truncate">{hovered.reason}</div>}
           </div>
-          <div className="mt-1 text-[9px] text-krypt-muted/60">click to divine</div>
+          <div className="mt-1 text-micro text-krypt-muted/60">click to divine</div>
         </div>
       )}
-      <div className="pointer-events-none absolute bottom-3 left-4 font-mono text-[9px] uppercase tracking-[0.28em] text-krypt-muted/50">
+      <div className="pointer-events-none absolute bottom-3 left-4 font-mono text-micro uppercase tracking-heading text-krypt-muted/50">
         {live ? 'live · mainnet' : 'offline'}
       </div>
     </div>

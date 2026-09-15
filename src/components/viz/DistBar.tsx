@@ -27,10 +27,10 @@ export function DistBar({
                 animate={{ width: `${Math.max(pct, 6)}%` }}
                 transition={{ duration: 0.4 }}
               >
-                <span className="text-[10px] font-mono text-white/90">{it.value}</span>
+                <span className="text-label font-mono text-white/90">{it.value}</span>
               </motion.div>
             </div>
-            <div className="w-10 text-right text-[11px] font-mono text-krypt-muted">{pct.toFixed(0)}%</div>
+            <div className="w-10 text-right text-body font-mono text-krypt-muted">{pct.toFixed(0)}%</div>
           </div>
         );
       })}

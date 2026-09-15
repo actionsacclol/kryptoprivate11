@@ -40,18 +40,18 @@ function CohortCard({
   return (
     <div className="rounded-lg border border-white/8 bg-white/[0.02] p-3 space-y-2">
       <div className="flex items-baseline justify-between gap-2">
-        <h4 className="font-display text-[10px] font-semibold uppercase tracking-[0.2em] text-krypt-muted">{title}</h4>
-        <span className="text-[10px] font-mono text-krypt-muted">
+        <h4 className="font-display text-label font-semibold uppercase tracking-label text-krypt-muted">{title}</h4>
+        <span className="text-label font-mono text-krypt-muted">
           {cohort.wallets} {cohort.wallets === 1 ? 'wallet' : 'wallets'}
         </span>
       </div>
 
       <div className="flex items-baseline gap-2">
         <span className={cls('font-mono text-xl', tone(bought))}>{fmtPctOrDash(bought, 2)}</span>
-        <span className="text-[10px] text-krypt-muted">of supply bought</span>
+        <span className="text-label text-krypt-muted">of supply bought</span>
       </div>
 
-      <div className="space-y-1 pt-1 border-t border-white/5 text-[11px]">
+      <div className="space-y-1 pt-1 border-t border-white/5 text-body">
         <div className="flex justify-between">
           <span className="text-krypt-muted">Still holds</span>
           <span className={cls('font-mono', tone(held))}>{fmtPctOrDash(held, 2)}</span>
@@ -74,7 +74,7 @@ function CohortCard({
         </div>
       </div>
 
-      <p className="text-[9px] leading-relaxed text-krypt-muted/55">{blurb}</p>
+      <p className="text-micro leading-relaxed text-krypt-muted/55">{blurb}</p>
     </div>
   );
 }
@@ -84,28 +84,28 @@ function WalletRow({ w, creator }: { w: EarlyWallet; creator: string | null }) {
   return (
     <tr className="border-t border-white/5 hover:bg-white/[0.03] transition">
       <td className="py-1.5 pr-2">
-        <button onClick={open} className="group flex items-center gap-1.5 font-mono text-[11px] text-white/85">
+        <button onClick={open} className="group flex items-center gap-1.5 font-mono text-body text-white/85">
           {shortAddr(w.address, 4)}
           <ExternalLink className="h-3 w-3 opacity-0 group-hover:opacity-60" />
         </button>
       </td>
       <td className="py-1.5 pr-2">
-        <span className={cls('rounded border px-1.5 py-0.5 text-[9px] uppercase tracking-wider', COHORT_TONE[w.cohort])}>
+        <span className={cls('rounded border px-1.5 py-0.5 text-micro uppercase tracking-wider', COHORT_TONE[w.cohort])}>
           {w.address === creator ? 'dev' : w.cohort}
         </span>
       </td>
-      <td className="py-1.5 pr-2 text-right font-mono text-[11px] text-krypt-muted">
+      <td className="py-1.5 pr-2 text-right font-mono text-body text-krypt-muted">
         {w.slotOffset === 0 ? 'launch' : `+${w.slotOffset}`}
       </td>
-      <td className="py-1.5 pr-2 text-right font-mono text-[11px] text-white/85">{fmtPctOrDash(w.boughtPct, 2)}</td>
-      <td className="py-1.5 pr-2 text-right font-mono text-[11px]">
+      <td className="py-1.5 pr-2 text-right font-mono text-body text-white/85">{fmtPctOrDash(w.boughtPct, 2)}</td>
+      <td className="py-1.5 pr-2 text-right font-mono text-body">
         {w.heldPct === null ? (
           <span className="text-krypt-muted">—</span>
         ) : (
           <span className={w.heldPct > 0 ? 'text-emerald-400' : 'text-krypt-muted/60'}>{fmtPctOrDash(w.heldPct, 2)}</span>
         )}
       </td>
-      <td className="py-1.5 text-right font-mono text-[10px] text-krypt-muted">{fmtSol(w.sol, 2)}</td>
+      <td className="py-1.5 text-right font-mono text-label text-krypt-muted">{fmtSol(w.sol, 2)}</td>
     </tr>
   );
 }
@@ -122,43 +122,43 @@ function CreatorBlock({ history }: { history: CreatorHistory }) {
   return (
     <div className="rounded-lg border border-white/8 bg-white/[0.02] p-3 space-y-2">
       <div className="flex items-center gap-3">
-        <h4 className="font-display text-[10px] font-semibold uppercase tracking-[0.2em] text-krypt-muted whitespace-nowrap">
+        <h4 className="font-display text-label font-semibold uppercase tracking-label text-krypt-muted whitespace-nowrap">
           Creator track record
         </h4>
         <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
       </div>
 
-      <p className={cls('text-[12px]', tone)}>{v.detail}</p>
+      <p className={cls('text-note', tone)}>{v.detail}</p>
 
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-body sm:grid-cols-4">
         <div>
-          <div className="text-[9px] uppercase tracking-wider text-krypt-muted/60">Launches</div>
+          <div className="text-micro uppercase tracking-wider text-krypt-muted/60">Launches</div>
           <div className="font-mono text-white/85">
             {history.launches}
             {history.truncated ? '+' : ''}
           </div>
         </div>
         <div>
-          <div className="text-[9px] uppercase tracking-wider text-krypt-muted/60">Graduated</div>
+          <div className="text-micro uppercase tracking-wider text-krypt-muted/60">Graduated</div>
           <div className="font-mono text-white/85">
             {history.graduated} <span className="text-krypt-muted">({fmtPctOrDash(history.graduationRate, 0)})</span>
           </div>
         </div>
         <div>
-          <div className="text-[9px] uppercase tracking-wider text-krypt-muted/60">Busiest day</div>
+          <div className="text-micro uppercase tracking-wider text-krypt-muted/60">Busiest day</div>
           <div className={cls('font-mono', history.launchesInBusiestDay >= 10 ? 'text-rose-400' : 'text-white/85')}>
             {history.launchesInBusiestDay}
           </div>
         </div>
         <div>
-          <div className="text-[9px] uppercase tracking-wider text-krypt-muted/60">Median peak</div>
+          <div className="text-micro uppercase tracking-wider text-krypt-muted/60">Median peak</div>
           <div className="font-mono text-white/85">{fmtUsd(history.medianAthUsd)}</div>
         </div>
       </div>
 
       {history.recent.length > 1 && (
         <div className="space-y-1 pt-1">
-          <div className="text-[9px] uppercase tracking-wider text-krypt-muted/60">Recent launches</div>
+          <div className="text-micro uppercase tracking-wider text-krypt-muted/60">Recent launches</div>
           <div className="flex flex-wrap gap-1">
             {history.recent.map((l) => (
               <button
@@ -168,7 +168,7 @@ function CreatorBlock({ history }: { history: CreatorHistory }) {
                   l.graduated ? 'graduated' : 'never graduated'
                 }${l.athUsd ? `\npeak ${fmtUsd(l.athUsd)}` : ''}`}
                 className={cls(
-                  'rounded px-1.5 py-0.5 text-[9px] font-mono border transition hover:border-white/25',
+                  'rounded px-1.5 py-0.5 text-micro font-mono border transition hover:border-white/25',
                   l.graduated
                     ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
                     : 'border-white/8 bg-white/[0.03] text-krypt-muted',
@@ -181,7 +181,7 @@ function CreatorBlock({ history }: { history: CreatorHistory }) {
         </div>
       )}
 
-      <p className="text-[9px] leading-relaxed text-krypt-muted/50">
+      <p className="text-micro leading-relaxed text-krypt-muted/50">
         pump.fun launches only{history.truncated ? ', capped at 200' : ''} — launches on other platforms are invisible
         to this, so treat a small number as "nothing found here", not "clean".
       </p>
@@ -202,13 +202,13 @@ export function LaunchPanel({
     return (
       <div className="flex flex-col items-center gap-3 py-10 text-center">
         <Loader2 className="h-5 w-5 animate-spin text-krypt-purple" />
-        <p className="text-[11px] text-krypt-muted max-w-sm leading-relaxed">
+        <p className="text-body text-krypt-muted max-w-sm leading-relaxed">
           Seeking this token's first block of trades, then reading what those wallets hold now.
         </p>
       </div>
     );
   }
-  if (!report) return <p className="py-8 text-center text-[11px] text-krypt-muted">No launch data.</p>;
+  if (!report) return <p className="py-8 text-center text-body text-krypt-muted">No launch data.</p>;
 
   const a = report.analysis;
   const measured = a.complete && a.tradesScanned > 0;
@@ -219,15 +219,15 @@ export function LaunchPanel({
         <div className="flex items-start gap-2.5 rounded-lg border border-arc-gold/25 bg-arc-gold/[0.06] px-3 py-2.5">
           <AlertTriangle className="h-4 w-4 flex-shrink-0 text-arc-gold mt-0.5" />
           <div className="space-y-1">
-            <p className="text-[12px] text-white/85">Launch cohorts not measured</p>
-            <p className="text-[11px] leading-relaxed text-krypt-muted">{report.note ?? 'No launch window available.'}</p>
+            <p className="text-note text-white/85">Launch cohorts not measured</p>
+            <p className="text-body leading-relaxed text-krypt-muted">{report.note ?? 'No launch window available.'}</p>
           </div>
         </div>
       )}
 
       {measured && (
         <>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-krypt-muted">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-label text-krypt-muted">
             <span>
               Launch slot <span className="font-mono text-white/80">{fmtNum(a.launchSlot)}</span>
             </span>
@@ -267,7 +267,7 @@ export function LaunchPanel({
           {a.wallets.length > 0 && (
             <div className="rounded-lg border border-white/8 bg-white/[0.02] p-3">
               <div className="flex items-center gap-3 mb-1.5">
-                <h4 className="font-display text-[10px] font-semibold uppercase tracking-[0.2em] text-krypt-muted whitespace-nowrap">
+                <h4 className="font-display text-label font-semibold uppercase tracking-label text-krypt-muted whitespace-nowrap">
                   Launch buyers
                 </h4>
                 <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -275,7 +275,7 @@ export function LaunchPanel({
               <div className="max-h-72 overflow-y-auto pr-1">
                 <table className="w-full">
                   <thead className="sticky top-0 bg-krypt-bg/95 backdrop-blur">
-                    <tr className="text-[9px] uppercase tracking-wider text-krypt-muted/60">
+                    <tr className="text-micro uppercase tracking-wider text-krypt-muted/60">
                       <th className="pb-1 text-left font-medium">Wallet</th>
                       <th className="pb-1 text-left font-medium">Cohort</th>
                       <th className="pb-1 text-right font-medium">Slot</th>
@@ -291,7 +291,7 @@ export function LaunchPanel({
                   </tbody>
                 </table>
               </div>
-              <p className="pt-1.5 text-[9px] leading-relaxed text-krypt-muted/50">
+              <p className="pt-1.5 text-micro leading-relaxed text-krypt-muted/50">
                 "Holds now" is the wallet's current balance in its associated token account, read from your RPC. A
                 wallet holding elsewhere reads as zero, so this is a floor.
               </p>
@@ -304,7 +304,7 @@ export function LaunchPanel({
         <CreatorBlock history={history} />
       ) : (
         report.creator && (
-          <p className="text-[11px] text-krypt-muted/60">
+          <p className="text-body text-krypt-muted/60">
             No wider record for {shortAddr(report.creator, 6)} — pump.fun lists no other launches from this wallet.
           </p>
         )

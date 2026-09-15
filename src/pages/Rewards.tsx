@@ -162,7 +162,7 @@ function CampaignTable({ rows, addUsd }: { rows: RewardOpportunity[]; addUsd: nu
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted">
+          <tr className="text-label uppercase tracking-label text-krypt-muted">
             <th className="text-left font-semibold py-2 pr-4">Protocol</th>
             <th className="text-left font-semibold py-2 pr-4">Pool</th>
             <th className="text-right font-semibold py-2 pr-4">APR</th>
@@ -179,12 +179,12 @@ function CampaignTable({ rows, addUsd }: { rows: RewardOpportunity[]; addUsd: nu
             <tr key={r.id} className="border-t border-white/5 align-top">
               <td className="py-2.5 pr-4 whitespace-nowrap">
                 <span className="text-white/90">{r.protocol ?? DASH}</span>
-                {r.action && <span className="ml-2 text-[10px] uppercase tracking-wider text-krypt-muted">{r.action}</span>}
+                {r.action && <span className="ml-2 text-label uppercase tracking-wider text-krypt-muted">{r.action}</span>}
               </td>
               <td className="py-2.5 pr-4 text-white/80">
                 {/* Text. Not a link, by policy — see the header of this file. */}
                 <div className="max-w-[26rem]">{r.name}</div>
-                {r.tokens.length > 0 && <div className="text-[11px] text-krypt-muted mt-0.5">{r.tokens.join(' · ')}</div>}
+                {r.tokens.length > 0 && <div className="text-body text-krypt-muted mt-0.5">{r.tokens.join(' · ')}</div>}
               </td>
               <td className="py-2.5 pr-4 text-right tabular-nums text-white/90">{fmtPctOrDash(r.aprPct, 2)}</td>
               <td className="py-2.5 pr-4 text-right tabular-nums text-krypt-muted">
@@ -233,7 +233,7 @@ function ChainCampaigns({ chain }: { chain: EvmChainKind }) {
         <div className="flex items-center gap-3">
           {/* The dilution control. Every tool in this category shows the
               headline rate, which is the rate BEFORE you arrive. */}
-          <label className="flex items-center gap-1.5 text-[11px] text-krypt-muted">
+          <label className="flex items-center gap-1.5 text-body text-krypt-muted">
             <span>if I add</span>
             <span className="text-krypt-muted/70">$</span>
             <input
@@ -245,7 +245,7 @@ function ChainCampaigns({ chain }: { chain: EvmChainKind }) {
                 const n = Number(e.target.value);
                 setAddUsd(Number.isFinite(n) && n >= 0 ? n : 0);
               }}
-              className="w-24 rounded border border-white/10 bg-black/30 px-2 py-1 text-right font-mono text-[11px] text-white/90 outline-none focus:border-krypt-purple/50"
+              className="w-24 rounded border border-white/10 bg-black/30 px-2 py-1 text-right font-mono text-body text-white/90 outline-none focus:border-krypt-purple/50"
             />
           </label>
           <GhostButton onClick={() => void run()} disabled={load.state === 'loading'} className="!px-3 !py-1.5 !text-xs">
@@ -311,7 +311,7 @@ function ChainWalletRewards({ chain }: { chain: EvmChainKind }) {
     <Card>
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-0">
-          <div className="font-display text-sm font-semibold tracking-[0.1em] text-white">{meta.name}</div>
+          <div className="font-display text-sm font-semibold tracking-action text-white">{meta.name}</div>
           <p className="text-xs text-krypt-muted mt-1.5 max-w-xl">
             Checking sends your address{' '}
             <span className="text-white/80 font-mono">{address ? shortAddr(address, 6) : DASH}</span> to{' '}
@@ -348,7 +348,7 @@ function ChainWalletRewards({ chain }: { chain: EvmChainKind }) {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted">
+                  <tr className="text-label uppercase tracking-label text-krypt-muted">
                     <th className="text-left font-semibold py-2 pr-4">Token</th>
                     <th className="text-right font-semibold py-2 pr-4">Earned</th>
                     <th className="text-right font-semibold py-2 pr-4">Claimed</th>
@@ -362,7 +362,7 @@ function ChainWalletRewards({ chain }: { chain: EvmChainKind }) {
                       <td className="py-2.5 pr-4">
                         <span className="text-white/90">{r.tokenSymbol}</span>
                         {r.tokenAddress && (
-                          <span className="ml-2 font-mono text-[11px] text-krypt-muted">{shortAddr(r.tokenAddress, 5)}</span>
+                          <span className="ml-2 font-mono text-body text-krypt-muted">{shortAddr(r.tokenAddress, 5)}</span>
                         )}
                       </td>
                       <td className="py-2.5 pr-4 text-right tabular-nums text-white/80">{fmtAmount(r.earned)}</td>
@@ -375,7 +375,7 @@ function ChainWalletRewards({ chain }: { chain: EvmChainKind }) {
                   ))}
                 </tbody>
               </table>
-              <p className="text-[11px] text-krypt-muted mt-3">
+              <p className="text-body text-krypt-muted mt-3">
                 Earned is cumulative since the campaign began; unclaimed is earned minus claimed; pending has accrued but is
                 not yet in a distribution root. Read {ago(answer.at)}. Krypt does not claim rewards for you and shows no
                 claim link — collect them from the protocol you already use.

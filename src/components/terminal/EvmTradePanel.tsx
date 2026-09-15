@@ -193,8 +193,8 @@ export function EvmTradePanel({
     <div className="space-y-3">
       {/* This chain's own mode. The top-bar switch follows the selected chain. */}
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted/70">{meta.name}</span>
-        <div className="inline-flex rounded-lg border border-white/12 overflow-hidden text-[10px] font-bold uppercase tracking-[0.14em]">
+        <span className="text-label uppercase tracking-label text-krypt-muted/70">{meta.name}</span>
+        <div className="inline-flex rounded-lg border border-white/12 overflow-hidden text-label font-bold uppercase tracking-label">
           <button
             onClick={() => void setMode(false)}
             className={cls('px-2.5 py-1 transition', !armed ? 'bg-emerald-500/20 text-emerald-200' : 'text-krypt-muted hover:text-white')}
@@ -219,7 +219,7 @@ export function EvmTradePanel({
             key={s}
             onClick={() => setSide(s)}
             className={cls(
-              'rounded-md py-2 text-[12px] font-bold uppercase tracking-[0.12em] transition',
+              'rounded-md py-2 text-note font-bold uppercase tracking-label transition',
               side === s
                 ? s === 'buy'
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
@@ -240,7 +240,7 @@ export function EvmTradePanel({
                 key={p}
                 onClick={() => setAmount(p)}
                 className={cls(
-                  'rounded-md border py-1.5 text-[11px] font-mono font-semibold transition',
+                  'rounded-md border py-1.5 text-body font-mono font-semibold transition',
                   amount === p
                     ? 'border-krypt-purple/50 bg-krypt-purple/20 text-white'
                     : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -262,9 +262,9 @@ export function EvmTradePanel({
               }}
               className="flex-1 bg-transparent px-3 py-2.5 text-sm font-mono text-white outline-none"
             />
-            <span className="px-3 text-[11px] uppercase text-krypt-muted">{sym}</span>
+            <span className="px-3 text-body uppercase text-krypt-muted">{sym}</span>
           </div>
-          <div className="text-[11px] text-krypt-muted text-right -mt-1">
+          <div className="text-body text-krypt-muted text-right -mt-1">
             {nativeUsd ? `≈ ${fmtUsd(amount * nativeUsd)}` : `${sym} price unavailable`}
           </div>
         </>
@@ -275,7 +275,7 @@ export function EvmTradePanel({
               key={p}
               onClick={() => setSellPct(p)}
               className={cls(
-                'rounded-md border py-1.5 text-[11px] font-mono font-semibold transition',
+                'rounded-md border py-1.5 text-body font-mono font-semibold transition',
                 sellPct === p
                   ? 'border-rose-400/50 bg-rose-500/20 text-white'
                   : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -288,7 +288,7 @@ export function EvmTradePanel({
       )}
 
       {/* The quote: what the chain said a moment ago for exactly this size. */}
-      <div className="rounded-lg border border-white/10 bg-black/25 px-3 py-2 space-y-1 text-[11px]">
+      <div className="rounded-lg border border-white/10 bg-black/25 px-3 py-2 space-y-1 text-body">
         <div className="flex items-center justify-between gap-3">
           <span className="text-krypt-muted/80">Expected</span>
           <span className="font-mono text-white/90 tabular-nums flex items-center gap-1.5">
@@ -333,19 +333,19 @@ export function EvmTradePanel({
           </span>
         </div>
         {quote && quote.approvalsNeeded > 0 && (
-          <p className="text-[10px] text-arc-gold/80 leading-relaxed">
+          <p className="text-label text-arc-gold/80 leading-relaxed">
             {quote.approvalsNeeded} one-time approval transaction{quote.approvalsNeeded === 1 ? '' : 's'} will be sent first so the router can move this token.
           </p>
         )}
-        {quote?.note && <p className="text-[10px] text-krypt-muted/70 leading-relaxed">{quote.note}</p>}
-        {quoteError && <p className="text-[10px] text-rose-300/90 leading-relaxed">{quoteError}</p>}
+        {quote?.note && <p className="text-label text-krypt-muted/70 leading-relaxed">{quote.note}</p>}
+        {quoteError && <p className="text-label text-rose-300/90 leading-relaxed">{quoteError}</p>}
       </div>
 
       <button
         onClick={() => void doTrade()}
         disabled={busy || blocked !== null}
         className={cls(
-          'w-full rounded-lg border py-3 text-sm font-bold uppercase tracking-[0.1em] transition flex items-center justify-center gap-2',
+          'w-full rounded-lg border py-3 text-sm font-bold uppercase tracking-action transition flex items-center justify-center gap-2',
           blocked !== null
             ? 'border-white/8 bg-white/5 text-krypt-muted/50 cursor-not-allowed'
             : side === 'buy'
@@ -362,24 +362,24 @@ export function EvmTradePanel({
       {/* Shown even when it does not block: on a sell it is a warning, not a
           refusal. */}
       {side === 'sell' && !blocked && state?.untradable && (
-        <p className="mt-2 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+        <p className="mt-2 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-body leading-relaxed text-amber-200">
           {state.untradable} — selling is still allowed; the quote below is the honest answer.
         </p>
       )}
       {blocked && (
-        <p className="text-[11px] text-arc-gold/80 leading-relaxed flex items-start gap-1.5">
+        <p className="text-body text-arc-gold/80 leading-relaxed flex items-start gap-1.5">
           <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-px" />
           {blocked}
         </p>
       )}
 
       {!armed && walletExists && !blocked && (
-        <p className="text-[10px] text-krypt-muted/60 leading-relaxed">
+        <p className="text-label text-krypt-muted/60 leading-relaxed">
           Paper: the real transaction is estimated on the chain and nothing is sent. No paper position is kept for {meta.shortName} yet.
         </p>
       )}
 
-      <div className="flex items-center justify-between text-[10px] text-krypt-muted/60 pt-1 border-t border-white/5">
+      <div className="flex items-center justify-between text-label text-krypt-muted/60 pt-1 border-t border-white/5">
         <span>{evm?.wallet.address ? shortAddr(evm.wallet.address, 4) : 'no wallet'}</span>
         <span>{balanceKnown ? fmtNative(balance, sym) : '—'}</span>
       </div>

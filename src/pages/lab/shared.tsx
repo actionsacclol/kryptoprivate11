@@ -11,8 +11,8 @@ import { MAX_LAB_WALLETS_PER_CALL, type RandomRunStatus } from '@shared/lab';
 import { cls } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
 
-export const selectCls = 'rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[12px] text-white';
-export const inputCls = 'rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60';
+export const selectCls = 'rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white';
+export const inputCls = 'rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60';
 
 export function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -189,7 +189,7 @@ export function groupBalance(g: WalletGroupView, balanceOf: Map<string, number |
  */
 export function RealMoneyBanner({ armed, what, kind = 'trade' }: { armed: boolean; what: string; kind?: 'trade' | 'transfer' }) {
   return (
-    <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-[12px] text-amber-200 leading-relaxed mb-4">
+    <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-note text-amber-200 leading-relaxed mb-4">
       <span className="font-semibold">Everything on this page moves real SOL between and from your own wallets.</span> {what}{' '}
       {kind === 'trade'
         ? 'Every action goes through the same signer policy and trade pipeline as a manual trade, platform fee included.'
@@ -252,24 +252,24 @@ export function ScopePicker({
             ))}
           </select>
         )}
-        <span className="text-[11px] font-mono text-krypt-muted">{scope.walletIds.length} wallet{scope.walletIds.length === 1 ? '' : 's'}</span>
+        <span className="text-body font-mono text-krypt-muted">{scope.walletIds.length} wallet{scope.walletIds.length === 1 ? '' : 's'}</span>
       </div>
       {scope.mode === 'pick' && (
         <div className="flex flex-wrap gap-1.5">
           {data.others.length === 0 ? (
-            <span className="text-[11px] text-krypt-muted">No other wallets yet — create some in Group Wallets.</span>
+            <span className="text-body text-krypt-muted">No other wallets yet — create some in Group Wallets.</span>
           ) : (
             data.others.map((w) => (
               <label
                 key={w.id}
                 className={cls(
-                  'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] cursor-pointer transition',
+                  'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-body cursor-pointer transition',
                   scope.picked.has(w.id) ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white' : 'border-white/10 text-krypt-muted hover:text-white',
                 )}
               >
                 <input type="checkbox" className="accent-krypt-purple" checked={scope.picked.has(w.id)} onChange={() => scope.toggle(w.id)} />
                 {w.label}
-                <span className="font-mono text-[10px] opacity-70">{w.balanceSol != null ? `${w.balanceSol.toFixed(3)}` : '—'}</span>
+                <span className="font-mono text-label opacity-70">{w.balanceSol != null ? `${w.balanceSol.toFixed(3)}` : '—'}</span>
               </label>
             ))
           )}

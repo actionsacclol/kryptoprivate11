@@ -15,9 +15,10 @@ import type {
   StrategySettings,
   WalletHolding,
 } from '@shared/types';
+import { EVM_CHAIN_META, nativeSymbolOf } from '@shared/evm';
 import type { EvmChainKind } from '@shared/evm';
 import { FeedManager, type LogNotification } from './feed';
-import { ReserveContinuity } from './feedHealth';
+import { ReserveContinuity, curveFeedIsTicking } from './feedHealth';
 import { DipShadow } from './dipShadow';
 import { StratLab } from './stratLab';
 import { MigShadow } from './migShadow';
@@ -30,6 +31,8 @@ import { curveProgressPct, curveProgressTokenPct, spotPriceSol, INITIAL_VIRTUAL_
 import { oddsFeaturesFromTrades, scoreOdds } from '@shared/odds';
 import type { LaunchTrade } from '@shared/launchintel';
 import { runnerVerdict, runnerNotification, pruneRunners, markCreatorSold, RunnerRateLimit, ODDS_TAPE_CAP, type RunnerFlag } from '@shared/runners';
+import type { NotifyTarget } from '@shared/types';
+import type { ChainKind } from '@shared/evm';
 import { PositionManager, type TokenMarket } from './positions';
 import { noteActiveMint } from './txBuilder';
 import { getTokenBalanceForMint, getTokenBalanceRawForMint, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from './rpcClient';
@@ -203,6 +206,34 @@ export interface EvmCopyBridge {
   /** Last price the Observatory saw for the token, native per token; null if unknown. */
   price(chain: EvmChainKind, token: string): number | null;
   facts(chain: EvmChainKind, token: string): Promise<{ liquidityUsd: number | null; marketCapUsd: number | null; kryptScore: number | null; isPumpfun: boolean }>;
+  /** A leader's current token balance, whole units — the rescue read for a
+   *  sell whose size the log did not carry. Optional: a rail that cannot
+   *  answer leaves such a sell unmirrored, as it was before. */
+  holdingOf?(chain: EvmChainKind, owner: string, token: string): Promise<number | null>;
+  /** What this install holds on the chain right now, for a script's own
+   *  position list. Optional: a rail that cannot answer leaves a live EVM
+   *  script with an EMPTY list, which refuses an exit rather than offering it
+   *  the wrong chain's bags. */
+  holdings?(chain: EvmChainKind): Promise<Array<{ token: string; symbol: string; amount: number; priceNative: number | null }>>;
+  /** The same tokens WITH cost basis, from the EVM ledger's reconciled fills.
+   *  Optional: a rail that cannot answer leaves a script with an empty list
+   *  rather than positions it cannot price. */
+  positions?(chain: EvmChainKind): Promise<Array<{
+    token: string;
+    symbol: string;
+    amount: number;
+    priceNative: number | null;
+    basisKnown: boolean;
+    costNative: number | null;
+    avgEntryPriceNative: number | null;
+    unrealizedPnlNative: number | null;
+    unrealizedPnlPct: number | null;
+    firstBuyAt: number | null;
+  }>>;
+  /** This install's wallet on the chain: native balance and address. Optional;
+   *  absent leaves a script's `walletSol` UNKNOWN rather than showing it the
+   *  Solana balance, which is a different number about a different chain. */
+  wallet?(chain: EvmChainKind): { native: number | null; address: string | null } | null;
 }
 
 export class SniperEngine {
@@ -627,7 +658,7 @@ export class SniperEngine {
       changed: () => this.emit({ kind: 'orders', snapshot: this.ordersSnapshot() }),
     });
     alerts.attach({
-      notify: (title, body) => this.notify(title, body),
+      notify: (title, body, mint) => this.notify(title, body, mint ? { mint, chain: 'solana' } : undefined),
       settings: () => this.getSettings().alerts,
       log: (level, line) => this.log(level, line),
       toast: (level, message) => this.emit({ kind: 'toast', level, message }),
@@ -713,6 +744,21 @@ export class SniperEngine {
       // mirrored "they sold 40%" is scaled to the copier's share of our bag
       // instead of taking 40% of hand-bought size too (copy-2).
       ourCostBasisSol: (mint, chain) => (chain && chain !== 'solana' ? null : this.ourCostBasisSol(mint)),
+      // The leader's CURRENT holding — the rescue path for a sell whose size
+      // the transaction did not carry. One read, and the fraction it yields
+      // is exact rather than assumed. EVM has its own balance reader; a rail
+      // without one answers null, which leaves the sell unmirrored exactly
+      // as before.
+      leaderHolding: async (leader, mint, chain) => {
+        if (chain && chain !== 'solana') return this.evmCopy?.holdingOf?.(chain, leader, mint) ?? null;
+        const s2 = this.getSettings();
+        try {
+          const r = await getTokenBalanceForMint(s2.rpc.heliusHttpUrl ?? s2.rpc.httpUrl, leader, mint);
+          return r.ok && typeof r.data === 'number' ? r.data : null;
+        } catch {
+          return null;
+        }
+      },
       priceSol: (mint, chain) =>
         chain && chain !== 'solana' ? (this.evmCopy?.price(chain, mint) ?? null) : (this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null),
       tokenFacts: async (mint, chain) => {
@@ -754,13 +800,28 @@ export class SniperEngine {
       log: (level, line) => this.log(level, line),
     });
     automation.attach({
-      buy: async (mint, sol, mode) => {
+      buy: async (mint, sol, mode, chain) => {
+        // Robinhood Chain / BNB go out on their own rail, the same one copy
+        // trading uses. Routed BEFORE the Solana path on purpose: a script on
+        // an EVM chain whose buy fell through to `testTrade` would spend SOL
+        // on a token address from another chain.
+        if (chain && chain !== 'solana') {
+          if (mode === 'paper') return this.evmPaperBuy(chain, mint, sol);
+          if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
+          return this.evmCopy.buy(chain, mint, sol);
+        }
         // Paper = the same simulation a paper buy by hand runs, booked into
         // the paper book from the simulated fill. Live = the real thing.
         const r = await this.testTrade(mint, sol, mode === 'paper');
         return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
       },
-      sell: async (mint, pct, mode) => {
+      sell: async (mint, pct, mode, chain) => {
+        if (chain && chain !== 'solana') {
+          if (mode === 'paper') return this.evmPaperSell(chain, mint, pct);
+          if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
+          const r = await this.evmCopy.sell(chain, mint, pct);
+          return { ok: r.ok, message: r.message, signature: r.signature, realizedSol: null };
+        }
         if (mode === 'paper') {
           const pos = paperBook.get(mint);
           if (!pos) return { ok: false, message: 'no paper position in this token' };
@@ -773,19 +834,46 @@ export class SniperEngine {
         const r = await this.manualSell(mint, pct);
         return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending', realizedSol: null };
       },
-      liveBlockedReason: () => this.executionBlockedReason(),
-      buyBlockedReason: () => {
+      liveBlockedReason: (chain) =>
+        chain && chain !== 'solana'
+          ? (this.evmCopy ? this.evmCopy.blocked(chain) : 'EVM trading is not available in this build')
+          : this.executionBlockedReason(),
+      buyBlockedReason: (chain) => {
+        if (chain && chain !== 'solana') return null; // the rail has no entry breakers; `blocked` above is the gate
         const pause = this.running ? this.entriesPauseReason() : null;
         return pause ? `entries are paused (${pause})` : null;
       },
-      maxLiveSol: () => this.getSettings().execution.maxLiveSol,
-      priceSol: (mint) => this.cheapPriceSol(mint),
+      maxLiveSol: (chain) =>
+        chain && chain !== 'solana'
+          ? (this.evmCopy?.maxLive(chain) ?? 0)
+          : this.getSettings().execution.maxLiveSol,
+      priceSol: (mint, chain) =>
+        chain && chain !== 'solana' ? (this.evmCopy?.price(chain, mint) ?? null) : this.cheapPriceSol(mint),
       launch: (mint) => this.tokens.get(mint)?.row ?? null,
-      marketCached: (mint) => {
+      marketCached: (mint, chain) => {
+        // The EVM rails have no cached provider summary here; their facts come
+        // from the bridge and only on request, so "cached" is honestly nothing.
+        if (chain && chain !== 'solana') return null;
         const s = market.summaryIfCached(mint);
         return s ? { priceSol: s.priceSol, priceUsd: s.priceUsd, marketCapUsd: s.marketCapUsd, liquidityUsd: s.liquidityUsd, holders: s.holders, launchpad: s.launchpad ?? null, symbol: s.symbol, name: s.name } : null;
       },
-      market: async (mint) => {
+      market: async (mint, chain) => {
+        if (chain && chain !== 'solana') {
+          if (!this.evmCopy) return null;
+          try {
+            const f = await this.evmCopy.facts(chain, mint);
+            // Only what that rail can actually answer. holders, priceUsd and
+            // launchpad have no source there and stay null rather than 0 —
+            // and the rule editor does not offer them on these chains.
+            return {
+              priceSol: this.evmCopy.price(chain, mint), priceUsd: null,
+              marketCapUsd: f.marketCapUsd, liquidityUsd: f.liquidityUsd,
+              holders: null, launchpad: null, symbol: '', name: '',
+            };
+          } catch {
+            return null;
+          }
+        }
         try {
           const s = await market.summary(mint);
           return { priceSol: s.priceSol, priceUsd: s.priceUsd, marketCapUsd: s.marketCapUsd, liquidityUsd: s.liquidityUsd, holders: s.holders, launchpad: s.launchpad ?? null, symbol: s.symbol, name: s.name };
@@ -793,8 +881,15 @@ export class SniperEngine {
           return null;
         }
       },
-      positions: (mode) => this.scriptPositions(mode),
-      wallet: () => {
+      positions: (mode, chain) => this.scriptPositions(mode, chain),
+      wallet: (chain) => {
+        // `walletSol` on an EVM script is that chain's own coin and that
+        // chain's own address. Returning the Solana balance would have a rule
+        // like "walletSol > 1" gate a BNB trade on an unrelated number.
+        if (chain && chain !== 'solana') {
+          const w = this.evmCopy?.wallet?.(chain) ?? null;
+          return { sol: w?.native ?? null, address: w?.address ?? null };
+        }
         const info = wallet.info();
         return { sol: info.balanceSol, address: wallet.publicKey() || null };
       },
@@ -1800,6 +1895,48 @@ export class SniperEngine {
     };
   }
 
+  /**
+   * A paper buy on Robinhood Chain or BNB.
+   *
+   * The Solana path asks the chain to simulate the swap. Neither EVM rail has
+   * that here, so the fill is MODELLED from the chain's own quoted price
+   * through `modelledPaperFill` — the same helper, carrying the same 1.5 % a
+   * side a real buy pays, so a paper record is never better than the trade it
+   * stands for.
+   *
+   * No price means no fill. A simulated buy at an invented price is exactly
+   * the number this product refuses to show, and it would go on to be sold
+   * against a real quote and book an invented profit.
+   */
+  private evmPaperBuy(chain: EvmChainKind, token: string, native: number): { ok: boolean; message: string } {
+    const price = this.evmCopy?.price(chain, token) ?? null;
+    if (price === null || !(price > 0)) {
+      return { ok: false, message: `no ${nativeSymbolOf(chain)} price for that token yet — paper needs a price to fill against` };
+    }
+    const fill = modelledPaperFill(native, price);
+    if (!fill) return { ok: false, message: 'that amount does not produce a fill at the current price' };
+    const r = paperBook.open({ mint: token, chain, symbol: '', tokens: fill.tokens, costSol: fill.costSol, decimalsKnown: true });
+    if (!r.ok) return { ok: false, message: r.message };
+    recorder.record('paper_buy', { chain, mint: token, native, priceSol: price, tokens: fill.tokens, by: 'script' });
+    this.emit({ kind: 'paper', mint: token, side: 'buy' });
+    return {
+      ok: true,
+      message: `Paper position opened on ${EVM_CHAIN_META[chain].name} — ${fill.tokens.toFixed(4)} tokens for ${fill.costSol.toFixed(4)} ${nativeSymbolOf(chain)} (modelled from the quoted price, fees included)`,
+    };
+  }
+
+  /** The paper exit for the same book. Refuses without a price rather than
+   *  realising a made-up number, exactly as the Solana paper sell does. */
+  private evmPaperSell(chain: EvmChainKind, token: string, pct: number): { ok: boolean; message: string; realizedSol?: number | null } {
+    const pos = paperBook.get(token, chain);
+    if (!pos) return { ok: false, message: `no paper position in that token on ${EVM_CHAIN_META[chain].name}` };
+    const price = this.evmCopy?.price(chain, token) ?? null;
+    const r = paperBook.sell(token, pct, price, chain);
+    recorder.record('paper_sell', { chain, mint: token, pct, ok: r.ok, priceSol: price, proceedsSol: r.proceedsSol, realizedSol: r.realizedSol, note: r.message.slice(0, 220), by: 'script' });
+    if (r.ok) this.emit({ kind: 'paper', mint: token, side: 'sell' });
+    return { ok: r.ok, message: r.message, realizedSol: typeof r.realizedSol === 'number' ? r.realizedSol : null };
+  }
+
   private async paperFillPrice(mint: string): Promise<number | null> {
     const own = this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null;
     if (own !== null && own > 0) return own;
@@ -2163,10 +2300,16 @@ export class SniperEngine {
         // previous sell (trades are serialized, so this is the net effect).
         const bal = await getBalance(s.rpc.httpUrl, wallet.publicKey() ?? '');
         if (bal.ok && bal.data !== undefined) {
-          if (this.liveBalanceAtLastSell !== null) {
-            if (bal.data < this.liveBalanceAtLastSell) this.liveConsecutiveLosses++;
-            else this.liveConsecutiveLosses = 0;
-          }
+          // The streak is NOT counted here. It used to be, from this balance
+          // delta — and that made one losing sell count as two, because the
+          // ledger's `onSettled` hook counts the same sale again from the
+          // reconciled fill's realised PnL. With the default limit of 2 that
+          // disarmed live trading on the FIRST loser (user report,
+          // 2026-09-13: "−0.0073 SOL appeared twice ... disarmed itself with
+          // loss_limit"). The balance delta was the worse of the two rules
+          // anyway: it compares the wallet against its level at the previous
+          // sell, so any buy in between makes a PROFITABLE sell read as a
+          // loss. `nextConsecutiveLosses` over the ledger is the one rule.
           this.liveBalanceAtLastSell = bal.data;
           this.walletBalanceLamports = bal.data;
         }
@@ -2237,9 +2380,53 @@ export class SniperEngine {
    * cost; a holding the ledger never saw bought has no cost, no PnL, and
    * a rule on either does not fire (honest null).
    */
-  private async scriptPositions(mode: 'paper' | 'live'): Promise<ScriptPosition[]> {
+  private async scriptPositions(mode: 'paper' | 'live', chain: ChainKind = 'solana'): Promise<ScriptPosition[]> {
+    // A script sees ONLY its own chain's positions. Without this an EVM
+    // script's "sell everything" enumerates Solana bags, and a Solana script
+    // would count EVM ones against its open-position budget.
+    if (chain !== 'solana') {
+      if (mode === 'paper') {
+        return paperBook
+          .list()
+          .filter((p) => (p.chain ?? 'solana') === chain)
+          .map((p) => {
+            const cur = this.evmCopy?.price(chain, p.mint) ?? null;
+            const entry = p.tokens > 0 ? p.costSol / p.tokens : null;
+            const { pnlSol, pnlPct } = positionPnl(p.costSol, p.tokens, cur);
+            return { mint: p.mint, symbol: p.symbol, name: '', openedAt: p.openedAt, costSol: p.costSol, tokens: p.tokens, entryPriceSol: entry, currentPriceSol: cur, peakPriceSol: null, pnlSol, pnlPct };
+          });
+      }
+      if (!this.evmCopy?.positions) return [];
+      try {
+        const rows = await this.evmCopy.positions(chain);
+        return rows.map((h) => ({
+          mint: h.token,
+          symbol: h.symbol,
+          name: '',
+          openedAt: h.firstBuyAt ?? 0,
+          // The EVM ledger DOES derive cost basis from reconciled on-chain
+          // fills (evm/ledger.ts basisByToken). This used to read holdings(),
+          // the raw balance underneath, and hard-code pnl to null — which made
+          // a rule like `pnlPct <= -20` unable to fire on an EVM script, the
+          // silent-never-fires failure the chain model exists to prevent.
+          //
+          // Null still means null: an unreconciled buy has no basis, and an
+          // unknown never satisfies a rule. That is the honest case, not the
+          // blanket one.
+          costSol: h.basisKnown ? h.costNative : null,
+          tokens: h.amount,
+          entryPriceSol: h.avgEntryPriceNative,
+          currentPriceSol: h.priceNative,
+          peakPriceSol: null,
+          pnlSol: h.basisKnown ? h.unrealizedPnlNative : null,
+          pnlPct: h.basisKnown ? h.unrealizedPnlPct : null,
+        }));
+      } catch {
+        return [];
+      }
+    }
     if (mode === 'paper') {
-      return paperBook.list().map((p) => {
+      return paperBook.list().filter((p) => (p.chain ?? 'solana') === 'solana').map((p) => {
         const tokens = p.decimalsKnown ? p.tokens : null;
         const cur = tokens !== null ? this.cheapPriceSol(p.mint) : null;
         const entry = tokens !== null && tokens > 0 ? p.costSol / tokens : null;
@@ -2298,6 +2485,13 @@ export class SniperEngine {
     return copyTrade.resetLeader(wallet);
   }
 
+  /** Clear PAPER copy results — one config, or all of them. Settings, live
+   *  history, leader records and real holdings are untouched. */
+  resetCopyPaper(configId?: string): { ok: boolean; message: string } {
+    const r = copyTrade.resetPaper(configId);
+    return { ok: r.ok, message: r.message };
+  }
+
   /** Point the wallet watcher at exactly the wallets with an enabled copy
    *  config. Called after every config change and once at boot, after the
    *  configs are loaded. */
@@ -2308,9 +2502,9 @@ export class SniperEngine {
   // ── Alerts (term.txt §17) ────────────────────────────────────────
 
   /** Desktop notification. Injected by main so the engine stays testable. */
-  private notifier: ((title: string, body: string) => void) | null = null;
+  private notifier: ((title: string, body: string, target?: NotifyTarget) => void) | null = null;
 
-  setNotifier(fn: (title: string, body: string) => void): void {
+  setNotifier(fn: (title: string, body: string, target?: NotifyTarget) => void): void {
     this.notifier = fn;
   }
 
@@ -2325,9 +2519,28 @@ export class SniperEngine {
     this.evmCopy = bridge;
   }
 
-  private notify(title: string, body: string): void {
+  /**
+   * A desktop notification, and whatever else is listening for one.
+   *
+   * `target` is what the notification is ABOUT. It carries the click through
+   * to the router (main attaches the handler; see `requestOpenToken`) and it
+   * is what a Discord webhook links to. Optional because not every
+   * notification has a token behind it — an update notice does not.
+   */
+  private notify(title: string, body: string, target?: NotifyTarget): void {
     if (!this.getSettings().alerts.desktopNotifications) return;
-    this.notifier?.(title, body);
+    this.notifier?.(title, body, target);
+  }
+
+  /**
+   * Someone clicked a desktop notification. Put its token on screen.
+   *
+   * Called from main, which owns the Notification and therefore the click.
+   * Routed through the engine's own emit so it travels the one channel every
+   * other UI push uses, rather than main reaching into ipc internals.
+   */
+  requestOpenToken(mint: string, chain: ChainKind): void {
+    this.emit({ kind: 'openToken', mint, chain });
   }
 
   /**
@@ -2337,8 +2550,8 @@ export class SniperEngine {
    * for Electron directly, so the desktop-notification switch and the chat
    * push mean the same thing for a Robinhood runner as for a Solana one.
    */
-  pushNotification(title: string, body: string): void {
-    this.notify(title, body);
+  pushNotification(title: string, body: string, target?: NotifyTarget): void {
+    this.notify(title, body, target);
   }
 
   alertsSnapshot(): import('@shared/alerts').AlertsSnapshot {
@@ -2858,7 +3071,9 @@ export class SniperEngine {
         // Open copies ride the same poll: a copied Raydium token gets no
         // tick from any feed, so this is what marks it to market.
         const copyMints = new Set(copyTrade.openMints());
-        const mints = [...new Set([...advOrders.armedMints(), ...alerts.armedMints(), ...copyMints])].filter((m) => !this.tokens.has(m));
+        const mints = [...new Set([...advOrders.armedMints(), ...alerts.armedMints(), ...copyMints])].filter(
+          (m) => !this.curveFeedIsTicking(m),
+        );
         if (!mints.length) {
           this.priceGap.clear();
           return;
@@ -3088,12 +3303,34 @@ export class SniperEngine {
     // Switched mid-read: answer the caller, but this is not the new
     // wallet's list — never keep or broadcast it as such.
     if (owner !== wallet.publicKey()) return { ok: true, message: 'ok', data };
+    // A copy row is opened by a buy and closed by a mirrored sell, so a
+    // manual sell — or a stop-loss, or a take-profit rung — used to leave it
+    // "open" forever (user report, 2026-09-13: three fully sold positions
+    // still showing open). Here, rather than in the portfolio build, because
+    // this is the one place a SUCCESSFUL holdings read lands: it costs no
+    // extra request, it runs for every caller, and it cannot fire on a read
+    // that failed — a failed read is not an empty wallet.
+    this.reconcileCopyRows(owner, data);
     const prev = this.lastHoldings;
     const changed =
       !prev || prev.owner !== owner || prev.data.length !== data.length || prev.data.some((h, i) => h.mint !== data[i].mint || h.amountRaw !== data[i].amountRaw);
     this.lastHoldings = { at, owner, data };
     if (changed) this.emit({ kind: 'holdings', data, at });
     return { ok: true, message: 'ok', data };
+  }
+
+  /** Close live copy rows whose tokens have left the wallet this read is
+   *  for. Scoped to the configs that actually sign with it: a config pinned
+   *  to another wallet is not described by these holdings. */
+  private reconcileCopyRows(owner: string, data: WalletHolding[]): void {
+    const mine = new Set<string>();
+    for (const c of copyTrade.all()) {
+      if ((c.chain ?? 'solana') !== 'solana') continue;
+      const signer = c.walletId ? wallet.publicKeyOf(c.walletId) : wallet.publicKey();
+      if (signer === owner) mine.add(c.id);
+    }
+    if (mine.size === 0) return;
+    copyTrade.reconcileHoldings(new Set(data.filter((h) => h.uiAmount > 0).map((h) => h.mint)), { configIds: mine });
   }
 
   /** What a held mint's own bytes say about its sellability — a Token-2022
@@ -4042,7 +4279,10 @@ export class SniperEngine {
     // Previously this returned when both shadow modules were off. The
     // terminal tape needs AMM swaps regardless, so the gate now also asks
     // whether anything is subscribed.
-    if (!sAmm.shadowStratLab && !sAmm.shadowMigration && tape.subscriptions().length === 0) return;
+    // ...and whether an armed order is waiting on a graduated token: those
+    // evaluate below, and returning here would leave them to the 12 s poller
+    // alone on a rail that moves in seconds.
+    if (!sAmm.shadowStratLab && !sAmm.shadowMigration && tape.subscriptions().length === 0 && !advOrders.hasArmed()) return;
     const decoded: AmmEvent[] = inner;
     if (inner.length === 0) {
       for (const payload of payloads) {
@@ -4060,6 +4300,20 @@ export class SniperEngine {
       if (sAmm.shadowMigration) this.emitMigEvents(this.mig.onAmmSwap(event, n.receivedAt));
       const mint = this.ammPoolToMint.get(event.pool);
       if (mint === undefined) continue;
+      // Orders on a graduated token evaluate at feed rate here, the way
+      // curve trades do in onTrade. The 12 s poller is the floor that always
+      // covers them (see `curveFeedIsTicking`); this is the fast path for
+      // the session that watched the token migrate, and it is what keeps a
+      // trailing stop's peak honest across the seam.
+      {
+        const priceSol = executedPriceSol(event);
+        if (Number.isFinite(priceSol) && priceSol > 0) {
+          this.rememberPrice(mint, priceSol);
+          advOrders.onTick({ mint, priceSol, mcapUsd: null });
+          alerts.onTick({ mint, priceSol, curvePct: 100 });
+          copyTrade.markToMarket(mint, priceSol);
+        }
+      }
       // A graduated token keeps charting: the terminal tape follows the mint
       // onto PumpSwap via the pool map, which the token page seeds from the
       // pool DexScreener reports.
@@ -4202,7 +4456,7 @@ export class SniperEngine {
         // Feed-health: every trade's reserve delta must match its SOL amount.
         // A mismatch means events between this one and the previous one for
         // this mint were dropped — the live version of the tape-analysis check.
-        this.continuity.observe(ev.mint, ev.isBuy, ev.solAmount, ev.virtualSolReserves);
+        this.continuity.observe(ev.mint, ev.isBuy, ev.solAmount, ev.virtualSolReserves, n.slot);
         if (dipOn) this.observeDip(ev, n.receivedAt);
         if (labOn) this.observeLab(ev, n.receivedAt);
         // Migration shadow's lead clock: first tick at ≥95% curve progress.
@@ -4327,6 +4581,9 @@ export class SniperEngine {
       checked: snap.checked,
       mismatched: snap.mismatched,
       lossPct: snap.lossPct,
+      // Out-of-order arrivals, skipped rather than counted as loss. High
+      // here with a low loss rate is the racing pool working.
+      staleArrivals: snap.stale,
       sockets: sockets.map((s) => ({ host: s.host, state: s.state, events: s.events, wins: s.wins, fills: s.fills, blocks: s.blocks })),
       undecodedPct: this.lastUndecodedPct,
       emitDropped: this.emitDropped,
@@ -4334,9 +4591,27 @@ export class SniperEngine {
     });
     if (snap.lossPct !== null && snap.lossPct > 5 && snap.checked >= 500 && now - this.lastFeedLossWarnAt > 10 * 60_000) {
       this.lastFeedLossWarnAt = now;
-      const msg = `feed losing ~${snap.lossPct}% of events (${snap.mismatched}/${snap.checked} continuity failures, 15m) — flow gates are undercounting; add a better WS endpoint in Settings`;
+      // Say what it affects and exactly what to do about it. The old wording
+      // ("add a better WS endpoint in Settings") named no setting, no page
+      // and no consequence, so users read it as an error they had caused and
+      // opened tickets asking what it meant (2026-09-13). It is a data-
+      // quality notice, not a fault: nothing about manual trading is broken.
+      const rpc = this.getSettings().rpc;
+      const fix = (rpc.heliusApiKey ?? '').trim()
+        ? rpc.heliusFeedSocket
+          ? 'Your Helius socket is already in the pool — this is public-endpoint loss on top of it and will pass.'
+          : 'Settings → Solana RPC → turn on "Helius feed socket" to race your key’s socket alongside the free ones (paid-plan traffic — see the note there).'
+        : 'Settings → Solana RPC → paste a free Helius API key, then turn on "Helius feed socket". Free public sockets drop events under load; a keyed one does not.';
+      const msg =
+        `feed losing ~${snap.lossPct}% of events (${snap.mismatched}/${snap.checked} continuity failures, 15m). ` +
+        `Scanner flow numbers — buyers, net inflow, volume — read LOW while this lasts, so fewer launches pass their gates. ` +
+        `Your wallet, orders and manual trades are unaffected. ${fix}`;
       this.log('warn', msg);
-      this.emit({ kind: 'toast', level: 'error', message: `Feed degraded: ~${snap.lossPct}% event loss — flow data unreliable` });
+      this.emit({
+        kind: 'toast',
+        level: 'warn',
+        message: `Feed degraded: ~${snap.lossPct}% event loss — scanner flow reads low. Trading is unaffected; see the Grimoire for the fix.`,
+      });
     }
   }
 
@@ -4588,6 +4863,10 @@ export class SniperEngine {
     {
       const priceSol = spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves);
       this.rememberPrice(ev.mint, priceSol);
+      // The order poller skips mints this feed is already ticking. It has to
+      // know that for a fact, not by assuming a tracked mint is a live one —
+      // see `curveFeedIsTicking`.
+      this.lastCurveTickAt.set(ev.mint, Date.now());
       const creatorSold = !ev.isBuy && ev.user === t.createEvent.creator;
       advOrders.onTick({
         mint: ev.mint,
@@ -4615,6 +4894,13 @@ export class SniperEngine {
           isBuy: ev.isBuy,
           sol: Number(ev.solAmount) / 1e9,
           priceSol,
+          // The token count the log DOES carry. `soldFraction` is still
+          // unknown on this rail (a log has no pre-balance), but with the
+          // count copyTrade can recover the fraction from one balance read
+          // instead of waiting for the wallet watcher's getTransaction —
+          // which always loses this race. On an exit that wait is the whole
+          // cost (user report, 2026-09-13).
+          tokens: Number(ev.tokenAmount) / 1e6,
           at: n.receivedAt,
           signature: n.signature,
         });
@@ -5066,7 +5352,7 @@ export class SniperEngine {
       const { title, body } = runnerNotification(flag);
       this.log('info', `${title} — ${body}`);
       if (this.runnerLimiter.allow(now, cfg.maxPerHour)) {
-        this.notify(title, body);
+        this.notify(title, body, { mint: flag.mint, chain: 'solana' });
         this.emit({ kind: 'toast', level: 'info', message: `${title} · ${flag.observedPct.toFixed(0)} % of this bucket graduated (base ${flag.basePct.toFixed(1)} %)` });
       }
     }
@@ -5161,6 +5447,22 @@ export class SniperEngine {
     if (Date.now() - last >= 250) this.pushLaunch(t);
   }
 
+  /** mint -> when the pump curve feed last delivered a trade for it. */
+  private lastCurveTickAt = new Map<string, number>();
+
+  /** Is the curve feed carrying this mint right now? The rule — and why
+   *  launch-list membership is not it — lives in feedHealth.ts, pure and
+   *  pinned by test/feedhealth.test.mjs. */
+  private curveFeedIsTicking(mint: string): boolean {
+    const t = this.tokens.get(mint);
+    return curveFeedIsTicking({
+      tracked: t !== undefined,
+      curveComplete: t?.curveComplete === true,
+      lastTickAt: this.lastCurveTickAt.get(mint) ?? null,
+      now: Date.now(),
+    });
+  }
+
   private evictOld(): void {
     while (this.launchOrder.length > LAUNCH_LIST_CAP) {
       const mint = this.launchOrder.shift()!;
@@ -5173,6 +5475,7 @@ export class SniperEngine {
       }
       this.tokens.delete(mint);
       this.lastPush.delete(mint);
+      this.lastCurveTickAt.delete(mint);
     }
   }
 

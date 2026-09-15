@@ -1,5 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, AlertTriangle, XCircle, Info, X } from 'lucide-react';
+import { isPanelWindow } from '../panels/windowId';
+import { cls } from '../utils/format';
 
 type Level = 'info' | 'success' | 'warn' | 'error';
 
@@ -32,6 +34,8 @@ const COLORS: Record<Level, { ring: string; icon: typeof CheckCircle2; tint: str
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
+  // Constant for the life of the window: the hash names the panel at load.
+  const panelWindow = isPanelWindow();
   const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const idRef = useRef(0);
 
@@ -61,7 +65,21 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <Ctx.Provider value={api}>
       {children}
-      <div className="pointer-events-none fixed top-4 right-4 z-[1000] flex flex-col gap-2 w-[360px]">
+      {/* Below the top bar, not over it. At `top-4` a toast landed on the
+          balance and the wallet — the two things someone is most likely to be
+          reading when one arrives. The bar is ~49 px (px-5 py-2.5 plus a
+          border), so this clears it with room to spare.
+
+          A popped-out panel gets none of this: engine toasts are about the app
+          as a whole and belong in the window that IS the app, and a 360 px
+          card inside a 420 px panel window covers the panel it was popped out
+          to show. */}
+      <div
+        className={cls(
+          'pointer-events-none fixed right-4 top-16 z-[1000] flex flex-col gap-2 w-[360px]',
+          panelWindow && 'hidden',
+        )}
+      >
         {toasts.map((t) => {
           const c = COLORS[t.level];
           const Icon = c.icon;

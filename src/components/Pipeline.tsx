@@ -34,7 +34,7 @@ function Stage({
       )}
     >
       <div className={cls(
-        'font-display text-[9px] font-semibold uppercase tracking-[0.28em]',
+        'font-display text-micro font-semibold uppercase tracking-heading',
         tone === 'gold' ? 'text-arc-gold/90' : tone === 'crimson' ? 'text-rose-300/90' : 'text-krypt-muted',
       )}>
         {label}
@@ -47,7 +47,7 @@ function Stage({
           tone === 'gold' ? 'text-arc-gold glow-text-gold' : tone === 'crimson' ? 'text-rose-300' : 'text-white',
         )}
       />
-      {sub && <div className="mt-0.5 text-[10px] font-mono text-krypt-muted/70">{sub}</div>}
+      {sub && <div className="mt-0.5 text-label font-mono text-krypt-muted/70">{sub}</div>}
     </div>
   );
 }

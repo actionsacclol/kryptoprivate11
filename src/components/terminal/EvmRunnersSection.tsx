@@ -11,6 +11,7 @@ import { ExternalLink, RefreshCw } from 'lucide-react';
 import { EVM_CHAIN_META, type ChainKind, type EvmChainKind } from '@shared/evm';
 import type { EvmScanLaunch, EvmScanStatus } from '@shared/evmScan';
 import { Card, Empty, IconButton, Section } from '../common';
+import { RunnerWebhook } from './RunnerWebhook';
 import { cls } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
 
@@ -32,35 +33,85 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
   const [busy, setBusy] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
+  // This chain's runner-alert settings, for the webhook card below. Read
+  // through the same settings channel every other panel uses.
+  const [alertsCfg, setAlertsCfg] = useState<{ webhookUrl: string } | null>(null);
+  const readCfg = useCallback(async () => {
+    const r = await window.krypt.settings.get();
+    if (r.ok && r.data) setAlertsCfg({ webhookUrl: r.data.evm[chain]?.runnerAlerts?.webhookUrl ?? '' });
+  }, [chain]);
+  useEffect(() => {
+    void readCfg();
+  }, [readCfg]);
+
+  const saveWebhook = async (webhookUrl: string): Promise<boolean> => {
+    const cur = await window.krypt.settings.get();
+    if (!cur.ok || !cur.data) {
+      toast.error('Could not read settings');
+      return false;
+    }
+    const evm = cur.data.evm;
+    const r = await window.krypt.settings.update({
+      evm: { ...evm, [chain]: { ...evm[chain], runnerAlerts: { ...evm[chain].runnerAlerts, webhookUrl } } },
+    });
+    if (!r.ok) toast.error(r.message);
+    else await readCfg();
+    return r.ok;
+  };
+
+  // The CHEAP read: three answers main already holds in memory. Safe to run on
+  // every scanner poll.
   const load = useCallback(async () => {
-    const [l, s, st, h] = await Promise.all([
+    const [l, s, st] = await Promise.all([
       window.krypt.evm.scan.launches(chain),
       window.krypt.evm.scan.status(chain),
       window.krypt.evm.state(chain),
-      window.krypt.evm.holdings(chain),
     ]);
     if (l.ok && l.data) setLaunches(l.data);
     if (s.ok && s.data) setStatus(s.data);
     if (st.ok && st.data) setArmed(st.data.live.armed);
+  }, [chain]);
+
+  /**
+   * The EXPENSIVE read, kept off the hot path.
+   *
+   * `evm.holdings` reads token balances over RPC and then PRICES them. It used
+   * to sit in the Promise.all above, which ran on mount, on a 10 s timer AND on
+   * every `evmScan` event — and that event fires on every scanner poll, seconds
+   * apart. On Robinhood's public RPC, which rate-limits bursts, those priced
+   * reads queued behind each other and the page took minutes to show anything.
+   *
+   * It only decides whether a row shows "held", so it refreshes on a slow timer
+   * and when a fill actually changes what is held.
+   */
+  const loadHeld = useCallback(async () => {
+    const h = await window.krypt.evm.holdings(chain);
     if (h.ok && h.data) setHeld(new Set(h.data.filter((x) => x.amount > 0).map((x) => x.token.toLowerCase())));
   }, [chain]);
 
   useEffect(() => {
     setLaunches(null);
     void load();
+    void loadHeld();
     const id = setInterval(() => {
       void load();
       setTick((t) => t + 1);
     }, 10_000);
+    // Holdings change when a fill lands, not when the scanner polls.
+    const heldId = setInterval(() => void loadHeld(), 60_000);
     const off = window.krypt.engine.onEvent((ev) => {
       if (ev.kind === 'evmScan' && ev.status.chain === chain) void load();
-      if (ev.kind === 'evmFill' && ev.fill.chain === chain) void load();
+      if (ev.kind === 'evmFill' && ev.fill.chain === chain) {
+        void load();
+        void loadHeld();
+      }
     });
     return () => {
       clearInterval(id);
+      clearInterval(heldId);
       off();
     };
-  }, [chain, load]);
+  }, [chain, load, loadHeld]);
 
   // Flagged first, newest first; the rest of the measured launches are a
   // count, not a list — a page called Runners lists runners.
@@ -91,19 +142,20 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
   };
 
   return (
-    <Section
+    <>
+      <Section
       title={`${meta.name} runners`}
       description={`Every launch the ${meta.name} Observatory sees is judged at +60 s against this chain's own record: which first-minute buyer bucket it landed in, and how often launches in that bucket have graduated here. The ones whose bucket clears every other launch's rate — with room to spare, not on a handful of graduations — land here, newest first. Most still do not graduate. ${armed ? 'Buy and Sell act the moment you click them, at the size beside the refresh button.' : `${meta.name} is in Paper: Buy and Sell simulate.`} Nothing is ever bought for you.`}
       actions={
         <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1 text-[11px] text-krypt-muted">
+          <label className="flex items-center gap-1 text-body text-krypt-muted">
             size
             <input
               type="text"
               inputMode="decimal"
               value={size}
               onChange={(e) => /^\d*\.?\d*$/.test(e.target.value) && setSize(e.target.value)}
-              className="w-16 rounded-md border border-white/15 bg-black/40 px-1.5 py-0.5 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+              className="w-16 rounded-md border border-white/15 bg-black/40 px-1.5 py-0.5 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
             />
             {meta.nativeSymbol}
           </label>
@@ -114,13 +166,13 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
       }
     >
       {status && !status.running && (
-        <div className="mb-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-200">
+        <div className="mb-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-body text-amber-200">
           The {meta.name} scanner is stopped, so nothing new is being judged. Start it from the Observatory or the automation bar.
         </div>
       )}
       <Card>
         {launches === null ? (
-          <div className="px-3 py-6 text-center text-[12px] text-krypt-muted">Reading the Observatory…</div>
+          <div className="px-3 py-6 text-center text-note text-krypt-muted">Reading the Observatory…</div>
         ) : flagged.length === 0 ? (
           <Empty
             title={`No ${meta.name} runners right now`}
@@ -132,7 +184,7 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
           />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-[11px]">
+            <table className="w-full text-body">
               <thead className="text-krypt-muted">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Token</th>
@@ -155,7 +207,7 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
                           {l.symbol || `${l.token.slice(0, 8)}…`}
                         </button>
                         {l.graduatedAt !== null && (
-                          <span className="ml-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-1.5 text-[9px] text-emerald-300">graduated</span>
+                          <span className="ml-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-1.5 text-micro text-emerald-300">graduated</span>
                         )}
                         <a
                           href={`${meta.explorer}/token/${l.token}`}
@@ -170,10 +222,10 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
                       <td className="px-3 py-1.5 text-right font-mono text-krypt-muted">{ago(l.seenAt)}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{w60 ? w60.uniqueBuyers : '—'}</td>
                       <td className="px-3 py-1.5" title={call.detail}>
-                        <span className="rounded-full border border-arc-gold/40 bg-arc-gold/10 px-1.5 py-0.5 text-[10px] text-arc-gold">
+                        <span className="rounded-full border border-arc-gold/40 bg-arc-gold/10 px-1.5 py-0.5 text-label text-arc-gold">
                           {call.ratePct?.toFixed(1)}% of {call.samples}
                         </span>
-                        <span className="ml-1.5 text-[10px] text-krypt-muted">
+                        <span className="ml-1.5 text-label text-krypt-muted">
                           vs {(call.otherRatePct ?? call.baseRatePct)?.toFixed(1)}% for every other launch
                         </span>
                       </td>
@@ -183,7 +235,7 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
                           <button
                             onClick={() => void quickBuy(l)}
                             disabled={busy !== null}
-                            className={cls('rounded-md border px-2 py-0.5 text-[10px] transition disabled:opacity-40', armed ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20' : 'border-white/15 bg-white/5 text-white/70 hover:bg-white/10')}
+                            className={cls('rounded-md border px-2 py-0.5 text-label transition disabled:opacity-40', armed ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20' : 'border-white/15 bg-white/5 text-white/70 hover:bg-white/10')}
                             title={armed ? `Buy ${size} ${meta.nativeSymbol} now` : 'Paper — simulates the buy'}
                           >
                             {busy === l.token ? '…' : 'Buy'}
@@ -192,7 +244,7 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
                             <button
                               onClick={() => void quickSell(l)}
                               disabled={busy !== null}
-                              className="rounded-md border border-rose-400/40 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-40"
+                              className="rounded-md border border-rose-400/40 bg-rose-500/10 px-2 py-0.5 text-label text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-40"
                               title="Sell everything you hold of it"
                             >
                               Sell
@@ -208,6 +260,17 @@ export function EvmRunnersSection({ chain, onOpenToken }: { chain: EvmChainKind;
           </div>
         )}
       </Card>
-    </Section>
+      </Section>
+
+      {/* Same card as the Solana tab, pointed at THIS chain's webhook: the
+          two chains have separate records and usually belong in separate
+          channels. */}
+      <RunnerWebhook
+        chain={chain}
+        chainLabel={meta.name}
+        webhookUrl={alertsCfg?.webhookUrl ?? ''}
+        onSave={saveWebhook}
+      />
+    </>
   );
 }

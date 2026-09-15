@@ -108,7 +108,7 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
       {loadFailure && (
         <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
           <div className="font-semibold">The warmer&rsquo;s record of open bags could not be read.</div>
-          <div className="mt-1 font-mono text-[11px] text-rose-300/90">{loadFailure}</div>
+          <div className="mt-1 font-mono text-body text-rose-300/90">{loadFailure}</div>
           <div className="mt-1">
             Nothing is being written to it this session, so the file is left intact — but a bag opened now is not remembered
             across a restart. Fix or move that file before arming.
@@ -140,8 +140,8 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
               <Section key={g.id}>
                 <Card>
                   <div className="flex items-center gap-2 mb-3">
-                    <span className="text-[13px] font-semibold text-white">{g.name}</span>
-                    <span className="text-[10px] font-mono text-krypt-muted">{members.length} wallet{members.length === 1 ? '' : 's'}</span>
+                    <span className="text-value font-semibold text-white">{g.name}</span>
+                    <span className="text-label font-mono text-krypt-muted">{members.length} wallet{members.length === 1 ? '' : 's'}</span>
                     {running ? <Badge tone="danger">running</Badge> : run ? <Badge tone="neutral">stopped</Badge> : null}
                     <div className="flex-1" />
                     <PrimaryButton onClick={() => void save(g)} disabled={!dirty || running} className="!py-1">Save</PrimaryButton>
@@ -192,7 +192,7 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
 
                   {/* Scope + start/stop */}
                   <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/5 pt-3">
-                    <span className="text-[11px] text-krypt-muted">Run on</span>
+                    <span className="text-body text-krypt-muted">Run on</span>
                     <select value={scopeWallet} onChange={(e) => setScope((cur) => ({ ...cur, [g.id]: e.target.value }))} className={selectCls} disabled={running}>
                       <option value="">Whole group ({members.length})</option>
                       {members.map((m) => (
@@ -206,11 +206,11 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
                       <PrimaryButton onClick={() => void start(g)} disabled={!armed || dirty || members.length === 0 || busy !== null} className="!py-1.5">Start</PrimaryButton>
                     )}
                   </div>
-                  {!armed && <div className="mt-2 text-[11px] text-arc-gold">{armedReason}</div>}
-                  {dirty && !running && <div className="mt-2 text-[11px] text-arc-gold">Unsaved settings — save before starting.</div>}
+                  {!armed && <div className="mt-2 text-body text-arc-gold">{armedReason}</div>}
+                  {dirty && !running && <div className="mt-2 text-body text-arc-gold">Unsaved settings — save before starting.</div>}
 
                   {run && (
-                    <div className="mt-3 rounded-lg border border-white/10 bg-black/25 p-3 text-[11px]">
+                    <div className="mt-3 rounded-lg border border-white/10 bg-black/25 p-3 text-body">
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                         <span className="text-white">
                           {running ? 'Running' : 'Stopped'} · started {run.startedAt ? fmtAgo(run.startedAt) + ' ago' : '—'}
@@ -273,13 +273,13 @@ export function WarmerPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
         <Section>
           <Card>
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-[13px] font-semibold text-white">Bags from deleted groups</span>
+              <span className="text-value font-semibold text-white">Bags from deleted groups</span>
               <Badge tone="warn">{orphanRuns.reduce((n, r) => n + r.open.length, 0)} held</Badge>
             </div>
-            <div className="text-[11px] text-krypt-muted mb-3">
+            <div className="text-body text-krypt-muted mb-3">
               These runs belong to groups that no longer exist. Their bags still sell on their own timers; sell one by hand from its token page if you would rather not wait.
             </div>
-            <div className="space-y-1 text-[11px]">
+            <div className="space-y-1 text-body">
               {orphanRuns.flatMap((r) =>
                 r.open.map((o) => (
                   <div key={`${r.groupId}:${o.walletId}:${o.mint}`} className="flex items-center gap-2">

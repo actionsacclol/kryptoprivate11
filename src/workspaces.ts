@@ -20,7 +20,7 @@
 
 import type { RouteId } from './components/Sidebar';
 
-export type WorkspaceId = 'hub' | 'terminal' | 'copy' | 'engine' | 'wallets' | 'rewards' | 'scout' | 'launch' | 'layout' | 'system';
+export type WorkspaceId = 'hub' | 'terminal' | 'automation' | 'engine' | 'wallets' | 'rewards' | 'scout' | 'launch' | 'layout' | 'system';
 
 export interface WorkspaceSpec {
   id: WorkspaceId;
@@ -43,7 +43,7 @@ export interface WorkspaceSpec {
    */
   groups?: Array<{ label: string; routes: RouteId[] }>;
   /** Lucide icon name, resolved by the Hub so this module stays icon-free. */
-  icon: 'compass' | 'users' | 'cpu' | 'wallet' | 'gift' | 'scout' | 'launch' | 'layout' | 'settings';
+  icon: 'compass' | 'users' | 'cpu' | 'wallet' | 'gift' | 'scout' | 'launch' | 'layout' | 'settings' | 'automation';
   /** False until the workspace has something worth opening. */
   ready: boolean;
 }
@@ -63,20 +63,31 @@ export const WORKSPACES: WorkspaceSpec[] = [
     ready: true,
   },
   {
-    id: 'copy',
-    title: 'Copy Trading',
-    blurb: "Follow other traders' wallets. Paper first, always.",
-    routes: ['wallets'],
-    icon: 'users',
+    id: 'automation',
+    title: 'Automation',
+    // Was "Copy Trading", which named ONE of the things in it. What actually
+    // unites these pages is that each one acts off something other than your
+    // click — another trader's wallet, a rule you wrote, a schedule. Scripts
+    // moved here from Main Engine for that reason: it is not part of the
+    // scanner, it just happened to be built alongside it.
+    blurb: 'Everything that trades without you clicking: followed wallets, your own rules, and farming.',
+    routes: ['wallets', 'scripts', 'farming'],
+    icon: 'automation',
     ready: true,
   },
   {
     id: 'engine',
     title: 'Main Engine',
-    blurb: 'The scanner, your scripts, and everything that acts on its own.',
-    routes: ['dashboard', 'observatoryrobinhood', 'observatorybnb', 'launches', 'scripts', 'strategy', 'execution', 'backtest', 'history', 'console'],
+    // Scripts used to be listed here and owned here. It moved to Automation
+    // on 2026-09-13: it is a thing that acts on its own, not a part of the
+    // scanner, and the two were only together because they were built
+    // together. Deliberately NOT left in `extraRoutes` — two menus showing
+    // the same page is how the flat sidebar became unreadable in the first
+    // place, and the Hub card for Automation now says where it went.
+    blurb: 'The scanner, its tuning, and the record of what it did.',
+    routes: ['dashboard', 'observatoryrobinhood', 'observatorybnb', 'launches', 'strategy', 'execution', 'backtest', 'history', 'console'],
     groups: [
-      { label: 'Running', routes: ['dashboard', 'observatoryrobinhood', 'observatorybnb', 'launches', 'scripts'] },
+      { label: 'Running', routes: ['dashboard', 'observatoryrobinhood', 'observatorybnb', 'launches'] },
       { label: 'Tuning', routes: ['strategy', 'execution'] },
       { label: 'Looking back', routes: ['backtest', 'history', 'console'] },
     ],

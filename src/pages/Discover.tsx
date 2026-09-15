@@ -220,14 +220,14 @@ export function Discover({
     <div className="flex flex-col h-full">
       <div className="px-6 pt-5 pb-3 flex items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-[0.06em] text-white">Discover</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-display text-white">Discover</h1>
           <p className="mt-1 text-sm text-krypt-muted">{SUBTITLE[chain]}</p>
         </div>
         <div className="flex items-center gap-2">
           {/* The chain switch lives in the top bar: it is app-wide, not a
               Discover setting. */}
           <div className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5">
-            <span className="text-[10px] uppercase tracking-[0.14em] text-krypt-muted">Quick buy</span>
+            <span className="text-label uppercase tracking-label text-krypt-muted">Quick buy</span>
             <input
               type="number"
               min={0}
@@ -237,9 +237,9 @@ export function Discover({
                 const n = Number(e.target.value);
                 if (Number.isFinite(n) && n >= 0) setQuickBuySol(n);
               }}
-              className="w-14 bg-transparent text-[12px] font-mono text-white outline-none text-right"
+              className="w-14 bg-transparent text-note font-mono text-white outline-none text-right"
             />
-            <span className="text-[10px] text-krypt-muted">{unit}</span>
+            <span className="text-label text-krypt-muted">{unit}</span>
           </div>
           <button
             onClick={() => term.setPaused(!term.paused)}
@@ -279,7 +279,7 @@ export function Discover({
 
       {providersOff && (
         <div className="mx-6 mb-3 rounded-lg border border-arc-gold/30 bg-arc-gold/10 px-4 py-2.5">
-          <p className="text-[12px] text-arc-gold/90">
+          <p className="text-note text-arc-gold/90">
             All market-data providers are off, so there is nothing to discover. Turn them on in{' '}
             <span className="font-semibold">Settings → Market data</span>.
           </p>
@@ -305,7 +305,7 @@ export function Discover({
                   <button
                     onClick={() => setExpanded(expanded === col.id ? null : col.id)}
                     title={expanded === col.id ? 'Back to all four columns' : `Expand ${col.label} to fill the page`}
-                    className="group flex items-center gap-1.5 font-display text-[12px] font-semibold tracking-[0.14em] uppercase text-white hover:text-krypt-pink transition"
+                    className="group flex items-center gap-1.5 font-display text-note font-semibold tracking-label uppercase text-white hover:text-krypt-pink transition"
                   >
                     {col.label}
                     {expanded === col.id ? (
@@ -318,13 +318,13 @@ export function Discover({
                       is what tells you the buttons above did something. */}
                   {col.id === 'trending' && !isEvm && (
                     <span
-                      className="rounded border border-white/10 px-1 py-px text-[9px] font-mono text-krypt-muted"
+                      className="rounded border border-white/10 px-1 py-px text-micro font-mono text-krypt-muted"
                       title="Ranked by traded volume in this window"
                     >
                       {term.filters.window}
                     </span>
                   )}
-                  <span className="text-[10px] font-mono text-krypt-muted">
+                  <span className="text-label font-mono text-krypt-muted">
                     {rows.length}
                     {rows.length !== state.rows.length && (
                       <span className="text-krypt-muted/50">/{state.rows.length}</span>
@@ -333,7 +333,7 @@ export function Discover({
                   <div className="flex-1" />
                   {state.loading && <Loader2 className="h-3 w-3 animate-spin text-krypt-purple" />}
                   {state.fetchedAt && !state.loading && (
-                    <span className="text-[9px] text-krypt-muted/45" title={col.hint}>
+                    <span className="text-micro text-krypt-muted/45" title={col.hint}>
                       {fmtAgo(state.fetchedAt)} ago
                     </span>
                   )}
@@ -351,22 +351,22 @@ export function Discover({
                     // Rows survived a parked provider: keep them, say why they
                     // are not refreshing. A 429 used to blank the column.
                     <div className={cls('rounded-md border border-arc-gold/25 bg-arc-gold/10 px-3 py-2', expanded === col.id && 'col-span-full')}>
-                      <p className="text-[10px] text-arc-gold/90 leading-relaxed">{state.error}</p>
+                      <p className="text-label text-arc-gold/90 leading-relaxed">{state.error}</p>
                     </div>
                   )}
                   {state.error && rows.length === 0 ? (
                     <div className={cls('rounded-md border border-rose-400/25 bg-rose-500/10 px-3 py-3', expanded === col.id && 'col-span-full')}>
-                      <p className="text-[11px] text-rose-200 leading-relaxed">{state.error}</p>
+                      <p className="text-body text-rose-200 leading-relaxed">{state.error}</p>
                       <button
                         onClick={() => term.refreshNow(col.id)}
-                        className="mt-2 text-[10px] text-rose-200/80 hover:text-white underline underline-offset-2"
+                        className="mt-2 text-label text-rose-200/80 hover:text-white underline underline-offset-2"
                       >
                         Retry
                       </button>
                     </div>
                   ) : rows.length === 0 ? (
                     <div className={cls('rounded-md border border-dashed border-white/10 px-3 py-8 text-center', expanded === col.id && 'col-span-full')}>
-                      <p className="text-[11px] text-krypt-muted">
+                      <p className="text-body text-krypt-muted">
                         {state.loading
                           ? 'Loading…'
                           : state.rows.length > 0

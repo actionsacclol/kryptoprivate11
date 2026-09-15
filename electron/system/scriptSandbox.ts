@@ -193,7 +193,7 @@ export interface StartResult {
 }
 
 /** Start (or restart) the sandbox for a script and load its code. */
-export async function start(scriptId: string, code: string): Promise<StartResult> {
+export async function start(scriptId: string, code: string, info?: { chain?: string; nativeSymbol?: string }): Promise<StartResult> {
   await stop(scriptId, 'restart');
   let win: BrowserWindow;
   try {
@@ -315,7 +315,7 @@ export async function start(scriptId: string, code: string): Promise<StartResult
   // Phase 2: the script's own top-level code. It may use top-level `await`,
   // so this budget is the USER's, and a renderer that keeps answering is
   // given more of it rather than killed for being slow.
-  post(box, { t: 'init', scriptId, code });
+  post(box, { t: 'init', scriptId, code, chain: info?.chain, nativeSymbol: info?.nativeSymbol });
   const startedAt = Date.now();
   let ready: { ok: boolean; why: string } | null = null;
   for (;;) {

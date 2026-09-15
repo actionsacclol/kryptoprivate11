@@ -38,7 +38,19 @@ function parse(raw: unknown): StoreFile | null {
     // half-armed later.
     .filter((t) => validateTemplate(t).ok)
     .slice(0, MAX_TEMPLATES);
-  return { version: 1, templates, activeId: typeof o.activeId === 'string' ? o.activeId : null };
+  // Auto-sell is OFF unless the file names a template that SURVIVED the
+  // filtering above. A stored id whose template was dropped — invalid after
+  // a version change, or sliced off past MAX_TEMPLATES — is healed to null
+  // here rather than left dangling. `active()` already refuses to arm a
+  // ghost, so this is not a behaviour fix; it is so the stored state, the
+  // dropdown and the engine agree on "off" instead of disagreeing quietly.
+  // Same rule the EVM wallet store applies to its own dangling activeId.
+  const wanted = typeof o.activeId === 'string' ? o.activeId : null;
+  const armed =
+    wanted !== null && (templates.some((t) => t.id === wanted) || BUILT_IN_TEMPLATES.some((t) => t.id === wanted))
+      ? wanted
+      : null;
+  return { version: 1, templates, activeId: armed };
 }
 
 export function init(userDataDir: string): void {

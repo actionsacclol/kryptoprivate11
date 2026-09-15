@@ -143,7 +143,7 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
               }}
               placeholder="token mint address"
               spellCheck={false}
-              className="w-[26rem] max-w-full rounded-md border border-white/15 bg-black/40 px-2 py-1.5 font-mono text-[12px] text-white outline-none focus:border-krypt-purple/60"
+              className="w-[26rem] max-w-full rounded-md border border-white/15 bg-black/40 px-2 py-1.5 font-mono text-note text-white outline-none focus:border-krypt-purple/60"
             />
             <PrimaryButton onClick={() => void lookUp()} disabled={!mintOk || lookingUp} className="!py-1.5">
               <Search className={cls('h-3.5 w-3.5', lookingUp && 'animate-pulse')} />
@@ -165,15 +165,15 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
             )}
           </div>
           {mintText.trim() && !mintOk && (
-            <div className="mt-2 text-[11px] text-rose-300">That is not a mint address (32–44 base58 characters).</div>
+            <div className="mt-2 text-body text-rose-300">That is not a mint address (32–44 base58 characters).</div>
           )}
 
           {token && (
             <div className="mt-4 border-t border-white/8 pt-4">
               <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <span className="text-[15px] font-semibold text-white">{token.symbol || token.mint.slice(0, 6)}</span>
-                <span className="text-[12px] text-krypt-muted">{token.name}</span>
-                <span className="font-mono text-[11px] text-krypt-muted">
+                <span className="text-figure font-semibold text-white">{token.symbol || token.mint.slice(0, 6)}</span>
+                <span className="text-note text-krypt-muted">{token.name}</span>
+                <span className="font-mono text-body text-krypt-muted">
                   {token.marketCapUsd !== null ? `${fmtUsd(token.marketCapUsd)} MC` : 'market cap unknown'}
                   {token.priceSol !== null ? ` · ${token.priceSol.toExponential(2)} SOL` : ' · no price'}
                 </span>
@@ -201,7 +201,7 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
             <div className="font-semibold text-arc-gold text-sm">
               {paused.length} order{paused.length === 1 ? '' : 's'} paused after restart — not protecting you
             </div>
-            <p className="text-[12px] text-arc-gold/80 mt-1 leading-relaxed">
+            <p className="text-note text-arc-gold/80 mt-1 leading-relaxed">
               Orders survive a restart but never re-arm themselves, so a stop loss can't fire into a market the app
               wasn't watching. Review them below, then resume. Anything that was mid-execution when the app closed
               stays paused until you've checked your wallet.
@@ -221,7 +221,7 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
             {blockedArmed.length} order{blockedArmed.length === 1 ? "'s" : "s'"} condition has been met but could not
             execute
           </div>
-          <p className="text-[12px] text-rose-200/80 mt-1 leading-relaxed">
+          <p className="text-note text-rose-200/80 mt-1 leading-relaxed">
             {snap?.blockedReason
               ? `Blocked because ${snap.blockedReason}. `
               : ''}
@@ -233,7 +233,7 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
 
       {snap && !snap.executable && paused.length === 0 && blockedArmed.length === 0 && active.length > 0 && (
         <div className="mb-5 rounded-lg border border-white/12 bg-black/25 px-4 py-2.5">
-          <p className="text-[12px] text-krypt-muted">
+          <p className="text-note text-krypt-muted">
             Orders are armed but cannot execute — {snap.blockedReason}.
           </p>
         </div>
@@ -285,10 +285,10 @@ export function OrdersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
       )}
 
       <Card className={cls('mt-4', 'border-white/8')}>
-        <h3 className="font-display text-[10px] font-semibold uppercase tracking-[0.28em] text-krypt-muted mb-2">
+        <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted mb-2">
           How these behave
         </h3>
-        <ul className="text-[11px] text-krypt-muted space-y-1.5 leading-relaxed">
+        <ul className="text-body text-krypt-muted space-y-1.5 leading-relaxed">
           <li>
             <span className="text-white">Exactly once.</span> An order can fire one time. The state change is written
             to disk before anything is signed, so a crash mid-execution can never produce a second transaction.

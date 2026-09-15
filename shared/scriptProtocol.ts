@@ -11,7 +11,7 @@
 // Pure: no Electron here, so the harness page and the parser are testable.
 
 export type MainToSandbox =
-  | { t: 'init'; scriptId: string; code: string }
+  | { t: 'init'; scriptId: string; code: string; chain?: string; nativeSymbol?: string }
   | { t: 'event'; id: number; name: string; payload: unknown }
   | { t: 'reply'; id: number; ok: boolean; value?: unknown; error?: string };
 
@@ -167,6 +167,12 @@ export function sandboxPageHtml(): string {
   const pending = new Map();
   let nextId = 1;
   let scriptId = null;
+  // Static per script, so they are handed over with the code rather than
+  // costing a round trip. Exposed as getters because \`bot\` is frozen before
+  // init arrives. Deliberately NOT including the mode: a script that behaves
+  // differently on paper is not a rehearsal of the live one.
+  let chain = 'solana';
+  let nativeSymbol = 'SOL';
 
   const send = (m) => { try { bridge.send(m); } catch (_) {} };
   const str = (v) => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch (_) { return String(v); } };
@@ -222,6 +228,10 @@ export function sandboxPageHtml(): string {
     setState: (obj) => call('setState', [obj]),
     disable: (reason) => call('disable', [str(reason || 'disabled by the script')]),
     now: () => Date.now(),
+    /** 'solana' | 'robinhood' | 'bnb' — the chain this script runs on. */
+    get chain() { return chain; },
+    /** The coin every amount in this script is denominated in: SOL, ETH or BNB. */
+    get nativeSymbol() { return nativeSymbol; },
   });
 
   const safeConsole = Object.freeze({
@@ -236,6 +246,8 @@ export function sandboxPageHtml(): string {
     if (!m || typeof m !== 'object') return;
     if (m.t === 'init') {
       scriptId = m.scriptId;
+      if (typeof m.chain === 'string' && m.chain) chain = m.chain;
+      if (typeof m.nativeSymbol === 'string' && m.nativeSymbol) nativeSymbol = m.nativeSymbol;
       try {
         // AsyncFunction, not Function: the guide (and the generated AI
         // prompt) promise top-level \`await\`, and a plain Function body

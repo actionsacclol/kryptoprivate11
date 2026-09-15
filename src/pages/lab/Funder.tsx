@@ -167,14 +167,14 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
               Fund {fundTargets.length} wallet{fundTargets.length === 1 ? '' : 's'}
             </PrimaryButton>
           </div>
-          <div className={cls('mt-2 text-[11px]', fundPlan.ok ? 'text-krypt-muted' : 'text-rose-300')}>
+          <div className={cls('mt-2 text-body', fundPlan.ok ? 'text-krypt-muted' : 'text-rose-300')}>
             {fundPlan.ok
               ? `${fundPlan.message} = ${fmtSol(fundPlan.totalLamports / 1e9)} SOL total · source has ${active?.balanceSol != null ? `${active.balanceSol.toFixed(4)} SOL` : 'an unknown balance'}`
               : fundPlan.message}
             {armedReason && <span className="block text-arc-gold">{armedReason}</span>}
             {fundTooMany && <span className="block text-arc-gold">{fundTooMany}</span>}
           </div>
-          {fundResult && <div className="mt-2 text-[11px] font-mono text-white/80">{fundResult}</div>}
+          {fundResult && <div className="mt-2 text-body font-mono text-white/80">{fundResult}</div>}
         </Card>
       </Section>
 
@@ -212,11 +212,11 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
             <GhostButton onClick={() => void doCollect()} disabled={!armed || busy !== null || !!collectTooMany || collectScope.walletIds.length === 0}>
               Collect spare SOL from {collectScope.walletIds.length} wallet{collectScope.walletIds.length === 1 ? '' : 's'}
             </GhostButton>
-            {armedReason && <span className="text-[11px] text-arc-gold">{armedReason}</span>}
-            {collectTooMany && <span className="text-[11px] text-arc-gold">{collectTooMany}</span>}
+            {armedReason && <span className="text-body text-arc-gold">{armedReason}</span>}
+            {collectTooMany && <span className="text-body text-arc-gold">{collectTooMany}</span>}
           </div>
           {collectResults && (
-            <div className="mt-2 space-y-0.5 text-[11px] font-mono">
+            <div className="mt-2 space-y-0.5 text-body font-mono">
               {collectResults.map((r) => (
                 <div key={r.walletId} className={r.ok ? 'text-emerald-300/90' : 'text-rose-300/90'}>
                   {labelOf.get(r.walletId) ?? r.walletId}: {r.ok ? `sent ${fmtSol(r.sol)} SOL` : r.message}

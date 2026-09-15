@@ -83,7 +83,7 @@ function ChainBlock({
             </div>
             <button
               onClick={() => void window.krypt.app.openExternal('https://dashboard.alchemy.com')}
-              className="text-[11px] font-semibold text-krypt-purple hover:text-white transition-colors"
+              className="text-body font-semibold text-krypt-purple hover:text-white transition-colors"
             >
               Get a free key at alchemy.com →
             </button>
@@ -97,7 +97,7 @@ function ChainBlock({
             autoComplete="off"
             className={inputCls}
           />
-          <div className="text-[11px] text-krypt-muted/70 mt-1">
+          <div className="text-body text-krypt-muted/70 mt-1">
             Robinhood's docs recommend Alchemy; the public endpoint rate-limits a Discover-sized burst. The key stays on this machine.
           </div>
         </div>
@@ -111,7 +111,7 @@ function ChainBlock({
           spellCheck={false}
           className={inputCls}
         />
-        <div className="text-[11px] text-krypt-muted/70 mt-1">
+        <div className="text-body text-krypt-muted/70 mt-1">
           {keyed ? 'Used only when no Alchemy key is set. ' : "BNB's public endpoints are generous; an own URL is optional. "}
           Must be https.
           {evm && (
@@ -122,18 +122,18 @@ function ChainBlock({
           )}
         </div>
         {rpcStatus === 'unreachable' && (
-          <div className="text-[11px] text-rose-300/90 mt-1">
+          <div className="text-body text-rose-300/90 mt-1">
             Your RPC URL is not answering — using the public endpoint. Check the address above.
           </div>
         )}
         {rpcStatus === 'rejected' && (
-          <div className="text-[11px] text-rose-300/90 mt-1">Your key or RPC URL was rejected (401/403) — using the public endpoint until you fix it.</div>
+          <div className="text-body text-rose-300/90 mt-1">Your key or RPC URL was rejected (401/403) — using the public endpoint until you fix it.</div>
         )}
         {rpcStatus === 'rate-limited' && (
           // Only Robinhood reads an Alchemy key; on BNB the key field does not
           // exist and `resolveEvmRpcUrl` ignores one, so the remedy there is
           // the RPC URL field above.
-          <div className="text-[11px] text-arc-gold/90 mt-1">
+          <div className="text-body text-arc-gold/90 mt-1">
             Rate limited by the public endpoint — {keyed ? 'add an Alchemy key' : 'set your own BNB RPC URL above (NodeReal, QuickNode, dRPC)'} for a steady feed.
           </div>
         )}
@@ -201,7 +201,7 @@ export function EvmSettingsCard({
               suffix="%"
               warn={(n) => (n < 0 ? 'Must be 0 or more' : n > 50 ? 'Max 50 %' : n < 2 ? 'Pons and four.meme charge 1 % per fill (Pons adds a creator tax); under 2 % most curve buys will revert' : null)}
             />
-            <div className="text-[11px] text-krypt-muted/70 mt-1">
+            <div className="text-body text-krypt-muted/70 mt-1">
               Buys use this cap; sells use the wider of this and 15 %, so an exit is never refused over a tight cap. The Solana loss
               breakers (session loss cap, losses in a row) do not cover the EVM chains yet.
             </div>
@@ -215,7 +215,7 @@ export function EvmSettingsCard({
               spellCheck={false}
               className={inputCls}
             />
-            <div className="text-[11px] text-krypt-muted/70 mt-1">
+            <div className="text-body text-krypt-muted/70 mt-1">
               They receive their share of the Krypt fee; it costs you nothing extra. Charged inside the same transaction on pool trades; on
               launchpad curves it is a separate transfer sent right after the fill. four.meme sells pay the whole fee to the treasury (no
               referral split there).

@@ -4,7 +4,9 @@ import { AUTOMATION_ROUTES, type RouteId } from './components/Sidebar';
 import { ensureRouteCacheSubscribed } from './state/routeCache';
 import { landingRouteOf, routesFor, workspaceOf, type WorkspaceId } from './workspaces';
 import { loadPinned } from './panels/pinned';
+import { setChartToken } from './panels/chartToken';
 import { Hub } from './pages/Hub';
+import { AppBackdrop, BACKDROP_FULL, BACKDROP_QUIET } from './components/viz/LiquidMetal';
 import { ROUTE_LOADERS, prefetchRoute, prefetchWhenIdle } from './routeLoaders';
 import { TopBar } from './components/TopBar';
 import { Onboarding } from './components/Onboarding';
@@ -55,6 +57,7 @@ const Execution = lazy(() => ROUTE_LOADERS.execution().then((m) => ({ default: m
 const History = lazy(() => ROUTE_LOADERS.history().then((m) => ({ default: m.History })));
 const Backtest = lazy(() => ROUTE_LOADERS.backtest().then((m) => ({ default: m.Backtest })));
 const RewardsPage = lazy(() => ROUTE_LOADERS.rewards().then((m) => ({ default: m.RewardsPage })));
+const FarmingPage = lazy(() => ROUTE_LOADERS.farming().then((m) => ({ default: m.FarmingPage })));
 const WalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.WalletPage })));
 const EvmWalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.EvmWalletPage })));
 const Strategy = lazy(() => ROUTE_LOADERS.strategy().then((m) => ({ default: m.Strategy })));
@@ -86,6 +89,7 @@ export default function App() {
   // Pages open on what the last visit saw; the cache listens for the
   // engine's pushes from the first frame on.
   useEffect(() => ensureRouteCacheSubscribed(), []);
+
   useEffect(() => prefetchWhenIdle(WARM_ROUTES), []);
   const [openMint, setOpenMint] = useState<string | null>(null);
   const [openChain, setOpenChain] = useState<ChainKind>('solana');
@@ -139,23 +143,44 @@ export default function App() {
   const openToken = useCallback((mint: string, chain?: ChainKind) => {
     setTarget('token');
     setOpenMint(mint);
+    // The chart panel follows whatever was opened last, in this window or a
+    // popped-out one. Written here because this is the one place every route
+    // into a token converges.
+    setChartToken({ mint, chain: chain ?? (isEvmAddress(mint) ? 'robinhood' : 'solana') });
     // Callers that know the row's chain say so; a bare 0x address (an old
     // pin, a script) is Robinhood's, the first EVM chain the app had.
     setOpenChain(chain ?? (isEvmAddress(mint) ? 'robinhood' : 'solana'));
+    // The WORKSPACE moves too, not just the route.
+    //
+    // A workspace decides what renders at all: while it is 'hub', nothing but
+    // the Hub is on screen, so setting the route alone looked like the click
+    // did nothing. Three callers had each learned this separately and set the
+    // workspace themselves before calling — the Hub, a popped-out panel and a
+    // notification click — and the top-bar search, which can be used from ANY
+    // workspace, had not. Doing it here makes every caller correct by
+    // construction instead of by remembering.
+    setWorkspace(workspaceOf('token'));
     setRoute('token');
   }, []);
 
-  // A token opened FROM the Hub has to leave the Hub: `openToken` changes the
-  // route but not the workspace, and while the workspace is 'hub' nothing but
-  // the Hub renders. Follow the token page into its own workspace, as
-  // `navigate` does for any route.
-  const openTokenFromHub = useCallback(
-    (mint: string) => {
-      setWorkspace(workspaceOf('token'));
-      openToken(mint, 'solana');
-    },
-    [openToken],
-  );
+  // Still its own function, but only to name the chain: the Hub's rows are
+  // Solana. Leaving the Hub is `openToken`'s job now, along with every other
+  // way into a token.
+  const openTokenFromHub = useCallback((mint: string) => openToken(mint, 'solana'), [openToken]);
+
+  // Clicking a desktop notification opens its token. Main owns the
+  // Notification (and so the click); it asks the engine to emit this, and
+  // this is where it lands. Until 2026-09-13 the click did nothing at all,
+  // so the one thing the notification was pushing you toward still meant
+  // going and finding the coin by hand.
+  useEffect(() => {
+    return window.krypt.engine.onEvent((ev) => {
+      if (ev.kind !== 'openToken') return;
+      // `openToken` moves the workspace as well as the route, so a
+      // notification click lands on the token wherever the user was.
+      openToken(ev.mint, ev.chain);
+    });
+  }, [openToken]);
 
   // Discover is never unmounted. Its ~10,000 row elements were the cost of
   // every return visit (4–5 s of mount work plus a cold fetch of all four
@@ -181,6 +206,16 @@ export default function App() {
       <LiteModeHost />
       <div className="pointer-events-none fixed inset-0 bg-krypt-radial" />
       <div className="pointer-events-none fixed inset-0 stars-backdrop opacity-80" />
+      {/* The liquid-metal sheet, in the same layer as the two above so it
+          paints BEHIND the chrome rather than over it — the top bar is a
+          static div with no z-index, and anything positioned washes it out.
+          Mounted ONCE for the life of the app: the Hub gets it at full
+          strength as the moment of arrival, every other page gets a far
+          quieter one (a ninth of the pixels, half the frames) so it can sit
+          behind a live chart without being felt. Only once `reduceEffects`
+          is known to be false; Lite mode unmounts it and disposes the GL
+          context. */}
+      <AppBackdrop intensity={onHub ? BACKDROP_FULL : BACKDROP_QUIET} />
       {/* Sidebar and Ticker subscribe to engine AND market state THEMSELVES.
           App used to call useAppState(), which meant the engine's 1/s status
           push re-rendered the ROOT — and with it every route, including
@@ -263,7 +298,8 @@ export default function App() {
                   {route === 'history' && <History />}
                   {route === 'backtest' && <Backtest />}
                   {route === 'rewards' && <RewardsPage />}
-                  {route === 'workspace' && <WorkspacePage />}
+                  {route === 'farming' && <FarmingPage />}
+                  {route === 'workspace' && <WorkspacePage openToken={openToken} />}
                   {route === 'scout' && <ScoutPage />}
                   {route === 'launch' && <LaunchPage />}
                   {route === 'swap' && <SwapPage />}

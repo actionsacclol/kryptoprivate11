@@ -53,10 +53,10 @@ export function UpdateNotice() {
     >
       <ArrowUpCircle className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${status.important ? 'text-arc-gold' : 'text-krypt-purple'}`} />
       <span className="min-w-0">
-        <span className="block text-[11px] font-semibold text-white/90">
+        <span className="block text-body font-semibold text-white/90">
           {status.important ? `Important update: ${status.latest}` : `Version ${status.latest} is out`}
         </span>
-        <span className="block text-[10px] leading-relaxed text-krypt-muted">
+        <span className="block text-label leading-relaxed text-krypt-muted">
           You are on {status.current}. Get it from krypt.cc.
         </span>
       </span>

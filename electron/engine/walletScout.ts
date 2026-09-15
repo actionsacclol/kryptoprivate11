@@ -348,6 +348,41 @@ export function wallets(chain: ScoutChain): ScoutWallet[] {
   return [...s.tracked.values()].map((b) => toWallet(chain, b));
 }
 
+/**
+ * Forget every tracked wallet on a chain.
+ *
+ * The population here is built by WATCHING — the live feed and any scan the
+ * user runs — so it only grows, and the only way to start a fresh hunt was to
+ * delete a file by hand. Nothing ships with wallets in it; this is the user's
+ * own accumulation, and it has to be theirs to throw away.
+ *
+ * SAVED wallets survive. Saving is a deliberate act — the one signal on this
+ * page that the user, not the scanner, put there — and a "clear" that threw it
+ * away would make the bookmark useless. They are returned to a blank record
+ * rather than deleted, so a saved wallet still appears and simply has nothing
+ * measured about it yet.
+ */
+export function clearTracked(chain: ScoutChain): { ok: boolean; message: string; cleared: number } {
+  const s = chainState(chain);
+  const before = s.tracked.size;
+  const keep = new Set(s.saved);
+  for (const [addr] of [...s.tracked]) {
+    if (!keep.has(addr)) s.tracked.delete(addr);
+  }
+  // Sightings and open positions are session state about wallets that no longer
+  // have a record; leaving them would let the next trade resurrect a half-row.
+  s.sightings.clear();
+  persist();
+  const cleared = before - s.tracked.size;
+  return {
+    ok: true,
+    message: cleared
+      ? `Forgot ${cleared.toLocaleString()} wallet${cleared === 1 ? '' : 's'}${keep.size ? `, kept ${keep.size} saved` : ''}`
+      : 'Nothing tracked to clear',
+    cleared,
+  };
+}
+
 export function counts(chain: ScoutChain): { tracked: number; watching: number; cap: number } {
   const s = chainState(chain);
   return { tracked: s.tracked.size, watching: s.sightings.size, cap: MAX_TRACKED };

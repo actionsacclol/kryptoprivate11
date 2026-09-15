@@ -83,7 +83,7 @@ export function HolderMap({
   if (graph.nodes.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-white/10 bg-black/20 px-4 py-8 text-center">
-        <p className="text-[12px] text-krypt-muted leading-relaxed max-w-md mx-auto">
+        <p className="text-note text-krypt-muted leading-relaxed max-w-md mx-auto">
           {emptyNote ??
             'No holder data for this token. The free public Solana RPC refuses holder lookups — add a free Helius key in Settings → Solana RPC, or a Birdeye key in Settings → Market data.'}
         </p>
@@ -94,7 +94,7 @@ export function HolderMap({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[11px] text-krypt-muted">
+        <span className="text-body text-krypt-muted">
           {graph.nodes.length} holder{graph.nodes.length === 1 ? '' : 's'}, bubble area = share of supply
         </span>
         <div className="flex-1" />
@@ -103,7 +103,7 @@ export function HolderMap({
             onClick={onAnalyse}
             disabled={analysing}
             className={cls(
-              'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[10px] font-semibold transition',
+              'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-label font-semibold transition',
               analysing
                 ? 'border-white/10 bg-white/5 text-krypt-muted cursor-wait'
                 : 'border-krypt-purple/45 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25',
@@ -116,7 +116,7 @@ export function HolderMap({
       </div>
 
       {!graph.analysed && (
-        <p className="text-[10px] text-krypt-muted/65 leading-relaxed">
+        <p className="text-label text-krypt-muted/65 leading-relaxed">
           Funding links are not free — tracing them reads each holder&rsquo;s earliest transactions, a couple of RPC
           calls per wallet. It runs only when you ask, and the result reports exactly how many calls it spent.
         </p>
@@ -175,15 +175,15 @@ export function HolderMap({
         {hover && (
           <div className="absolute left-2 bottom-2 rounded-md border border-white/15 bg-krypt-panel/95 px-3 py-2 backdrop-blur-sm pointer-events-none">
             <div className="flex items-center gap-2">
-              <span className="font-mono text-[11px] text-white">
+              <span className="font-mono text-body text-white">
                 {hover.node.label ?? shortAddr(hover.node.id, 6)}
               </span>
-              <span className="text-[11px] font-mono text-krypt-purple">{fmtPctOrDash(hover.node.pct, 2)}</span>
+              <span className="text-body font-mono text-krypt-purple">{fmtPctOrDash(hover.node.pct, 2)}</span>
               {hover.node.id === creator && (
-                <span className="text-[9px] font-bold uppercase text-rose-300">creator</span>
+                <span className="text-micro font-bold uppercase text-rose-300">creator</span>
               )}
             </div>
-            <div className="text-[10px] text-krypt-muted mt-0.5">
+            <div className="text-label text-krypt-muted mt-0.5">
               {colorFor(hover.node.tags).label}
               {hover.node.ageMs !== null && (
                 <> · wallet {hover.node.ageMs < 86_400_000
@@ -192,7 +192,7 @@ export function HolderMap({
               )}
             </div>
             {hover.node.fundedBy && (
-              <div className="text-[10px] text-fuchsia-300/85 mt-0.5">
+              <div className="text-label text-fuchsia-300/85 mt-0.5">
                 funded by {shortAddr(hover.node.fundedBy, 5)}
               </div>
             )}
@@ -208,7 +208,7 @@ export function HolderMap({
               className="h-2.5 w-2.5 rounded-full border"
               style={{ background: TAG_COLOR[t].fill, borderColor: TAG_COLOR[t].stroke }}
             />
-            <span className="text-[10px] text-krypt-muted">{TAG_COLOR[t].label}</span>
+            <span className="text-label text-krypt-muted">{TAG_COLOR[t].label}</span>
           </div>
         ))}
       </div>
@@ -217,13 +217,13 @@ export function HolderMap({
       {graph.analysed && (
         biggestCluster ? (
           <div className="rounded-lg border border-fuchsia-400/30 bg-fuchsia-500/10 px-3 py-2.5">
-            <div className="flex items-center gap-2 text-[12px] font-semibold text-fuchsia-200">
+            <div className="flex items-center gap-2 text-note font-semibold text-fuchsia-200">
               <TriangleAlert className="h-3.5 w-3.5" />
               {graph.clusters.length} funding cluster{graph.clusters.length === 1 ? '' : 's'} found
             </div>
             <div className="mt-1.5 space-y-1">
               {graph.clusters.slice(0, 4).map((c) => (
-                <div key={c.funder} className="text-[11px] text-fuchsia-100/85 font-mono">
+                <div key={c.funder} className="text-body text-fuchsia-100/85 font-mono">
                   {c.members.length} wallets · {c.totalPct.toFixed(2)}% of supply · funded by{' '}
                   {shortAddr(c.funder, 5)}
                 </div>
@@ -231,13 +231,13 @@ export function HolderMap({
             </div>
           </div>
         ) : (
-          <p className="text-[11px] text-emerald-300/85">
+          <p className="text-body text-emerald-300/85">
             No funding clusters found among the analysed holders.
           </p>
         )
       )}
 
-      {graph.note && <p className="text-[10px] text-krypt-muted/60 leading-relaxed">{graph.note}</p>}
+      {graph.note && <p className="text-label text-krypt-muted/60 leading-relaxed">{graph.note}</p>}
     </div>
   );
 }

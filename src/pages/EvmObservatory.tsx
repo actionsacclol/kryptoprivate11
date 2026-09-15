@@ -25,6 +25,7 @@ import {
   type RunnerModel,
 } from '@shared/evmRunners';
 import { useAppState } from '../state/AppStateProvider';
+import { Stat } from '../components/common';
 
 /** Unknown is an em dash. Never 0. */
 const n = (v: number | null | undefined): string => (typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString() : '—');
@@ -34,21 +35,6 @@ const ago = (t: number | null): string => {
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`;
 };
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'warn' | 'muted' }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-krypt-panel px-3 py-2">
-      <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/70">{label}</div>
-      <div
-        className={`mt-0.5 font-mono text-base font-semibold ${
-          tone === 'good' ? 'text-emerald-300' : tone === 'warn' ? 'text-amber-300' : tone === 'muted' ? 'text-krypt-muted' : 'text-white'
-        }`}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
 
 export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
   const meta = EVM_CHAIN_META[chain];
@@ -121,7 +107,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
             <Telescope className="h-4 w-4 text-krypt-pink" />
             {meta.name} Observatory
           </h1>
-          <p className="text-[12px] text-krypt-muted">
+          <p className="text-note text-krypt-muted">
             Watching {meta.launchpadLabel} launches on chain {meta.id}. Measured facts only — no odds on this chain yet.
           </p>
         </div>
@@ -130,7 +116,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
             one scanner, one of them ambiguous about WHICH, was the problem
             that row exists to fix. */}
         <span
-          className={`rounded-full border px-2.5 py-1 text-[11px] ${
+          className={`rounded-full border px-2.5 py-1 text-body ${
             status.running ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300' : 'border-white/10 bg-white/5 text-krypt-muted'
           }`}
         >
@@ -139,12 +125,12 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
       </div>
 
       {!status.enabled && (
-        <p className="mb-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[12px] text-krypt-muted">
+        <p className="mb-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-note text-krypt-muted">
           {meta.name} is turned off in Settings, so nothing is polled and nothing is shown.
         </p>
       )}
       {status.lastError && (
-        <p className="mb-3 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-[12px] text-amber-200">
+        <p className="mb-3 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-note text-amber-200">
           Last poll: {status.lastError}
         </p>
       )}
@@ -162,7 +148,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
         <Stat label="Calls" value={n(status.callsFlagged)} tone={status.callsFlagged > 0 ? 'good' : undefined} />
         <Stat label="Last block" value={n(status.lastBlock)} tone={status.behind !== null && status.behind > 50 ? 'warn' : undefined} />
       </div>
-      <p className="mt-2 text-[11px] text-krypt-muted">
+      <p className="mt-2 text-body text-krypt-muted">
         {status.behind === null ? 'Head not read yet.' : `${n(status.behind)} block(s) behind the head.`}
         {status.lastPollAt !== null && ` Last poll ${ago(status.lastPollAt)} ago.`}
         {status.startedAt !== null && status.running && ` Watching for ${ago(status.startedAt)}.`}
@@ -176,7 +162,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
             onClick={() => setAlerts({ enabled: !alerts.enabled })}
-            className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${
+            className={`rounded-lg border px-2.5 py-1 text-body font-semibold transition ${
               alerts.enabled
                 ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white'
                 : 'border-white/10 bg-white/5 text-krypt-muted hover:bg-white/10'
@@ -185,12 +171,12 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
             {alerts.enabled ? 'Runner alerts on' : 'Runner alerts off'}
           </button>
 
-          <label className="flex items-center gap-1.5 text-[11px] text-krypt-muted">
+          <label className="flex items-center gap-1.5 text-body text-krypt-muted">
             Tell me from
             <select
               value={alerts.minBucket}
               onChange={(e) => setAlerts({ minBucket: Number(e.target.value) as BuyerBucket })}
-              className="rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[11px] text-white focus:outline-none"
+              className="rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-body text-white focus:outline-none"
             >
               {BUYER_BUCKETS.filter((b) => b > 0).map((b) => (
                 <option key={b} value={b}>{BUYER_BUCKET_LABEL[b]}</option>
@@ -199,7 +185,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
             upwards
           </label>
 
-          <label className="flex items-center gap-1.5 text-[11px] text-krypt-muted">
+          <label className="flex items-center gap-1.5 text-body text-krypt-muted">
             At most
             <input
               type="number"
@@ -207,7 +193,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
               max={120}
               value={alerts.maxPerHour}
               onChange={(e) => setAlerts({ maxPerHour: Math.round(Number(e.target.value)) })}
-              className="w-14 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-right font-mono text-[11px] text-white focus:outline-none"
+              className="w-14 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-right font-mono text-body text-white focus:outline-none"
             />
             an hour
           </label>
@@ -215,7 +201,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
           <button
             onClick={() => setAlerts({ requireBeatsBase: !alerts.requireBeatsBase })}
             title="A bucket can be well sampled and still be no better than picking at random."
-            className="flex items-center gap-1.5 text-[11px] text-krypt-muted transition hover:text-white/80"
+            className="flex items-center gap-1.5 text-body text-krypt-muted transition hover:text-white/80"
           >
             <span className={`h-3 w-3 rounded border ${alerts.requireBeatsBase ? 'border-krypt-purple bg-krypt-purple/40' : 'border-white/20'}`} />
             only when it beats this chain's base rate
@@ -223,23 +209,23 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
 
           <button
             onClick={() => setFlaggedOnly((v) => !v)}
-            className="ml-auto flex items-center gap-1.5 text-[11px] text-krypt-muted transition hover:text-white/80"
+            className="ml-auto flex items-center gap-1.5 text-body text-krypt-muted transition hover:text-white/80"
           >
             <span className={`h-3 w-3 rounded border ${flaggedOnly ? 'border-arc-gold bg-arc-gold/40' : 'border-white/20'}`} />
             show flagged only
           </button>
         </div>
-        <p className="mt-2 text-[10px] leading-relaxed text-krypt-muted/80">
+        <p className="mt-2 text-label leading-relaxed text-krypt-muted/80">
           This decides what interrupts you. Every launch is still measured and still listed — the buckets below are {meta.name}'s
           whole record, whatever is set here.
         </p>
       </div>
 
-      <h2 className="mt-6 mb-2 text-[11px] uppercase tracking-[0.18em] text-krypt-muted/70">Launches, newest first</h2>
+      <h2 className="mt-6 mb-2 text-body uppercase tracking-label text-krypt-muted/70">Launches, newest first</h2>
       {watched.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-krypt-panel/40 py-12 text-center">
-          <p className="text-[13px] text-white/80">{status.running ? 'Nothing yet.' : 'Not watching.'}</p>
-          <p className="mt-1 text-[12px] text-krypt-muted">
+          <p className="text-value text-white/80">{status.running ? 'Nothing yet.' : 'Not watching.'}</p>
+          <p className="mt-1 text-note text-krypt-muted">
             {status.running
               ? 'Launches appear here as they happen — the scanner starts at the head, so nothing older is back-filled.'
               : `Use the Scanners row above — ${meta.shortName} — to follow launches from now on.`}
@@ -247,8 +233,8 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-white/10">
-          <table className="w-full min-w-[720px] text-[12px]">
-            <thead className="bg-white/[0.03] text-[10px] uppercase tracking-wider text-krypt-muted/70">
+          <table className="w-full min-w-[720px] text-note">
+            <thead className="bg-white/[0.03] text-label uppercase tracking-wider text-krypt-muted/70">
               <tr>
                 <th className="px-3 py-2 text-left font-medium">Token</th>
                 <th className="px-3 py-2 text-right font-medium">Age</th>
@@ -269,7 +255,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
                     <td className="px-3 py-1.5">
                       <span className="font-medium text-white/90">{l.symbol || `${l.token.slice(0, 8)}…`}</span>
                       {l.graduatedAt !== null && (
-                        <span className="ml-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-1.5 text-[9px] text-emerald-300">graduated</span>
+                        <span className="ml-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-1.5 text-micro text-emerald-300">graduated</span>
                       )}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono text-krypt-muted">{ago(l.seenAt)}</td>
@@ -296,11 +282,11 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
                       {!l.call ? (
                         <span className="text-krypt-muted">—</span>
                       ) : l.call.flag ? (
-                        <span className="rounded-full border border-arc-gold/40 bg-arc-gold/10 px-1.5 py-0.5 text-[10px] text-arc-gold" title={l.call.detail}>
+                        <span className="rounded-full border border-arc-gold/40 bg-arc-gold/10 px-1.5 py-0.5 text-label text-arc-gold" title={l.call.detail}>
                           {l.call.ratePct?.toFixed(1)}% vs {(l.call.otherRatePct ?? l.call.baseRatePct)?.toFixed(1)}%
                         </span>
                       ) : (
-                        <span className="text-[10px] text-krypt-muted" title={l.call.detail}>
+                        <span className="text-label text-krypt-muted" title={l.call.detail}>
                           {l.call.ratePct === null
                             ? 'not enough data'
                             : l.call.ratePct === 0 && l.call.baseRatePct === 0
@@ -319,7 +305,7 @@ export function EvmObservatory({ chain }: { chain: EvmChainKind }) {
         </div>
       )}
 
-      <div className="mt-4 space-y-2 text-[11px] leading-relaxed text-krypt-muted">
+      <div className="mt-4 space-y-2 text-body leading-relaxed text-krypt-muted">
         <p>
           <span className="text-white/80">Runner calls on {meta.name} are built from this chain's own records</span>, never from
           the Solana model — that one was fitted on pump.fun launches and its numbers describe that population.{' '}

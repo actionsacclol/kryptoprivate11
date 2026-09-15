@@ -1609,6 +1609,19 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
   const cachedNow = recallChart(cacheKey);
   const parked = chartProvidersParked();
 
+  // "No chart source is answering" is the wrong sentence for a token still
+  // on its bonding curve: NO provider indexes one, and none ever will until
+  // it graduates. The only source that can exist is our own feed, so the
+  // note has to say what the user can actually do about it — start the
+  // engine — instead of reading like an outage (user report, 2026-09-13).
+  // Any launchpad's curve, not just pump's: nothing indexes a pre-graduation
+  // token on any of them.
+  const onCurveNow = s.bondingCurvePct !== null && s.bondingCurvePct < 100;
+  const staleNote = (ageMs: number): string =>
+    onCurveNow
+      ? `Not updating — this token is still on its bonding curve, so no chart provider indexes it. Showing the last loaded chart (${Math.max(1, Math.round(ageMs / 1000))}s old). Start scanning and keep this page open and Krypt draws it live from its own feed.`
+      : tape.staleChartNote(ageMs, parked);
+
   if (tapeSol.length) {
     if (cachedNow && !cachedNow.degraded) {
       const age = Date.now() - cachedNow.at;
@@ -1622,7 +1635,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
           supplyForMcap: supply,
           candles: tape.mergeCandles(cached.candles, tapeUsd, limit),
           source: 'merged',
-          note: `${tape.staleChartNote(age, parked)} Live edge from this app’s own feed.`,
+          note: `${staleNote(age)} Live edge from this app’s own feed.`,
         };
       }
       if (cached.unit === 'sol') {
@@ -1639,7 +1652,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       // USD history but no SOL/USD rate: the fuller stale chart beats a
       // unit-mixed or tape-only one.
       if (cached.candles.length > tapeSol.length) {
-        return { ...cached, supplyForMcap: supply, note: tape.staleChartNote(age, parked) };
+        return { ...cached, supplyForMcap: supply, note: staleNote(age) };
       }
     }
     if (cachedNow?.degraded && tapeSol.length < TAPE_CAN_LEAD_AT && cachedNow.series.candles.length > tapeSol.length) {
@@ -1647,7 +1660,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       return {
         ...cachedNow.series,
         supplyForMcap: supply,
-        note: `${cachedNow.series.note ?? ''} ${tape.staleChartNote(Date.now() - cachedNow.at, parked)}`.trim(),
+        note: `${cachedNow.series.note ?? ''} ${staleNote(Date.now() - cachedNow.at)}`.trim(),
       };
     }
     const series = fromTape();
@@ -1661,7 +1674,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
     return {
       ...cachedNow.series,
       supplyForMcap: supply,
-      note: tape.staleChartNote(Date.now() - cachedNow.at, parked),
+      note: staleNote(Date.now() - cachedNow.at),
     };
   }
 

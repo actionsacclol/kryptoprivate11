@@ -649,6 +649,12 @@ function finish(o: AdvOrder, state: OrderState, note: string, signature: string 
   host?.changed();
 }
 
+/** Is anything armed at all? Cheap enough for a hot feed path to ask on
+ *  every notification, unlike `armedMints()` which allocates. */
+export function hasArmed(): boolean {
+  return orders.some((o) => o.state === 'armed');
+}
+
 /** Mints with at least one armed order — the poller's work list. */
 export function armedMints(): string[] {
   return [...new Set(orders.filter((o) => o.state === 'armed').map((o) => o.mint))];

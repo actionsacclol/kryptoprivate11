@@ -136,7 +136,7 @@ export function MarketDataSettings({
         />
 
         <div className="rounded-lg border border-white/10 bg-black/25 p-3">
-          <p className="text-[11px] text-krypt-muted leading-relaxed">
+          <p className="text-body text-krypt-muted leading-relaxed">
             <span className="text-white font-semibold">What these providers learn.</span> Each one sees the mint
             addresses you look at and your IP, because your machine asks them directly — there is no Krypt server in
             between, so Krypt never sees any of it. A provider you switch off is never contacted at all. The
@@ -159,15 +159,15 @@ export function MarketDataSettings({
                   <StatusDot p={p} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="text-[13px] font-semibold text-white">{p.label}</span>
-                      <span className="font-mono text-[10px] text-krypt-muted/70">{p.host}</span>
+                      <span className="text-value font-semibold text-white">{p.label}</span>
+                      <span className="font-mono text-label text-krypt-muted/70">{p.host}</span>
                       {!p.keyless && (
-                        <span className="rounded border border-arc-gold/30 bg-arc-gold/10 px-1.5 text-[9px] font-bold text-arc-gold">
+                        <span className="rounded border border-arc-gold/30 bg-arc-gold/10 px-1.5 text-micro font-bold text-arc-gold">
                           KEY
                         </span>
                       )}
                     </div>
-                    <p className="text-[11px] text-krypt-muted mt-0.5">{p.provides}</p>
+                    <p className="text-body text-krypt-muted mt-0.5">{p.provides}</p>
                   </div>
                   <button
                     role="switch"
@@ -190,7 +190,7 @@ export function MarketDataSettings({
                 </div>
 
                 {on && (
-                  <div className="flex items-center gap-4 mt-2 pt-2 border-t border-white/5 text-[10px] font-mono text-krypt-muted">
+                  <div className="flex items-center gap-4 mt-2 pt-2 border-t border-white/5 text-label font-mono text-krypt-muted">
                     <span>{p.calls} calls</span>
                     <span className={p.errors > 0 ? 'text-rose-400/80' : undefined}>{p.errors} errors</span>
                     <span>{p.latencyMs === null ? '—' : `${p.latencyMs}ms`}</span>
@@ -216,7 +216,7 @@ export function MarketDataSettings({
 
         {/* Birdeye key */}
         <div>
-          <label className="block text-[11px] uppercase tracking-[0.14em] text-krypt-muted mb-1.5">
+          <label className="block text-body uppercase tracking-label text-krypt-muted mb-1.5">
             Birdeye API key (optional)
           </label>
           <div className="flex gap-2">
@@ -242,7 +242,7 @@ export function MarketDataSettings({
               Save
             </GhostButton>
           </div>
-          <p className="text-[10px] text-krypt-muted/60 mt-1.5 leading-relaxed">
+          <p className="text-label text-krypt-muted/60 mt-1.5 leading-relaxed">
             Stored in your local settings file. Everything in the terminal works without it — a key only adds
             sub-minute candles for tokens the engine is not taping, full holder lists, and historical trades.
           </p>
@@ -250,7 +250,7 @@ export function MarketDataSettings({
 
         {/* Jupiter key — a host switch, not a feature unlock. */}
         <div>
-          <label className="block text-[11px] uppercase tracking-[0.14em] text-krypt-muted mb-1.5">
+          <label className="block text-body uppercase tracking-label text-krypt-muted mb-1.5">
             Jupiter API key (optional)
           </label>
           <div className="flex gap-2">
@@ -272,7 +272,7 @@ export function MarketDataSettings({
               Save
             </GhostButton>
           </div>
-          <p className="text-[10px] text-krypt-muted/60 mt-1.5 leading-relaxed">
+          <p className="text-label text-krypt-muted/60 mt-1.5 leading-relaxed">
             Jupiter unlocks no extra data — everything it serves is keyless today. What a key buys is the{' '}
             <span className="text-white/80">host</span>: without one the terminal uses{' '}
             <span className="font-mono">lite-api.jup.ag</span>, which Jupiter says will be throttled further “until
@@ -285,7 +285,7 @@ export function MarketDataSettings({
 
         {/* GIF backgrounds — nothing else in the app uses these. */}
         <div>
-          <label className="block text-[11px] uppercase tracking-[0.14em] text-krypt-muted mb-1.5">
+          <label className="block text-body uppercase tracking-label text-krypt-muted mb-1.5">
             GIF backgrounds (optional)
           </label>
           <div className="grid gap-2 sm:grid-cols-2">
@@ -316,7 +316,7 @@ export function MarketDataSettings({
               </GhostButton>
             </div>
           </div>
-          <p className="text-[10px] text-krypt-muted/60 mt-1.5 leading-relaxed">
+          <p className="text-label text-krypt-muted/60 mt-1.5 leading-relaxed">
             Only used when you search a GIF for the background of a share card or a trade replay. Both providers give a
             key away free; without one, that search is simply not offered. A chosen GIF is downloaded once and baked
             into the image, so the finished card is not linked to anyone's server.
@@ -326,7 +326,7 @@ export function MarketDataSettings({
         {/* Cadence */}
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-[11px] uppercase tracking-[0.14em] text-krypt-muted mb-1.5">
+            <label className="block text-body uppercase tracking-label text-krypt-muted mb-1.5">
               Discover refresh
             </label>
             <div className="flex items-center rounded-lg border border-white/10 bg-black/40 overflow-hidden">
@@ -337,11 +337,11 @@ export function MarketDataSettings({
                 onCommit={(n) => void updateSettings({ data: { ...settings.data, discoverRefreshSec: n } })}
                 className="flex-1 bg-transparent px-3 py-2 text-sm font-mono text-white outline-none"
               />
-              <span className="px-3 text-[11px] uppercase text-krypt-muted">sec</span>
+              <span className="px-3 text-body uppercase text-krypt-muted">sec</span>
             </div>
           </div>
           <div>
-            <label className="block text-[11px] uppercase tracking-[0.14em] text-krypt-muted mb-1.5">
+            <label className="block text-body uppercase tracking-label text-krypt-muted mb-1.5">
               Rows per column
             </label>
             <div className="flex items-center rounded-lg border border-white/10 bg-black/40 overflow-hidden">
@@ -352,7 +352,7 @@ export function MarketDataSettings({
                 onCommit={(n) => void updateSettings({ data: { ...settings.data, discoverLimit: n } })}
                 className="flex-1 bg-transparent px-3 py-2 text-sm font-mono text-white outline-none"
               />
-              <span className="px-3 text-[11px] uppercase text-krypt-muted">rows</span>
+              <span className="px-3 text-body uppercase text-krypt-muted">rows</span>
             </div>
           </div>
         </div>
@@ -368,7 +368,7 @@ export function MarketDataSettings({
           >
             Clear market cache
           </GhostButton>
-          <span className="text-[10px] text-krypt-muted/55">
+          <span className="text-label text-krypt-muted/55">
             Drops every cached response so the next refresh is a fresh fetch.
           </span>
         </div>

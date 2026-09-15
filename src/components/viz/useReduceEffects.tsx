@@ -44,7 +44,7 @@ export function useReduceEffects(): boolean | null {
 export function EffectsOff({ label }: { label: string }): JSX.Element {
   return (
     <div className="absolute inset-0 flex items-end justify-end p-3 pointer-events-none" aria-hidden="true">
-      <span className="font-display text-[10px] uppercase tracking-[0.22em] text-krypt-muted/70">{label}</span>
+      <span className="font-display text-label uppercase tracking-label text-krypt-muted/70">{label}</span>
     </div>
   );
 }

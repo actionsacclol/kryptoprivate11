@@ -34,7 +34,7 @@ const HOLD_PRESETS: Array<{ label: string; ms: number }> = [
 ];
 
 const inputCls =
-  'rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60';
+  'rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60';
 
 export function SimulateTrade({
   onClose,
@@ -78,7 +78,7 @@ export function SimulateTrade({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm" onClick={onClose}>
       <div className="plate w-full max-w-lg animate-pop-in rounded-xl p-4" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center gap-2">
-          <h3 className="font-display text-[11px] font-semibold uppercase tracking-[0.28em] text-krypt-muted">
+          <h3 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted">
             Simulate a trade
           </h3>
           <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -87,14 +87,14 @@ export function SimulateTrade({
           </button>
         </div>
 
-        <p className="mb-3 rounded-md border border-krypt-pink/30 bg-krypt-pink/10 px-3 py-2 text-[11px] leading-relaxed text-krypt-pink/90">
+        <p className="mb-3 rounded-md border border-krypt-pink/30 bg-krypt-pink/10 px-3 py-2 text-body leading-relaxed text-krypt-pink/90">
           A made-up trade for checking how the replay and the card look. Nothing here touches your wallet, and it is
           never recorded against your trade history.
         </p>
 
         <div className="grid gap-2.5">
           <div className="flex items-center gap-2">
-            <label className="w-28 text-[11px] text-krypt-muted">Ticker</label>
+            <label className="w-28 text-body text-krypt-muted">Ticker</label>
             <input
               value={symbol}
               onChange={(e) => setSymbol(e.target.value)}
@@ -105,28 +105,28 @@ export function SimulateTrade({
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="w-28 text-[11px] text-krypt-muted">Size in</label>
+            <label className="w-28 text-body text-krypt-muted">Size in</label>
             <NumberInput value={costSol} min={0.001} max={1000} onChange={setCostSol} suffix="SOL" className="w-32" />
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="w-28 text-[11px] text-krypt-muted">Result</label>
+            <label className="w-28 text-body text-krypt-muted">Result</label>
             <NumberInput value={pnlPct} min={-99} max={100000} onChange={setPnlPct} suffix="%" className="w-32" />
-            <span className={cls('font-mono text-[12px]', up ? 'text-emerald-300' : 'text-rose-300')}>
+            <span className={cls('font-mono text-note', up ? 'text-emerald-300' : 'text-rose-300')}>
               {up ? '+' : ''}
               {trade.pnlSol.toFixed(3)} SOL out {trade.proceedsSol.toFixed(3)}
             </span>
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="w-28 text-[11px] text-krypt-muted">Held</label>
+            <label className="w-28 text-body text-krypt-muted">Held</label>
             <div className="flex overflow-hidden rounded-md border border-white/10">
               {HOLD_PRESETS.map((h) => (
                 <button
                   key={h.label}
                   onClick={() => setHoldMs(h.ms)}
                   className={cls(
-                    'px-2.5 py-1 text-[10px] font-semibold transition',
+                    'px-2.5 py-1 text-label font-semibold transition',
                     holdMs === h.ms ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
                   )}
                 >
@@ -137,7 +137,7 @@ export function SimulateTrade({
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="w-28 text-[11px] text-krypt-muted">Shape</label>
+            <label className="w-28 text-body text-krypt-muted">Shape</label>
             <select value={shape} onChange={(e) => setShape(e.target.value as SimShape)} className={cls(inputCls, 'w-44')}>
               {SHAPES.map((s) => (
                 <option key={s.id} value={s.id}>
@@ -148,7 +148,7 @@ export function SimulateTrade({
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="w-28 text-[11px] text-krypt-muted">Violence</label>
+            <label className="w-28 text-body text-krypt-muted">Violence</label>
             <input
               type="range"
               min={0}
@@ -157,11 +157,11 @@ export function SimulateTrade({
               onChange={(e) => setVolatility(Number(e.target.value))}
               className="w-44 accent-krypt-purple"
             />
-            <span className="font-mono text-[11px] text-krypt-muted">{volatility}</span>
+            <span className="font-mono text-body text-krypt-muted">{volatility}</span>
             <button
               onClick={() => setSeed((s) => s + 1)}
               title="Same numbers, a different path"
-              className="ml-auto inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold text-krypt-muted transition hover:text-white"
+              className="ml-auto inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
             >
               <Wand2 className="h-3.5 w-3.5" />
               Reshuffle
@@ -184,7 +184,7 @@ export function SimulateTrade({
             <ImageIcon className="h-4 w-4" />
             Make the card
           </button>
-          <span className="font-mono text-[11px] text-krypt-muted">{candles.length} candles</span>
+          <span className="font-mono text-body text-krypt-muted">{candles.length} candles</span>
         </div>
       </div>
     </div>

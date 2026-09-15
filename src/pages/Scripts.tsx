@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Clipboard, Code2, ListChecks, Play, Plus, Power, Trash2 } from 'lucide-react';
+import type { ChainKind } from '@shared/evm';
 import {
   ALERT_KINDS,
   DEFAULT_BUDGET,
@@ -15,6 +16,11 @@ import {
   OP_LABELS,
   RULE_ACTIONS,
   RULE_FIELDS,
+  actionAvailableOn,
+  chainLabel,
+  fieldAvailableOn,
+  scriptChain,
+  triggerAvailableOn,
   RULE_TRIGGERS,
   SCOPES_FOR_TRIGGER,
   SCRIPT_API_DOC,
@@ -34,7 +40,7 @@ import {
   type ScriptStats,
   type UserScript,
 } from '@shared/automation';
-import { Badge, Card, GhostButton, Page, PrimaryButton, Section, Switch } from '../components/common';
+import { Badge, Card, Field, GhostButton, Page, PrimaryButton, Section, Switch } from '../components/common';
 import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
@@ -42,20 +48,8 @@ import { cls } from '../utils/format';
 
 type Draft = Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'> & { id?: string };
 
-const inputCls = 'w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60';
-const selectCls = 'rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[12px] text-white';
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <div className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted mb-1">
-        {label}
-        {hint && <span className="normal-case tracking-normal text-krypt-muted/60"> · {hint}</span>}
-      </div>
-      {children}
-    </label>
-  );
-}
+const inputCls = 'w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60';
+const selectCls = 'rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white';
 
 function fmtAgo(ts: number | null): string {
   if (!ts) return '—';
@@ -232,13 +226,14 @@ export function ScriptsPage() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-semibold text-white truncate">{s.name}</span>
                       <span className="flex items-center gap-1.5 flex-shrink-0">
+                        {scriptChain(s) !== 'solana' && <Badge tone="neutral">{scriptChain(s) === 'bnb' ? 'BNB' : 'Robinhood'}</Badge>}
                         <Badge tone={s.mode === 'live' ? 'danger' : 'neutral'}>{s.mode}</Badge>
                         <Badge tone={s.enabled ? 'success' : 'neutral'}>{s.enabled ? (s.kind === 'code' && st && !st.running ? 'starting' : 'on') : 'off'}</Badge>
                       </span>
                     </div>
-                    <div className="mt-1 text-[11px] text-krypt-muted truncate">{s.kind === 'rules' ? describeRules(s.rules) : `script · ${s.code.split('\n').length} lines`}</div>
+                    <div className="mt-1 text-body text-krypt-muted truncate">{s.kind === 'rules' ? describeRules(s.rules) : `script · ${s.code.split('\n').length} lines`}</div>
                     {st && (
-                      <div className="mt-1 text-[10px] font-mono text-krypt-muted/70">
+                      <div className="mt-1 text-label font-mono text-krypt-muted/70">
                         today {st.buysToday}b/{st.sellsToday}s · {st.realizedSolToday >= 0 ? '+' : ''}
                         {st.realizedSolToday.toFixed(3)} SOL · open {st.openCount}
                         {st.errorsInARow > 0 && <span className="text-rose-300"> · {st.errorsInARow} errors</span>}
@@ -273,9 +268,40 @@ export function ScriptsPage() {
                         <button
                           key={k}
                           onClick={() => setDraft({ ...draft, kind: k, code: k === 'code' && !draft.code ? SCRIPT_EXAMPLES[0].code : draft.code })}
-                          className={cls('px-3 py-1.5 text-[11px] font-semibold transition', draft.kind === k ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white')}
+                          className={cls('px-3 py-1.5 text-body font-semibold transition', draft.kind === k ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white')}
                         >
                           {k === 'rules' ? 'Rules' : 'Code'}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                  <Field label="Chain" hint="A script watches and trades on one chain">
+                    <div className="flex rounded-md border border-white/10 overflow-hidden">
+                      {(['solana', 'robinhood', 'bnb'] as const).map((ch) => (
+                        <button
+                          key={ch}
+                          onClick={() => {
+                            if (scriptChain(draft) === ch) return;
+                            // Conditions and actions the new chain cannot supply are
+                            // DROPPED rather than carried over dead: an unknown fact
+                            // never satisfies a rule, so keeping them would leave a
+                            // rule that looks armed and can never fire.
+                            const rules = {
+                              ...draft.rules,
+                              // A trigger the new chain never fires would leave the rule
+                              // armed and silent, so it falls back to one that does.
+                              trigger: triggerAvailableOn(draft.rules.trigger, ch) ? draft.rules.trigger : 'launch_update',
+                              conditions: draft.rules.conditions.filter((c) => fieldAvailableOn(c.field, ch)),
+                              actions: draft.rules.actions.filter((a) => actionAvailableOn(a.type, ch)),
+                            };
+                            setDraft({ ...draft, chain: ch, rules });
+                          }}
+                          className={cls(
+                            'px-2.5 py-1.5 text-body font-semibold transition',
+                            scriptChain(draft) === ch ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
+                          )}
+                        >
+                          {ch === 'solana' ? 'Solana' : ch === 'bnb' ? 'BNB' : 'Robinhood'}
                         </button>
                       ))}
                     </div>
@@ -286,7 +312,7 @@ export function ScriptsPage() {
                         <button
                           key={m}
                           onClick={() => setDraft({ ...draft, mode: m })}
-                          className={cls('px-3 py-1.5 text-[11px] font-semibold transition', draft.mode === m ? (m === 'live' ? 'bg-rose-500/30 text-white' : 'bg-krypt-purple/25 text-white') : 'text-krypt-muted hover:text-white')}
+                          className={cls('px-3 py-1.5 text-body font-semibold transition', draft.mode === m ? (m === 'live' ? 'bg-rose-500/30 text-white' : 'bg-krypt-purple/25 text-white') : 'text-krypt-muted hover:text-white')}
                         >
                           {m === 'paper' ? 'Paper' : 'Live'}
                         </button>
@@ -294,8 +320,20 @@ export function ScriptsPage() {
                     </div>
                   </Field>
                 </div>
+                {scriptChain(draft) !== 'solana' && (
+                  <div className="text-body text-krypt-muted flex items-start gap-2">
+                    <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-krypt-warn" />
+                    <span>
+                      On {chainLabel(scriptChain(draft))} a script sees only what that chain&rsquo;s scanner measures — buyers, buys,
+                      sells, curve progress, whether the creator sold, and money only when the curve is quoted in the chain&rsquo;s own
+                      coin. There is no Krypt score, no risk flags and no holder or creator history, so those conditions are not
+                      offered, and advanced orders and alerts are Solana-only. Paper works: the fill is modelled from the chain&rsquo;s
+                      quoted price with the same fees a real buy pays, and refuses rather than inventing one when no price is known.
+                    </span>
+                  </div>
+                )}
                 {draft.mode === 'live' && (
-                  <div className="text-[11px] text-rose-200/90 flex items-center gap-2">
+                  <div className="text-body text-rose-200/90 flex items-center gap-2">
                     <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
                     {/* Saving disarms only on the paper → live TRANSITION. A script
                         already saved as live keeps its arming and restarts with the
@@ -310,7 +348,7 @@ export function ScriptsPage() {
                   </div>
                 )}
                 {draft.mode === 'paper' && draft.kind === 'rules' && draft.rules.actions.some((a) => ['stop_loss', 'take_profit', 'trailing_stop', 'limit_buy', 'limit_sell', 'apply_template'].includes(a.type)) && (
-                  <div className="text-[11px] text-amber-200/90">Advanced orders execute for real, so a paper script records them on its log without placing them. Switch the script to live to place them.</div>
+                  <div className="text-body text-amber-200/90">Advanced orders execute for real, so a paper script records them on its log without placing them. Switch the script to live to place them.</div>
                 )}
 
                 {/* Budget */}
@@ -331,7 +369,7 @@ export function ScriptsPage() {
                     <input type="number" value={draft.budget.maxActionsPerMinute} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxActionsPerMinute: Number(e.target.value) } })} className={inputCls} />
                   </Field>
                 </div>
-                <div className="text-[11px] text-krypt-muted">
+                <div className="text-body text-krypt-muted">
                   Every action a script takes is checked against this budget in the app, not in the script. A buy over the cap is refused, not shrunk. Past the daily loss stop the script turns itself off.
                   {' '}
                   <button className="underline text-krypt-muted hover:text-white" onClick={() => setDraft({ ...draft, budget: { ...DEFAULT_BUDGET } })}>
@@ -416,8 +454,16 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
   const r = draft.rules;
   const setRules = (patch: Partial<Draft['rules']>): void => setDraft({ ...draft, rules: { ...r, ...patch } });
   const scopes = SCOPES_FOR_TRIGGER[r.trigger];
-  const fieldsFor = RULE_FIELDS.filter((f) => scopes.includes(f.scope));
-  const actionsFor = RULE_ACTIONS.filter((a) => (r.trigger === 'schedule' ? !a.needsMint : !(r.trigger === 'position' && (a.id === 'buy' || a.id === 'limit_buy'))));
+  // A chain that cannot measure a fact must not offer a condition on it: an
+  // unknown never satisfies a rule, so such a rule would look armed and never
+  // once fire. Same for actions with no implementation on the rail.
+  const chain = scriptChain(draft);
+  const fieldsFor = RULE_FIELDS.filter((f) => scopes.includes(f.scope) && fieldAvailableOn(f.id, chain));
+  const actionsFor = RULE_ACTIONS.filter(
+    (a) =>
+      actionAvailableOn(a.id, chain) &&
+      (r.trigger === 'schedule' ? !a.needsMint : !(r.trigger === 'position' && (a.id === 'buy' || a.id === 'limit_buy'))),
+  );
 
   const setCond = (i: number, patch: Partial<RuleCondition>): void => {
     const next = r.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c));
@@ -446,7 +492,7 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
               }}
               className={cls(selectCls, 'w-full')}
             >
-              {RULE_TRIGGERS.map((t) => (
+              {RULE_TRIGGERS.filter((t) => triggerAvailableOn(t.id, chain)).map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.label} — {t.hint}
                 </option>
@@ -467,7 +513,7 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
         </div>
 
         <div>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted mb-2">And all of these hold (an unknown value never does)</div>
+          <div className="text-label uppercase tracking-label text-krypt-muted mb-2">And all of these hold (an unknown value never does)</div>
           <div className="space-y-2">
             {r.conditions.map((c, i) => {
               const f = RULE_FIELDS.find((x) => x.id === c.field);
@@ -489,7 +535,7 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
                     ))}
                   </select>
                   {kind === 'boolean' ? (
-                    <span className="text-[11px] text-krypt-muted">{f?.hint || f?.unit}</span>
+                    <span className="text-body text-krypt-muted">{f?.hint || f?.unit}</span>
                   ) : (
                     <input
                       type={kind === 'number' ? 'number' : 'text'}
@@ -513,7 +559,7 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
         </div>
 
         <div>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted mb-2">Then</div>
+          <div className="text-label uppercase tracking-label text-krypt-muted mb-2">Then</div>
           <div className="space-y-2">
             {r.actions.map((a, i) => (
               <div key={i} className="grid grid-cols-[auto_1fr_auto] gap-2 items-center">
@@ -534,7 +580,7 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
               <Plus className="h-3 w-3" /> Action
             </GhostButton>
           </div>
-          <div className="mt-2 text-[11px] text-krypt-muted">Messages may use {'{symbol}'}, {'{mint}'}, {'{score}'}, {'{pnlPct}'} and any other field name. Hover a field for its unit and when it is unknown.</div>
+          <div className="mt-2 text-body text-krypt-muted">Messages may use {'{symbol}'}, {'{mint}'}, {'{score}'}, {'{pnlPct}'} and any other field name. Hover a field for its unit and when it is unknown.</div>
         </div>
       </Card>
     </Section>
@@ -553,17 +599,17 @@ function ActionParams({ a, set, templates }: { a: RuleAction; set: (a: RuleActio
       return (
         <div className="flex items-center gap-2">
           <input type="number" value={a.pct} onChange={(e) => set({ type: a.type, pct: Number(e.target.value) })} className={cls(inputCls, 'w-24')} />
-          <span className="text-[11px] text-krypt-muted">% {a.type === 'stop_loss' ? 'below the price now' : 'below the peak'} — sells all</span>
+          <span className="text-body text-krypt-muted">% {a.type === 'stop_loss' ? 'below the price now' : 'below the peak'} — sells all</span>
         </div>
       );
     case 'take_profit':
       return (
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-krypt-muted">up</span>
+          <span className="text-body text-krypt-muted">up</span>
           <input type="number" value={a.gainPct} onChange={(e) => set({ ...a, gainPct: Number(e.target.value) })} className={cls(inputCls, 'w-24')} />
-          <span className="text-[11px] text-krypt-muted">% → sell</span>
+          <span className="text-body text-krypt-muted">% → sell</span>
           <input type="number" value={a.sellPct} onChange={(e) => set({ ...a, sellPct: Number(e.target.value) })} className={cls(inputCls, 'w-20')} />
-          <span className="text-[11px] text-krypt-muted">%</span>
+          <span className="text-body text-krypt-muted">%</span>
         </div>
       );
     case 'limit_buy':
@@ -577,15 +623,15 @@ function ActionParams({ a, set, templates }: { a: RuleAction; set: (a: RuleActio
           <input type="number" step="any" value={a.value} onChange={(e) => set({ ...a, value: Number(e.target.value) })} className={cls(inputCls, 'w-32')} placeholder="level" />
           {a.type === 'limit_buy' ? (
             <>
-              <span className="text-[11px] text-krypt-muted">→ buy</span>
+              <span className="text-body text-krypt-muted">→ buy</span>
               <input type="number" step="0.01" value={a.sol} onChange={(e) => set({ ...a, sol: Number(e.target.value) })} className={cls(inputCls, 'w-24')} />
-              <span className="text-[11px] text-krypt-muted">SOL</span>
+              <span className="text-body text-krypt-muted">SOL</span>
             </>
           ) : (
             <>
-              <span className="text-[11px] text-krypt-muted">→ sell</span>
+              <span className="text-body text-krypt-muted">→ sell</span>
               <input type="number" value={a.pct} onChange={(e) => set({ ...a, pct: Number(e.target.value) })} className={cls(inputCls, 'w-20')} />
-              <span className="text-[11px] text-krypt-muted">%</span>
+              <span className="text-body text-krypt-muted">%</span>
             </>
           )}
         </div>
@@ -618,7 +664,7 @@ function ActionParams({ a, set, templates }: { a: RuleAction; set: (a: RuleActio
     case 'log':
       return <input value={a.message} onChange={(e) => set({ type: a.type, message: e.target.value })} className={inputCls} placeholder="{symbol} scored {score} — {mint}" />;
     default:
-      return <span className="text-[11px] text-krypt-muted">{hint}</span>;
+      return <span className="text-body text-krypt-muted">{hint}</span>;
   }
 }
 
@@ -675,27 +721,27 @@ function CodeEditor({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft) =>
             value={draft.code}
             onChange={(e) => setDraft({ ...draft, code: e.target.value })}
             spellCheck={false}
-            className={cls(inputCls, 'font-mono text-[12px] leading-5 min-h-[380px] resize-y')}
+            className={cls(inputCls, 'font-mono text-note leading-5 min-h-[380px] resize-y')}
           />
-          <div className="text-[11px] text-krypt-muted flex items-center gap-2">
+          <div className="text-body text-krypt-muted flex items-center gap-2">
             <Play className="h-3 w-3" /> Save, then switch it on. A handler that runs past 3 s is killed; five errors in a row turn the script off. Unknown facts are null, never zero.
           </div>
         </Card>
         {panel === 'api' && (
           <Card className="overflow-auto max-h-[560px]">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted mb-2">The bot API</div>
-            <pre className="font-mono text-[11px] leading-5 text-krypt-muted whitespace-pre-wrap">{SCRIPT_API_DOC}</pre>
+            <div className="text-label uppercase tracking-label text-krypt-muted mb-2">The bot API</div>
+            <pre className="font-mono text-body leading-5 text-krypt-muted whitespace-pre-wrap">{SCRIPT_API_DOC}</pre>
           </Card>
         )}
         {panel === 'vars' && (
           <Card className="overflow-auto max-h-[560px]">
             <div className="flex items-center justify-between mb-2">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted">Variable guide — every field a script or rule can see</div>
-              <GhostButton onClick={() => void copyGuide()} className="!py-0.5 !px-2 text-[11px]">
+              <div className="text-label uppercase tracking-label text-krypt-muted">Variable guide — every field a script or rule can see</div>
+              <GhostButton onClick={() => void copyGuide()} className="!py-0.5 !px-2 text-body">
                 Copy
               </GhostButton>
             </div>
-            <VariableGuide />
+            <VariableGuide guideChain={scriptChain(draft)} />
           </Card>
         )}
       </div>
@@ -703,7 +749,7 @@ function CodeEditor({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft) =>
   );
 }
 
-function VariableGuide() {
+function VariableGuide({ guideChain = 'solana' as ChainKind }: { guideChain?: ChainKind }) {
   const groups: Array<[string, string]> = [
     ['token', 'Launch feed'],
     ['market', 'Market providers (when cached)'],
@@ -715,16 +761,18 @@ function VariableGuide() {
     ['any', 'Always'],
   ];
   return (
-    <div className="space-y-3 text-[11px]">
+    <div className="space-y-3 text-body">
       <div className="text-krypt-muted">
         Always present: <code className="text-white/80">mint</code>, <code className="text-white/80">symbol</code>, <code className="text-white/80">name</code>, <code className="text-white/80">priceHistory</code> (SOL, oldest first).
       </div>
-      {groups.map(([scope, title]) => (
+      {groups
+        .filter(([scope]) => RULE_FIELDS.some((f) => f.scope === scope && fieldAvailableOn(f.id, guideChain)))
+        .map(([scope, title]) => (
         <div key={scope}>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted/80 mb-1">{title}</div>
+          <div className="text-label uppercase tracking-label text-krypt-muted/80 mb-1">{title}</div>
           <table className="w-full">
             <tbody>
-              {RULE_FIELDS.filter((f) => f.scope === scope).map((f) => (
+              {RULE_FIELDS.filter((f) => f.scope === scope && fieldAvailableOn(f.id, guideChain)).map((f) => (
                 <tr key={f.id} className="border-t border-white/5 align-top">
                   <td className="py-1 pr-2 font-mono text-white/85 whitespace-nowrap">{f.id}</td>
                   <td className="py-1 pr-2 text-krypt-muted/80 whitespace-nowrap">{f.kind}</td>
@@ -755,7 +803,7 @@ function ScriptLog({ lines, stats }: { lines: ScriptLogLine[]; stats?: ScriptSta
         {lines.length === 0 ? (
           <div className="p-4 text-xs text-krypt-muted">Nothing yet.</div>
         ) : (
-          <div className="font-mono text-[11px]">
+          <div className="font-mono text-body">
             {[...lines].reverse().map((l, i) => (
               <div key={i} className={cls('px-4 py-1 border-b border-white/5 flex gap-3', l.level === 'error' ? 'text-rose-300' : l.level === 'warn' ? 'text-amber-300' : 'text-white/80')}>
                 <span className="text-krypt-muted/60 flex-shrink-0">{new Date(l.at).toLocaleTimeString()}</span>

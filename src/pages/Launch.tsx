@@ -33,6 +33,7 @@ import {
 import { useAppState } from '../state/AppStateProvider';
 import { useToast } from '../state/ToastProvider';
 import { cls } from '../utils/format';
+import { Field } from '../components/common';
 
 const CHAIN_LABEL: Record<LaunchChain, string> = { solana: 'Solana', robinhood: 'Robinhood Chain' };
 const VENUE: Record<LaunchChain, string> = { solana: 'pump.fun', robinhood: 'Pons' };
@@ -68,19 +69,7 @@ interface EvmWalletRow {
 }
 
 const inputCls =
-  'w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-[12px] text-white placeholder:text-krypt-muted/60 focus:border-krypt-purple/60 focus:outline-none';
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <div className="mb-1 flex items-baseline justify-between gap-2">
-        <span className="text-[11px] font-semibold text-white/80">{label}</span>
-        {hint && <span className="text-[10px] text-krypt-muted">{hint}</span>}
-      </div>
-      {children}
-    </label>
-  );
-}
+  'w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-note text-white placeholder:text-krypt-muted/60 focus:border-krypt-purple/60 focus:outline-none';
 
 interface LaunchAttempt {
   at: number;
@@ -337,17 +326,17 @@ export function Launch() {
         <Rocket className="h-4 w-4 text-krypt-pink" />
         <h1 className="text-lg font-semibold text-white">Launch a token</h1>
       </div>
-      <p className="mb-5 text-[12px] leading-relaxed text-krypt-muted">
+      <p className="mb-5 text-note leading-relaxed text-krypt-muted">
         Create your own token on {LAUNCH_CHAINS.map((c) => CHAIN_LABEL[c]).join(' or ')}. Off by default — while it is off this app
         cannot co-sign a launch at all.
       </p>
 
       {/* ── what this is worth, said once, before the switch ───────────── */}
       <div className="mb-5 rounded-xl border border-amber-400/25 bg-amber-400/[0.07] p-4">
-        <div className="mb-1 flex items-center gap-2 text-[12px] font-semibold text-amber-200">
+        <div className="mb-1 flex items-center gap-2 text-note font-semibold text-amber-200">
           <AlertTriangle className="h-3.5 w-3.5" /> Read this before you turn it on
         </div>
-        <ul className="space-y-1 text-[11px] leading-relaxed text-amber-100/80">
+        <ul className="space-y-1 text-body leading-relaxed text-amber-100/80">
           <li>
             Measured on this app's own corpus of 73,890 launches: <span className="text-white/90">82.5% are dead in ten minutes</span>,
             about 2% ever graduate, and roughly 1 in 5,000 becomes a token with a lasting fee stream.
@@ -367,8 +356,8 @@ export function Launch() {
       {/* ── the switch ─────────────────────────────────────────────────── */}
       <div className="mb-4 flex items-center justify-between rounded-xl border border-white/10 bg-krypt-panel p-4">
         <div>
-          <div className="text-[13px] font-semibold text-white">Allow launching from this install</div>
-          <div className="mt-0.5 text-[11px] leading-relaxed text-krypt-muted">
+          <div className="text-value font-semibold text-white">Allow launching from this install</div>
+          <div className="mt-0.5 text-body leading-relaxed text-krypt-muted">
             Off: the signer refuses any transaction needing a second signature, which is every launch. On: it accepts exactly one
             extra signer — the new mint this app generates — and nothing else.
           </div>
@@ -376,7 +365,7 @@ export function Launch() {
         <button
           onClick={() => void save({ enabled: !cfg.enabled })}
           className={cls(
-            'ml-4 shrink-0 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition',
+            'ml-4 shrink-0 rounded-lg border px-3 py-1.5 text-note font-semibold transition',
             cfg.enabled
               ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25'
               : 'border-white/10 bg-white/5 text-white/80 hover:bg-white/10',
@@ -388,7 +377,7 @@ export function Launch() {
 
       {/* ── chain ──────────────────────────────────────────────────────── */}
       <div className="mb-4 rounded-xl border border-white/10 bg-krypt-panel p-4">
-        <div className="mb-2 text-[13px] font-semibold text-white">Where</div>
+        <div className="mb-2 text-value font-semibold text-white">Where</div>
         <div className="flex gap-2">
           {LAUNCH_CHAINS.map((c) => (
             <button
@@ -399,30 +388,30 @@ export function Launch() {
                 chain === c ? 'border-krypt-purple/50 bg-krypt-purple/10' : 'border-white/10 bg-white/[0.02] hover:bg-white/5',
               )}
             >
-              <div className="text-[12px] font-semibold text-white/90">{CHAIN_LABEL[c]}</div>
-              <div className="text-[10px] text-krypt-muted">{VENUE[c]}</div>
+              <div className="text-note font-semibold text-white/90">{CHAIN_LABEL[c]}</div>
+              <div className="text-label text-krypt-muted">{VENUE[c]}</div>
             </button>
           ))}
         </div>
         {!ready.ready && ready.blocker && (
-          <p className="mt-2 text-[11px] leading-relaxed text-amber-200/80">{BLOCKER_TEXT[ready.blocker]}</p>
+          <p className="mt-2 text-body leading-relaxed text-amber-200/80">{BLOCKER_TEXT[ready.blocker]}</p>
         )}
       </div>
 
       {/* ── the wallet ─────────────────────────────────────────────────── */}
       <div className="mb-4 rounded-xl border border-white/10 bg-krypt-panel p-4">
-        <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-white">
+        <div className="mb-2 flex items-center gap-2 text-value font-semibold text-white">
           <Wallet className="h-3.5 w-3.5" /> Launch wallet · {CHAIN_LABEL[chain]}
         </div>
-        <p className="mb-3 text-[11px] leading-relaxed text-krypt-muted">
+        <p className="mb-3 text-body leading-relaxed text-krypt-muted">
           Launching signs from its own wallet, never the one you trade with. A mistake in the launch path then cannot reach the keys
           holding your positions — and your creator address is not your trading address on chain.
         </p>
         {chain === 'solana' ? (
           wallets === null ? (
-            <p className="text-[11px] text-krypt-muted">Reading wallets…</p>
+            <p className="text-body text-krypt-muted">Reading wallets…</p>
           ) : wallets.length === 0 ? (
-            <p className="text-[11px] text-krypt-muted">No wallets yet. Create one on the Wallet page first.</p>
+            <p className="text-body text-krypt-muted">No wallets yet. Create one on the Wallet page first.</p>
           ) : (
             <div className="space-y-1">
               {wallets.map((w) => {
@@ -440,8 +429,8 @@ export function Launch() {
                     )}
                   >
                     <span className="min-w-0">
-                      <span className="block truncate text-[12px] text-white/90">{w.label || 'Wallet'}</span>
-                      <span className="block truncate font-mono text-[10px] text-krypt-muted">
+                      <span className="block truncate text-note text-white/90">{w.label || 'Wallet'}</span>
+                      <span className="block truncate font-mono text-label text-krypt-muted">
                         {w.publicKey}
                         {isActive && ' · your trading wallet'}
                       </span>
@@ -453,9 +442,9 @@ export function Launch() {
             </div>
           )
         ) : evmWallets === null ? (
-          <p className="text-[11px] text-krypt-muted">Reading wallets…</p>
+          <p className="text-body text-krypt-muted">Reading wallets…</p>
         ) : evmWallets.length === 0 ? (
-          <p className="text-[11px] text-krypt-muted">No Robinhood wallets yet. Create one on the Wallet page first.</p>
+          <p className="text-body text-krypt-muted">No Robinhood wallets yet. Create one on the Wallet page first.</p>
         ) : (
           <div className="space-y-1">
             {evmWallets.map((w) => {
@@ -472,8 +461,8 @@ export function Launch() {
                   )}
                 >
                   <span className="min-w-0">
-                    <span className="block truncate text-[12px] text-white/90">{w.label || 'Wallet'}</span>
-                    <span className="block truncate font-mono text-[10px] text-krypt-muted">
+                    <span className="block truncate text-note text-white/90">{w.label || 'Wallet'}</span>
+                    <span className="block truncate font-mono text-label text-krypt-muted">
                       {w.address}
                       {w.active && ' · your trading wallet'}
                     </span>
@@ -488,7 +477,7 @@ export function Launch() {
 
       {/* ── the form ───────────────────────────────────────────────────── */}
       <div className={cls('rounded-xl border border-white/10 bg-krypt-panel p-4', (!cfg.enabled || !walletPicked) && 'opacity-50')}>
-        <div className="mb-3 text-[13px] font-semibold text-white">Your token</div>
+        <div className="mb-3 text-value font-semibold text-white">Your token</div>
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Name" hint={`${draft.name.length}/${MAX_NAME}`}>
@@ -533,22 +522,22 @@ export function Launch() {
             )}
           </button>
           <div className="min-w-0 flex-1">
-            <div className="text-[11px] font-semibold text-white/80">Image</div>
-            <p className="mt-0.5 text-[10px] leading-relaxed text-krypt-muted">
+            <div className="text-body font-semibold text-white/80">Image</div>
+            <p className="mt-0.5 text-label leading-relaxed text-krypt-muted">
               {image ? image.name : 'PNG, JPG, GIF or WebP. This is the only thing most people will ever see of your token.'}
             </p>
             {image && !draft.imageUrl && (
               <button
                 onClick={() => void upload()}
                 disabled={busy !== '' || draft.name.trim() === '' || draft.symbol.trim() === ''}
-                className="mt-2 flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/90 transition hover:bg-white/10 disabled:opacity-40"
+                className="mt-2 flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-body text-white/90 transition hover:bg-white/10 disabled:opacity-40"
               >
                 {busy === 'upload' && <Loader2 className="h-3 w-3 animate-spin" />}
                 Pin to IPFS
               </button>
             )}
             {draft.imageUrl && (
-              <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-emerald-300">
+              <div className="mt-1.5 flex items-center gap-1.5 text-label text-emerald-300">
                 <Check className="h-3 w-3" /> Pinned. Nothing has been created yet.
               </div>
             )}
@@ -573,7 +562,7 @@ export function Launch() {
               className={cls(inputCls, 'font-mono')}
             />
           </Field>
-          <p className="mt-1.5 text-[10px] leading-relaxed text-krypt-muted">
+          <p className="mt-1.5 text-label leading-relaxed text-krypt-muted">
             {chain === 'robinhood'
               ? 'Pons creates and buys in one call, so nobody can buy in front of you. The buy is billed the normal 0.5% platform fee, charged separately once the launch confirms.'
               : "pump's create and buy are separate instructions, so this app creates the token and then buys it through the ordinary trade path — verified, billed and booked as a real position. There is a window of a few seconds in between."}
@@ -594,8 +583,8 @@ export function Launch() {
               >
                 <span className={cls('mt-0.5 h-3.5 w-3.5 shrink-0 rounded border', draft[key] ? 'border-krypt-purple bg-krypt-purple/40' : 'border-white/20')} />
                 <span className="min-w-0">
-                  <span className="block text-[11px] font-semibold text-white/90">{label}</span>
-                  <span className="block text-[10px] leading-relaxed text-krypt-muted">{why}</span>
+                  <span className="block text-body font-semibold text-white/90">{label}</span>
+                  <span className="block text-label leading-relaxed text-krypt-muted">{why}</span>
                 </span>
               </button>
             ))}
@@ -613,13 +602,13 @@ export function Launch() {
                 className={cls(inputCls, 'font-mono')}
               />
             </Field>
-            <p className="mt-1 text-[10px] text-krypt-muted">100 basis points is 1% of every trade, for as long as the token trades.</p>
+            <p className="mt-1 text-label text-krypt-muted">100 basis points is 1% of every trade, for as long as the token trades.</p>
           </div>
         )}
 
         {/* ── what is stopping this ───────────────────────────────────── */}
         {problems.length > 0 && cfg.enabled && walletPicked && (
-          <ul className="mt-4 space-y-1 rounded-lg border border-white/10 bg-black/20 p-3 text-[10px] leading-relaxed text-krypt-muted">
+          <ul className="mt-4 space-y-1 rounded-lg border border-white/10 bg-black/20 p-3 text-label leading-relaxed text-krypt-muted">
             {problems.map((p) => (
               <li key={p}>· {p}</li>
             ))}
@@ -627,7 +616,7 @@ export function Launch() {
         )}
 
         {checked && (
-          <div className="mt-4 flex items-start gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.07] p-3 text-[11px] leading-relaxed text-emerald-200">
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.07] p-3 text-body leading-relaxed text-emerald-200">
             <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>{checked} Nothing has been created — press Launch to do it for real.</span>
           </div>
@@ -637,7 +626,7 @@ export function Launch() {
           <button
             onClick={() => void preview()}
             disabled={!canSend}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[12px] text-white/90 transition hover:bg-white/10 disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-note text-white/90 transition hover:bg-white/10 disabled:opacity-40"
           >
             {busy === 'preview' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             Check it first
@@ -646,7 +635,7 @@ export function Launch() {
             onClick={() => void send()}
             disabled={!canSend || checked === null}
             title={checked === null ? 'Check it first — a token cannot be un-created' : undefined}
-            className="flex items-center gap-1.5 rounded-lg border border-krypt-pink/40 bg-krypt-pink/15 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-krypt-pink/25 disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-lg border border-krypt-pink/40 bg-krypt-pink/15 px-3 py-1.5 text-note font-semibold text-white transition hover:bg-krypt-pink/25 disabled:opacity-40"
           >
             {busy === 'send' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Rocket className="h-3.5 w-3.5" />}
             Launch {draft.symbol.trim() || 'it'}
@@ -661,7 +650,7 @@ export function Launch() {
           saying out loud. An unreadable balance renders as a dash, never 0. */}
       {cfg.walletId && (
         <div className="mt-4 rounded-xl border border-white/10 bg-krypt-panel p-4">
-          <div className="mb-1 flex items-center gap-2 text-[13px] font-semibold text-white">
+          <div className="mb-1 flex items-center gap-2 text-value font-semibold text-white">
             <Coins className="h-3.5 w-3.5 text-arc-gold" /> Creator fees
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -669,7 +658,7 @@ export function Launch() {
               <div className="font-mono text-base text-white">
                 {claimableSol === null ? '—' : `${claimableSol.toFixed(6)} SOL`}
               </div>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-krypt-muted">
+              <p className="mt-0.5 text-body leading-relaxed text-krypt-muted">
                 {fees?.failure
                   ? `Could not read your creator vault: ${fees.failure}`
                   : 'Everything every coin this wallet launched has paid you, in one vault. The vault keeps its rent, so this is what would actually arrive.'}
@@ -679,7 +668,7 @@ export function Launch() {
               onClick={() => void claim()}
               disabled={claiming || !claimableSol}
               title={claimableSol ? undefined : 'Nothing to claim yet'}
-              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-arc-gold/40 bg-arc-gold/10 px-3 py-1.5 text-[12px] font-semibold text-arc-gold transition hover:bg-arc-gold/20 disabled:opacity-40"
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-arc-gold/40 bg-arc-gold/10 px-3 py-1.5 text-note font-semibold text-arc-gold transition hover:bg-arc-gold/20 disabled:opacity-40"
             >
               {claiming && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               Claim
@@ -690,22 +679,22 @@ export function Launch() {
 
       {attempts.length > 0 && (
         <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.02] p-4">
-          <div className="text-[13px] font-semibold text-white">Every launch this page has sent</div>
-          <p className="mb-2 mt-0.5 text-[11px] leading-relaxed text-krypt-muted">
+          <div className="text-value font-semibold text-white">Every launch this page has sent</div>
+          <p className="mb-2 mt-0.5 text-body leading-relaxed text-krypt-muted">
             Kept on this machine. A create that timed out may still have landed — look the transaction up before launching again.
           </p>
           <div>
             <div className="space-y-1.5">
               {attempts.map((a) => (
-                <div key={`${a.at}-${a.hash ?? a.token ?? ''}`} className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-[11px]">
+                <div key={`${a.at}-${a.hash ?? a.token ?? ''}`} className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-body">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-white/90">
                       {a.symbol || '(no symbol)'} · {a.chain} · {new Date(a.at).toLocaleString()}
                     </span>
                     <span className="text-krypt-muted">{a.outcome}</span>
                   </div>
-                  {a.token && <div className="mt-1 select-all break-all font-mono text-[10px] text-krypt-muted">token {a.token}</div>}
-                  {a.hash && <div className="select-all break-all font-mono text-[10px] text-krypt-muted">tx {a.hash}</div>}
+                  {a.token && <div className="mt-1 select-all break-all font-mono text-label text-krypt-muted">token {a.token}</div>}
+                  {a.hash && <div className="select-all break-all font-mono text-label text-krypt-muted">tx {a.hash}</div>}
                 </div>
               ))}
             </div>
@@ -715,13 +704,13 @@ export function Launch() {
 
       {created && (
         <div className="mt-4 rounded-xl border border-krypt-purple/40 bg-krypt-purple/10 p-4">
-          <div className="text-[13px] font-semibold text-white">{CHAIN_LABEL[created.chain]} · your token is live</div>
-          <div className="mt-1 select-all break-all font-mono text-[11px] text-krypt-muted">{created.token}</div>
-          {created.note && <p className="mt-2 text-[11px] leading-relaxed text-amber-200/80">Your own first buy did not go through: {created.note}</p>}
+          <div className="text-value font-semibold text-white">{CHAIN_LABEL[created.chain]} · your token is live</div>
+          <div className="mt-1 select-all break-all font-mono text-body text-krypt-muted">{created.token}</div>
+          {created.note && <p className="mt-2 text-body leading-relaxed text-amber-200/80">Your own first buy did not go through: {created.note}</p>}
         </div>
       )}
 
-      <div className="mt-5 space-y-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-[11px] leading-relaxed text-krypt-muted">
+      <div className="mt-5 space-y-2 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-body leading-relaxed text-krypt-muted">
         <p className="font-semibold text-white/80">How this is kept safe</p>
         <p>
           The switch, the separate wallet, and a signer rule that accepts exactly one extra signature — the mint this app generates

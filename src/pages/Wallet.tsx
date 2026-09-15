@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 
-import { AlertTriangle, ArrowUpRight, Copy, Download, ExternalLink, FlaskConical, KeyRound, RefreshCw, ShieldAlert, Trash2, Wallet as WalletIcon, Zap } from 'lucide-react';
-import { Badge, Card, GhostButton, NumberInput, Page, PrimaryButton, Section, Switch } from '../components/common';
+import { AlertTriangle, ArrowUpRight, Download, ExternalLink, FlaskConical, KeyRound, RefreshCw, ShieldAlert, Trash2, Wallet as WalletIcon, Zap } from 'lucide-react';
+import { Badge, Card, Copyable, GhostButton, NumberInput, Page, PrimaryButton, Section, Switch } from '../components/common';
 import { useReduceEffects, EffectsOff } from '../components/viz/useReduceEffects';
 import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
@@ -107,7 +107,7 @@ function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol:
               suffix="SOL"
               warn={(n) => (n < 0 ? 'Must be 0 or more' : n > 100 ? 'Max 100 SOL' : null)}
             />
-            <p className="mt-1.5 text-[11px] text-krypt-muted leading-relaxed">
+            <p className="mt-1.5 text-body text-krypt-muted leading-relaxed">
               Realised losses this session (from confirmed sells) past this pause live trading. 0 = off. Solana only — the EVM chains have no loss breaker yet.
             </p>
           </div>
@@ -118,7 +118,7 @@ function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol:
               onChange={(n) => void updateSettings({ execution: { ...e, maxLiveConsecutiveLosses: Math.max(0, Math.round(n)) } })}
               warn={(n) => (n < 0 ? 'Must be 0 or more' : n > 50 ? 'Max 50' : null)}
             />
-            <p className="mt-1.5 text-[11px] text-krypt-muted leading-relaxed">
+            <p className="mt-1.5 text-body text-krypt-muted leading-relaxed">
               Consecutive realised losses that pause live trading. Whole number, 0 = off. Solana only — the EVM chains have no loss breaker yet.
             </p>
           </div>
@@ -152,7 +152,7 @@ function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol:
           )}
           <div className="pt-2 border-t border-white/10 space-y-2">
             <div className="text-xs font-semibold text-white">Sell a token (100%)</div>
-            <div className="text-[11px] text-krypt-muted">Liquidate a leftover or dust position back to SOL. Needs real broadcast on.</div>
+            <div className="text-body text-krypt-muted">Liquidate a leftover or dust position back to SOL. Needs real broadcast on.</div>
             <div className="flex flex-wrap gap-2">
               <input value={sellMint} onChange={(ev) => setSellMint(ev.target.value)} placeholder="Token mint to sell" spellCheck={false}
                 className="flex-1 min-w-[240px] rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm font-mono text-white placeholder-krypt-muted/40 outline-none focus:border-krypt-purple/60" />
@@ -162,27 +162,11 @@ function LiveExecutionPanel({ armed, balanceSol }: { armed: boolean; balanceSol:
             </div>
           </div>
           {balanceSol !== null && balanceSol < 0.02 && (
-            <div className="flex items-center gap-2 text-[11px] text-amber-300"><AlertTriangle className="h-3.5 w-3.5" /> Low balance — fund the wallet before a real buy.</div>
+            <div className="flex items-center gap-2 text-body text-amber-300"><AlertTriangle className="h-3.5 w-3.5" /> Low balance — fund the wallet before a real buy.</div>
           )}
         </div>
       </Card>
     </Section>
-  );
-}
-
-function Copyable({ value }: { value: string }) {
-  const toast = useToast();
-  return (
-    <button
-      onClick={() => {
-        void navigator.clipboard.writeText(value);
-        toast.success('Copied');
-      }}
-      className="group inline-flex items-center gap-2 rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm text-white hover:border-krypt-purple/40 transition w-full"
-    >
-      <span className="truncate">{value}</span>
-      <Copy className="h-3.5 w-3.5 text-krypt-muted group-hover:text-krypt-purple flex-shrink-0 ml-auto" />
-    </button>
   );
 }
 
@@ -274,12 +258,12 @@ function WithdrawPanel({
         Send SOL from the active trading wallet to its withdrawal address. SOL only — SPL tokens are not sent here; sell them first or export the key.
       </div>
 
-      <div className="flex items-center gap-2 text-[11px]">
+      <div className="flex items-center gap-2 text-body">
         <span className="text-krypt-muted">To</span>
         <span className="font-mono text-white/85 truncate" title={home ?? undefined}>
           {home ?? '— no withdrawal address'}
         </span>
-        <button onClick={onChangeAddress} className="text-krypt-purple hover:text-white text-[10px] whitespace-nowrap">
+        <button onClick={onChangeAddress} className="text-krypt-purple hover:text-white text-label whitespace-nowrap">
           change
         </button>
       </div>
@@ -305,7 +289,7 @@ function WithdrawPanel({
         </span>
       </div>
 
-      <div className="text-[10px] text-krypt-muted/70">
+      <div className="text-label text-krypt-muted/70">
         Balance {info.balanceSol != null ? `${info.balanceSol.toFixed(4)} SOL` : '—'}. Max leaves the
         {' '}{(RENT_EXEMPT_MIN_LAMPORTS / LAMPORTS_PER_SOL).toFixed(5)} SOL rent-exempt minimum plus
         {' '}{(WITHDRAW_FEE_HEADROOM_LAMPORTS / LAMPORTS_PER_SOL).toFixed(5)} SOL fee headroom behind.
@@ -313,7 +297,7 @@ function WithdrawPanel({
       </div>
 
       {last && (
-        <div className="flex items-center gap-2 text-[11px] text-krypt-muted">
+        <div className="flex items-center gap-2 text-body text-krypt-muted">
           <span>Last: {(last.lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL</span>
           <span className="font-mono">{last.signature.slice(0, 8)}…{last.signature.slice(-4)}</span>
           <button
@@ -495,31 +479,31 @@ export function WalletPage() {
           <EffectsOff label={reduceEffects === null ? '' : 'Effects reduced · Settings › Display'} />
         )}
         <div className="pointer-events-none absolute top-4 left-5">
-          <div className="font-display text-[10px] uppercase tracking-[0.34em] text-arc-gold/75">The Vault</div>
+          <div className="font-display text-label uppercase tracking-eyebrow text-arc-gold/75">The Vault</div>
           {info?.exists ? (
             <>
               <div className={cls('mt-1.5 text-3xl font-bold font-mono tabular-nums glow-text', overCap ? 'text-amber-300' : 'text-white')}>
                 {info.balanceSol != null ? info.balanceSol.toFixed(4) : '—'}
                 <span className="ml-2 text-sm font-normal text-krypt-muted">SOL</span>
               </div>
-              <div className="mt-0.5 font-mono text-[11px] text-krypt-muted">
+              <div className="mt-0.5 font-mono text-body text-krypt-muted">
                 {info.publicKey ? `${info.publicKey.slice(0, 6)}…${info.publicKey.slice(-6)}` : ''}
               </div>
             </>
           ) : (
-            <div className="mt-1.5 font-display text-sm tracking-[0.12em] text-krypt-muted">No wallet bound to the tome</div>
+            <div className="mt-1.5 font-display text-sm tracking-label text-krypt-muted">No wallet bound to the tome</div>
           )}
         </div>
         <div className="pointer-events-none absolute top-4 right-5 flex flex-col items-end gap-2">
           <span className={cls(
-            'inline-flex items-center gap-1.5 font-display text-[9px] uppercase tracking-[0.24em]',
+            'inline-flex items-center gap-1.5 font-display text-micro uppercase tracking-label',
             live?.armed ? 'text-rose-300' : 'text-krypt-muted/60',
           )}>
             <span className={cls('h-1 w-1 rotate-45', live?.armed ? 'bg-rose-400 shadow-crimson-glow animate-rune-pulse' : 'bg-krypt-muted/30')} />
             {live?.armed ? 'Armed' : 'Disarmed'}
           </span>
           <span className={cls(
-            'inline-flex items-center gap-1.5 font-display text-[9px] uppercase tracking-[0.24em]',
+            'inline-flex items-center gap-1.5 font-display text-micro uppercase tracking-label',
             settings.execution.autoCashout ? 'text-arc-gold/90' : 'text-krypt-muted/60',
           )}>
             <span className={cls('h-1 w-1 rotate-45', settings.execution.autoCashout ? 'bg-arc-gold shadow-gold-glow animate-rune-pulse' : 'bg-krypt-muted/30')} />
@@ -605,7 +589,7 @@ export function WalletPage() {
                       disabled={wal.active || live?.armed === true}
                       title={live?.armed ? 'Disarm live execution to switch wallets' : wal.active ? 'Active' : 'Make this the signing wallet'}
                       className={cls(
-                        'h-6 w-6 flex-shrink-0 rounded-full border flex items-center justify-center text-[10px]',
+                        'h-6 w-6 flex-shrink-0 rounded-full border flex items-center justify-center text-label',
                         wal.active ? 'border-krypt-purple bg-krypt-purple/30 text-white' : 'border-white/20 text-krypt-muted hover:border-white/40',
                         live?.armed && !wal.active ? 'opacity-40 cursor-not-allowed' : '',
                       )}
@@ -621,25 +605,25 @@ export function WalletPage() {
                           onChange={(e) => setRenameText(e.target.value)}
                           onBlur={() => void doRename(wal.id)}
                           onKeyDown={(e) => { if (e.key === 'Enter') void doRename(wal.id); if (e.key === 'Escape') setRenaming(null); }}
-                          className="w-40 rounded bg-black/40 border border-white/15 px-2 py-0.5 text-[12px] text-white outline-none"
+                          className="w-40 rounded bg-black/40 border border-white/15 px-2 py-0.5 text-note text-white outline-none"
                         />
                       ) : (
                         <button
                           onClick={() => { setRenaming(wal.id); setRenameText(wal.label); }}
                           title="Rename"
-                          className="text-[12px] font-medium text-white/90 hover:text-white"
+                          className="text-note font-medium text-white/90 hover:text-white"
                         >
                           {wal.label}
                         </button>
                       )}
-                      <div className="font-mono text-[10px] text-krypt-muted truncate">{wal.publicKey}</div>
+                      <div className="font-mono text-label text-krypt-muted truncate">{wal.publicKey}</div>
                     </div>
 
                     <div className="text-right">
-                      <div className="font-mono text-[12px] text-white/85">
+                      <div className="font-mono text-note text-white/85">
                         {wal.balanceSol != null ? `${wal.balanceSol.toFixed(3)} SOL` : '—'}
                       </div>
-                      <div className="text-[9px] text-krypt-muted">cap {wal.maxBalanceSol} SOL</div>
+                      <div className="text-micro text-krypt-muted">cap {wal.maxBalanceSol} SOL</div>
                     </div>
 
                     <GhostButton onClick={() => void doRemoveOne(wal)} destructive>
@@ -665,7 +649,7 @@ export function WalletPage() {
                     value={importText}
                     onChange={(e) => setImportText(e.target.value)}
                     placeholder="base58 secret key or [1,2,3,…] byte array"
-                    className="flex-1 rounded bg-black/40 border border-white/15 px-2 py-1 font-mono text-[11px] text-white outline-none"
+                    className="flex-1 rounded bg-black/40 border border-white/15 px-2 py-1 font-mono text-body text-white outline-none"
                   />
                   <PrimaryButton onClick={() => void doImport()} disabled={busy || !importText.trim()}>
                     Import
@@ -673,7 +657,7 @@ export function WalletPage() {
                 </div>
               )}
 
-              <p className="mt-2 text-[10px] leading-relaxed text-krypt-muted/60">
+              <p className="mt-2 text-label leading-relaxed text-krypt-muted/60">
                 Each wallet keeps its own balance cap and withdrawal address. Fills are recorded against the wallet that
                 made them, so switching never mixes up your history.
               </p>
@@ -686,7 +670,7 @@ export function WalletPage() {
               <Card>
                 <div className="flex items-end justify-between">
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted">Trading wallet</div>
+                    <div className="text-label uppercase tracking-label text-krypt-muted">Trading wallet</div>
                     <div className={cls('mt-1 text-3xl font-bold font-mono', overCap ? 'text-amber-300' : 'text-white')}>
                       {info.balanceSol != null ? info.balanceSol.toFixed(4) : '—'} <span className="text-sm text-krypt-muted">SOL</span>
                     </div>
@@ -700,14 +684,14 @@ export function WalletPage() {
                     <AlertTriangle className="h-4 w-4" /> Above your {info.maxBalanceSol} SOL cap — sweep some out.
                   </div>
                 )}
-                {info.balanceCheckedAt && <div className="mt-2 text-[11px] text-krypt-muted/60">checked {fmtClock(info.balanceCheckedAt)}</div>}
+                {info.balanceCheckedAt && <div className="mt-2 text-body text-krypt-muted/60">checked {fmtClock(info.balanceCheckedAt)}</div>}
               </Card>
             </Section>
 
             <Section title="Deposit address" description="Send SOL here from your main wallet or an exchange.">
               <Card className="space-y-2">
                 <Copyable value={info.publicKey ?? ''} />
-                <div className="text-[11px] text-krypt-muted/70">Only SOL on Solana mainnet. Start small — 0.1–0.5 SOL is plenty to test with.</div>
+                <div className="text-body text-krypt-muted/70">Only SOL on Solana mainnet. Start small — 0.1–0.5 SOL is plenty to test with.</div>
               </Card>
             </Section>
           </div>
@@ -801,7 +785,7 @@ export function WalletPage() {
             </Section>
           )}
           {!live?.armed && live?.lastDisarmReason && (
-            <p className="text-[11px] text-krypt-muted/70 px-1">
+            <p className="text-body text-krypt-muted/70 px-1">
               Live auto-switched to Paper — reason: {live.lastDisarmReason.replace(/_/g, ' ')}. Re-enable it in the top bar.
             </p>
           )}

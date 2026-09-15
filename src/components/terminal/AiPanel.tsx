@@ -58,7 +58,7 @@ export function AiPanel({ mint, symbol }: { mint: string; symbol: string }) {
         <Bot className="h-4 w-4 text-krypt-purple" />
         <span className="text-sm font-semibold text-white">AI analysis</span>
         {result && (
-          <span className="text-[10px] text-krypt-muted/70">
+          <span className="text-label text-krypt-muted/70">
             {result.provider} · {result.model} · {fmtAge(result.at)}
           </span>
         )}
@@ -70,7 +70,7 @@ export function AiPanel({ mint, symbol }: { mint: string; symbol: string }) {
       </div>
 
       {!configured && (
-        <p className="text-[11px] text-krypt-muted leading-relaxed">
+        <p className="text-body text-krypt-muted leading-relaxed">
           Add an OpenAI or Anthropic API key in <span className="text-white">Settings → AI</span> to get a model&apos;s
           read on a token. Off by default; each analysis uses your own API credits.
         </p>
@@ -83,11 +83,11 @@ export function AiPanel({ mint, symbol }: { mint: string; symbol: string }) {
               <div className={cls('font-mono text-2xl font-bold leading-none', toneClass[scoreTone(result.score)])}>
                 {result.score === null ? '—' : result.score}
               </div>
-              <div className="text-[9px] uppercase tracking-wider text-krypt-muted/60 mt-1">AI score</div>
+              <div className="text-micro uppercase tracking-wider text-krypt-muted/60 mt-1">AI score</div>
             </div>
             <div className="min-w-0 flex-1">
               <div className={cls('text-sm font-semibold', toneClass[scoreTone(result.score)])}>{result.verdict}</div>
-              <p className="text-[11px] text-krypt-muted leading-relaxed mt-0.5">{result.summary}</p>
+              <p className="text-body text-krypt-muted leading-relaxed mt-0.5">{result.summary}</p>
             </div>
           </div>
 
@@ -95,24 +95,24 @@ export function AiPanel({ mint, symbol }: { mint: string; symbol: string }) {
             <div className="grid sm:grid-cols-2 gap-3">
               {result.bullish.length > 0 && (
                 <div className="rounded-md border border-emerald-400/20 bg-emerald-500/[0.05] px-3 py-2">
-                  <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300 mb-1">
+                  <div className="flex items-center gap-1.5 text-label font-semibold uppercase tracking-wider text-emerald-300 mb-1">
                     <ThumbsUp className="h-3 w-3" /> For
                   </div>
                   <ul className="space-y-1">
                     {result.bullish.map((b, i) => (
-                      <li key={i} className="text-[11px] text-krypt-muted leading-snug">• {b}</li>
+                      <li key={i} className="text-body text-krypt-muted leading-snug">• {b}</li>
                     ))}
                   </ul>
                 </div>
               )}
               {result.bearish.length > 0 && (
                 <div className="rounded-md border border-rose-400/20 bg-rose-500/[0.05] px-3 py-2">
-                  <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-rose-300 mb-1">
+                  <div className="flex items-center gap-1.5 text-label font-semibold uppercase tracking-wider text-rose-300 mb-1">
                     <ThumbsDown className="h-3 w-3" /> Against
                   </div>
                   <ul className="space-y-1">
                     {result.bearish.map((b, i) => (
-                      <li key={i} className="text-[11px] text-krypt-muted leading-snug">• {b}</li>
+                      <li key={i} className="text-body text-krypt-muted leading-snug">• {b}</li>
                     ))}
                   </ul>
                 </div>
@@ -120,7 +120,7 @@ export function AiPanel({ mint, symbol }: { mint: string; symbol: string }) {
             </div>
           )}
 
-          <p className="text-[10px] text-krypt-muted/50 leading-relaxed">
+          <p className="text-label text-krypt-muted/50 leading-relaxed">
             An AI&apos;s opinion on the same on-chain facts shown here — automated, often wrong, and NOT financial
             advice. Your token data was sent to {result.provider} to produce it.
           </p>

@@ -68,7 +68,7 @@ function Reader({ onBack }: { onBack: () => void }) {
             key={d.id}
             onClick={() => setOpen(d.id)}
             className={cls(
-              'rounded-md border px-2.5 py-1 text-[10px] font-semibold transition',
+              'rounded-md border px-2.5 py-1 text-label font-semibold transition',
               d.id === open
                 ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white'
                 : 'border-white/10 bg-black/25 text-krypt-muted hover:text-white',
@@ -79,18 +79,18 @@ function Reader({ onBack }: { onBack: () => void }) {
         ))}
       </div>
       <div className="px-6 py-4 max-h-[52vh] overflow-y-auto">
-        <div className="font-display text-[13px] font-semibold text-white">{doc.title}</div>
-        <div className="text-[10px] text-krypt-muted/70 mb-3">{doc.subtitle}</div>
+        <div className="font-display text-value font-semibold text-white">{doc.title}</div>
+        <div className="text-label text-krypt-muted/70 mb-3">{doc.subtitle}</div>
         {doc.sections.map((sec) => (
           <div key={sec.heading} className="mb-3">
-            <h3 className={cls('text-[11px] font-semibold mb-1', sec.emphasis ? 'text-arc-gold' : 'text-white')}>
+            <h3 className={cls('text-body font-semibold mb-1', sec.emphasis ? 'text-arc-gold' : 'text-white')}>
               {sec.heading}
             </h3>
             {sec.body.map((para, i) => (
               <p
                 key={i}
                 className={cls(
-                  'text-[11px] leading-relaxed mb-1.5',
+                  'text-body leading-relaxed mb-1.5',
                   sec.emphasis ? 'text-white/90 font-medium' : 'text-krypt-muted',
                 )}
               >
@@ -144,28 +144,28 @@ function Field({
   return (
     <div className="rounded-md border border-white/10 bg-black/25 px-3 py-2.5">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[11px] font-semibold text-white">{label}</span>
+        <span className="text-body font-semibold text-white">{label}</span>
         {saved && (
-          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-300">
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-1.5 py-0.5 text-micro font-bold uppercase tracking-wider text-emerald-300">
             <Check className="h-2.5 w-2.5" /> saved
           </span>
         )}
         <div className="flex-1" />
         <button
           onClick={onLink}
-          className="inline-flex items-center gap-1 text-[10px] font-semibold text-krypt-purple hover:text-white transition-colors"
+          className="inline-flex items-center gap-1 text-label font-semibold text-krypt-purple hover:text-white transition-colors"
         >
           {link} <ExternalLink className="h-3 w-3" />
         </button>
       </div>
-      <p className="mt-1 text-[11px] leading-relaxed text-krypt-muted">{hint}</p>
+      <p className="mt-1 text-body leading-relaxed text-krypt-muted">{hint}</p>
       <input
         type="password"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         spellCheck={false}
         placeholder={placeholder}
-        className="mt-2 w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+        className="mt-2 w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
       />
     </div>
   );
@@ -271,12 +271,12 @@ export function Onboarding({
       <div ref={boxRef} tabIndex={-1} className="w-full max-w-xl rounded-lg border border-white/10 bg-krypt-panel shadow-2xl outline-none">
         <div className="px-6 pt-6 pb-4 border-b border-white/10 flex items-end gap-3">
           <div className="flex-1">
-            <div className="font-display text-[11px] tracking-[0.36em] text-arc-gold/80">WELCOME TO</div>
-            <div className="font-display text-2xl font-bold text-krypt-gradient tracking-[0.12em] mt-1">
+            <div className="font-display text-body tracking-eyebrow text-arc-gold/80">WELCOME TO</div>
+            <div className="font-display text-2xl font-bold text-krypt-gradient tracking-label mt-1">
               KRYPT TERMINAL
             </div>
             {step === 'legal' && (
-              <div className="text-[10px] text-krypt-muted/70 mt-1.5">
+              <div className="text-label text-krypt-muted/70 mt-1.5">
                 Published by {info.entity} · terms version {info.termsVersion}
               </div>
             )}
@@ -290,7 +290,7 @@ export function Onboarding({
         {step === 'legal' && !reading && (
           <>
             <div className="px-6 py-4 max-h-[54vh] overflow-y-auto">
-              <p className="text-[11px] leading-relaxed text-krypt-muted mb-3">
+              <p className="text-body leading-relaxed text-krypt-muted mb-3">
                 Before you use {info.product}, please read this summary. It is short on purpose, and the full documents
                 are one click away.
               </p>
@@ -303,7 +303,7 @@ export function Onboarding({
                       pt.flagged ? 'border-arc-gold/25 bg-arc-gold/[0.06]' : 'border-white/10 bg-black/25',
                     )}
                   >
-                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                    <div className="flex items-center gap-1.5 text-body font-semibold text-white">
                       {pt.flagged ? (
                         <AlertTriangle className="h-3.5 w-3.5 text-arc-gold flex-shrink-0" />
                       ) : (
@@ -311,13 +311,13 @@ export function Onboarding({
                       )}
                       {pt.title}
                     </div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-krypt-muted">{pt.detail}</p>
+                    <p className="mt-1 text-body leading-relaxed text-krypt-muted">{pt.detail}</p>
                   </div>
                 ))}
               </div>
               <button
                 onClick={() => setReading(true)}
-                className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-semibold text-krypt-purple hover:text-white transition-colors"
+                className="mt-3 inline-flex items-center gap-1.5 text-body font-semibold text-krypt-purple hover:text-white transition-colors"
               >
                 <FileText className="h-3.5 w-3.5" />
                 Read the full Terms of Service, Privacy Policy and Software Terms
@@ -332,7 +332,7 @@ export function Onboarding({
                   onChange={(e) => setAgreed(e.target.checked)}
                   className="mt-0.5 h-4 w-4 flex-shrink-0 accent-krypt-purple"
                 />
-                <span className="text-[11px] leading-relaxed text-krypt-muted">
+                <span className="text-body leading-relaxed text-krypt-muted">
                   I am {info.minimumAge} or older, I have read and agree to the{' '}
                   <span className="text-white">Terms of Service</span>,{' '}
                   <span className="text-white">Privacy Policy</span> and{' '}
@@ -341,7 +341,7 @@ export function Onboarding({
                 </span>
               </label>
               <div className="mt-3 flex items-center gap-2">
-                <span className="text-[10px] text-krypt-muted/60">Declining closes the app.</span>
+                <span className="text-label text-krypt-muted/60">Declining closes the app.</span>
                 <div className="flex-1" />
                 <GhostButton onClick={() => void window.krypt.app.quit()} disabled={busy} destructive>
                   Decline &amp; quit
@@ -359,11 +359,11 @@ export function Onboarding({
         {step === 'referral' && (
           <>
             <div className="px-6 py-6 space-y-3">
-              <div className="flex items-center gap-2 text-white text-[13px] font-semibold">
+              <div className="flex items-center gap-2 text-white text-value font-semibold">
                 <Gift className="h-4 w-4 text-arc-gold" />
                 Have a friend who referred you?
               </div>
-              <p className="text-[11px] leading-relaxed text-krypt-muted">
+              <p className="text-body leading-relaxed text-krypt-muted">
                 Put their Solana address below and they&apos;ll earn rewards as you trade. Leave it blank if not.
               </p>
               <input
@@ -374,12 +374,12 @@ export function Onboarding({
                 }}
                 spellCheck={false}
                 placeholder="Their SOL address (optional)"
-                className="w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-[11px] text-white outline-none focus:border-krypt-purple/60"
+                className="w-full rounded bg-black/40 border border-white/15 px-3 py-2 font-mono text-body text-white outline-none focus:border-krypt-purple/60"
               />
-              {problem && <p className="text-[11px] text-rose-300">{problem}</p>}
+              {problem && <p className="text-body text-rose-300">{problem}</p>}
             </div>
             <div className="px-6 py-4 border-t border-white/10 flex items-center gap-2">
-              <span className="text-[10px] text-krypt-muted/60">You can add this later in Settings.</span>
+              <span className="text-label text-krypt-muted/60">You can add this later in Settings.</span>
               <div className="flex-1" />
               <PrimaryButton onClick={() => void goFromFee()} disabled={!!problem || busy}>
                 {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowRight className="h-3.5 w-3.5" />}
@@ -393,11 +393,11 @@ export function Onboarding({
         {step === 'keys' && (
           <>
             <div className="px-6 py-5 space-y-3 max-h-[56vh] overflow-y-auto">
-              <div className="flex items-center gap-2 text-white text-[12px] font-semibold">
+              <div className="flex items-center gap-2 text-white text-note font-semibold">
                 <KeyRound className="h-3.5 w-3.5 text-krypt-purple" />
                 Connect your data (optional)
               </div>
-              <p className="text-[11px] leading-relaxed text-krypt-muted">
+              <p className="text-body leading-relaxed text-krypt-muted">
                 <span className="text-white">Krypto works right now with no keys at all.</span> It races several free
                 public Solana endpoints for the launch feed. These two are free upgrades — paste them here, or skip and
                 add them any time under Settings.
@@ -431,7 +431,7 @@ export function Onboarding({
                 onLink={() => void window.krypt.app.openExternal('https://bds.birdeye.so')}
               />
 
-              <p className="text-[10px] leading-relaxed text-krypt-muted/60">
+              <p className="text-label leading-relaxed text-krypt-muted/60">
                 Keys are stored on this machine only and are stripped from recordings. They are never sent to Krypt —
                 there is no Krypt server to send them to.
               </p>
@@ -465,24 +465,24 @@ export function Onboarding({
         {step === 'wallet' && (
           <>
             <div className="px-6 py-5 space-y-3 max-h-[56vh] overflow-y-auto">
-              <div className="flex items-center gap-2 text-white text-[12px] font-semibold">
+              <div className="flex items-center gap-2 text-white text-note font-semibold">
                 <WalletIcon className="h-3.5 w-3.5 text-krypt-purple" />
                 Your trading wallet
               </div>
-              <p className="text-[11px] leading-relaxed text-krypt-muted">
+              <p className="text-body leading-relaxed text-krypt-muted">
                 Krypto can browse, score and research tokens with no wallet at all. You only need one to place a trade.
               </p>
               <div className="rounded-md border border-white/10 bg-black/25 px-3 py-2.5 space-y-1.5">
-                <p className="text-[11px] leading-relaxed text-krypt-muted">
+                <p className="text-body leading-relaxed text-krypt-muted">
                   <span className="text-white">Use a dedicated hot wallet.</span> Generate a fresh one under Wallet, or
                   import an existing key. Fund it with an amount you would not mind losing entirely — not your main
                   wallet.
                 </p>
-                <p className="text-[11px] leading-relaxed text-krypt-muted">
+                <p className="text-body leading-relaxed text-krypt-muted">
                   <span className="text-white">Your key is encrypted by Windows</span> and never leaves this machine. If
                   your OS cannot store it securely, Krypto refuses to store it at all rather than leave it in the clear.
                 </p>
-                <p className="text-[11px] leading-relaxed text-krypt-muted">
+                <p className="text-body leading-relaxed text-krypt-muted">
                   <span className="text-white">Once this wallet exists the app is in Live mode on Solana</span> — a trade you
                   place spends real SOL. Switch to Paper in the top bar to practise first. Nothing trades on its own: on
                   Solana there is a per-trade cap, a balance cap and a kill switch, and the scanner only flags tokens. The
@@ -490,7 +490,7 @@ export function Onboarding({
                 </p>
               </div>
               <div className="rounded-md border border-arc-gold/25 bg-arc-gold/[0.06] px-3 py-2">
-                <p className="text-[11px] leading-relaxed text-krypt-muted">
+                <p className="text-body leading-relaxed text-krypt-muted">
                   <AlertTriangle className="inline h-3.5 w-3.5 text-arc-gold mr-1 -mt-0.5" />
                   Back up your key somewhere safe before you fund it. Nobody — including Krypt — can recover it for you.
                 </p>
@@ -515,7 +515,7 @@ export function Onboarding({
         {step === 'ready' && (
           <>
             <div className="px-6 py-5 space-y-3 max-h-[56vh] overflow-y-auto">
-              <div className="flex items-center gap-2 text-white text-[12px] font-semibold">
+              <div className="flex items-center gap-2 text-white text-note font-semibold">
                 <Rocket className="h-3.5 w-3.5 text-arc-gold" />
                 You’re set
               </div>
@@ -546,11 +546,11 @@ export function Onboarding({
                   },
                 ].map((row) => (
                   <div key={row.title} className="rounded-md border border-white/10 bg-black/25 px-3 py-2">
-                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                    <div className="flex items-center gap-1.5 text-body font-semibold text-white">
                       <row.icon className="h-3.5 w-3.5 text-krypt-purple flex-shrink-0" />
                       {row.title}
                     </div>
-                    <p className="mt-1 text-[11px] leading-relaxed text-krypt-muted">{row.detail}</p>
+                    <p className="mt-1 text-body leading-relaxed text-krypt-muted">{row.detail}</p>
                   </div>
                 ))}
               </div>
@@ -563,13 +563,13 @@ export function Onboarding({
               >
                 <PlayCircle className="h-5 w-5 flex-shrink-0 text-krypt-purple" />
                 <span>
-                  <span className="block text-[11px] font-semibold text-white">Watch the guide (10 min)</span>
-                  <span className="block text-[10px] leading-relaxed text-krypt-muted">
+                  <span className="block text-body font-semibold text-white">Watch the guide (10 min)</span>
+                  <span className="block text-label leading-relaxed text-krypt-muted">
                     The whole app end to end, including the parts that lose people money. Opens in your browser.
                   </span>
                 </span>
               </button>
-              <p className="text-[10px] leading-relaxed text-krypt-muted/60">
+              <p className="text-label leading-relaxed text-krypt-muted/60">
                 Start small. Memecoins are the most volatile assets there are, and most go to zero.
               </p>
             </div>

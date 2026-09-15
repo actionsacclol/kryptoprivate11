@@ -4,6 +4,7 @@ import { EVM_CHAIN_META, type EvmChainKind, type EvmPosition } from '@shared/evm
 import { cls, fmtUsd } from '../../utils/format';
 import { fmtNative, fmtNativeSigned, fmtPriceNative, fmtTokens, isPendingResult, PENDING_TOAST } from '../../utils/evm';
 import { useToast } from '../../state/ToastProvider';
+import { DataRow } from '../common';
 
 // Your position in THIS token on one EVM chain — the EVM twin of
 // PositionPanel. What you HOLD is read from the chain and always known;
@@ -12,15 +13,6 @@ import { useToast } from '../../state/ToastProvider';
 // an em dash rather than an invented zero.
 
 const SELL_PCTS = [25, 50, 100] as const;
-
-function Row({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="flex items-baseline justify-between gap-3 text-[11px]">
-      <span className="text-krypt-muted/80">{label}</span>
-      <span className={cls('font-mono tabular-nums', tone ?? 'text-white/90')}>{value}</span>
-    </div>
-  );
-}
 
 export function EvmPositionPanel({
   chain,
@@ -96,7 +88,7 @@ export function EvmPositionPanel({
   return (
     <div className="plate rounded-lg p-3 mt-4 space-y-2.5">
       <div className="flex items-center gap-2">
-        <h3 className="font-display text-[11px] font-semibold uppercase tracking-[0.28em] text-arc-gold/90">Your position</h3>
+        <h3 className="font-display text-body font-semibold uppercase tracking-heading text-arc-gold/90">Your position</h3>
         <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
         <button onClick={() => void load()} title="Refresh" className="text-krypt-muted/60 hover:text-white transition">
           <RefreshCw className="h-3 w-3" />
@@ -105,12 +97,12 @@ export function EvmPositionPanel({
 
       <div className="rounded-lg border border-white/10 bg-black/25 px-3 py-2.5">
         <div className="flex items-baseline justify-between gap-3">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted/70 flex items-center gap-1.5">
+          <span className="text-label uppercase tracking-label text-krypt-muted/70 flex items-center gap-1.5">
             Value
             {pos.valueSource === 'spot' && (
               <span
                 title="Spot price × your amount — no sell quote was run for this figure; a thin curve can fetch less"
-                className="rounded border border-amber-400/30 px-1 py-px text-[8px] tracking-[0.12em] text-amber-300/80 normal-case"
+                className="rounded border border-amber-400/30 px-1 py-px text-nano tracking-label text-amber-300/80 normal-case"
               >
                 spot × amount
               </span>
@@ -118,11 +110,11 @@ export function EvmPositionPanel({
           </span>
           <span className="font-mono text-base text-white tabular-nums">
             {fmtNative(pos.valueNative, sym)}
-            <span className="text-[11px] text-krypt-muted/70">{usd(pos.valueNative)}</span>
+            <span className="text-body text-krypt-muted/70">{usd(pos.valueNative)}</span>
           </span>
         </div>
         <div className="flex items-baseline justify-between gap-3 mt-1">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-krypt-muted/70">Unrealized</span>
+          <span className="text-label uppercase tracking-label text-krypt-muted/70">Unrealized</span>
           <span className={cls('font-mono text-sm tabular-nums', tone)}>
             {pnl === null ? '—' : `${fmtNativeSigned(pnl, sym)}${pct === null ? '' : ` · ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`}`}
           </span>
@@ -130,17 +122,17 @@ export function EvmPositionPanel({
       </div>
 
       <div className="space-y-1">
-        <Row label="Holding" value={`${fmtTokens(pos.amount)} ${pos.symbol || ''}`} />
-        <Row label="Avg entry" value={fmtPriceNative(pos.avgEntryPriceNative, sym)} />
-        <Row label="Now" value={fmtPriceNative(pos.priceNative, sym)} />
-        <Row label="Cost" value={pos.costNative === null ? '—' : fmtNative(pos.costNative, sym)} />
+        <DataRow label="Holding" value={`${fmtTokens(pos.amount)} ${pos.symbol || ''}`} />
+        <DataRow label="Avg entry" value={fmtPriceNative(pos.avgEntryPriceNative, sym)} />
+        <DataRow label="Now" value={fmtPriceNative(pos.priceNative, sym)} />
+        <DataRow label="Cost" value={pos.costNative === null ? '—' : fmtNative(pos.costNative, sym)} />
         {pos.realizedPnlNative !== null && (
-          <Row label="Realized so far" value={fmtNativeSigned(pos.realizedPnlNative, sym)} tone={pos.realizedPnlNative >= 0 ? 'text-emerald-300' : 'text-rose-300'} />
+          <DataRow label="Realized so far" value={fmtNativeSigned(pos.realizedPnlNative, sym)} tone={pos.realizedPnlNative >= 0 ? 'text-emerald-300' : 'text-rose-300'} />
         )}
       </div>
 
       {!pos.basisKnown && (
-        <p className="text-[10px] text-krypt-muted/60 leading-relaxed">
+        <p className="text-label text-krypt-muted/60 leading-relaxed">
           No cost basis in this install —{' '}
           {pos.unreconciledFills > 0 ? `${pos.unreconciledFills} fill(s) could not be read from the chain yet.` : 'these tokens were not bought through Krypt.'}{' '}
           PnL is unknown, not zero.
@@ -154,7 +146,7 @@ export function EvmPositionPanel({
             onClick={() => void sell(p)}
             disabled={busy !== null}
             className={cls(
-              'rounded-md border py-1.5 text-[11px] font-semibold transition flex items-center justify-center gap-1',
+              'rounded-md border py-1.5 text-body font-semibold transition flex items-center justify-center gap-1',
               'border-rose-400/40 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25',
               busy !== null && 'opacity-60 cursor-wait',
             )}

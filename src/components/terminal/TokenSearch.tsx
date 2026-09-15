@@ -113,9 +113,9 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKi
             if (e.key === 'Enter') submit();
           }}
           placeholder="Search or paste a contract address…"
-          className="w-full bg-black/40 border border-white/10 rounded-lg pl-8 pr-14 py-2 text-[12px] text-white outline-none focus:border-krypt-purple/50 placeholder:text-krypt-muted/50"
+          className="w-full bg-black/40 border border-white/10 rounded-lg pl-8 pr-14 py-2 text-note text-white outline-none focus:border-krypt-purple/50 placeholder:text-krypt-muted/50"
         />
-        <kbd className="absolute right-2 top-1/2 -translate-y-1/2 rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[9px] font-mono text-krypt-muted/60">
+        <kbd className="absolute right-2 top-1/2 -translate-y-1/2 rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-micro font-mono text-krypt-muted/60">
           Ctrl K
         </kbd>
       </div>
@@ -127,12 +127,12 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKi
               onClick={submit}
               className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-white/5 transition"
             >
-              <span className="rounded bg-krypt-purple/20 px-1.5 py-0.5 text-[9px] font-bold text-krypt-pink">CA</span>
-              <span className="font-mono text-[11px] text-white truncate">{shortAddr(query.trim(), 8)}</span>
+              <span className="rounded bg-krypt-purple/20 px-1.5 py-0.5 text-micro font-bold text-krypt-pink">CA</span>
+              <span className="font-mono text-body text-white truncate">{shortAddr(query.trim(), 8)}</span>
               {/* An address alone does not say which chain it lives on, so name
                   the one it will actually open on — a BNB contract pasted while
                   Robinhood is selected otherwise opens an empty Robinhood page. */}
-              <span className="ml-auto text-[10px] text-krypt-muted">
+              <span className="ml-auto text-label text-krypt-muted">
                 {chainLabel(chainFor(query.trim()))} · Open ↵
               </span>
             </button>
@@ -141,14 +141,14 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKi
               <Loader2 className="h-4 w-4 animate-spin text-krypt-purple" />
             </div>
           ) : rows.length === 0 ? (
-            <div className="px-3 py-3 text-[11px] text-krypt-muted">
+            <div className="px-3 py-3 text-body text-krypt-muted">
               No matches.
               {isEvmChain(chain) && <span className="block mt-1 text-krypt-muted/70">Name search is Solana-only for now — paste a 0x contract address to open a token on {chain === 'bnb' ? 'BNB Smart Chain' : 'Robinhood Chain'}.</span>}
             </div>
           ) : (
             <div className="max-h-[320px] overflow-y-auto">
               {isEvmChain(chain) && (
-                <div className="px-3 py-1.5 text-[10px] text-arc-gold/80 border-b border-white/8">
+                <div className="px-3 py-1.5 text-label text-arc-gold/80 border-b border-white/8">
                   Name search is Solana-only for now — these are Solana tokens. Paste a 0x contract address for {chain === 'bnb' ? 'BNB Smart Chain' : 'Robinhood Chain'}.
                 </div>
               )}
@@ -167,10 +167,10 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKi
                       <img src={imageSrc(t.imageUrl) as string} alt="" className="h-full w-full object-cover" />
                     )}
                   </div>
-                  <span className="text-[12px] font-semibold text-white">{t.symbol || '—'}</span>
-                  <span className="text-[11px] text-krypt-muted truncate flex-1">{t.name}</span>
-                  <span className="text-[10px] font-mono text-krypt-muted/70">{fmtAge(t.createdAt)}</span>
-                  <span className={cls('text-[11px] font-mono w-16 text-right text-white/80')}>
+                  <span className="text-note font-semibold text-white">{t.symbol || '—'}</span>
+                  <span className="text-body text-krypt-muted truncate flex-1">{t.name}</span>
+                  <span className="text-label font-mono text-krypt-muted/70">{fmtAge(t.createdAt)}</span>
+                  <span className={cls('text-body font-mono w-16 text-right text-white/80')}>
                     {fmtUsd(t.marketCapUsd)}
                   </span>
                 </button>

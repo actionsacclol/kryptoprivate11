@@ -25,7 +25,7 @@ const Radar3D = lazy(() => import('../components/viz/Radar3D').then((m) => ({ de
 
 function OrbLabel({ text, on, tone = 'violet' }: { text: string; on: boolean; tone?: 'violet' | 'gold' }) {
   return (
-    <div className="flex items-center gap-1.5 text-[9px] font-display uppercase tracking-[0.22em]">
+    <div className="flex items-center gap-1.5 text-micro font-display uppercase tracking-label">
       <span
         className={cls(
           'h-1 w-1 rotate-45 flex-shrink-0',
@@ -43,7 +43,7 @@ function OrbLabel({ text, on, tone = 'violet' }: { text: string; on: boolean; to
 function LedgerStat({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
   return (
     <div>
-      <div className="text-[9px] font-display uppercase tracking-[0.22em] text-krypt-muted/80">{label}</div>
+      <div className="text-micro font-display uppercase tracking-label text-krypt-muted/80">{label}</div>
       <div className={cls(
         'mt-0.5 text-sm font-mono tabular-nums font-semibold',
         tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : 'text-white/90',
@@ -162,11 +162,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
               <EffectsOff label={reduceEffects === null ? '' : 'Effects reduced · Settings › Display'} />
             )}
             <div className="pointer-events-none absolute top-4 left-5">
-              <div className="font-display text-[10px] uppercase tracking-[0.34em] text-arc-gold/75">The Observatory</div>
+              <div className="font-display text-label uppercase tracking-eyebrow text-arc-gold/75">The Observatory</div>
               <div className="mt-1.5 text-3xl font-bold font-mono tabular-nums text-white glow-text">
                 <NumberTicker value={status.launchesSeen} format={(v) => String(Math.round(v))} />
               </div>
-              <div className="font-display text-[10px] uppercase tracking-[0.22em] text-krypt-muted mt-0.5">
+              <div className="font-display text-label uppercase tracking-label text-krypt-muted mt-0.5">
                 Launches observed
               </div>
             </div>
@@ -176,7 +176,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
               <OrbLabel text="Creator scans" on={status.running && status.feed === 'live'} />
               <OrbLabel text={`Runners ${status.runnersFlagged}`} on={status.runnersFlagged > 0} tone="gold" />
             </div>
-            <div className="pointer-events-none absolute bottom-3 right-4 flex items-center gap-3 text-[10px] font-mono text-krypt-muted/70">
+            <div className="pointer-events-none absolute bottom-3 right-4 flex items-center gap-3 text-label font-mono text-krypt-muted/70">
               <span><span className="text-krypt-pink">●</span> launch</span>
               <span><span className="text-arc-gold">●</span> runner</span>
               <span><span className="text-rose-900">●</span> rejected</span>
@@ -192,11 +192,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
             <div className="flex items-start justify-between">
               <div>
                 <div className="flex items-center gap-2">
-                  <div className="font-display text-[10px] uppercase tracking-[0.34em] text-krypt-muted">
+                  <div className="font-display text-label uppercase tracking-eyebrow text-krypt-muted">
                     Session ledger
                   </div>
                   {status.liveActive && (
-                    <span className="text-[9px] font-bold uppercase tracking-wider text-rose-300 px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30">live</span>
+                    <span className="text-micro font-bold uppercase tracking-wider text-rose-300 px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30">live</span>
                   )}
                 </div>
                 <NumberTicker
@@ -208,7 +208,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
                   )}
                 />
                 {status.liveActive && (
-                  <div className="mt-1 text-[11px] text-krypt-muted font-mono">
+                  <div className="mt-1 text-body text-krypt-muted font-mono">
                     research paper {pnl >= 0 ? '+' : ''}{pnl.toFixed(4)} SOL
                   </div>
                 )}
@@ -287,7 +287,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
             />
           ) : (
             <Card padded={false} className="overflow-hidden">
-              <div className="grid grid-cols-[1fr_110px_110px_150px_80px_130px_70px] items-center gap-2 px-5 py-2 text-[9px] font-display font-semibold uppercase tracking-[0.2em] text-krypt-muted border-b border-white/10">
+              <div className="grid grid-cols-[1fr_110px_110px_150px_80px_130px_70px] items-center gap-2 px-5 py-2 text-micro font-display font-semibold uppercase tracking-label text-krypt-muted border-b border-white/10">
                 <span>Token</span>
                 <span className="text-right">Entry</span>
                 <span className="text-right">Close</span>
@@ -315,7 +315,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
                       {p.closedAt ? fmtDur(p.closedAt - p.openedAt) : ''}
                     </span>
                     <span className="text-xs text-krypt-muted truncate">{p.exitReason?.replace(/_/g, ' ') ?? '—'}</span>
-                    <span className={cls('text-right text-[10px] font-mono uppercase', p.live ? 'text-rose-300' : 'text-krypt-muted/70')}>
+                    <span className={cls('text-right text-label font-mono uppercase', p.live ? 'text-rose-300' : 'text-krypt-muted/70')}>
                       {p.live ? 'live' : 'paper'}
                     </span>
                   </motion.button>

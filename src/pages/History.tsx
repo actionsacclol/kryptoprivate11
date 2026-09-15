@@ -11,7 +11,7 @@ import { cls, fmtClock, shortAddr } from '../utils/format';
 function Tile({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <Card>
-      <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-krypt-muted">{label}</div>
+      <div className="text-label font-semibold uppercase tracking-label text-krypt-muted">{label}</div>
       <div className="mt-1.5 text-xl font-bold font-mono tabular-nums">{children}</div>
     </Card>
   );
@@ -123,7 +123,7 @@ export function History() {
                   <div key={h.label} className="flex-1 flex flex-col items-center justify-end group relative">
                     <div className="w-full rounded-t-[3px] bg-krypt-purple/40" style={{ height: `${(h.launches / maxHour) * 100}%` }} />
                     {h.entries > 0 && <div className="absolute -top-1 h-1.5 w-1.5 rounded-full bg-arc-gold shadow-[0_0_6px_rgba(217,180,91,0.8)]" />}
-                    <div className="pointer-events-none absolute -top-8 hidden group-hover:block rounded-lg border border-white/10 bg-black/85 px-2 py-1 text-[10px] font-mono whitespace-nowrap z-10">
+                    <div className="pointer-events-none absolute -top-8 hidden group-hover:block rounded-lg border border-white/10 bg-black/85 px-2 py-1 text-label font-mono whitespace-nowrap z-10">
                       {h.label} · {h.launches} launches · {h.entries} entries
                     </div>
                   </div>
@@ -134,7 +134,7 @@ export function History() {
 
           <Section title={`Closed trades (${sum.recentCloses.length})`}>
             <Card padded={false} className="overflow-hidden">
-              <div className="grid grid-cols-[1fr_1.2fr_0.9fr_0.9fr] gap-2 px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-krypt-muted border-b border-white/5">
+              <div className="grid grid-cols-[1fr_1.2fr_0.9fr_0.9fr] gap-2 px-5 py-2.5 text-label font-semibold uppercase tracking-wider text-krypt-muted border-b border-white/5">
                 <span>Time</span><span>Mint</span><span>Exit</span><span className="text-right">PnL</span>
               </div>
               <div className="max-h-[420px] overflow-auto divide-y divide-white/5">

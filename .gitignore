@@ -16,6 +16,7 @@ mints.json
 v4mod.json
 recover.tmp.json
 test/.sandbox/
+test/.walletdata/
 contracts/build/
 
 # Python bytecode from the analysis scripts
@@ -25,3 +26,7 @@ __pycache__/
 # Local environment files — keys never belong in the repo
 .env
 .env.*
+
+# Research tape — collected market data, never committed
+tape/
+tape-ofi.out

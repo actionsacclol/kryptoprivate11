@@ -63,10 +63,10 @@ export const LIABILITY_CAP_USD = 100;
  * for a comma trains people to click through, which is the opposite of what
  * clickwrap is for.
  */
-export const TERMS_VERSION = '2026-09-11.1';
+export const TERMS_VERSION = '2026-09-14.1';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '11 September 2026';
+export const TERMS_EFFECTIVE_DATE = '14 September 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

@@ -32,21 +32,21 @@ export function HoldersPanel({ report }: { report: HolderReport }) {
 
   return (
     <div className="space-y-2">
-      <div className="flex items-baseline gap-4 text-[11px]">
+      <div className="flex items-baseline gap-4 text-body">
         <span className="text-krypt-muted">
           Holders: <span className="text-white/90 font-mono">{fmtNum(report.holderCount)}</span>
         </span>
         <span className="text-krypt-muted">
           Supply: <span className="text-white/90 font-mono">{fmtNum(report.totalSupply)}</span>
         </span>
-        <span className="ml-auto text-[10px] text-krypt-muted/50 uppercase tracking-[0.14em]">
+        <span className="ml-auto text-label text-krypt-muted/50 uppercase tracking-label">
           via {report.source}
         </span>
       </div>
 
       {report.rows.length === 0 ? (
         <div className="rounded-md border border-dashed border-white/10 bg-black/20 px-3 py-6 text-center">
-          <p className="text-[11px] text-krypt-muted">{report.note ?? 'No holder data available.'}</p>
+          <p className="text-body text-krypt-muted">{report.note ?? 'No holder data available.'}</p>
         </div>
       ) : (
         <>
@@ -56,20 +56,20 @@ export function HoldersPanel({ report }: { report: HolderReport }) {
                 key={r.address}
                 className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-white/[0.04] transition group"
               >
-                <span className="w-5 text-[10px] font-mono text-krypt-muted/50 text-right">{i + 1}</span>
+                <span className="w-5 text-label font-mono text-krypt-muted/50 text-right">{i + 1}</span>
                 <button
                   onClick={openSolscan(r.owner ?? r.address)}
-                  className="font-mono text-[11px] text-white/85 hover:text-krypt-purple transition"
+                  className="font-mono text-body text-white/85 hover:text-krypt-purple transition"
                   title={r.owner ? `Owner ${r.owner}` : `Token account ${r.address}`}
                 >
                   {shortAddr(r.owner ?? r.address, 5)}
                 </button>
-                {r.label && <span className="text-[10px] text-arc-gold truncate max-w-[90px]">{r.label}</span>}
+                {r.label && <span className="text-label text-arc-gold truncate max-w-[90px]">{r.label}</span>}
                 <div className="flex items-center gap-1">
                   {r.tags.filter((t) => TAG_LABEL[t]).map((t) => (
                     <span
                       key={t}
-                      className={cls('rounded border px-1 text-[8px] font-bold tracking-wider', TAG_STYLE[t])}
+                      className={cls('rounded border px-1 text-nano font-bold tracking-wider', TAG_STYLE[t])}
                     >
                       {TAG_LABEL[t]}
                     </span>
@@ -97,7 +97,7 @@ export function HoldersPanel({ report }: { report: HolderReport }) {
                         )}
                       </div>
                       <span
-                        className={cls('w-14 text-right text-[11px] font-mono', pct === null ? 'text-krypt-muted/60' : 'text-white/85')}
+                        className={cls('w-14 text-right text-body font-mono', pct === null ? 'text-krypt-muted/60' : 'text-white/85')}
                         title={pct === null ? 'Share of supply not known — the total supply was not read' : undefined}
                       >
                         {fmtPctOrDash(pct, 2)}
@@ -108,7 +108,7 @@ export function HoldersPanel({ report }: { report: HolderReport }) {
               </div>
             ))}
           </div>
-          {report.note && <p className="text-[10px] text-krypt-muted/55 leading-relaxed pt-1">{report.note}</p>}
+          {report.note && <p className="text-label text-krypt-muted/55 leading-relaxed pt-1">{report.note}</p>}
         </>
       )}
     </div>

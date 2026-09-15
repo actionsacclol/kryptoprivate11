@@ -46,7 +46,7 @@ function ChainSwitch() {
 
   if (segments.length < 2) return null;
   return (
-    <div className="inline-flex rounded-lg border border-white/12 overflow-hidden text-[10px] font-bold uppercase tracking-[0.14em]">
+    <div className="inline-flex rounded-lg border border-white/12 overflow-hidden text-label font-bold uppercase tracking-label">
       {segments.map((c) => (
         <button
           key={c}
@@ -125,7 +125,7 @@ function ModeToggle() {
 
   return (
     <div
-      className="inline-flex rounded-lg border border-white/12 overflow-hidden text-[10px] font-bold uppercase tracking-[0.14em]"
+      className="inline-flex rounded-lg border border-white/12 overflow-hidden text-label font-bold uppercase tracking-label"
       title={evmLoading ? `Reading the ${CHAIN_LABEL[chain]} rail…` : `Paper / Live for ${CHAIN_LABEL[chain]} — each chain is armed on its own`}
     >
       <button
@@ -151,7 +151,7 @@ function Divider() {
 function Readout({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
   return (
     <div className="text-right leading-tight" title={label}>
-      <div className="text-[9px] font-display uppercase tracking-[0.24em] text-krypt-muted/70">{label}</div>
+      <div className="text-micro font-display uppercase tracking-label text-krypt-muted/70">{label}</div>
       <div className={cls(
         'text-xs font-mono tabular-nums',
         tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : 'text-white/90',
@@ -253,7 +253,7 @@ export function TopBar({ search, onOpenAutomation, onOpenRunners, onHub }: { sea
             <button
               onClick={onHub}
               title="Back to the Hub"
-              className="flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-[12px] font-medium text-krypt-muted transition hover:border-krypt-purple/40 hover:bg-krypt-purple/10 hover:text-white"
+              className="flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-note font-medium text-krypt-muted transition hover:border-krypt-purple/40 hover:bg-krypt-purple/10 hover:text-white"
             >
               <Home className="h-3.5 w-3.5" />
               Hub
@@ -278,7 +278,7 @@ export function TopBar({ search, onOpenAutomation, onOpenRunners, onHub }: { sea
               title="The scanner is watching launches and flags potential runners — it never trades. Open the Observatory."
               // This pill describes the SCANNER, which is paper by construction;
               // the Paper/Live switch beside it is the only real-money control.
-              className="inline-flex items-center gap-2 rounded-lg border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-1.5 text-[12px] font-semibold text-krypt-pink transition hover:bg-krypt-purple/20"
+              className="inline-flex items-center gap-2 rounded-lg border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-1.5 text-note font-semibold text-krypt-pink transition hover:bg-krypt-purple/20"
             >
               <span className="h-1.5 w-1.5 rounded-full animate-pulse-slow bg-krypt-pink" />
               {status.running ? 'Scanning' : 'Paper positions'}
@@ -295,7 +295,7 @@ export function TopBar({ search, onOpenAutomation, onOpenRunners, onHub }: { sea
           <button
             onClick={onOpenRunners}
             title="Launches the scanner flagged as potential runners in the last hour — measured graduation odds, never a purchase. Open the list."
-            className="inline-flex items-center gap-2 rounded-lg border border-arc-gold/40 bg-arc-gold/10 px-3 py-1.5 text-[12px] font-semibold text-arc-gold transition hover:bg-arc-gold/20"
+            className="inline-flex items-center gap-2 rounded-lg border border-arc-gold/40 bg-arc-gold/10 px-3 py-1.5 text-note font-semibold text-arc-gold transition hover:bg-arc-gold/20"
           >
             <span className="h-1.5 w-1.5 rounded-full animate-pulse-slow bg-arc-gold" />
             {recentRunners} runner{recentRunners === 1 ? '' : 's'}

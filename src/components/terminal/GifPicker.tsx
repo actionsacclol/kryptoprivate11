@@ -70,7 +70,7 @@ export function GifPicker({ onPick, onClose }: { onPick: (dataUrl: string) => vo
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-6 backdrop-blur-sm" onClick={onClose}>
       <div className="plate w-full max-w-2xl animate-pop-in rounded-xl p-4" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center gap-2">
-          <h3 className="font-display text-[11px] font-semibold uppercase tracking-[0.28em] text-krypt-muted">
+          <h3 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted">
             Background GIF
           </h3>
           <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
@@ -84,7 +84,7 @@ export function GifPicker({ onPick, onClose }: { onPick: (dataUrl: string) => vo
                   setProblem(null);
                 }}
                 className={cls(
-                  'px-2.5 py-1 text-[10px] font-semibold transition',
+                  'px-2.5 py-1 text-label font-semibold transition',
                   provider === p ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
                 )}
               >
@@ -107,12 +107,12 @@ export function GifPicker({ onPick, onClose }: { onPick: (dataUrl: string) => vo
             }}
             placeholder={`Search ${GIF_LABEL[provider]} — moon, pepe, explosion…`}
             maxLength={60}
-            className="flex-1 rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60"
+            className="flex-1 rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60"
           />
           <button
             onClick={() => void run()}
             disabled={!query.trim() || searching}
-            className="inline-flex items-center gap-2 rounded-lg border border-krypt-purple/50 bg-krypt-gradient px-3 py-1.5 text-[12px] font-semibold text-white transition hover:brightness-110 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-lg border border-krypt-purple/50 bg-krypt-gradient px-3 py-1.5 text-note font-semibold text-white transition hover:brightness-110 disabled:opacity-50"
           >
             {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
             Search
@@ -120,7 +120,7 @@ export function GifPicker({ onPick, onClose }: { onPick: (dataUrl: string) => vo
         </div>
 
         {problem && (
-          <div className="mt-3 rounded-md border border-arc-gold/30 bg-arc-gold/10 px-3 py-2 text-[11px] leading-relaxed text-arc-gold">
+          <div className="mt-3 rounded-md border border-arc-gold/30 bg-arc-gold/10 px-3 py-2 text-body leading-relaxed text-arc-gold">
             {problem}
             {needsKey && (
               <>
@@ -160,7 +160,7 @@ export function GifPicker({ onPick, onClose }: { onPick: (dataUrl: string) => vo
                 </button>
               ))}
             </div>
-            <div className="mt-2 flex items-center justify-between text-[10px] text-krypt-muted">
+            <div className="mt-2 flex items-center justify-between text-label text-krypt-muted">
               <span>{ATTRIBUTION[provider]}</span>
               <span>Downloaded once and kept locally. A PNG saves one frame; Save video keeps the motion.</span>
             </div>

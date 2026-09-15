@@ -18,7 +18,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from 'react-dom';
 import { LayoutGrid, PanelLeft, X } from 'lucide-react';
 import { PanelGrid } from '../components/PanelGrid';
-import { PANELS, DEFAULT_ENABLED } from '../panels/registry';
+import { PANELS, DEFAULT_ENABLED, PanelActionsContext } from '../panels/registry';
+import { ChainFilter, PanelChainContext, loadChainFilter, storeChainFilter, type ChainFilterValue } from '../panels/chainFilter';
+import { useToast } from '../state/ToastProvider';
+import type { ChainKind } from '@shared/evm';
 import { ROUTES, type RouteId } from '../components/Sidebar';
 import { WORKSPACES, workspaceOf } from '../workspaces';
 import { isPinnable, loadPinned, savePinned } from '../panels/pinned';
@@ -115,7 +118,7 @@ function Picker({
       className="z-50 flex w-80 flex-col overflow-hidden rounded-xl border border-white/10 bg-krypt-panel shadow-krypt-card"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-3 py-2">
-        <span className="text-[10px] uppercase tracking-[0.18em] text-krypt-muted/70">{title}</span>
+        <span className="text-label uppercase tracking-label text-krypt-muted/70">{title}</span>
         <button onClick={onClose} className="text-krypt-muted transition hover:text-white" aria-label="Close">
           <X className="h-3.5 w-3.5" />
         </button>
@@ -129,7 +132,7 @@ function Picker({
 function Check({ on }: { on: boolean }) {
   return (
     <span
-      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[9px] ${
+      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-micro ${
         on ? 'border-krypt-purple bg-krypt-purple/20 text-krypt-purple' : 'border-white/15 text-transparent'
       }`}
       aria-hidden
@@ -139,7 +142,8 @@ function Check({ on }: { on: boolean }) {
   );
 }
 
-export function Workspace() {
+export function Workspace({ openToken }: { openToken?: (mint: string, chain?: ChainKind) => void } = {}) {
+  const toast = useToast();
   const [enabled, setEnabled] = useState<string[]>(loadEnabled);
   const [pinned, setPinned] = useState<RouteId[]>(loadPinned);
   const [open, setOpen] = useState<'panels' | 'pages' | null>(null);
@@ -198,34 +202,69 @@ export function Workspace() {
 
   // Panels render in registry order, not the order they were switched on, so
   // the default arrangement is stable no matter how someone got there.
+  // One filter per chain-aware panel, read from and written to localStorage.
+  // Held here rather than inside each Body so the header control and the rows
+  // it filters are the same piece of state.
+  const [chainFilters, setChainFilters] = useState<Record<string, ChainFilterValue>>(() => {
+    const out: Record<string, ChainFilterValue> = {};
+    for (const p of PANELS) if (p.chainAware) out[p.id] = loadChainFilter(p.id);
+    return out;
+  });
+  const setChainFilter = useCallback((id: string, v: ChainFilterValue) => {
+    setChainFilters((cur) => ({ ...cur, [id]: v }));
+    storeChainFilter(id, v);
+  }, []);
+
   const panels = useMemo(
     () =>
-      PANELS.filter((p) => enabled.includes(p.id)).map((p) => ({
-        key: p.id,
-        title: p.title,
-        body: <p.Body />,
-        layout: p.layout,
-      })),
-    [enabled],
+      PANELS.filter((p) => enabled.includes(p.id)).map((p) => {
+        const value = chainFilters[p.id] ?? 'all';
+        return {
+          key: p.id,
+          title: p.title,
+          // The Body reads its chain from context, so a panel can be dropped
+          // anywhere — grid or popped-out window — without being handed props.
+          body: p.chainAware ? (
+            <PanelChainContext.Provider value={value}>
+              <p.Body />
+            </PanelChainContext.Provider>
+          ) : (
+            <p.Body />
+          ),
+          headerControl: p.chainAware ? (
+            <ChainFilter value={value} onChange={(v) => setChainFilter(p.id, v)} />
+          ) : p.HeaderControl ? (
+            <p.HeaderControl />
+          ) : undefined,
+          layout: p.layout,
+        };
+      }),
+    [enabled, chainFilters, setChainFilter],
   );
 
+  // Panels navigate through this rather than props: `<p.Body />` takes none,
+  // and threading one callback through every panel to serve one of them would
+  // be worse than a context that is empty for the rest.
+  const actions = useMemo(() => ({ openToken }), [openToken]);
+
   return (
+    <PanelActionsContext.Provider value={actions}>
     <div className="px-6 py-5">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-white">My Layout</h1>
-          <p className="text-[12px] text-krypt-muted">Pick your panels and drag them where you want. Saved on this machine.</p>
+          <p className="text-note text-krypt-muted">Pick your panels and drag them where you want. Saved on this machine.</p>
         </div>
 
         <div className="flex items-center gap-2" ref={barRef}>
           <button
             ref={pagesBtn}
             onClick={() => setOpen((v) => (v === 'pages' ? null : 'pages'))}
-            className="flex items-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-3 py-1.5 text-[12px] text-white/90 transition hover:border-krypt-purple/50"
+            className="flex items-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-3 py-1.5 text-note text-white/90 transition hover:border-krypt-purple/50"
           >
             <PanelLeft className="h-3.5 w-3.5" />
             Pages
-            <span className="rounded-full border border-white/10 bg-white/5 px-1.5 text-[10px] text-krypt-muted">
+            <span className="rounded-full border border-white/10 bg-white/5 px-1.5 text-label text-krypt-muted">
               {pinned.length}/{pinnableCount}
             </span>
           </button>
@@ -233,11 +272,11 @@ export function Workspace() {
           <button
             ref={panelsBtn}
             onClick={() => setOpen((v) => (v === 'panels' ? null : 'panels'))}
-            className="flex items-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-3 py-1.5 text-[12px] text-white/90 transition hover:border-krypt-purple/50"
+            className="flex items-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-3 py-1.5 text-note text-white/90 transition hover:border-krypt-purple/50"
           >
             <LayoutGrid className="h-3.5 w-3.5" />
             Panels
-            <span className="rounded-full border border-white/10 bg-white/5 px-1.5 text-[10px] text-krypt-muted">
+            <span className="rounded-full border border-white/10 bg-white/5 px-1.5 text-label text-krypt-muted">
               {enabled.length}/{PANELS.length}
             </span>
           </button>
@@ -254,8 +293,8 @@ export function Workspace() {
                   >
                     <Check on={on} />
                     <span className="min-w-0">
-                      <span className="block text-[12px] font-medium text-white/90">{p.title}</span>
-                      <span className="block text-[11px] leading-snug text-krypt-muted">{p.blurb}</span>
+                      <span className="block text-note font-medium text-white/90">{p.title}</span>
+                      <span className="block text-body leading-snug text-krypt-muted">{p.blurb}</span>
                     </span>
                   </button>
                 );
@@ -265,12 +304,12 @@ export function Workspace() {
 
           {open === 'pages' && (
             <Picker anchor={pagesBtn.current} panelRef={panelRef} title="Pages in your sidebar" onClose={() => setOpen(null)}>
-              <p className="px-2 pb-1 text-[11px] leading-snug text-krypt-muted">
+              <p className="px-2 pb-1 text-body leading-snug text-krypt-muted">
                 Any page from any workspace. Pinned pages appear in the menu on the left while you are in My Layout, and opening one keeps you here.
               </p>
               {groups.map((g) => (
                 <div key={g.title} className="mt-1">
-                  <div className="px-2 py-1 text-[9px] uppercase tracking-[0.18em] text-krypt-muted/60">{g.title}</div>
+                  <div className="px-2 py-1 text-micro uppercase tracking-label text-krypt-muted/60">{g.title}</div>
                   {g.routes.map((r) => {
                     const on = pinned.includes(r.id);
                     return (
@@ -281,8 +320,8 @@ export function Workspace() {
                       >
                         <Check on={on} />
                         <span className="min-w-0">
-                          <span className="block text-[12px] font-medium text-white/90">{r.label}</span>
-                          {r.hint && <span className="block text-[11px] leading-snug text-krypt-muted">{r.hint}</span>}
+                          <span className="block text-note font-medium text-white/90">{r.label}</span>
+                          {r.hint && <span className="block text-body leading-snug text-krypt-muted">{r.hint}</span>}
                         </span>
                       </button>
                     );
@@ -296,14 +335,38 @@ export function Workspace() {
 
       {panels.length === 0 ? (
         <div className="rounded-xl border border-dashed border-white/10 bg-krypt-panel/40 py-16 text-center">
-          <p className="text-[13px] text-white/80">No panels yet.</p>
-          <p className="mt-1 text-[12px] text-krypt-muted">
+          <p className="text-value text-white/80">No panels yet.</p>
+          <p className="mt-1 text-note text-krypt-muted">
             Open <span className="text-white/80">Panels</span> above and switch on what you want to see.
           </p>
         </div>
       ) : (
-        <PanelGrid id="my-layout" panels={panels} onRemove={toggle} />
+        <PanelGrid
+          id="my-layout"
+          panels={panels}
+          onRemove={toggle}
+          // Popping out does NOT remove the panel from the grid: the window is
+          // a second view of it, and closing the window leaves the layout as
+          // it was. Main refuses an id it has no panel for.
+          onPopOut={(key) => {
+            // A refusal has to SAY so. Swallowing the result left a failed
+            // pop-out indistinguishable from a working one that opened a
+            // window somewhere off screen.
+            const api = window.krypt.panels;
+            if (!api) {
+              toast.error('This build cannot pop panels out — restart the app to pick up the new bridge.');
+              return;
+            }
+            void api.popout(key).then(
+              (r) => {
+                if (!r.ok) toast.error(r.message);
+              },
+              (err: unknown) => toast.error(`Could not pop that panel out: ${(err as Error)?.message ?? String(err)}`),
+            );
+          }}
+        />
       )}
     </div>
+    </PanelActionsContext.Provider>
   );
 }

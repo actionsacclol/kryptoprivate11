@@ -29,6 +29,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../system/logger';
 import {
+  contextFromEvmLaunch,
   contextFromLaunch,
   contextFromRunner,
   describeAction,
@@ -43,6 +44,9 @@ import {
   withOrder,
   withPosition,
   ALERT_KINDS,
+  actionAvailableOn,
+  chainLabel,
+  scriptChain,
   MAX_SCRIPTS,
   MAX_STATE_BYTES,
   RULE_ACTIONS,
@@ -59,6 +63,9 @@ import {
 } from '@shared/automation';
 import { MIN_INTERVAL_S, type SandboxToMain } from '@shared/scriptProtocol';
 import type { EngineEvent, LaunchRow } from '@shared/types';
+import { nativeSymbolOf } from '@shared/evm';
+import type { ChainKind } from '@shared/evm';
+import type { EvmScanLaunch } from '@shared/evmScan';
 import type { RunnerFlag } from '@shared/runners';
 import { TRIGGER_BASES } from '@shared/orders';
 import type { NewOrderRequest, OrderKind, TriggerBasis } from '@shared/orders';
@@ -97,31 +104,34 @@ export interface LeaderView {
 export interface LeaderTrade extends LeaderFacts {
   mint: string;
   symbol: string;
+  /** The chain the leader traded on; absent = Solana. Only scripts on that
+   *  chain hear it. */
+  chain?: ChainKind;
 }
 
 export interface AutomationHost {
   /** A buy in the script's mode: paper = simulated fill into the paper book;
    *  live = the real pipeline. */
-  buy(mint: string, sol: number, mode: ScriptMode): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }>;
+  buy(mint: string, sol: number, mode: ScriptMode, chain?: ChainKind): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }>;
   /** A sell of `pct`% of what is held, in the script's mode. `realizedSol`
    *  when the fill can say (paper: exact). */
-  sell(mint: string, pct: number, mode: ScriptMode): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }>;
+  sell(mint: string, pct: number, mode: ScriptMode, chain?: ChainKind): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }>;
   /** Why NO live action can execute right now, or null. Paper ignores it. */
-  liveBlockedReason(): string | null;
+  liveBlockedReason(chain?: ChainKind): string | null;
   /** Why a live BUY specifically cannot (entry breakers). Never blocks a sell. */
-  buyBlockedReason(): string | null;
+  buyBlockedReason(chain?: ChainKind): string | null;
   /** Per-trade SOL cap from execution settings; a live buy may not exceed it. */
-  maxLiveSol(): number;
-  priceSol(mint: string): number | null;
+  maxLiveSol(chain?: ChainKind): number;
+  priceSol(mint: string, chain?: ChainKind): number | null;
   /** The launch feed's row for a mint, if it has one. */
   launch(mint: string): LaunchRow | null;
   /** Provider facts already cached — free. */
-  marketCached(mint: string): MarketFacts | null;
+  marketCached(mint: string, chain?: ChainKind): MarketFacts | null;
   /** Provider facts, fetched — a round trip. */
-  market(mint: string): Promise<MarketFacts | null>;
+  market(mint: string, chain?: ChainKind): Promise<MarketFacts | null>;
   /** Open positions in a mode. */
-  positions(mode: ScriptMode): Promise<ScriptPosition[]>;
-  wallet(): { sol: number | null; address: string | null };
+  positions(mode: ScriptMode, chain?: ChainKind): Promise<ScriptPosition[]>;
+  wallet(chain?: ChainKind): { sol: number | null; address: string | null };
   orders(mint?: string): OrderView[];
   placeOrder(req: NewOrderRequest): Promise<{ ok: boolean; message: string }>;
   cancelOrders(mint: string): { ok: boolean; message: string; cancelled: number };
@@ -139,7 +149,7 @@ export interface AutomationHost {
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   changed(): void;
   sandbox: {
-    start(scriptId: string, code: string): Promise<{ ok: boolean; message: string; retryable?: boolean }>;
+    start(scriptId: string, code: string, info?: { chain?: string; nativeSymbol?: string }): Promise<{ ok: boolean; message: string; retryable?: boolean }>;
     dispatch(scriptId: string, name: string, payload: unknown): Promise<{ ok: boolean; error?: string }>;
     reply(scriptId: string, id: number, ok: boolean, value?: unknown, error?: string): void;
     stop(scriptId: string, reason?: string): Promise<void>;
@@ -580,14 +590,14 @@ async function ctxFor(s: UserScript, mint: string, base?: RuleContext): Promise<
   const now = Date.now();
   if (!h) return base ?? emptyContext(mint);
   const row = h.launch(mint);
-  const pos = (await h.positions(s.mode)).find((p) => p.mint === mint) ?? null;
+  const pos = (await h.positions(s.mode, scriptChain(s))).find((p) => p.mint === mint) ?? null;
   // A bag the user opened by hand still lends its name to the context — the
   // script can watch it and log about it — but it is not this script's
   // POSITION. `held` means "held by this script": that is what the field guide
   // says, what the open-position cap counts, and what the script may sell.
   const mine = rtFor(s).opened.has(mint);
   let c = base ?? (row ? contextFromLaunch(row, now) : emptyContext(mint, pos?.symbol, pos?.name));
-  c = withMarket(c, h.marketCached(mint));
+  c = withMarket(c, h.marketCached(mint, scriptChain(s)));
   c = withPosition(c, mine && pos ? withPeak(s.mode, pos) : null, now);
   c = withGlobals(c, { walletSol: h.wallet().sol, now });
   return c;
@@ -623,7 +633,7 @@ function rateLimited(s: UserScript, rt: Runtime, now: number): boolean {
 async function reconcileOpened(s: UserScript, rt: Runtime): Promise<void> {
   const h = host;
   if (!h) return;
-  const held = new Set((await h.positions(s.mode)).map((p) => p.mint));
+  const held = new Set((await h.positions(s.mode, scriptChain(s))).map((p) => p.mint));
   for (const mint of [...rt.opened.keys()]) if (!held.has(mint) && !host?.orders(mint).some((o) => o.kind === 'limit_buy' && (o.state === 'armed' || o.state === 'paused'))) rt.opened.delete(mint);
 }
 
@@ -645,9 +655,9 @@ async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, wh
   await reconcileOpened(s, rt);
   if (!rt.opened.has(mint) && rt.opened.size >= s.budget.maxOpenPositions) return refuse(s, `buy ${what}: already holding ${rt.opened.size} positions (max ${s.budget.maxOpenPositions})`);
   if (s.mode === 'live') {
-    const blocked = h.liveBlockedReason() ?? h.buyBlockedReason();
+    const blocked = h.liveBlockedReason(scriptChain(s)) ?? h.buyBlockedReason(scriptChain(s));
     if (blocked) return refuse(s, `buy ${what}: not executed — ${blocked}`);
-    if (sol > h.maxLiveSol()) return refuse(s, `buy ${what}: ${sol} SOL is over the execution cap (${h.maxLiveSol()} SOL per trade)`);
+    if (sol > h.maxLiveSol(scriptChain(s))) return refuse(s, `buy ${what}: ${sol} SOL is over the execution cap (${h.maxLiveSol(scriptChain(s))} SOL per trade)`);
   }
   return null;
 }
@@ -713,6 +723,14 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
   const spec = RULE_ACTIONS.find((x) => x.id === action.type);
   if (!s.enabled) return { ok: false, message: 'script is disabled' };
   if (!spec) return refuse(s, 'unknown action');
+  // Chain gate, second of two. `validateScript` already refuses a RULES script
+  // built on a Solana-only action, but a CODE script picks its action at
+  // runtime and never passed that check — and advanced orders and alerts have
+  // no EVM implementation at all, so attempting one would place a Solana order
+  // against a token on another chain. Refused with the reason, never ignored.
+  if (!actionAvailableOn(action.type, scriptChain(s))) {
+    return refuse(s, `${spec.label.toLowerCase()}: not available on ${chainLabel(scriptChain(s))} — advanced orders and alerts are Solana-only`);
+  }
   if (spec.needsMint && !mint) return refuse(s, `${action.type}: no token`);
   if (rateLimited(s, rt, now)) {
     const msg = `refused ${action.type}: over ${s.budget.maxActionsPerMinute} actions in a minute`;
@@ -729,7 +747,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       // says "every script is off" and must not be overtaken by a buy that was
       // already past its checks.
       if (!s.enabled || killSwitch) return { ok: false, message: 'script is disabled' };
-      const r = await h.buy(mint, sol, s.mode);
+      const r = await h.buy(mint, sol, s.mode, scriptChain(s));
       if (r.ok || r.pending) {
         rt.buysToday += 1;
         const prev = rt.opened.get(mint);
@@ -755,7 +773,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       // returns the whole wallet, so a schedule rule armed from the built-in
       // "Daily housekeeping" example would otherwise market-sell every bag the
       // user bought by hand.
-      const held = (await h.positions(s.mode)).filter((p) => rt.opened.has(p.mint));
+      const held = (await h.positions(s.mode, scriptChain(s))).filter((p) => rt.opened.has(p.mint));
       if (!held.length) return refuse(s, 'sell everything: this script holds nothing');
       let sold = 0;
       for (const p of held) {
@@ -778,7 +796,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       if (isBuy) {
         const gate = await buyGate(s, rt, mint, Number(amount), what);
         if (gate) return gate;
-      } else if (!(await h.positions(s.mode)).some((p) => p.mint === mint)) {
+      } else if (!(await h.positions(s.mode, scriptChain(s))).some((p) => p.mint === mint)) {
         return refuse(s, `${spec.label.toLowerCase()} ${what}: nothing held in ${s.mode} mode`);
       }
       if (s.mode === 'paper') {
@@ -802,7 +820,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       return { ok: r.ok, message: r.message, count: r.cancelled };
     }
     case 'apply_template': {
-      if (!(await h.positions(s.mode)).some((p) => p.mint === mint)) return refuse(s, `apply template ${what}: nothing held in ${s.mode} mode`);
+      if (!(await h.positions(s.mode, scriptChain(s))).some((p) => p.mint === mint)) return refuse(s, `apply template ${what}: nothing held in ${s.mode} mode`);
       if (s.mode === 'paper') {
         slog(s, 'info', `PAPER apply template on ${what} — noted, not placed (orders execute for real)`);
         return { ok: true, message: 'paper: template noted, not placed' };
@@ -858,11 +876,11 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   // is the whole wallet; a script must never be able to exit a position the
   // user opened by hand.
   if (!rt.opened.has(mint)) return refuse(s, `sell ${what}: this script does not hold it`);
-  const held = await h.positions(s.mode);
+  const held = await h.positions(s.mode, scriptChain(s));
   const before = held.find((p) => p.mint === mint);
   if (!before) return refuse(s, `sell ${what}: nothing held in ${s.mode} mode`);
   if (s.mode === 'live') {
-    const blocked = h.liveBlockedReason();
+    const blocked = h.liveBlockedReason(scriptChain(s));
     if (blocked) return refuse(s, `sell ${what}: not executed — ${blocked}`);
   }
   // `pct` is a percentage of the WHOLE wallet holding, and the guard above is
@@ -876,11 +894,15 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   // still be able to exit; this only ever shrinks the sell, never grows it.
   const ourCost = rt.opened.get(mint)?.costSol ?? 0;
   let pctOfWallet = pct;
-  if (Number.isFinite(before.costSol) && before.costSol > 0 && ourCost > 0) {
-    const ratio = Math.min(1, ourCost / before.costSol);
+  // An UNKNOWN wallet basis means the script cannot work out its own share, so
+  // it sells the percentage it asked for rather than guessing a ratio — the
+  // same branch an unreconciled Solana position already took.
+  const walletCost = before.costSol;
+  if (walletCost !== null && Number.isFinite(walletCost) && walletCost > 0 && ourCost > 0) {
+    const ratio = Math.min(1, ourCost / walletCost);
     pctOfWallet = Math.max(1, Math.min(100, Math.round(pct * ratio)));
   }
-  const r = await h.sell(mint, pctOfWallet, s.mode);
+  const r = await h.sell(mint, pctOfWallet, s.mode, scriptChain(s));
   if (r.ok || r.pending) {
     rt.sellsToday += 1;
     // Paper says exactly what it realised. A live fill's own number is not
@@ -1041,7 +1063,8 @@ async function startCodeInner(s: UserScript): Promise<void> {
   const rt = rtFor(s);
   rt.running = false;
   clearSchedules(rt);
-  const r = await h.sandbox.start(s.id, s.code);
+  const chain = scriptChain(s);
+  const r = await h.sandbox.start(s.id, s.code, { chain, nativeSymbol: nativeSymbolOf(chain) });
   if (!r.ok) {
     rt.running = false;
     rt.lastError = r.message;
@@ -1365,7 +1388,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       case 'token': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'token: bad mint');
-        if (!h.launch(mint) && !h.marketCached(mint)) return answer(true, null);
+        if (!h.launch(mint) && !h.marketCached(mint, scriptChain(s))) return answer(true, null);
         return answer(true, await ctxFor(s, mint));
       }
       case 'market': {
@@ -1375,16 +1398,16 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         // queue, so an un-awaited loop of these starves the whole app and trips
         // its 429 parks. It costs an action like anything else does.
         if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `market: over ${s.budget.maxActionsPerMinute} actions in a minute`);
-        return answer(true, await h.market(mint));
+        return answer(true, await h.market(mint, scriptChain(s)));
       }
       case 'positions': {
         const now = Date.now();
         const out: RuleContext[] = [];
         const rtp = rtFor(s);
-        for (const p of (await h.positions(s.mode)).filter((x) => rtp.opened.has(x.mint))) {
+        for (const p of (await h.positions(s.mode, scriptChain(s))).filter((x) => rtp.opened.has(x.mint))) {
           const row = h.launch(p.mint);
           let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
-          c = withMarket(c, h.marketCached(p.mint));
+          c = withMarket(c, h.marketCached(p.mint, scriptChain(s)));
           c = withPosition(c, withPeak(s.mode, p), now);
           out.push(withGlobals(c, { walletSol: h.wallet().sol, now }));
         }
@@ -1452,10 +1475,18 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
 
 // ── Event feed ────────────────────────────────────────────────────────
 
-function fanOut(trigger: string, eventName: string, mint: string, build: (s: UserScript) => Promise<RuleContext>, throttle?: { map: (rt: Runtime) => Map<string, number>; ms: number }): void {
+/**
+ * `chain` is the chain the EVENT happened on. A script only ever sees its own
+ * chain's events: the same mint string can exist on two of them, the facts
+ * behind a rule differ per chain, and a buy fired from a Solana launch onto a
+ * BNB wallet would be a real trade on the wrong rail. So this is a safety
+ * filter, not a tidiness one.
+ */
+function fanOut(trigger: string, eventName: string, mint: string, chain: ChainKind, build: (s: UserScript) => Promise<RuleContext>, throttle?: { map: (rt: Runtime) => Map<string, number>; ms: number }): void {
   const now = Date.now();
   for (const s of scripts) {
     if (!s.enabled) continue;
+    if (scriptChain(s) !== chain) continue;
     if (s.kind === 'rules' && s.rules.trigger !== trigger) continue;
     if (s.kind === 'code') {
       const rt = rtFor(s);
@@ -1486,12 +1517,12 @@ export function onEngineEvent(ev: EngineEvent): void {
     case 'launchUpdate': {
       const row = ev.launch;
       const trigger = ev.kind === 'launch' ? 'launch' : 'launch_update';
-      fanOut(trigger, ev.kind, row.mint, (s) => ctxFor(s, row.mint, contextFromLaunch(row, Date.now())), ev.kind === 'launchUpdate' ? { map: (rt) => rt.lastUpdateAt, ms: LAUNCH_UPDATE_THROTTLE_MS } : undefined);
+      fanOut(trigger, ev.kind, row.mint, 'solana', (s) => ctxFor(s, row.mint, contextFromLaunch(row, Date.now())), ev.kind === 'launchUpdate' ? { map: (rt) => rt.lastUpdateAt, ms: LAUNCH_UPDATE_THROTTLE_MS } : undefined);
       return;
     }
     case 'runner': {
       const f = ev.runner;
-      fanOut('runner', 'runner', f.mint, (s) => ctxFor(s, f.mint, contextFromRunner(f, h.launch(f.mint), Date.now())));
+      fanOut('runner', 'runner', f.mint, 'solana', (s) => ctxFor(s, f.mint, contextFromRunner(f, h.launch(f.mint), Date.now())));
       return;
     }
     case 'tick': {
@@ -1524,7 +1555,7 @@ export function onEngineEvent(ev: EngineEvent): void {
         orderStates.set(o.id, o.state);
         if (prev === undefined || prev === o.state) continue;
         if (!['triggered', 'filled', 'failed', 'cancelled', 'expired', 'paused'].includes(o.state)) continue;
-        fanOut('order', 'order', o.mint, async (s) => {
+        fanOut('order', 'order', o.mint, 'solana', async (s) => {
           const c = await ctxFor(s, o.mint);
           if (!c.symbol && o.symbol) c.symbol = o.symbol;
           return withOrder(c, { kind: o.kind, state: o.state, amount: o.amount });
@@ -1538,7 +1569,7 @@ export function onEngineEvent(ev: EngineEvent): void {
         const prev = alertFires.get(a.id);
         alertFires.set(a.id, a.lastFiredAt);
         if (prev === undefined || a.lastFiredAt === null || prev === a.lastFiredAt) continue;
-        fanOut('alert', 'alert', a.mint, async (s) => {
+        fanOut('alert', 'alert', a.mint, 'solana', async (s) => {
           const c = await ctxFor(s, a.mint);
           if (!c.symbol && a.symbol) c.symbol = a.symbol;
           return withAlert(c, { kind: a.kind, threshold: a.threshold });
@@ -1563,10 +1594,33 @@ export function onEngineEvent(ev: EngineEvent): void {
   }
 }
 
+/**
+ * An EVM chain's measurement window closed on a tracked launch.
+ *
+ * This is the EVM counterpart of `launch` / `launchUpdate`, and it only ever
+ * reaches scripts on that same chain. The first window a launch produces is
+ * its `launch`; every later one is a `launch_update`, which keeps the two
+ * rails' triggers meaning the same thing to a rule.
+ */
+export function onEvmLaunch(chain: ChainKind, launch: EvmScanLaunch): void {
+  if (!host || !scripts.some((s) => s.enabled && scriptChain(s) === chain)) return;
+  const first = (launch.windows?.length ?? 0) <= 1;
+  const trigger = first ? 'launch' : 'launch_update';
+  const base = contextFromEvmLaunch(launch, Date.now());
+  fanOut(
+    trigger,
+    trigger === 'launch' ? 'launch' : 'launchUpdate',
+    launch.token,
+    chain,
+    async (s) => ctxFor(s, launch.token, base),
+    first ? undefined : { map: (rt) => rt.lastUpdateAt, ms: LAUNCH_UPDATE_THROTTLE_MS },
+  );
+}
+
 /** A followed wallet traded (copy trading's watcher). */
 export function onLeaderTrade(t: LeaderTrade): void {
   if (!host || !scripts.some((s) => s.enabled)) return;
-  fanOut('leader_trade', 'leaderTrade', t.mint, async (s) => {
+  fanOut('leader_trade', 'leaderTrade', t.mint, t.chain ?? 'solana', async (s) => {
     const c = await ctxFor(s, t.mint);
     if (!c.symbol && t.symbol) c.symbol = t.symbol;
     return withLeader(c, t);
@@ -1589,12 +1643,12 @@ export async function pollPositions(): Promise<void> {
     await reconcileOpened(s, rt);
     // Only this script's own positions. A position rule over the whole wallet
     // would fire, log and notify about bags it can neither own nor sell.
-    const held = (await h.positions(s.mode)).filter((p) => rt.opened.has(p.mint));
+    const held = (await h.positions(s.mode, scriptChain(s))).filter((p) => rt.opened.has(p.mint));
     for (const p of held) {
       h.subscribeTicks(p.mint);
       const row = h.launch(p.mint);
       let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
-      c = withMarket(c, h.marketCached(p.mint));
+      c = withMarket(c, h.marketCached(p.mint, scriptChain(s)));
       c = withPosition(c, withPeak(s.mode, p), now);
       c = withGlobals(c, { walletSol: h.wallet().sol, now });
       if (s.kind === 'rules') await runRules(s, c);

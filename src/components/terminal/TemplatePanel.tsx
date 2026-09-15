@@ -24,7 +24,7 @@ import { cls } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
 
 const inputCls =
-  'rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60';
+  'rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60';
 
 function Editor({
   draft,
@@ -60,7 +60,7 @@ function Editor({
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">
-        <label className="flex items-center gap-2 text-[11px] text-krypt-muted">
+        <label className="flex items-center gap-2 text-body text-krypt-muted">
           <input
             type="checkbox"
             className="accent-krypt-purple"
@@ -72,7 +72,7 @@ function Editor({
             <NumberInput value={draft.stopLossPct} min={1} max={99} onChange={(n) => patch({ stopLossPct: n })} suffix="%" className="w-24" />
           )}
         </label>
-        <label className="flex items-center gap-2 text-[11px] text-krypt-muted">
+        <label className="flex items-center gap-2 text-body text-krypt-muted">
           <input
             type="checkbox"
             className="accent-krypt-purple"
@@ -88,8 +88,8 @@ function Editor({
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <span className="text-[11px] text-krypt-muted">Take profits</span>
-          <span className="text-[10px] text-krypt-muted/60">each sells a share of what is left at that point</span>
+          <span className="text-body text-krypt-muted">Take profits</span>
+          <span className="text-label text-krypt-muted/60">each sells a share of what is left at that point</span>
           <div className="flex-1" />
           {draft.takeProfits.length < MAX_TAKE_PROFITS && (
             <GhostButton
@@ -106,8 +106,8 @@ function Editor({
         <div className="space-y-1.5">
           {draft.takeProfits.map((tp, i) => (
             <div key={i} className="flex items-center gap-2">
-              <span className="w-4 text-[11px] text-krypt-muted/60">{i + 1}</span>
-              <span className="text-[11px] text-krypt-muted">at</span>
+              <span className="w-4 text-body text-krypt-muted/60">{i + 1}</span>
+              <span className="text-body text-krypt-muted">at</span>
               <NumberInput
                 value={tp.gainPct}
                 min={1}
@@ -116,7 +116,7 @@ function Editor({
                 suffix="%"
                 className="w-28"
               />
-              <span className="text-[11px] text-krypt-muted">sell</span>
+              <span className="text-body text-krypt-muted">sell</span>
               <NumberInput
                 value={tp.sellPct}
                 min={1}
@@ -130,7 +130,7 @@ function Editor({
               </GhostButton>
             </div>
           ))}
-          {!draft.takeProfits.length && <div className="text-[11px] text-krypt-muted/50">No take profits — the stop is the only exit.</div>}
+          {!draft.takeProfits.length && <div className="text-body text-krypt-muted/50">No take profits — the stop is the only exit.</div>}
         </div>
       </div>
 
@@ -141,7 +141,7 @@ function Editor({
         description="The one launch signal with a measured edge in our own data"
       />
 
-      {!v.ok && <div className="text-[11px] text-rose-300">{v.message}</div>}
+      {!v.ok && <div className="text-body text-rose-300">{v.message}</div>}
     </div>
   );
 }
@@ -189,11 +189,11 @@ export function TemplatePanel() {
     >
       <Card>
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="text-[11px] text-krypt-muted">On every manual buy:</span>
+          <span className="text-body text-krypt-muted">On every manual buy:</span>
           <select
             value={activeId ?? ''}
             onChange={(e) => void setActive(e.target.value || null)}
-            className="rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-[12px] text-white outline-none focus:border-krypt-purple/60"
+            className="rounded-md border border-white/15 bg-black/40 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60"
           >
             <option value="">Arm nothing (off)</option>
             {templates.map((t) => (
@@ -203,9 +203,9 @@ export function TemplatePanel() {
             ))}
           </select>
           {active ? (
-            <span className="font-mono text-[11px] text-arc-gold">{describeTemplate(active)}</span>
+            <span className="font-mono text-body text-arc-gold">{describeTemplate(active)}</span>
           ) : (
-            <span className="text-[11px] text-krypt-muted/60">A buy arms nothing; write your own exits below.</span>
+            <span className="text-body text-krypt-muted/60">A buy arms nothing; write your own exits below.</span>
           )}
           <div className="flex-1" />
           {!draft && (
@@ -229,8 +229,8 @@ export function TemplatePanel() {
                 )}
               >
                 <div className="flex items-center gap-2">
-                  <span className="text-[12px] font-semibold text-white">{t.name}</span>
-                  {builtIn && <span className="text-[9px] uppercase tracking-wider text-krypt-muted/60">built in</span>}
+                  <span className="text-note font-semibold text-white">{t.name}</span>
+                  {builtIn && <span className="text-micro uppercase tracking-wider text-krypt-muted/60">built in</span>}
                   <div className="flex-1" />
                   <GhostButton onClick={() => setDraft({ ...t })} className="!py-0.5">
                     <Pencil className="h-3 w-3" />
@@ -245,13 +245,13 @@ export function TemplatePanel() {
                     </GhostButton>
                   )}
                 </div>
-                <div className="mt-1 font-mono text-[11px] text-krypt-muted">{describeTemplate(t)}</div>
+                <div className="mt-1 font-mono text-body text-krypt-muted">{describeTemplate(t)}</div>
               </div>
             );
           })}
         </div>
 
-        <p className="mt-3 text-[10px] leading-relaxed text-krypt-muted/60">
+        <p className="mt-3 text-label leading-relaxed text-krypt-muted/60">
           These orders execute later, without a click at that moment — that is what a stop is for. They are gated on the
           same switches as a manual trade, they survive a restart PAUSED (never silently re-armed), and buying the same
           token twice does not arm a second ladder.

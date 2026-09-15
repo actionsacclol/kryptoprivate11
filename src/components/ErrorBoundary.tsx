@@ -49,14 +49,14 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
     return (
       <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-krypt-void p-6">
         <div className="w-full max-w-lg rounded-2xl border border-rose-500/30 bg-krypt-panel p-6 shadow-krypt-card">
-          <div className="font-display text-[11px] tracking-[0.36em] text-rose-300/80">RENDERER CRASHED</div>
+          <div className="font-display text-body tracking-eyebrow text-rose-300/80">RENDERER CRASHED</div>
           <h2 className="mt-1 text-lg font-semibold text-white">The interface hit an error</h2>
           <p className="mt-3 text-sm text-krypt-muted leading-relaxed">
             The trading engine is unaffected and still running in the background. Reload the
             interface to continue, or stop the engine first if you would rather nothing trades
             while you are blind.
           </p>
-          <pre className="mt-4 max-h-40 overflow-auto rounded-lg border border-white/10 bg-black/40 p-3 text-[11px] leading-snug text-rose-200/90 whitespace-pre-wrap break-words">
+          <pre className="mt-4 max-h-40 overflow-auto rounded-lg border border-white/10 bg-black/40 p-3 text-body leading-snug text-rose-200/90 whitespace-pre-wrap break-words">
             {error.message || String(error)}
           </pre>
           {stopped && <div className="mt-3 text-xs text-krypt-muted">{stopped}</div>}

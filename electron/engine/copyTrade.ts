@@ -18,6 +18,7 @@ import path from 'node:path';
 import {
   copySize,
   DEFAULT_COPIES_PER_MINUTE,
+  COPY_LATENCY_FLOOR_MS,
   emptyLeaderStats,
   validateConfig,
   type CopyConfig,
@@ -93,6 +94,24 @@ export interface CopyHost {
    * absent means "unknown", and the percentage is used unscaled.
    */
   ourCostBasisSol?(mint: string, chain?: ChainKind): number | null;
+  /**
+   * How much of `mint` the LEADER holds right now, in whole tokens, or null
+   * when it cannot be read.
+   *
+   * The rescue path for an unreadable sell size. `soldFraction` is decoded
+   * from the transaction's pre-balances, and those carry an `owner` only on
+   * newer RPC replies — when the owner is missing the pre-balance reads 0,
+   * the fraction comes out null, and the mirror used to give up and sell
+   * NOTHING. That is the failure a user named as the worst of the lot
+   * (2026-09-13): "when someone sells and they can't tell how much it is, it
+   * just doesn't sell".
+   *
+   * One read fixes it exactly, with no guessing: their holding AFTER the
+   * sell, plus the tokens the sell moved, IS what they held before, so
+   * `sold / (after + sold)` is the true fraction — and `after ≈ 0` is a full
+   * exit, the case that matters most.
+   */
+  leaderHolding?(wallet: string, mint: string, chain?: ChainKind): Promise<number | null>;
   /** The live per-trade ceiling, SOL. A copy over it is REFUSED (copy-8). */
   maxLiveSol?(chain?: ChainKind): number | null;
   /** Current spot price in SOL for a mint, if known. */
@@ -141,10 +160,16 @@ export function init(userDataDir: string): void {
       configs: CopyConfig[];
       trades: CopyTrade[];
       leaders?: Record<string, LeaderBook>;
+      pendingExits?: Array<{ key: string; trade: WalletTrade }>;
     };
     configs = Array.isArray(raw?.configs) ? raw.configs : [];
     trades = Array.isArray(raw?.trades) ? raw.trades : [];
     leaders = raw?.leaders && typeof raw.leaders === 'object' && !Array.isArray(raw.leaders) ? raw.leaders : {};
+    for (const row of Array.isArray(raw?.pendingExits) ? raw.pendingExits : []) {
+      if (row && typeof row.key === 'string' && row.trade && typeof row.trade.mint === 'string') {
+        restoredExits.set(row.key, row.trade);
+      }
+    }
   } catch (e) {
     configs = [];
     trades = [];
@@ -183,7 +208,25 @@ function persist(): void {
   saveTimer = setTimeout(() => {
     try {
       const tmp = `${filePath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ version: 1, configs, trades: trades.slice(0, MAX_TRADES), leaders }, null, 2), 'utf8');
+      fs.writeFileSync(
+        tmp,
+        JSON.stringify(
+          {
+            version: 1,
+            configs,
+            trades: trades.slice(0, MAX_TRADES),
+            leaders,
+            // A sell the leader made while our buy was in flight is an
+            // INSTRUCTION, not a cache. Losing it to a crash or a quit is
+            // the same bug as dropping it in memory: the position stays
+            // open and nothing remembers it was meant to close.
+            pendingExits: [...pendingExits.entries()].map(([key, trade]) => ({ key, trade })),
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
       fs.renameSync(tmp, filePath);
     } catch {
       /* memory stays authoritative */
@@ -256,6 +299,10 @@ export function remove(id: string): { ok: boolean; message: string } {
   }
   pendingCopies.delete(id);
   recentCopies.delete(id);
+  for (const key of [...buysInFlight.keys()]) if (key.startsWith(`${id}:`)) buysInFlight.delete(key);
+  for (const key of [...pendingExits.keys()]) if (key.startsWith(`${id}:`)) pendingExits.delete(key);
+  for (const key of [...staleBuys]) if (key.startsWith(`${id}:`)) staleBuys.delete(key);
+  for (const key of [...restoredExits.keys()]) if (key.startsWith(`${id}:`)) restoredExits.delete(key);
   for (const key of [...supersededSkips.keys()]) {
     if (key.startsWith(`${id}:`)) supersededSkips.delete(key);
   }
@@ -264,6 +311,56 @@ export function remove(id: string): { ok: boolean; message: string } {
   persist();
   host?.changed();
   return { ok: true, message: 'Stopped following' };
+}
+
+/**
+ * Clear PAPER results only — one config, or every config.
+ *
+ * "Remove" was the only way to start a paper record over, and it takes the
+ * config, the live history and the leader's own record with it (a user
+ * verified the leader stats went too, 2026-09-13). Those are three different
+ * things and only one of them was being asked for.
+ *
+ * Kept, deliberately: every config and its settings, the live/paper switch,
+ * live rows (they describe real money that really moved — a scorecard reset
+ * must never rewrite them), leader statistics (their record is theirs, not
+ * a function of your paper run), and anything the wallet actually holds.
+ *
+ * Open paper rows go too. A paper position is a simulation with no claim on
+ * anything, and leaving half a run behind would make the next scorecard a
+ * mix of two experiments.
+ */
+export function resetPaper(configId?: string): { ok: boolean; message: string; cleared: number } {
+  if (configId !== undefined && !configs.some((c) => c.id === configId)) {
+    return { ok: false, message: 'Config not found', cleared: 0 };
+  }
+  const before = trades.length;
+  trades = trades.filter((t) => {
+    if (t.mode !== 'paper') return true;
+    return configId !== undefined && t.configId !== configId;
+  });
+  const cleared = before - trades.length;
+  // Paper rows carry no runtime state a live row needs, but a parked exit or
+  // an abandoned buy keyed to a config whose paper rows just vanished has
+  // nothing left to apply to.
+  for (const c of configs) {
+    if (configId !== undefined && c.id !== configId) continue;
+    if (c.mode !== 'paper') continue;
+    for (const key of [...pendingExits.keys()]) if (key.startsWith(`${c.id}:`)) pendingExits.delete(key);
+    for (const key of [...staleBuys]) if (key.startsWith(`${c.id}:`)) staleBuys.delete(key);
+  }
+  persist();
+  host?.changed();
+  const who = configId === undefined ? 'every followed wallet' : (configs.find((c) => c.id === configId)?.label || 'that wallet');
+  host?.log('info', `copy: cleared ${cleared} paper row${cleared === 1 ? '' : 's'} for ${who}`);
+  return {
+    ok: true,
+    message:
+      cleared === 0
+        ? 'No paper results to clear.'
+        : `Cleared ${cleared} paper row${cleared === 1 ? '' : 's'} for ${who}. Settings, live history and leader records are untouched.`,
+    cleared,
+  };
 }
 
 export function all(): CopyConfig[] {
@@ -469,6 +566,14 @@ function leaderStatsFor(wallet: string): LeaderStats {
     unrealized = (unrealized ?? 0) + (p.tokens * px - p.costSol);
   }
   const holds = trips.map((x) => x.closedAt - x.openedAt).filter((ms) => ms >= 0);
+  // Sorted once, for the median and the too-fast share. Both describe whether
+  // a copier could have been inside these trips at all — see
+  // COPY_LATENCY_FLOOR_MS for why this is not a quality measure.
+  const sortedHolds = [...holds].sort((a, b) => a - b);
+  const medianHoldMs = sortedHolds.length ? sortedHolds[sortedHolds.length >> 1] : null;
+  const tooFastPct = holds.length
+    ? (holds.filter((ms) => ms < COPY_LATENCY_FLOOR_MS).length / holds.length) * 100
+    : null;
   const days = b.firstAt === null ? null : Math.max(1, (Date.now() - b.firstAt) / 86_400_000);
   return {
     wallet,
@@ -485,6 +590,8 @@ function leaderStatsFor(wallet: string): LeaderStats {
     openCostSol: open.reduce((a, p) => a + p.costSol, 0),
     unrealizedPnlSol: unrealized,
     avgHoldMs: holds.length ? holds.reduce((a, x) => a + x, 0) / holds.length : null,
+    medianHoldMs,
+    tooFastPct,
     bestSol: trips.length ? Math.max(...trips.map((x) => x.pnlSol)) : null,
     worstSol: trips.length ? Math.min(...trips.map((x) => x.pnlSol)) : null,
     unscoredSells: b.unscoredSells,
@@ -725,6 +832,145 @@ const SIDE_COST = 0.01 + FEE_BPS / 10_000;
  *  second apart (a ladder) must not both size from the same remainder. */
 const exitChains = new Map<string, Promise<void>>();
 
+// ── The leader sells while our buy is still in flight ─────────────────
+//
+// `copyOnce` is slow on purpose: a token-facts fetch, the user's configured
+// delay, then a broadcast and a confirmation. The copy row does not exist
+// until all of that returns. A leader who exits inside that window used to
+// hit `closeOpen`, find no `open` row for the config, and return — the sell
+// was dropped on the floor, with nothing recorded. The buy then landed and
+// opened a position that no exit was ever queued for.
+//
+// A user reported 15 of 16 matched buys recorded AFTER the leader had
+// already exited (2026-09-13). Two things follow from that, and both are
+// implemented here:
+//
+//   1. A sell that arrives with a buy in flight is REMEMBERED, and applied
+//      the moment that buy opens its row (`drainPendingExit`).
+//   2. A buy that has not been SUBMITTED yet when the leader exits is
+//      abandoned (`staleBuys`) — entering a position the leader has already
+//      left is not copying them, and it is the entry that lost the money.
+//      A buy already broadcast cannot be recalled, so it opens its row and
+//      the remembered sell closes it immediately.
+
+/** `${configId}:${mint}` → the buy is between `evaluateBuy` and its record. */
+const buysInFlight = new Map<string, { since: number; submitted: boolean }>();
+/** `${configId}:${mint}` → the leader sell that landed mid-buy, newest wins. */
+const pendingExits = new Map<string, WalletTrade>();
+/** `${configId}:${mint}` marked abandoned: the leader left before we sent. */
+const staleBuys = new Set<string>();
+/** Parked exits read back off disk at boot, before `attach` has a host to
+ *  act with. `resumePendingExits` drains this. */
+const restoredExits = new Map<string, WalletTrade>();
+
+/**
+ * How old a parked exit may be and still be acted on after a restart.
+ *
+ * The instruction is "they sold, so get out". That is worth honouring
+ * through a crash and a relaunch — it is exactly the case the user lost
+ * money to. It is NOT worth honouring after the app has been shut for a
+ * week: mirroring a sell from days ago at today's price is a fresh trading
+ * decision nobody made, which is the same reasoning that brings persisted
+ * orders back PAUSED rather than armed.
+ *
+ * Past the window the exit is not silently dropped either — it is recorded
+ * as skipped, saying what it was and that the position is still held.
+ */
+const PENDING_EXIT_MAX_AGE_MS = 15 * 60_000;
+
+const flightKey = (configId: string, mint: string): string => `${configId}:${mint}`;
+
+/** Note a sell that has no row to close yet because the buy is still going.
+ *  Returns true when it was parked (so the caller does not also drop it). */
+function parkExit(c: CopyConfig, t: WalletTrade): boolean {
+  const key = flightKey(c.id, t.mint);
+  const flight = buysInFlight.get(key);
+  if (!flight) return false;
+  pendingExits.set(key, t);
+  // Not yet sent: the entry itself is what we no longer want.
+  if (!flight.submitted) staleBuys.add(key);
+  host?.log(
+    'info',
+    `copy: ${c.label || c.wallet.slice(0, 6)} sold ${t.symbol || t.mint.slice(0, 8)} while our buy was in flight — ` +
+      (flight.submitted ? 'exit queued for the moment it opens' : 'buy abandoned as stale'),
+  );
+  return true;
+}
+
+/**
+ * Act on exits parked before the last shutdown. Called once, after the host
+ * is attached and the configs are loaded.
+ *
+ * Fresh ones fire through the ordinary path. Stale ones are RECORDED as
+ * skipped rather than dropped, because the user is still holding the
+ * position and the one thing worse than a late exit is a silent one.
+ */
+export function resumePendingExits(now = Date.now()): { fired: number; expired: number } {
+  let fired = 0;
+  let expired = 0;
+  for (const [key, t] of [...restoredExits.entries()]) {
+    restoredExits.delete(key);
+    const configId = key.slice(0, key.indexOf(':'));
+    const c = configs.find((x) => x.id === configId);
+    if (!c || !c.copySells) continue;
+    const open = trades.filter((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open' && x.kind !== 'exit');
+    if (!open.length) continue; // the buy never opened a row — nothing is held for it
+    const age = now - (t.at ?? 0);
+    if (age > PENDING_EXIT_MAX_AGE_MS) {
+      expired += 1;
+      record(
+        exitSkipped(
+          open[0],
+          t,
+          100,
+          `not executed — ${c.label || c.wallet.slice(0, 6)} sold this ${Math.round(age / 60_000)} minutes ago, while the app was closed. ` +
+            'Too old to mirror at today\u2019s price, so nothing was sold. You still hold it.',
+        ),
+      );
+      host?.toast(
+        'error',
+        `${t.symbol || t.mint.slice(0, 8)}: the wallet you follow sold it while Krypt was closed. You still hold it \u2014 sell by hand if you want out.`,
+      );
+      continue;
+    }
+    fired += 1;
+    // A LIVE config comes back from a restart DISARMED (see init). That rule
+    // is about not resuming ENTRIES — "an exit must stay possible while
+    // entries are paused" — so a parked exit still fires. But the panel will
+    // be showing "Paused" while this sells, and a user who sees those two
+    // things together with no explanation is right to distrust both. Say it.
+    const paused = c.mode === 'live' && !c.enabled;
+    host?.log(
+      'info',
+      `copy: resuming an exit parked before shutdown — ${t.symbol || t.mint.slice(0, 8)}` +
+        (paused ? ' (this config is paused after the restart; exits still run, entries do not)' : ''),
+    );
+    if (paused) {
+      host?.toast(
+        'warn',
+        `${t.symbol || t.mint.slice(0, 8)}: selling an exit that was interrupted by a restart. ` +
+          `Following is paused — this is the old instruction finishing, not a new copy.`,
+      );
+    }
+    queueExit(c, t);
+  }
+  if (fired || expired) {
+    persist();
+    host?.changed();
+  }
+  return { fired, expired };
+}
+
+/** Apply a sell that was parked while this buy was in flight. */
+function drainPendingExit(c: CopyConfig, mint: string): void {
+  const key = flightKey(c.id, mint);
+  const parked = pendingExits.get(key);
+  if (!parked) return;
+  pendingExits.delete(key);
+  if (!c.copySells) return;
+  queueExit(c, parked);
+}
+
 function queueExit(c: CopyConfig, t: WalletTrade): void {
   const key = `${c.id}:${t.mint}`;
   const prev = exitChains.get(key) ?? Promise.resolve();
@@ -742,6 +988,60 @@ function fractionOf(t: WalletTrade): number | null {
   const f = t.soldFraction;
   if (f === null || f === undefined || !Number.isFinite(f) || f <= 0) return null;
   return Math.min(1, f);
+}
+
+/**
+ * Work out what share the leader sold when the transaction could not say.
+ *
+ * Their holding AFTER the sell plus the tokens it moved is what they held
+ * BEFORE it, so the fraction is exact — this recovers the number, it does
+ * not estimate it. Needs the token count (`t.tokens`, from the same decode)
+ * and one balance read.
+ *
+ * Still null on a failed read, and null still means "do not mirror": an
+ * unknown share must never become a full dump because an RPC timed out.
+ * What changes is that "unknown" is now rare instead of routine.
+ */
+/** `${wallet}:${mint}` → a recent holding read. `getTokenAccountsByOwner` is
+ *  one of the scarcest public methods (10 per 10 s), and a leader selling in
+ *  rungs fires this path once per rung against the same balance. Short
+ *  enough that it never answers for a DIFFERENT sell than the one it read. */
+const holdingCache = new Map<string, { at: number; value: number | null }>();
+const HOLDING_CACHE_MS = 3_000;
+
+async function recoverFraction(t: WalletTrade, h: CopyHost): Promise<number | null> {
+  const sold = t.tokens;
+  if (sold === undefined || !Number.isFinite(sold) || sold <= 0) return null;
+  if (!h.leaderHolding) return null;
+  const ck = `${t.wallet}:${t.mint}`;
+  const now = Date.now();
+  let after: number | null = null;
+  const hit = holdingCache.get(ck);
+  if (hit && now - hit.at < HOLDING_CACHE_MS) {
+    after = hit.value;
+  } else {
+    try {
+      after = await h.leaderHolding(t.wallet, t.mint, t.chain ?? 'solana');
+    } catch {
+      return null; // unreadable is unknown, never a guess
+    }
+    holdingCache.set(ck, { at: now, value: after });
+    if (holdingCache.size > 256) {
+      const oldest = holdingCache.keys().next().value;
+      if (oldest !== undefined) holdingCache.delete(oldest);
+    }
+  }
+  if (after === null || !Number.isFinite(after) || after < 0) return null;
+  const before = after + sold;
+  if (!(before > 0)) return null;
+  const f = Math.min(1, sold / before);
+  if (!(f > 0)) return null;
+  h.log(
+    'info',
+    `copy: sell size was unreadable from the transaction — recovered from their balance: ` +
+      `sold ${sold}, ${after} left → ${Math.round(f * 100)}% of their bag`,
+  );
+  return f;
 }
 
 /** One sell of `fraction` of what is left of copy `x`: the slice record,
@@ -840,7 +1140,11 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
   const h = host;
   if (!h) return;
   const rows = trades.filter((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open' && x.kind !== 'exit');
-  if (!rows.length) return;
+  if (!rows.length) {
+    // Nothing to close YET is not nothing to close: a buy may be mid-flight.
+    parkExit(c, t);
+    return;
+  }
   // A row is governed by the mode it was OPENED in, not by what the config is
   // set to today (copy-3). Flipping a config from paper to live used to make
   // the leader's next sell broadcast a real order against a paper row, and
@@ -851,9 +1155,15 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
   const who = c.label || c.wallet.slice(0, 6);
   const what = t.symbol || t.mint.slice(0, 8);
   const skipKey = t.signature ? `${c.id}:${t.signature}` : null;
-  const fraction = fractionOf(t);
+  let fraction = fractionOf(t);
+  if (fraction === null) fraction = await recoverFraction(t, h);
   if (fraction === null) {
-    const row = exitSkipped(rows[0], t, 100, 'not executed — could not tell how much of their holding they sold');
+    const row = exitSkipped(
+      rows[0],
+      t,
+      100,
+      'not executed — how much of their bag they sold could not be read, and their balance could not be checked either. Your position is still open; sell it by hand if you want out.',
+    );
     // The wallet watcher may deliver this same sell again WITH the fraction
     // (copy-13); if it does, this row is withdrawn rather than left standing.
     if (skipKey) {
@@ -866,7 +1176,10 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
       }
     }
     record(row);
-    h.toast('warn', `Copy sell skipped — ${who} sold ${what}, but the share they sold could not be read`);
+    h.toast(
+      'error',
+      `Copy sell NOT placed — ${who} sold ${what} but the size could not be read. You still hold it — sell by hand if you want out.`,
+    );
     return;
   }
   const pct = Math.max(1, Math.min(100, Math.round(fraction * 100)));
@@ -976,10 +1289,18 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
   // The slot is taken NOW, before the first await, so the next swap in this
   // same slot sees it (copy-1). Everything below runs inside the try.
   reserve(c, Date.now());
+  const key = flightKey(c.id, t.mint);
+  buysInFlight.set(key, { since: Date.now(), submitted: false });
   try {
     await copyOnce(c, t, base, h);
   } finally {
     release(c.id);
+    buysInFlight.delete(key);
+    staleBuys.delete(key);
+    // Whatever happened above, a sell that landed mid-flight is applied now:
+    // the row it needs either exists or never will, and `closeOpen` handles
+    // both. Runs last so it sees the row `copyOnce` just recorded.
+    drainPendingExit(c, t.mint);
   }
 }
 
@@ -1055,6 +1376,12 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
   }
 
   if (c.mode === 'paper') {
+    // Paper follows the same rule as live, or the scorecard measures a
+    // strategy the live config would never have run.
+    if (staleBuys.has(flightKey(c.id, t.mint))) {
+      record({ ...base, reason: 'not executed — they had already sold before this copy was sent' });
+      return;
+    }
     record({ ...base, state: 'open', entryPriceSol: entry });
     h.log('info', `paper-copy ${c.label || c.wallet.slice(0, 6)}: ${base.ourSol} SOL of ${t.symbol}`);
     recorder.record('copy_open', { configId: c.id, mint: t.mint, mode: 'paper', ourSol: base.ourSol, entry });
@@ -1077,6 +1404,20 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
     h.toast('warn', `Copy skipped — ${base.ourSol} SOL is above your live max per trade (${cap} SOL)`);
     return;
   }
+  // Last gate before real money leaves: did the leader exit while we were
+  // reading token facts and serving the configured delay? Copying an entry
+  // into a position they have already closed is not copying them, and it is
+  // the leg that lost the money in the 2026-09-13 report.
+  const key = flightKey(c.id, t.mint);
+  if (staleBuys.has(key)) {
+    record({ ...base, reason: 'not executed — they had already sold before this copy was sent' });
+    h.toast('warn', `Copy skipped — ${c.label || c.wallet.slice(0, 6)} sold ${t.symbol} before your buy went out`);
+    return;
+  }
+  // From here the transaction can reach the chain, so it can no longer be
+  // abandoned — only followed by an exit.
+  const flight = buysInFlight.get(key);
+  if (flight) flight.submitted = true;
   const res = await h.buy(t.mint, base.ourSol, { slippagePct: c.maxSlippagePct, walletId: c.walletId ?? undefined, chain: chainOf(c) });
   if (!stillConfigured(c.id)) return;
   if (res.ok || res.pending === true) {
@@ -1115,6 +1456,62 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
   }
 }
 
+/**
+ * Close LIVE copy rows whose tokens are no longer in the wallet.
+ *
+ * A copy row is opened by a buy and closed by a mirrored sell. Nothing else
+ * used to touch it — so selling the position by hand, or letting a stop-loss
+ * or a take-profit ladder take it, left the copy standing as "open" forever:
+ * it kept a slot in `openCount`, kept being marked to market, and kept being
+ * priced by the engine's poll. A user reported three fully sold positions
+ * (FUZZ, anal and a SOL-quoted mint) still showing open (2026-09-13).
+ *
+ * `heldMints` must be a COMPLETE, successful read of the wallet's holdings.
+ * A failed read is not an empty wallet, and the caller must not pass one —
+ * closing every live copy on a timed-out RPC is a far worse bug than the one
+ * this fixes. `configIds` names the configs that wallet actually signs for;
+ * rows belonging to a config pinned to a different signer are left alone.
+ *
+ * Realised PnL stays NULL on these rows on purpose: the tokens left through
+ * a sale this module never saw, so it has no exit price, and inventing one
+ * would put a made-up number into the scorecard. The row says what happened
+ * instead.
+ */
+export function reconcileHoldings(
+  heldMints: Set<string>,
+  opts: { graceMs?: number; configIds?: Set<string> } = {},
+): number {
+  const grace = opts.graceMs ?? 90_000;
+  const only = opts.configIds ?? null;
+  const now = Date.now();
+  let closed = 0;
+  for (const x of trades) {
+    if (x.state !== 'open' || x.mode !== 'live' || x.kind === 'exit') continue;
+    if ((x.chain ?? 'solana') !== 'solana') continue; // this read is the Solana wallet's
+    // A config can sign with a wallet that is not the active one. This read
+    // describes ONE wallet, and another wallet's holdings say nothing about
+    // whether these tokens are still held — closing on them would be the
+    // same bug in the other direction.
+    if (only !== null && !only.has(x.configId)) continue;
+    if (heldMints.has(x.mint)) continue;
+    // A buy that has just been broadcast is not in the wallet yet. Closing it
+    // on the next poll would report every fresh copy as already gone.
+    if (now - x.at < grace) continue;
+    if (buysInFlight.has(flightKey(x.configId, x.mint))) continue;
+    x.state = 'closed';
+    x.closedAt = now;
+    x.remainingPct = 0;
+    x.reason = 'closed — these tokens are no longer in the wallet (sold by hand, or by one of your orders)';
+    closed += 1;
+  }
+  if (closed > 0) {
+    persist();
+    host?.changed();
+    host?.log('info', `copy: closed ${closed} copy row${closed === 1 ? '' : 's'} whose tokens are no longer held`);
+  }
+  return closed;
+}
+
 /** Mark paper positions to market so open PnL is not stale. */
 export function markToMarket(mint: string, priceSol: number, chain?: ChainKind): void {
   if (!(priceSol > 0)) return;
@@ -1140,6 +1537,11 @@ export function _reset(): void {
   handledSells.clear();
   supersededSkips.clear();
   pendingCopies.clear();
+  buysInFlight.clear();
+  pendingExits.clear();
+  staleBuys.clear();
+  restoredExits.clear();
+  holdingCache.clear();
   recentCopies.clear();
   exitChains.clear();
 }

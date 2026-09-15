@@ -61,26 +61,26 @@ export function EvmPortfolioCard({ chain, onOpenToken }: { chain: EvmChainKind; 
       <Card className="space-y-3">
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <div>
-            <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/70">{sym} balance</div>
+            <div className="text-micro uppercase tracking-label text-krypt-muted/70">{sym} balance</div>
             <div className="text-base font-mono font-semibold text-white mt-0.5">
               {fmtNative(data.nativeBalance, sym)}
-              <span className="text-[10px] text-krypt-muted/70">{usd(data.nativeBalance)}</span>
+              <span className="text-label text-krypt-muted/70">{usd(data.nativeBalance)}</span>
             </div>
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/70">Positions</div>
+            <div className="text-micro uppercase tracking-label text-krypt-muted/70">Positions</div>
             <div className="text-base font-mono font-semibold text-white mt-0.5">{data.positions.length}</div>
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/70">Unrealized</div>
+            <div className="text-micro uppercase tracking-label text-krypt-muted/70">Unrealized</div>
             <div className={cls('text-base font-mono font-semibold mt-0.5', toneFor(data.unrealizedPnlNative))}>{fmtNativeSigned(data.unrealizedPnlNative, sym)}</div>
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/70">Realized</div>
+            <div className="text-micro uppercase tracking-label text-krypt-muted/70">Realized</div>
             <div className={cls('text-base font-mono font-semibold mt-0.5', toneFor(data.realizedPnlNative))}>{fmtNativeSigned(data.realizedPnlNative, sym)}</div>
           </div>
           <div>
-            <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/70">Gas + fees paid</div>
+            <div className="text-micro uppercase tracking-label text-krypt-muted/70">Gas + fees paid</div>
             <div className="text-base font-mono font-semibold text-white mt-0.5">
               {/* Both halves are computed independently, so either can be
                   unknown on its own. Dashing only when BOTH are null printed a
@@ -92,7 +92,7 @@ export function EvmPortfolioCard({ chain, onOpenToken }: { chain: EvmChainKind; 
         </div>
 
         {data.unreconciled > 0 && (
-          <p className="text-[11px] text-arc-gold/85">
+          <p className="text-body text-arc-gold/85">
             {data.unreconciled} of {data.fills} fill(s) could not be read from the chain yet — their cost is left out, not guessed.
           </p>
         )}
@@ -103,7 +103,7 @@ export function EvmPortfolioCard({ chain, onOpenToken }: { chain: EvmChainKind; 
               <button
                 key={p.token}
                 onClick={() => onOpenToken(p.token, chain)}
-                className="w-full flex items-center gap-3 rounded-md px-2 py-1.5 text-[11px] text-left hover:bg-white/[0.04] transition"
+                className="w-full flex items-center gap-3 rounded-md px-2 py-1.5 text-body text-left hover:bg-white/[0.04] transition"
               >
                 <span className="font-semibold text-white/90 w-24 truncate">{p.symbol || shortAddr(p.token, 4)}</span>
                 <span className="font-mono text-krypt-muted w-24 text-right">{fmtTokens(p.amount)}</span>
@@ -113,7 +113,7 @@ export function EvmPortfolioCard({ chain, onOpenToken }: { chain: EvmChainKind; 
                     ? '—'
                     : `${fmtNativeSigned(p.unrealizedPnlNative, sym)}${p.unrealizedPnlPct === null ? '' : ` · ${p.unrealizedPnlPct >= 0 ? '+' : ''}${fmtNum(p.unrealizedPnlPct, 1)}%`}`}
                 </span>
-                <span className="flex-1 text-right text-[9px] uppercase tracking-wider text-krypt-muted/60">{p.basisKnown ? '' : 'no basis'}</span>
+                <span className="flex-1 text-right text-micro uppercase tracking-wider text-krypt-muted/60">{p.basisKnown ? '' : 'no basis'}</span>
               </button>
             ))}
           </div>

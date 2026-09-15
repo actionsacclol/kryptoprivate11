@@ -50,8 +50,8 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
 
   const stat = (label: string, value: string) => (
     <div className="min-w-[84px]">
-      <div className="text-[9px] uppercase tracking-[0.18em] text-krypt-muted/60">{label}</div>
-      <div className="font-mono text-[13px] text-white/90">{value}</div>
+      <div className="text-micro uppercase tracking-label text-krypt-muted/60">{label}</div>
+      <div className="font-mono text-value text-white/90">{value}</div>
     </div>
   );
 
@@ -63,10 +63,10 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
             <Coins className="h-5 w-5" />
           </span>
           <div>
-            <div className="text-[15px] font-semibold text-white">
+            <div className="text-figure font-semibold text-white">
               ${KRYPTO_TOKEN.symbol} <span className="font-normal text-krypt-muted">· {KRYPTO_TOKEN.name}</span>
             </div>
-            <div className="text-[12px] text-krypt-muted">Krypt's own token, on pump.fun.</div>
+            <div className="text-note text-krypt-muted">Krypt's own token, on pump.fun.</div>
           </div>
         </div>
         <div className="flex flex-wrap gap-5">
@@ -78,22 +78,22 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
         <div className="flex items-center gap-2">
           <button
             onClick={() => onOpenToken(mint)}
-            className="rounded-lg bg-krypt-gradient px-4 py-2 text-[12px] font-semibold text-white transition hover:opacity-90"
+            className="rounded-lg bg-krypt-gradient px-4 py-2 text-note font-semibold text-white transition hover:opacity-90"
             title="Open the token page — the buy there uses your Paper/Live setting, arm state and slippage like any other token"
           >
             Buy ${KRYPTO_TOKEN.symbol}
           </button>
           <button
             onClick={() => void window.krypt.app.openExternal(kryptoPumpUrl(mint))}
-            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[12px] text-krypt-muted transition hover:text-white"
+            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-note text-krypt-muted transition hover:text-white"
             title="Open on pump.fun in your browser"
           >
             <ExternalLink className="h-3.5 w-3.5" /> pump.fun
           </button>
         </div>
       </div>
-      {failed && <p className="mt-2 text-[11px] text-amber-300/90">Could not read the market for it right now — the numbers above are the last known, or unknown.</p>}
-      <p className="mt-3 text-[10px] leading-relaxed text-krypt-muted/80">{kryptoDisclosure()}</p>
+      {failed && <p className="mt-2 text-body text-amber-300/90">Could not read the market for it right now — the numbers above are the last known, or unknown.</p>}
+      <p className="mt-3 text-label leading-relaxed text-krypt-muted/80">{kryptoDisclosure()}</p>
     </section>
   );
 }

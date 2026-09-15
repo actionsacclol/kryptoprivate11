@@ -20,7 +20,7 @@ function DocumentBody({ doc }: { doc: LegalDocument }) {
         <div key={sec.heading}>
           <h3
             className={cls(
-              'text-[12px] font-semibold mb-1',
+              'text-note font-semibold mb-1',
               sec.emphasis ? 'text-arc-gold' : 'text-white',
             )}
           >
@@ -30,7 +30,7 @@ function DocumentBody({ doc }: { doc: LegalDocument }) {
             <p
               key={i}
               className={cls(
-                'text-[11px] leading-relaxed mb-1.5',
+                'text-body leading-relaxed mb-1.5',
                 // Emphasised sections are the ones a court expects to be
                 // conspicuous: warranty disclaimer, liability cap, arbitration.
                 sec.emphasis ? 'text-white/90 font-medium' : 'text-krypt-muted',
@@ -65,7 +65,7 @@ export function LegalPage() {
         <Card>
           <div className="flex items-start gap-2">
             <ShieldCheck className="h-4 w-4 text-emerald-300 mt-0.5 flex-shrink-0" />
-            <div className="text-[11px] leading-relaxed text-krypt-muted">
+            <div className="text-body leading-relaxed text-krypt-muted">
               {status?.acceptedAt ? (
                 <>
                   You accepted version <span className="text-white">{status.acceptedVersion}</span> on{' '}
@@ -93,7 +93,7 @@ export function LegalPage() {
               key={d.id}
               onClick={() => setOpen(d.id)}
               className={cls(
-                'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[11px] font-semibold transition',
+                'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-body font-semibold transition',
                 d.id === open
                   ? 'border-krypt-purple/40 bg-krypt-purple/15 text-white'
                   : 'border-white/10 bg-black/25 text-krypt-muted hover:text-white',
@@ -106,8 +106,8 @@ export function LegalPage() {
         </div>
         <Card>
           <div className="mb-3">
-            <div className="font-display text-[13px] font-semibold text-white">{doc.title}</div>
-            <div className="text-[10px] text-krypt-muted/70">{doc.subtitle}</div>
+            <div className="font-display text-value font-semibold text-white">{doc.title}</div>
+            <div className="text-label text-krypt-muted/70">{doc.subtitle}</div>
           </div>
           <DocumentBody doc={doc} />
         </Card>
@@ -115,10 +115,10 @@ export function LegalPage() {
 
       <Section title="Contact">
         <Card>
-          <p className="text-[11px] leading-relaxed text-krypt-muted">
+          <p className="text-body leading-relaxed text-krypt-muted">
             {info.entity} · {info.email} · {info.website}
           </p>
-          <p className="mt-1 text-[11px] text-krypt-muted/70">
+          <p className="mt-1 text-body text-krypt-muted/70">
             Provided as-is with no warranty. No affiliation with, sponsorship by, or endorsement from any third party
             is implied; all third-party names and marks belong to their owners. {COPYRIGHT_LINE}
           </p>

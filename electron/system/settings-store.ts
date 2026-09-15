@@ -64,6 +64,19 @@ function migrateUnsafe(s: AppSettings, fromRevision: number): boolean {
     if (typeof s.strategy.paperEntries !== 'boolean') s.strategy.paperEntries = false;
   }
 
+  if (fromRevision < 6) {
+    // Discord Rich Presence is ON by default from 3.0.0, and revision 2 had
+    // explicitly turned it OFF for everyone. Leaving that alone would mean the
+    // feature is "on by default" for new installs only and silently off for
+    // every existing user — the worst of both.
+    //
+    // It publishes to the Discord client on this machine and nothing reaches
+    // us; the privacy policy says so in those words, and TERMS_VERSION moves
+    // with this change so the sentence a user accepted still matches what the
+    // software does. The switch is in Settings and turning it off is one click.
+    s.discordRpcEnabled = true;
+  }
+
   s.settingsRevision = SETTINGS_REVISION;
   return true;
 }

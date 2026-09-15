@@ -15,10 +15,11 @@
 // fetch any was a page that looked broken until the feed had run for a day.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Bookmark, BookmarkCheck, Loader2, Play, Search, Square, Trophy, Users } from 'lucide-react';
+import { Bookmark, BookmarkCheck, Loader2, Play, Search, Square, Trash2, Trophy, Users } from 'lucide-react';
 import { EVM_CHAIN_META } from '@shared/evm';
 import { defaultConfig } from '@shared/copytrade';
 import { useToast } from '../state/ToastProvider';
+import { useModal } from '../state/ModalProvider';
 import {
   MIN_TRIPS_FOR_RANK,
   SCOUT_CHAINS,
@@ -75,7 +76,7 @@ function Pill<T extends string | number>({ value, current, onPick, label }: { va
   return (
     <button
       onClick={() => onPick(value)}
-      className={`rounded-lg border px-2.5 py-1 text-[11px] transition ${
+      className={`rounded-lg border px-2.5 py-1 text-body transition ${
         current === value ? 'border-krypt-purple/60 bg-krypt-purple/15 text-white' : 'border-white/10 bg-krypt-panel text-krypt-muted hover:text-white'
       }`}
     >
@@ -86,6 +87,7 @@ function Pill<T extends string | number>({ value, current, onPick, label }: { va
 
 export function Scout() {
   const toast = useToast();
+  const modal = useModal();
   const [chain, setChain] = useState<ScoutChain>('solana');
   const [section, setSection] = useState<Section>('top');
   const [window_, setWindow] = useState<ScoutWindow>('day');
@@ -94,6 +96,9 @@ export function Scout() {
   const [rows, setRows] = useState<ScoutRow[]>([]);
   const [saved, setSaved] = useState<string[]>([]);
   const [counts, setCounts] = useState<{ tracked: number; watching: number; cap: number } | null>(null);
+  const [clearBusy, setClearBusy] = useState(false);
+  /** Wallets already on the Copy Trading page, so Follow can say so. */
+  const [followed, setFollowed] = useState<string[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   /** Null until read — an unknown collector state must not render as "off". */
@@ -120,6 +125,28 @@ export function Scout() {
     const r = await window.krypt.scout.scanStatus(chain);
     setScan(r.ok && r.data ? r.data : null);
   }, [chain]);
+
+  // Which of these are already on the Copy Trading page. Read once and after a
+  // follow, because it changes only when the user acts.
+  const readFollowed = useCallback(async () => {
+    const r = await window.krypt.copy.list();
+    if (r.ok && r.data) setFollowed(r.data.configs.map((c) => c.wallet));
+  }, []);
+  useEffect(() => {
+    void readFollowed();
+  }, [readFollowed]);
+
+  const copyAddress = useCallback(
+    async (address: string) => {
+      try {
+        await navigator.clipboard.writeText(address);
+        toast.success('Address copied');
+      } catch {
+        toast.error('Could not reach the clipboard');
+      }
+    },
+    [toast],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -211,11 +238,33 @@ export function Scout() {
     async (address: string) => {
       const cfg = defaultConfig(address, `Scout ${address.slice(0, 4)}…${address.slice(-4)}`);
       const r = await window.krypt.copy.save(cfg);
-      if (r.ok) toast.success('Added to copy trading — paper, and switched off until you arm it.');
-      else toast.error(r.message);
+      if (r.ok) {
+        toast.success('Added to copy trading — paper, and switched off until you arm it.');
+        // The row says "Following" from here on; a toast that fades was the
+        // only feedback before, which read as the button doing nothing.
+        void readFollowed();
+      } else toast.error(r.message);
     },
-    [toast],
+    [toast, readFollowed],
   );
+
+  const clearTracked = useCallback(async () => {
+    const yes = await modal.confirm({
+      title: 'Clear tracked wallets',
+      message: `Forget every wallet ${CHAIN_LABEL[chain]} has on record? Saved wallets are kept, and the scanner starts finding new ones from the next trade it sees.`,
+      confirmLabel: 'Clear them',
+      destructive: true,
+    });
+    if (!yes) return;
+    setClearBusy(true);
+    const r = await window.krypt.scout.clear(chain);
+    setClearBusy(false);
+    if (r.ok) {
+      toast.success(r.message);
+      // `load()` re-reads the rows AND the counts together.
+      void load();
+    } else toast.error(r.message);
+  }, [chain, modal, toast, load]);
 
   const toggleSave = useCallback(
     async (address: string) => {
@@ -233,16 +282,16 @@ export function Scout() {
       <aside className="w-[200px] shrink-0 border-r border-white/10 bg-krypt-panel/40 px-3 py-4">
         <div className="mb-4 flex items-center gap-2 px-1">
           <Users className="h-4 w-4 text-krypt-pink" />
-          <span className="text-[13px] font-semibold text-white">Wallet Scout</span>
+          <span className="text-value font-semibold text-white">Wallet Scout</span>
         </div>
 
-        <div className="mb-1 px-1 text-[9px] uppercase tracking-[0.18em] text-krypt-muted/60">Chain</div>
+        <div className="mb-1 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Chain</div>
         <div className="mb-4 space-y-0.5">
           {SCOUT_CHAINS.map((c) => (
             <button
               key={c}
               onClick={() => setChain(c)}
-              className={`block w-full rounded-lg px-2 py-1.5 text-left text-[12px] transition ${
+              className={`block w-full rounded-lg px-2 py-1.5 text-left text-note transition ${
                 chain === c ? 'bg-krypt-purple/15 text-white' : 'text-krypt-muted hover:bg-white/5 hover:text-white'
               }`}
             >
@@ -251,11 +300,11 @@ export function Scout() {
           ))}
         </div>
 
-        <div className="mb-1 px-1 text-[9px] uppercase tracking-[0.18em] text-krypt-muted/60">Lists</div>
+        <div className="mb-1 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Lists</div>
         <div className="mb-4 space-y-0.5">
           <button
             onClick={() => setSection('top')}
-            className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] transition ${
+            className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-note transition ${
               section === 'top' ? 'bg-krypt-purple/15 text-white' : 'text-krypt-muted hover:bg-white/5 hover:text-white'
             }`}
           >
@@ -263,36 +312,36 @@ export function Scout() {
           </button>
           <button
             onClick={() => setSection('saved')}
-            className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-[12px] transition ${
+            className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-note transition ${
               section === 'saved' ? 'bg-krypt-purple/15 text-white' : 'text-krypt-muted hover:bg-white/5 hover:text-white'
             }`}
           >
             <span className="flex items-center gap-2">
               <Bookmark className="h-3.5 w-3.5" /> Saved
             </span>
-            {saved.length > 0 && <span className="rounded-full border border-white/10 bg-white/5 px-1.5 text-[10px]">{saved.length}</span>}
+            {saved.length > 0 && <span className="rounded-full border border-white/10 bg-white/5 px-1.5 text-label">{saved.length}</span>}
           </button>
         </div>
 
-        <div className="mb-1 px-1 text-[9px] uppercase tracking-[0.18em] text-krypt-muted/60">Collecting</div>
+        <div className="mb-1 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Collecting</div>
         <button
           onClick={() => void toggleCollect()}
           disabled={busy}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-2 py-1.5 text-[12px] text-white/90 transition hover:border-krypt-purple/50 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-2 py-1.5 text-note text-white/90 transition hover:border-krypt-purple/50 disabled:opacity-50"
         >
           {collecting ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
           {collecting === null ? 'Unknown' : collecting ? 'Stop' : 'Start'}
         </button>
-        <p className="mt-2 px-1 text-[10px] leading-relaxed text-krypt-muted">
+        <p className="mt-2 px-1 text-label leading-relaxed text-krypt-muted">
           {collecting === null
             ? 'Could not read the collector state.'
             : collecting
               ? `Recording ${CHAIN_LABEL[chain]} trades as they arrive.`
               : `Not recording. ${chain === 'solana' ? 'This starts the engine.' : `This starts the ${CHAIN_LABEL[chain]} Observatory.`}`}
         </p>
-        {note && <p className="mt-2 px-1 text-[10px] leading-relaxed text-amber-300">{note}</p>}
+        {note && <p className="mt-2 px-1 text-label leading-relaxed text-amber-300">{note}</p>}
 
-        <div className="mb-1 mt-4 px-1 text-[9px] uppercase tracking-[0.18em] text-krypt-muted/60">Scan</div>
+        <div className="mb-1 mt-4 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Scan</div>
         <div className="mb-2 flex gap-1">
           {SCOUT_SCAN_HOURS.map((h) => (
             <Pill key={h} value={h} current={hours} onPick={setHours} label={SCOUT_SCAN_HOURS_LABEL[h].replace(' hours', 'h').replace(' hour', 'h')} />
@@ -301,28 +350,43 @@ export function Scout() {
         <button
           onClick={() => void (scanRunning ? cancelScan() : startScan())}
           disabled={scanBusy}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-2 py-1.5 text-[12px] text-white/90 transition hover:border-krypt-purple/50 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-2 py-1.5 text-note text-white/90 transition hover:border-krypt-purple/50 disabled:opacity-50"
           title={scanRunning ? 'Stop after the current step' : 'Read recent trades into the record now. Spends nothing.'}
         >
           {scanRunning ? <Square className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
           {scanRunning ? 'Cancel scan' : 'Scan recent trades'}
         </button>
-        <p className="mt-2 px-1 text-[10px] leading-relaxed text-krypt-muted">{scanLine(chain, scan, hours)}</p>
-        {scan?.message && <p className="mt-1 px-1 text-[10px] leading-relaxed text-amber-300">{scan.message}</p>}
+        <p className="mt-2 px-1 text-label leading-relaxed text-krypt-muted">{scanLine(chain, scan, hours)}</p>
+        {scan?.message && <p className="mt-1 px-1 text-label leading-relaxed text-amber-300">{scan.message}</p>}
 
         {counts && (
-          <p className="mt-4 px-1 text-[10px] leading-relaxed text-krypt-muted">
+          <p className="mt-4 px-1 text-label leading-relaxed text-krypt-muted">
             {counts.tracked.toLocaleString()} wallet{counts.tracked === 1 ? '' : 's'} on record
             {counts.tracked >= counts.cap && ' — the cap; thin, quiet records are dropped first'}
             {counts.watching > 0 && `, ${counts.watching.toLocaleString()} more not active enough yet`}.
           </p>
+        )}
+
+        {/* The record only ever GROWS — the live feed and every scan add to it —
+            so starting a fresh hunt meant deleting a file by hand. Saved wallets
+            survive: saving is the one mark on this page the user put there. */}
+        {counts && counts.tracked > 0 && (
+          <button
+            onClick={() => void clearTracked()}
+            disabled={clearBusy}
+            className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 px-2 py-1.5 text-label text-krypt-muted transition hover:border-rose-400/40 hover:text-rose-200 disabled:opacity-50"
+            title="Forget every tracked wallet on this chain and start the hunt over. Saved wallets are kept."
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Clear tracked wallets
+          </button>
         )}
       </aside>
 
       {/* ── table ────────────────────────────────────────────────────── */}
       <div className="min-w-0 flex-1 overflow-auto px-5 py-4">
         <div className="mb-3 flex flex-wrap items-center gap-3">
-          <h2 className="text-[13px] font-semibold text-white">
+          <h2 className="text-value font-semibold text-white">
             {section === 'top' ? 'Top wallets' : 'Saved wallets'} · {CHAIN_LABEL[chain]}
           </h2>
           <div className="flex gap-1.5">
@@ -340,21 +404,21 @@ export function Scout() {
         </div>
 
         {failure && (
-          <p className="mb-3 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-[12px] text-amber-200">
+          <p className="mb-3 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-note text-amber-200">
             History is read-only this session — {failure}
           </p>
         )}
 
         {loading && rows.length === 0 ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-[12px] text-krypt-muted">
+          <div className="flex items-center justify-center gap-2 py-16 text-note text-krypt-muted">
             <Loader2 className="h-4 w-4 animate-spin" /> Reading records…
           </div>
         ) : rows.length === 0 ? (
           <div className="rounded-xl border border-dashed border-white/10 bg-krypt-panel/40 py-14 text-center">
-            <p className="text-[13px] text-white/80">
+            <p className="text-value text-white/80">
               {section === 'saved' ? 'No saved wallets on this chain.' : `Nothing recorded for ${CHAIN_LABEL[chain]} in this window.`}
             </p>
-            <p className="mt-1 text-[12px] text-krypt-muted">
+            <p className="mt-1 text-note text-krypt-muted">
               {section === 'saved'
                 ? 'Save a wallet from Top wallets and it will be kept here — and never dropped from the records.'
                 : collecting
@@ -364,8 +428,8 @@ export function Scout() {
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-white/10">
-            <table className="w-full min-w-[820px] text-[12px]">
-              <thead className="bg-white/[0.03] text-[10px] uppercase tracking-wider text-krypt-muted/70">
+            <table className="w-full min-w-[820px] text-note">
+              <thead className="bg-white/[0.03] text-label uppercase tracking-wider text-krypt-muted/70">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Wallet</th>
                   <th className="px-3 py-2 text-right font-medium">Profit ({UNIT[chain]})</th>
@@ -384,11 +448,20 @@ export function Scout() {
                     <tr key={r.address} className="border-t border-white/5">
                       <td className="px-3 py-1.5">
                         <span className="font-mono text-white/90">
-                          {r.address.slice(0, 6)}…{r.address.slice(-4)}
+                          <button
+                            onClick={() => void copyAddress(r.address)}
+                            className="font-mono transition hover:text-krypt-purple"
+                            // The full address in the tooltip as well as on the
+                            // clipboard: a truncated string with no way to read
+                            // or copy it is a wallet you cannot look up anywhere.
+                            title={`${r.address} — click to copy`}
+                          >
+                            {r.address.slice(0, 6)}…{r.address.slice(-4)}
+                          </button>
                         </span>
                         {r.looksAutomated && (
                           <span
-                            className="ml-2 rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 text-[9px] text-amber-300"
+                            className="ml-2 rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 text-micro text-amber-300"
                             title="Holds for seconds and trades constantly. A bot wins on latency you do not have — copying one is not the same trade."
                           >
                             bot
@@ -396,7 +469,7 @@ export function Scout() {
                         )}
                         {!r.ranked && (
                           <span
-                            className="ml-2 rounded-full border border-white/10 bg-white/5 px-1.5 text-[9px] text-krypt-muted"
+                            className="ml-2 rounded-full border border-white/10 bg-white/5 px-1.5 text-micro text-krypt-muted"
                             title={`Fewer than ${MIN_TRIPS_FOR_RANK} closed round trips in this window — too small a sample to rank.`}
                           >
                             thin
@@ -423,15 +496,27 @@ export function Scout() {
                           >
                             {isSaved ? <BookmarkCheck className="h-3 w-3" /> : <Bookmark className="h-3 w-3" />}
                           </button>
-                          {chain === 'solana' && (
-                            <button
-                              onClick={() => void follow(r.address)}
-                              className="rounded border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-krypt-muted transition hover:text-white"
-                              title="Add to copy trading — paper, and switched off until you arm it"
-                            >
-                              Follow
-                            </button>
-                          )}
+                          {chain === 'solana' &&
+                            // Following left no mark on the row, so the button
+                            // looked like it had done nothing — it had quietly
+                            // added a paper config and said so in a toast that
+                            // was gone a moment later.
+                            (followed.includes(r.address) ? (
+                              <span
+                                className="rounded border border-krypt-purple/40 bg-krypt-purple/10 px-2 py-0.5 text-label text-krypt-purple"
+                                title="Already on the Copy Trading page — paper, and switched off until you arm it"
+                              >
+                                Following
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => void follow(r.address)}
+                                className="rounded border border-white/10 bg-white/5 px-2 py-0.5 text-label text-krypt-muted transition hover:text-white"
+                                title="Add to copy trading — paper, and switched off until you arm it"
+                              >
+                                Follow
+                              </button>
+                            ))}
                         </span>
                       </td>
                     </tr>
@@ -442,7 +527,7 @@ export function Scout() {
           </div>
         )}
 
-        <div className="mt-4 space-y-1 text-[11px] leading-relaxed text-krypt-muted">
+        <div className="mt-4 space-y-1 text-body leading-relaxed text-krypt-muted">
           <p>
             Every number here is something that happened. Nothing on this page says a wallet will keep winning — ranking traders by
             past profit picks up luck as readily as skill, and this app has measured that twice before. A wallet with fewer than{' '}

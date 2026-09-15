@@ -26,6 +26,31 @@ import { resolveTreasury } from './feeIntegrity';
 /** Our cut, in basis points of the trade's SOL value. 50 bps = 0.5%. */
 export const FEE_BPS = 50;
 
+/**
+ * The farming rate: 5 bps = 0.05% a side, 0.10% a round trip.
+ *
+ * WHY A SECOND RATE EXISTS. Volume farming is not trading. A farmer does
+ * hundreds of round trips whose expected price move is zero, purely to be
+ * counted by some external programme — so the app's fee is not a share of a
+ * gain, it is the entire cost of the activity. Measured 2026-09-14, the whole
+ * market friction of a WSOL->USDC->WSOL round trip is about 0.5 bps at size.
+ * Charging 100 bps on top of a 0.5 bps activity means the user needs a
+ * programme paying more than 1% of volume to break even, and nothing pays
+ * that — the fee would not be expensive, it would make the feature
+ * arithmetically impossible.
+ *
+ * At 10 bps a round trip the bar is ~0.11% instead, which most programmes
+ * clear, so the feature can exist and still pay for itself.
+ *
+ * THIS IS NOT A BYPASS AND MUST NEVER BECOME ONE. It applies only to round
+ * trips the farming runner itself places. Every ordinary buy and sell — every
+ * manual trade, every copy, every order, every script — stays at FEE_BPS.
+ * `splitFee` defaults to FEE_BPS precisely so that reaching the farm rate has
+ * to be deliberate at the call site, and the canary (shared/canary.ts) checks
+ * this constant the same way it checks the main one.
+ */
+export const FARM_FEE_BPS = 5;
+
 /** The referrer's share OF OUR FEE, in basis points. 2000 = 20% of the fee,
  *  which is 0.1% of the trade. */
 export const REFERRAL_SHARE_BPS = 2000;
@@ -65,9 +90,12 @@ export const ZERO_SPLIT: FeeSplit = { totalLamports: 0, treasuryLamports: 0, ref
  * (valid, not the user's own, not the treasury) is a separate decision made
  * once at onboarding — not re-litigated on the hot path of every trade.
  */
-export function splitFee(basisLamports: number, hasReferrer: boolean): FeeSplit {
+export function splitFee(basisLamports: number, hasReferrer: boolean, bps: number = FEE_BPS): FeeSplit {
   if (!Number.isFinite(basisLamports) || basisLamports <= 0) return ZERO_SPLIT;
-  const total = Math.floor((basisLamports * FEE_BPS) / 10_000);
+  // Defaulted, never inferred. A caller that wants the farm rate says so; a
+  // caller that forgets gets the ordinary fee, which is the safe direction.
+  const rate = Number.isFinite(bps) && bps > 0 && bps <= FEE_BPS ? bps : FEE_BPS;
+  const total = Math.floor((basisLamports * rate) / 10_000);
   if (total < MIN_FEE_LAMPORTS) return ZERO_SPLIT;
   if (!hasReferrer) return { totalLamports: total, treasuryLamports: total, referrerLamports: 0 };
   const referrer = Math.floor((total * REFERRAL_SHARE_BPS) / 10_000);

@@ -7,6 +7,7 @@ import {
   MIN_TRIPS_FOR_RANK,
   copySize,
   defaultConfig,
+  leaderTooFast,
   leaderWinRate,
   rankLeaders,
   validateConfig,
@@ -41,15 +42,15 @@ function Field({
 }) {
   return (
     <div>
-      <div className="text-[9px] uppercase tracking-[0.16em] text-krypt-muted/70 mb-1">{label}</div>
+      <div className="text-micro uppercase tracking-label text-krypt-muted/70 mb-1">{label}</div>
       {children}
-      {hint && <div className="text-[9px] text-krypt-muted/50 mt-0.5">{hint}</div>}
+      {hint && <div className="text-micro text-krypt-muted/50 mt-0.5">{hint}</div>}
     </div>
   );
 }
 
 const numBox =
-  'w-full rounded-md border border-white/10 bg-black/40 px-2 py-1.5 text-[12px] font-mono text-white outline-none focus:border-krypt-purple/50';
+  'w-full rounded-md border border-white/10 bg-black/40 px-2 py-1.5 text-note font-mono text-white outline-none focus:border-krypt-purple/50';
 
 /** Where the copy trading stands, live and paper apart — they are different experiments. */
 /** A chain's name for a label, whichever of the three it is. */
@@ -86,7 +87,7 @@ function CopyTotals({ snap }: { snap: CopySnapshot }) {
     <div className="grid gap-2 sm:grid-cols-2">
       {shown.map((r) => (
         <div key={`${r.mode}-${r.chain}`} className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
-          <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-white/80">
+          <div className="mb-2 flex items-center gap-2 text-body font-semibold uppercase tracking-wide text-white/80">
             {r.mode === 'paper' ? <FlaskConical className="h-3 w-3" /> : <Zap className="h-3 w-3" />}
             {r.mode} · {r.name} · {r.running} of {r.configs} running
           </div>
@@ -96,7 +97,7 @@ function CopyTotals({ snap }: { snap: CopySnapshot }) {
             <Tot label="Realised" value={`${r.pnl >= 0 ? '+' : ''}${r.pnl.toFixed(4)} ${r.sym}`} tone={r.pnl > 0 ? 'good' : r.pnl < 0 ? 'bad' : undefined} />
             <Tot label="Open" value={r.open ? `${r.open} · ${r.openCost.toFixed(4)} ${r.sym}` : '0'} />
           </div>
-          {r.skipped > 0 && <div className="mt-1.5 text-[10px] text-krypt-muted">{r.skipped} skipped by filters or limits — counted, not hidden.</div>}
+          {r.skipped > 0 && <div className="mt-1.5 text-label text-krypt-muted">{r.skipped} skipped by filters or limits — counted, not hidden.</div>}
         </div>
       ))}
     </div>
@@ -106,8 +107,8 @@ function CopyTotals({ snap }: { snap: CopySnapshot }) {
 function Tot({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wide text-krypt-muted">{label}</div>
-      <div className={cls('font-mono text-[12px]', tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : 'text-white')}>{value}</div>
+      <div className="text-label uppercase tracking-wide text-krypt-muted">{label}</div>
+      <div className={cls('font-mono text-note', tone === 'good' ? 'text-emerald-300' : tone === 'bad' ? 'text-rose-300' : 'text-white')}>{value}</div>
     </div>
   );
 }
@@ -147,14 +148,14 @@ function ConfigEditor({
         <select
           value={chain}
           onChange={(e) => setC((p) => ({ ...p, chain: e.target.value as ChainKind, walletId: null, onlyPumpfun: e.target.value === 'solana' ? p.onlyPumpfun : false }))}
-          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[12px] text-white"
+          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white"
         >
           <option value="solana">Solana</option>
           <option value="robinhood">Robinhood Chain</option>
           <option value="bnb">BNB Smart Chain</option>
         </select>
         {chain !== 'solana' && (
-          <p className="mt-1 text-[10px] leading-relaxed text-krypt-muted">
+          <p className="mt-1 text-label leading-relaxed text-krypt-muted">
             On {EVM_CHAIN_META[chain].name} a leader is followed through the Observatory&rsquo;s trade feed: their launchpad-curve
             trades while a token is on its curve. That chain&rsquo;s scanner has to be watching, and a live copy needs the chain
             armed on its wallet page. Sells mirror the share they sold, read from their balance.
@@ -183,11 +184,59 @@ function ConfigEditor({
         </Field>
       </div>
 
+      {/*
+        Mode, in the editor.
+
+        A config is created on paper and could only be changed afterwards, on
+        its card — so the form never said which it was making, and choosing
+        paper deliberately was not something the page let you do. Copying a
+        wallet with real money is the highest-variance choice here; the mode
+        belongs next to the decision, the way the Scripts page has it.
+
+        Switching to live DISARMS, exactly as the card's toggle does: arming is
+        a separate, confirmed click and must never be inherited from an edit.
+      */}
+      <Field label="Mode">
+        <div className="flex rounded-md border border-white/10 overflow-hidden">
+          {(['paper', 'live'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setC((prev) => ({ ...prev, mode: m, enabled: m === 'live' ? false : prev.enabled }))}
+              className={cls(
+                'inline-flex items-center gap-1.5 px-3 py-1.5 text-body font-semibold transition',
+                c.mode === m
+                  ? m === 'live'
+                    ? 'bg-rose-500/30 text-white'
+                    : 'bg-krypt-purple/25 text-white'
+                  : 'text-krypt-muted hover:text-white',
+              )}
+            >
+              {m === 'paper' ? <FlaskConical className="h-3 w-3" /> : <Zap className="h-3 w-3" />}
+              {m === 'paper' ? 'Paper' : 'Live'}
+            </button>
+          ))}
+        </div>
+      </Field>
+      {c.mode === 'paper' ? (
+        <p className="text-label leading-relaxed text-krypt-muted">
+          Paper simulates each fill — your configured delay and the protocol fee included — so the record is one a real
+          execution could have produced. Nothing is spent.
+        </p>
+      ) : (
+        <p className="flex items-start gap-2 text-label leading-relaxed text-rose-200/90">
+          <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            Live copies spend real {sym} on their own, every time that wallet trades. Saving leaves this switched off;
+            arming it is a separate, confirmed click.
+          </span>
+        </p>
+      )}
+
       <Field label="Copy with">
         <select
           value={c.walletId ?? ''}
           onChange={(e) => setC({ ...c, walletId: e.target.value || null })}
-          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[12px] text-white"
+          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white"
         >
           <option value="">Active wallet{chain !== 'solana' ? ` on ${EVM_CHAIN_META[chain].name}` : ''}</option>
           {ownWallets.map((w) => (
@@ -196,7 +245,7 @@ function ConfigEditor({
             </option>
           ))}
         </select>
-        <p className="mt-1 text-[10px] leading-relaxed text-krypt-muted">
+        <p className="mt-1 text-label leading-relaxed text-krypt-muted">
           Which of your wallets signs the copies. Pick a different one from your trading wallet to keep the two apart, and give each
           followed leader its own — every config is its own runner.
         </p>
@@ -210,7 +259,7 @@ function ConfigEditor({
                 key={m}
                 onClick={() => set('sizing', m)}
                 className={cls(
-                  'flex-1 px-2 py-1.5 text-[10px] font-semibold transition',
+                  'flex-1 px-2 py-1.5 text-label font-semibold transition',
                   c.sizing === m ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
                 )}
               >
@@ -283,7 +332,7 @@ function ConfigEditor({
           <button
             onClick={() => set('copySells', !c.copySells)}
             className={cls(
-              'w-full rounded-md border px-2 py-1.5 text-[10px] font-semibold transition',
+              'w-full rounded-md border px-2 py-1.5 text-label font-semibold transition',
               c.copySells ? 'border-krypt-purple/45 bg-krypt-purple/15 text-white' : 'border-white/10 bg-white/5 text-krypt-muted',
             )}
           >
@@ -294,7 +343,7 @@ function ConfigEditor({
           <button
             onClick={() => set('onlyPumpfun', !c.onlyPumpfun)}
             className={cls(
-              'w-full rounded-md border px-2 py-1.5 text-[10px] font-semibold transition',
+              'w-full rounded-md border px-2 py-1.5 text-label font-semibold transition',
               c.onlyPumpfun ? 'border-krypt-purple/45 bg-krypt-purple/15 text-white' : 'border-white/10 bg-white/5 text-krypt-muted',
             )}
           >
@@ -303,7 +352,7 @@ function ConfigEditor({
         </Field>
       </div>
 
-      {!validity.ok && <p className="text-[11px] text-rose-300">{validity.message}</p>}
+      {!validity.ok && <p className="text-body text-rose-300">{validity.message}</p>}
 
       <div className="flex items-center gap-2">
         <PrimaryButton onClick={() => onSave(c)} disabled={!validity.ok} className="!py-2 !px-4 text-xs">
@@ -312,7 +361,7 @@ function ConfigEditor({
         <GhostButton onClick={onCancel} className="!py-2 !px-4 text-xs">
           Cancel
         </GhostButton>
-        <span className="text-[10px] text-krypt-muted/60 ml-2">
+        <span className="text-label text-krypt-muted/60 ml-2">
           A trade of 1 {sym} by them would copy as{' '}
           <span className="font-mono text-white/80">{copySize(c as CopyConfig, 1).toFixed(3)} {sym}</span>.
         </span>
@@ -427,6 +476,9 @@ export function WalletsPage() {
   // The leaderboard: THEIR record per followed wallet (every swap seen,
   // copied or not), next to what copying them did for us.
   const leaderRows = snap ? rankLeaders(Object.values(snap.leaders).filter((l) => l.buys + l.sells > 0), rankBy) : [];
+  // How much of the visible top is unreachable? Drives the warning above the
+  // table. Counted over the first ten rows because that is what a user reads.
+  const tooFastTop = leaderRows.slice(0, 10).filter(leaderTooFast).length;
   const labelFor = (wallet: string): string => snap?.configs.find((c) => c.wallet === wallet)?.label || shortAddr(wallet, 6);
   const ourCopies = (wallet: string): { copies: number; closed: number; realized: number } => {
     const out = { copies: 0, closed: 0, realized: 0 };
@@ -455,6 +507,31 @@ export function WalletsPage() {
     else if (!r.ok) toast.error(r.message);
   };
 
+  // Paper results only. "Remove" deletes the config, the live history AND
+  // the leader's own record — three different things, bundled only because
+  // there was no other button (user report, 2026-09-13).
+  const resetPaper = async (c: { id: string; label: string; wallet: string } | null): Promise<void> => {
+    const who = c ? c.label || shortAddr(c.wallet, 6) : 'every followed wallet';
+    const yes = await modal.confirm({
+      title: 'Clear paper results',
+      message:
+        `Clear the paper record for ${who} and start the scorecard over?
+
+` +
+        'Kept: your settings, whether each wallet is on paper or live, every live trade, ' +
+        'the leaders’ own records, and anything your wallet actually holds. ' +
+        'Only simulated results are cleared — including open paper positions.',
+      confirmLabel: 'Clear paper results',
+      destructive: true,
+    });
+    if (!yes) return;
+    const r = await window.krypt.copy.resetPaper(c?.id);
+    if (r.ok && r.data) {
+      setSnap(r.data);
+      toast.success(r.message);
+    } else if (!r.ok) toast.error(r.message);
+  };
+
   return (
     <Page
       title="Copy Trading"
@@ -477,7 +554,7 @@ export function WalletsPage() {
       {snap?.loadFailure && (
         <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-3 py-2.5 flex items-start gap-2">
           <TriangleAlert className="h-4 w-4 text-rose-300 flex-shrink-0 mt-0.5" />
-          <p className="text-[11px] text-rose-200 leading-relaxed">
+          <p className="text-body text-rose-200 leading-relaxed">
             Your copy-trading file could not be read — <span className="font-semibold">nothing was overwritten</span>, and
             nothing is being saved this session. {snap.loadFailure} Configs, copies and leader records you add now are
             gone at the next start. Close the app, copy that file somewhere safe, and check it before continuing.
@@ -497,11 +574,11 @@ export function WalletsPage() {
       {snap && leaderRows.length > 0 && (
         <Section
           title="Leaderboard"
-          description="Every swap seen on a followed wallet is scored as THEIR trade — whether or not your filters let a copy through — so wallets run on paper compare on their own record. Sells of tokens bought before you followed are counted, not scored."
+          description="Every swap seen on a followed wallet is scored as THEIR trade — whether or not your filters let a copy through — so wallets run on paper compare on their own record. Every SOL figure here is theirs, not yours: only the 'Your copies' column is your side of it. Sells of tokens bought before you followed are counted, not scored."
         >
           <Card className="space-y-3">
-            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-              <span className="uppercase tracking-[0.14em] text-krypt-muted/60 mr-1">Rank by</span>
+            <div className="flex flex-wrap items-center gap-1.5 text-label">
+              <span className="uppercase tracking-label text-krypt-muted/60 mr-1">Rank by</span>
               {LEADER_RANK_KEYS.map((k) => (
                 <button
                   key={k.key}
@@ -517,21 +594,41 @@ export function WalletsPage() {
               <span className="flex-1" />
               <span className="text-krypt-muted/50">fewer than {MIN_TRIPS_FOR_RANK} closed trades ranks last</span>
             </div>
+            {tooFastTop > 0 && (
+              <div className="flex items-start gap-2 rounded-md border border-krypt-warn/25 bg-krypt-warn/[0.07] px-2.5 py-2 text-label text-krypt-muted">
+                <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-krypt-warn mt-[1px]" />
+                <span>
+                  <span className="text-white/85">{tooFastTop} of the top {Math.min(10, leaderRows.length)} finish most trades inside a minute.</span>{' '}
+                  Ranking by a wallet&rsquo;s own profit favours wallets whose edge is speed, and speed is the one edge a copy
+                  cannot take: their trade is over before yours lands. Sort by <span className="text-white/70">Hold time</span> to
+                  see the wallets you could actually be in.
+                </span>
+              </div>
+            )}
             <div className="overflow-x-auto">
-              <table className="w-full text-[11px] font-mono">
+              <table className="w-full text-body font-mono">
                 <thead>
-                  <tr className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">
+                  <tr className="text-micro uppercase tracking-label text-krypt-muted/60">
                     <th className="text-left font-normal py-1 pr-2">#</th>
                     <th className="text-left font-normal py-1 pr-3">Wallet</th>
                     <th className="text-right font-normal py-1 px-2">Trades</th>
                     <th className="text-right font-normal py-1 px-2">Win</th>
-                    <th className="text-right font-normal py-1 px-2">Realized</th>
-                    <th className="text-right font-normal py-1 px-2">Return</th>
-                    <th className="text-right font-normal py-1 px-2">Open</th>
-                    <th className="text-right font-normal py-1 px-2">Unreal.</th>
-                    <th className="text-right font-normal py-1 px-2">Avg hold</th>
+                    <th className="text-right font-normal py-1 px-2" title="SOL this wallet has realised on closed round trips — their money, not yours">
+                      Realized SOL
+                    </th>
+                    <th className="text-right font-normal py-1 px-2" title="Realised SOL as a percentage of what they put in">Return %</th>
+                    <th className="text-right font-normal py-1 px-2" title="Positions they still hold · SOL they paid for them">Open</th>
+                    <th className="text-right font-normal py-1 px-2" title="SOL they are up or down on what they still hold">Unreal. SOL</th>
+                    <th
+                      className="text-right font-normal py-1 px-2"
+                      title="Median hold across their closed round trips — median, not average, because one long position drags an average by orders of magnitude. A trip shorter than a minute was over before a copy could have joined it."
+                    >
+                      Hold
+                    </th>
                     <th className="text-right font-normal py-1 px-2">/ day</th>
-                    <th className="text-right font-normal py-1 px-2">Your copies</th>
+                    <th className="text-right font-normal py-1 px-2" title="Copies you took from this wallet · SOL you realised on the closed ones">
+                      Your copies
+                    </th>
                     <th className="text-right font-normal py-1 pl-2">Since</th>
                     <th className="py-1" />
                   </tr>
@@ -540,6 +637,7 @@ export function WalletsPage() {
                   {leaderRows.map((l, i) => {
                     const wr = leaderWinRate(l);
                     const small = l.roundTrips < MIN_TRIPS_FOR_RANK;
+                    const tooFast = leaderTooFast(l);
                     const ours = ourCopies(l.wallet);
                     const scored = l.roundTrips > 0 || l.realizedPnlSol !== 0;
                     return (
@@ -547,10 +645,18 @@ export function WalletsPage() {
                         <td className="py-1.5 pr-2 text-krypt-muted/60">{i + 1}</td>
                         <td className="py-1.5 pr-3">
                           <div className="text-white/90 truncate max-w-[10rem]">{labelFor(l.wallet)}</div>
-                          <div className="text-[9px] text-krypt-muted/60">
+                          <div className="text-micro text-krypt-muted/60">
                             {shortAddr(l.wallet, 4)}
                             {small ? ` · ${l.roundTrips}/${MIN_TRIPS_FOR_RANK} closed` : ''}
                           </div>
+                          {tooFast && (
+                            <div
+                              className="text-micro text-krypt-warn/90"
+                              title={`${l.tooFastPct?.toFixed(0)}% of this wallet's closed round trips opened and closed inside a minute. A copy has to see the buy, land it, then do the same to exit — those trades were over first. Their profit on them is not reachable, however good it looks.`}
+                            >
+                              too fast to copy
+                            </div>
+                          )}
                         </td>
                         <td className="py-1.5 px-2 text-right text-white/85">
                           {l.roundTrips}
@@ -570,7 +676,16 @@ export function WalletsPage() {
                         <td className={cls('py-1.5 px-2 text-right', l.unrealizedPnlSol === null ? 'text-krypt-muted' : toneFor(l.unrealizedPnlSol))}>
                           {l.unrealizedPnlSol === null ? '—' : signed(l.unrealizedPnlSol)}
                         </td>
-                        <td className="py-1.5 px-2 text-right text-white/85">{l.avgHoldMs === null ? '—' : fmtDur(l.avgHoldMs)}</td>
+                        <td
+                          className={cls('py-1.5 px-2 text-right', tooFast ? 'text-krypt-warn' : 'text-white/85')}
+                          title={
+                            l.avgHoldMs === null
+                              ? undefined
+                              : `average ${fmtDur(l.avgHoldMs)}${l.tooFastPct === null ? '' : ` · ${l.tooFastPct.toFixed(0)}% of their trips finished inside a minute`}`
+                          }
+                        >
+                          {l.medianHoldMs === null ? '—' : fmtDur(l.medianHoldMs)}
+                        </td>
                         <td className="py-1.5 px-2 text-right text-white/85">{l.tradesPerDay === null ? '—' : l.tradesPerDay.toFixed(1)}</td>
                         <td className="py-1.5 px-2 text-right text-white/85">
                           {ours.copies}
@@ -593,7 +708,7 @@ export function WalletsPage() {
               </table>
             </div>
             {leaderRows.some((l) => l.unscoredSells > 0) && (
-              <p className="text-[10px] text-krypt-muted/60">
+              <p className="text-label text-krypt-muted/60">
                 Sells of tokens bought before you followed: {leaderRows.reduce((a, l) => a + l.unscoredSells, 0)} — counted in the
                 trade rate, left out of PnL.
               </p>
@@ -616,7 +731,7 @@ export function WalletsPage() {
                   <div className="flex items-center gap-3">
                     <span
                       className={cls(
-                        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider',
+                        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-micro font-bold uppercase tracking-wider',
                         c.mode === 'paper'
                           ? 'border-white/15 bg-white/5 text-krypt-muted'
                           : 'border-rose-400/40 bg-rose-500/15 text-rose-300',
@@ -626,11 +741,11 @@ export function WalletsPage() {
                       {c.mode}
                     </span>
                     <div className="min-w-0">
-                      <div className="text-[13px] font-semibold text-white truncate">
+                      <div className="text-value font-semibold text-white truncate">
                         {c.label || shortAddr(c.wallet, 6)}
                       </div>
-                      <div className="text-[10px] font-mono text-krypt-muted">{shortAddr(c.wallet, 6)}</div>
-                      <div className="text-[10px] text-krypt-muted">
+                      <div className="text-label font-mono text-krypt-muted">{shortAddr(c.wallet, 6)}</div>
+                      <div className="text-label text-krypt-muted">
                         {chainName(chainOf(c))} · signs with{' '}
                         {c.walletId ? (walletsFor(chainOf(c)).find((w) => w.id === c.walletId)?.label ?? 'a wallet that no longer exists') : 'the active wallet'}
                       </div>
@@ -644,7 +759,7 @@ export function WalletsPage() {
                           key={m}
                           onClick={() => void setMode(c, m)}
                           className={cls(
-                            'px-2.5 py-1 text-[10px] font-semibold transition',
+                            'px-2.5 py-1 text-label font-semibold transition',
                             c.mode === m
                               ? m === 'live'
                                 ? 'bg-rose-500/25 text-rose-200'
@@ -660,7 +775,7 @@ export function WalletsPage() {
                     <button
                       onClick={() => void toggle(c)}
                       className={cls(
-                        'rounded-md border px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider transition',
+                        'rounded-md border px-3 py-1.5 text-body font-bold uppercase tracking-wider transition',
                         c.enabled
                           ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300'
                           : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
@@ -669,9 +784,16 @@ export function WalletsPage() {
                       {c.enabled ? 'Following' : 'Paused'}
                     </button>
 
-                    <GhostButton onClick={() => setEditing(c)} className="!py-1.5 !px-2.5 text-[11px]">
+                    <GhostButton onClick={() => setEditing(c)} className="!py-1.5 !px-2.5 text-body">
                       Edit
                     </GhostButton>
+                    <button
+                      onClick={() => void resetPaper({ id: c.id, label: c.label, wallet: c.wallet })}
+                      title="Clear this wallet's paper results — settings, live trades and their own record all stay"
+                      className="text-krypt-muted/60 hover:text-white transition"
+                    >
+                      <FlaskConical className="h-3.5 w-3.5" />
+                    </button>
                     <button
                       onClick={() => void remove(c.id)}
                       className="text-krypt-muted/60 hover:text-rose-300 transition"
@@ -689,15 +811,15 @@ export function WalletsPage() {
                         ['Open', String(st.openCount)],
                         ['Win rate', wr === null ? '—' : `${wr.toFixed(0)}%`],
                         ['W / L', `${st.wins}/${st.losses}`],
-                        ['Realized', st.wins + st.losses === 0 ? '—' : `${st.realizedPnlSol >= 0 ? '+' : ''}${st.realizedPnlSol.toFixed(3)}`],
+                        ['Realized SOL', st.wins + st.losses === 0 ? '—' : `${st.realizedPnlSol >= 0 ? '+' : ''}${st.realizedPnlSol.toFixed(3)}`],
                         ['Filtered out', String(st.skipped)],
                         ['Limit-blocked', String(st.blocked)],
                       ].map(([label, value], i) => (
                         <div key={label}>
-                          <div className="text-[9px] uppercase tracking-[0.14em] text-krypt-muted/60">{label}</div>
+                          <div className="text-micro uppercase tracking-label text-krypt-muted/60">{label}</div>
                           <div
                             className={cls(
-                              'text-[13px] font-mono font-semibold mt-0.5',
+                              'text-value font-mono font-semibold mt-0.5',
                               i === 4 && st.wins + st.losses > 0 ? toneFor(st.realizedPnlSol) : 'text-white',
                             )}
                           >
@@ -708,6 +830,29 @@ export function WalletsPage() {
                     </div>
                   )}
 
+                  {/* "How would I cash out?" was the single most asked
+                      question about copy trading (2026-09-13): the page
+                      shows a running PnL and no sell button anywhere, so it
+                      reads as money locked inside the feature. Say where the
+                      position actually lives. */}
+                  {st && st.openCount > 0 && (
+                    <p className="text-label text-krypt-muted/70 leading-relaxed">
+                      {c.mode === 'live' ? (
+                        <>
+                          {st.openCount} open cop{st.openCount === 1 ? 'y is' : 'ies are'} ordinary holdings in your
+                          wallet — sell {st.openCount === 1 ? 'it' : 'them'} on Portfolio, or on the token page, like
+                          anything else you bought. Copies also close on their own when this wallet sells.
+                        </>
+                      ) : (
+                        <>
+                          {st.openCount} open cop{st.openCount === 1 ? 'y is' : 'ies are'} simulated — nothing was
+                          bought and there is nothing to cash out. They close when this wallet sells, or when your exit
+                          rules fire. Switch to live to trade this wallet for real.
+                        </>
+                      )}
+                    </p>
+                  )}
+
                   {/* How the wallet is being watched. Every followed wallet
                       has its own subscription on the live socket, on any DEX;
                       this line is what turns silence into an explanation. */}
@@ -716,20 +861,20 @@ export function WalletsPage() {
                     if (!w) return null;
                     if (w.state === 'over-cap') {
                       return (
-                        <p className="text-[10px] text-arc-gold/90">
+                        <p className="text-label text-arc-gold/90">
                           Not watched: the endpoint refused this subscription. It may be busy — the app will keep the
                           others watched and retry this one.
                         </p>
                       );
                     }
                     if (w.state === 'off') {
-                      return <p className="text-[10px] text-rose-300/80">Not watched — no websocket endpoint is configured.</p>;
+                      return <p className="text-label text-rose-300/80">Not watched — no websocket endpoint is configured.</p>;
                     }
                     if (w.state === 'connecting') {
-                      return <p className="text-[10px] text-krypt-muted/60">Connecting to the live socket…</p>;
+                      return <p className="text-label text-krypt-muted/60">Connecting to the live socket…</p>;
                     }
                     return (
-                      <p className="text-[10px] text-krypt-muted/60">
+                      <p className="text-label text-krypt-muted/60">
                         Watching on the live socket, any DEX · {w.seen} transaction{w.seen === 1 ? '' : 's'} seen
                         {w.lastSeenAt ? `, last ${fmtAgo(w.lastSeenAt)} ago` : ' so far'} · {w.swaps} swap{w.swaps === 1 ? '' : 's'}
                         {w.lastSwapAt ? ` (last ${fmtAgo(w.lastSwapAt)} ago)` : ''}
@@ -737,7 +882,7 @@ export function WalletsPage() {
                     );
                   })()}
                   {st && st.trades === 0 && c.enabled && (
-                    <p className="text-[10px] text-krypt-muted/60">
+                    <p className="text-label text-krypt-muted/60">
                       Nothing copied yet. Every trade this wallet signs is read from the live socket, whatever DEX it
                       used; buys that pass your filters appear here, and skipped ones say why.
                     </p>
@@ -756,7 +901,7 @@ export function WalletsPage() {
         {snap && !snap.liveExecutable && snap.configs.some((c) => c.mode === 'live' && c.enabled) && (
           <div className="mt-3 rounded-lg border border-arc-gold/35 bg-arc-gold/10 px-3 py-2 flex items-start gap-2">
             <TriangleAlert className="h-4 w-4 text-arc-gold flex-shrink-0 mt-0.5" />
-            <p className="text-[11px] text-arc-gold/90">
+            <p className="text-body text-arc-gold/90">
               Live copying is armed but cannot execute — {snap.liveBlockedReason}.
             </p>
           </div>
@@ -770,7 +915,7 @@ export function WalletsPage() {
             {snap.recent.slice(0, 30).map((t) => (
               <div
                 key={t.id}
-                className="flex items-center gap-3 rounded-md px-3 py-1.5 text-[11px] font-mono hover:bg-white/[0.04] transition"
+                className="flex items-center gap-3 rounded-md px-3 py-1.5 text-body font-mono hover:bg-white/[0.04] transition"
               >
                 <span className="text-krypt-muted/60 w-14">{fmtAgo(t.at)}</span>
                 <span className={cls('w-16 font-bold', t.state === 'skipped' ? 'text-krypt-muted/50' : t.state === 'open' ? 'text-krypt-pink' : 'text-white/80')}>
@@ -826,22 +971,22 @@ export function WalletsPage() {
           </div>
 
           {tracked.length === 0 ? (
-            <p className="text-[11px] text-krypt-muted/60">No tracked wallets yet.</p>
+            <p className="text-body text-krypt-muted/60">No tracked wallets yet.</p>
           ) : (
             <div className="space-y-1">
               {tracked.map((w) => (
                 <div key={w.address} className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-white/[0.04] transition">
-                  <span className="text-[12px] text-arc-gold w-40 truncate">{w.label || '—'}</span>
+                  <span className="text-note text-arc-gold w-40 truncate">{w.label || '—'}</span>
                   <button
                     onClick={() => void window.krypt.app.openExternal(`https://solscan.io/account/${w.address}`)}
-                    className="font-mono text-[11px] text-white/80 hover:text-krypt-purple"
+                    className="font-mono text-body text-white/80 hover:text-krypt-purple"
                   >
                     {shortAddr(w.address, 6)}
                   </button>
                   <div className="flex-1" />
                   <GhostButton
                     onClick={() => setEditing({ ...defaultConfig(w.address, w.label) })}
-                    className="!py-1 !px-2 text-[10px]"
+                    className="!py-1 !px-2 text-label"
                   >
                     <Copy className="h-3 w-3" />
                     Paper-copy

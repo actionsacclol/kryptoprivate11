@@ -38,7 +38,7 @@ export function Bars({
         })}
       </div>
       {hover !== null && (
-        <div className="pointer-events-none absolute -top-7 left-1/2 -translate-x-1/2 rounded-lg border border-white/10 bg-black/85 px-2 py-1 text-[10px] font-mono text-white whitespace-nowrap">
+        <div className="pointer-events-none absolute -top-7 left-1/2 -translate-x-1/2 rounded-lg border border-white/10 bg-black/85 px-2 py-1 text-label font-mono text-white whitespace-nowrap">
           {buckets[hover].label} · {buckets[hover].count} launch{buckets[hover].count === 1 ? '' : 'es'}
         </div>
       )}

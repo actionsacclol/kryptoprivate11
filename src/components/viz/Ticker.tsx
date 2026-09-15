@@ -25,7 +25,7 @@ function TapeItem({ l }: { l: LaunchRow }) {
       </span>
       <span className="text-krypt-muted/60">{l.flow.uniqueBuyers}b</span>
       <span className="text-krypt-muted/40">{fmtAgo(l.detectedAt)}</span>
-      <span className="text-arc-gold/30 text-[9px]">✦</span>
+      <span className="text-arc-gold/30 text-micro">✦</span>
     </span>
   );
 }
@@ -36,7 +36,7 @@ export function Ticker({ launches }: { launches: LaunchRow[] }) {
   return (
     <div className="group relative flex items-stretch overflow-hidden border-b border-white/10 bg-black/40 select-none">
       <div className="flex items-center border-r border-white/10 bg-krypt-panel/80 px-3 z-20">
-        <span className="font-display text-[9px] uppercase tracking-[0.32em] text-arc-gold/70">Omens</span>
+        <span className="font-display text-micro uppercase tracking-eyebrow text-arc-gold/70">Omens</span>
       </div>
       <div className="relative flex-1 overflow-hidden py-1.5">
         <div className="pointer-events-none absolute inset-y-0 left-0 w-14 bg-gradient-to-r from-krypt-void to-transparent z-10" />

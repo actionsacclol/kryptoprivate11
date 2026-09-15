@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { cls } from '../utils/format';
+import { Check, Copy } from 'lucide-react';
 
 export function Page({
   title,
@@ -16,7 +17,7 @@ export function Page({
     <div className="flex flex-col h-full">
       <div className="px-8 pt-7 pb-5 flex items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-[0.06em] text-white">{title}</h1>
+          <h1 className="font-display text-2xl font-semibold tracking-display text-white">{title}</h1>
           {subtitle && <p className="mt-1.5 text-sm text-krypt-muted">{subtitle}</p>}
         </div>
         {actions && <div className="flex items-center gap-2">{actions}</div>}
@@ -44,7 +45,7 @@ export function Section({
           <div className="min-w-0 flex-1">
             {title && (
               <div className="flex items-center gap-3">
-                <h2 className="font-display text-[11px] font-semibold uppercase tracking-[0.3em] text-krypt-muted whitespace-nowrap">
+                <h2 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">
                   {title}
                 </h2>
                 <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" aria-hidden="true" />
@@ -238,6 +239,40 @@ export function Switch({
  * the field itself to [min,max] on blur. Re-syncs from the prop when not
  * focused, so external changes (reset, arrows) still reflect.
  */
+/**
+ * A single-line text field.
+ *
+ * Promoted out of Settings.tsx on 2026-09-14, where it had been private —
+ * and had already been copied once, into the runner-webhook card. Two
+ * definitions of "a text box" is how a UI ends up with two text boxes that
+ * look almost but not quite alike.
+ */
+export function TextInput({
+  value,
+  onChange,
+  placeholder,
+  mono = true,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  /** Off for prose (a label, a note); on for anything the chain produced. */
+  mono?: boolean;
+}) {
+  return (
+    <input
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      spellCheck={false}
+      className={cls(
+        'w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder-krypt-muted/50 outline-none transition focus:border-krypt-purple/60',
+        mono && 'font-mono',
+      )}
+    />
+  );
+}
+
 export function NumberInput({
   value,
   onChange,
@@ -320,7 +355,133 @@ export function NumberInput({
         />
         {suffix && <div className="flex-shrink-0 pr-2 text-xs uppercase text-krypt-muted">{suffix}</div>}
       </div>
-      {warning && <div className="mt-0.5 text-[10px] text-arc-gold/90">{warning}</div>}
+      {warning && <div className="mt-0.5 text-label text-arc-gold/90">{warning}</div>}
+    </div>
+  );
+}
+
+/**
+ * A labelled figure — the app's most-repeated element, and until 2026-09-14
+ * its least consistent.
+ *
+ * There were SEVEN of these, private to seven files, rendering the same
+ * thing four different ways: 9px or 10px labels, tracking anywhere from
+ * 0.14em to 0.18em, muted at 60 %, 70 % or full, values at 13px or 15px.
+ * Nobody could name the difference and everybody could feel it.
+ *
+ * `tone` is a text colour class, not a variant name, because callers already
+ * compute one from a sign and a union would only make them map it back.
+ */
+export function Stat({
+  label,
+  value,
+  tone,
+  hint,
+  size = 'value',
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: string;
+  hint?: string;
+  /** `figure` for the one number a card is actually about. */
+  size?: 'value' | 'figure';
+}) {
+  return (
+    <div>
+      <div className="text-label uppercase tracking-label text-krypt-muted/60">{label}</div>
+      <div
+        className={cls(
+          'mt-0.5 font-mono font-semibold tabular-nums',
+          size === 'figure' ? 'text-figure' : 'text-value',
+          tone ?? 'text-white',
+        )}
+      >
+        {value}
+      </div>
+      {hint && <div className="mt-0.5 text-label leading-relaxed text-krypt-muted/60">{hint}</div>}
+    </div>
+  );
+}
+
+/** A label and a value on one line, ruled against the right edge — the
+ *  position-panel shape. Distinct from `Field`, which holds a CONTROL. */
+export function DataRow({ label, value, tone }: { label: string; value: ReactNode; tone?: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 text-body">
+      <span className="text-krypt-muted/80">{label}</span>
+      <span className={cls('font-mono tabular-nums', tone ?? 'text-white/90')}>{value}</span>
+    </div>
+  );
+}
+
+/** A labelled control, with an optional line of explanation. Was three
+ *  copies under two names (`Field` in Launch and Scripts, `Row` in
+ *  Strategy) that differed only in padding. */
+export function Field({
+  label,
+  hint,
+  children,
+  inline = false,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+  /** Control beside the label (a settings row) rather than beneath it. */
+  inline?: boolean;
+}) {
+  if (inline) {
+    return (
+      <div className="flex items-center justify-between gap-4 rounded-md border border-white/10 bg-black/20 px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-white">{label}</div>
+          {hint && <div className="mt-0.5 text-xs text-krypt-muted">{hint}</div>}
+        </div>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <label className="block">
+      <span className="block text-label uppercase tracking-label text-krypt-muted/70">{label}</span>
+      <div className="mt-1">{children}</div>
+      {hint && <span className="mt-1 block text-label leading-relaxed text-krypt-muted/60">{hint}</span>}
+    </label>
+  );
+}
+
+/** An address or signature you will want on your clipboard. */
+export function Copyable({ value, label }: { value: string; label?: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        void navigator.clipboard.writeText(value);
+        setDone(true);
+        window.setTimeout(() => setDone(false), 1200);
+      }}
+      title={label ? `Copy ${label}` : 'Copy'}
+      className="group inline-flex w-full items-center gap-2 rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm text-white transition hover:border-krypt-purple/40"
+    >
+      <span className="truncate">{value}</span>
+      {done ? (
+        <Check className="ml-auto h-3.5 w-3.5 flex-shrink-0 text-emerald-300" />
+      ) : (
+        <Copy className="ml-auto h-3.5 w-3.5 flex-shrink-0 text-krypt-muted group-hover:text-krypt-purple" />
+      )}
+    </button>
+  );
+}
+
+/** A Section's title treatment, for a heading INSIDE a card — where a full
+ *  `Section` would add margins the card does not want. Was two byte-identical
+ *  copies in OddsPanel and SecurityPanel. */
+export function SectionHeader({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="flex items-center gap-3" title={hint}>
+      <h3 className="font-display text-label font-semibold uppercase tracking-heading text-krypt-muted whitespace-nowrap">
+        {title}
+      </h3>
+      <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" aria-hidden="true" />
     </div>
   );
 }
@@ -342,7 +503,7 @@ export function Empty({
         <path d="M24 4v8M24 36v8M4 24h8M36 24h8" />
         <circle cx="24" cy="24" r="2.5" fill="currentColor" stroke="none" />
       </svg>
-      <div className="font-display text-sm font-semibold tracking-[0.12em] text-white">{title}</div>
+      <div className="font-display text-sm font-semibold tracking-label text-white">{title}</div>
       {message && <div className="text-sm text-krypt-muted mt-2 max-w-md">{message}</div>}
       {action && <div className="mt-4">{action}</div>}
     </div>
@@ -364,7 +525,7 @@ export function Badge({
     gradient:'border-krypt-purple/40 bg-krypt-purple/10 text-krypt-pink',
   };
   return (
-    <span className={cls('inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider', styles[tone])}>
+    <span className={cls('inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-label font-semibold uppercase tracking-wider', styles[tone])}>
       {children}
     </span>
   );

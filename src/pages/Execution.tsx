@@ -34,7 +34,7 @@ function FeeLadder({ snap }: { snap: ExecutionSnapshot }) {
                 animate={{ width: `${(v / max) * 100}%` }}
                 transition={{ duration: 0.4 }}
               />
-              <span className="absolute inset-0 flex items-center px-2 font-mono text-[11px] text-white/90">
+              <span className="absolute inset-0 flex items-center px-2 font-mono text-body text-white/90">
                 {v.toLocaleString()} µlamports/CU
               </span>
             </div>
@@ -42,7 +42,7 @@ function FeeLadder({ snap }: { snap: ExecutionSnapshot }) {
           </div>
         );
       })}
-      <div className="text-[11px] text-krypt-muted/70 pt-1">
+      <div className="text-body text-krypt-muted/70 pt-1">
         Source: <span className="font-mono text-krypt-muted">{fe.source}</span> · scoped to the bonding curve + creator vault (local fee markets)
       </div>
     </div>
@@ -111,7 +111,7 @@ export function Execution() {
               <div className="grid grid-cols-3 gap-2">
                 {([['p50', tf.p50Lamports], ['p75', tf.p75Lamports], ['p95', tf.p95Lamports]] as Array<[string, number]>).map(([k, v]) => (
                   <div key={k} className={cls('rounded-lg border px-3 py-2', e.jitoTipPercentile === Number(k.slice(1)) ? 'border-krypt-purple/50 bg-krypt-purple/10' : 'border-white/10 bg-black/20')}>
-                    <div className="text-[10px] uppercase tracking-wider text-krypt-muted">{k}</div>
+                    <div className="text-label uppercase tracking-wider text-krypt-muted">{k}</div>
                     <div className="font-mono text-sm text-white mt-0.5">{solFrom(v)}</div>
                   </div>
                 ))}
@@ -166,8 +166,8 @@ export function Execution() {
               so we do not claim a number. */}
           <div className="rounded-lg border border-white/10 bg-black/25 p-3">
             <div className="mb-2 flex items-baseline gap-2">
-              <span className="text-[13px] font-semibold text-white">Sandwich exposure (MEV)</span>
-              <span className="text-[11px] text-krypt-muted">how a BUY is routed</span>
+              <span className="text-value font-semibold text-white">Sandwich exposure (MEV)</span>
+              <span className="text-body text-krypt-muted">how a BUY is routed</span>
             </div>
             <div className="grid gap-1.5 sm:grid-cols-3">
               {(
@@ -187,14 +187,14 @@ export function Execution() {
                       : 'border-white/10 bg-white/[0.02] hover:border-white/20',
                   )}
                 >
-                  <div className={cls('text-[12px] font-semibold', (e.mevMode ?? 'fast') === mode ? 'text-white' : 'text-krypt-muted')}>
+                  <div className={cls('text-note font-semibold', (e.mevMode ?? 'fast') === mode ? 'text-white' : 'text-krypt-muted')}>
                     {label}
                   </div>
-                  <div className="mt-0.5 text-[10px] leading-relaxed text-krypt-muted/80">{desc}</div>
+                  <div className="mt-0.5 text-label leading-relaxed text-krypt-muted/80">{desc}</div>
                 </button>
               ))}
             </div>
-            <p className="mt-2 text-[10px] leading-relaxed text-krypt-muted/70">
+            <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">
               Selling always uses every lane, whatever this is set to — missing a block on the way out is worse than
               being seen. How much sandwiching Private actually avoids is <span className="text-krypt-muted">unmeasured</span>:
               nobody can measure the trade that did not happen, and a vendor showing you a protection score is
@@ -251,7 +251,7 @@ export function Execution() {
                   </div>
                   <div className="px-5 pb-3 flex flex-wrap gap-1.5">
                     {p.lanes.map((l, i) => (
-                      <span key={i} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px]">
+                      <span key={i} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-body">
                         <span className="font-semibold text-white">{l.lane}</span>
                         <span className="text-krypt-muted">· {l.detail}</span>
                         {l.tipLamports > 0 && <span className="text-krypt-purple font-mono">tip {solFrom(l.tipLamports)}</span>}

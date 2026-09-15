@@ -28,13 +28,13 @@ export function LiveTrades({
   if (!rows.length) {
     return (
       <div className="rounded-md border border-dashed border-white/10 bg-black/20 px-3 py-6 text-center">
-        <p className="text-[11px] text-krypt-muted leading-relaxed">{note ?? 'No trades yet.'}</p>
+        <p className="text-body text-krypt-muted leading-relaxed">{note ?? 'No trades yet.'}</p>
       </div>
     );
   }
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-krypt-muted/60 px-2">
+      <div className="flex items-center gap-2 text-label uppercase tracking-label text-krypt-muted/60 px-2">
         <span className="w-14">Time</span>
         <span className="w-10">Side</span>
         <span className="w-20">SOL</span>
@@ -45,7 +45,7 @@ export function LiveTrades({
         {rows.map((t, i) => (
           <div
             key={`${t.at}-${t.wallet}-${i}`}
-            className="flex items-center gap-2 rounded px-2 py-1 text-[11px] font-mono hover:bg-white/[0.04] transition"
+            className="flex items-center gap-2 rounded px-2 py-1 text-body font-mono hover:bg-white/[0.04] transition"
           >
             <span className="w-14 text-krypt-muted/70">{clock(t.at)}</span>
             <span className={cls('w-10 font-bold', t.side === 'buy' ? 'text-emerald-400' : 'text-rose-400')}>
@@ -76,7 +76,7 @@ export function LiveTrades({
           </div>
         ))}
       </div>
-      <p className="text-[10px] text-krypt-muted/50 px-2">
+      <p className="text-label text-krypt-muted/50 px-2">
         {note ?? `Source: ${source}`}
       </p>
     </div>
@@ -87,13 +87,13 @@ export function TraderScan({ rows, note }: { rows: TraderScanRow[]; note: string
   if (!rows.length) {
     return (
       <div className="rounded-md border border-dashed border-white/10 bg-black/20 px-3 py-6 text-center">
-        <p className="text-[11px] text-krypt-muted leading-relaxed">{note ?? 'No trader data.'}</p>
+        <p className="text-body text-krypt-muted leading-relaxed">{note ?? 'No trader data.'}</p>
       </div>
     );
   }
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-krypt-muted/60 px-2">
+      <div className="flex items-center gap-2 text-label uppercase tracking-label text-krypt-muted/60 px-2">
         <span className="flex-1">Wallet</span>
         <span className="w-16 text-right">Bought</span>
         <span className="w-16 text-right">Sold</span>
@@ -105,7 +105,7 @@ export function TraderScan({ rows, note }: { rows: TraderScanRow[]; note: string
         {rows.map((r) => (
           <div
             key={r.wallet}
-            className="flex items-center gap-2 rounded px-2 py-1 text-[11px] font-mono hover:bg-white/[0.04] transition"
+            className="flex items-center gap-2 rounded px-2 py-1 text-body font-mono hover:bg-white/[0.04] transition"
           >
             <button
               onClick={() => void window.krypt.app.openExternal(`https://solscan.io/account/${r.wallet}`)}
@@ -131,8 +131,8 @@ export function TraderScan({ rows, note }: { rows: TraderScanRow[]; note: string
           </div>
         ))}
       </div>
-      {note && <p className="text-[10px] text-krypt-muted/50 px-2 leading-relaxed">{note}</p>}
-      <p className="text-[10px] text-krypt-muted/40 px-2">
+      {note && <p className="text-label text-krypt-muted/50 px-2 leading-relaxed">{note}</p>}
+      <p className="text-label text-krypt-muted/40 px-2">
         Amounts in SOL. Realized PnL covers only the window this app has taped.
       </p>
     </div>

@@ -1,7 +1,10 @@
-import { app, BrowserWindow, Menu, Notification, dialog, nativeImage, powerMonitor, session } from 'electron';
+import { app, BrowserWindow, Menu, Notification, dialog, nativeImage, powerMonitor, screen, session } from 'electron';
+import { postFlag, publicTokenUrl, redactWebhook } from './system/discordWebhook';
+import { EVM_CHAIN_META } from '@shared/evm';
+import type { NotifyTarget } from '@shared/types';
 import path from 'node:path';
 import fs from 'node:fs';
-import { registerIpc, getEngine, syncLiveMode, bridgeDeps } from './ipc';
+import { registerIpc, getEngine, syncLiveMode, bridgeDeps, setWindowHost } from './ipc';
 import * as store from './system/settings-store';
 import * as wallet from './system/wallet';
 import { failure as evmWalletFailure } from './evm/evmWallet';
@@ -179,6 +182,13 @@ if (process.platform === 'win32') {
   const aumid = app.isPackaged ? 'cc.krypt.terminal' : `cc.krypt.terminal.dev.${app.getVersion()}`;
   app.setAppUserModelId(aumid);
   logger.info(`taskbar identity: ${aumid}`);
+  // Windows routes a toast's CLICK by its AppUserModelID, and only for an id
+  // that owns a Start Menu shortcut. The installer creates one for the
+  // packaged id; a dev run's id has none, so its notifications appear and
+  // their clicks go nowhere. The handler below is not at fault and needs no
+  // fixing — said here so the next person does not go looking for a bug that
+  // only exists unpackaged.
+  if (!app.isPackaged) logger.info('dev run: desktop notifications will show but clicking one cannot open its coin (no Start Menu shortcut for this AppUserModelID)');
 }
 
 // macOS reads a packaged app's icon from its bundle, but an unpackaged run
@@ -346,6 +356,16 @@ function showMainWindow(): BrowserWindow {
     win.webContents.on('devtools-opened', () => win.webContents.closeDevTools());
   }
 
+  // A renderer error in the MAIN window only ever existed in DevTools, so a
+  // crash card told a user "RENDERER CRASHED" while the app log said nothing
+  // at all. Errors and warnings land in the log now, which is what makes a
+  // report like "it flashes red" diagnosable after the fact.
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level < 2) return;
+    const where = sourceId ? ` (${String(sourceId).split('/').pop()}:${line})` : '';
+    logger[level >= 3 ? 'error' : 'warn'](`renderer${where} — ${String(message).slice(0, 400)}`);
+  });
+
   // Reveal robustly: ready-to-show is the ideal trigger, but did-finish-load
   // + a hard timeout guarantee the window can never get stuck invisible.
   const reveal = (): void => {
@@ -420,6 +440,214 @@ function showMainWindow(): BrowserWindow {
       .catch((err) => logger.error(`loadFile failed: ${err}`));
   }
   mainWindow = win;
+  return win;
+}
+
+// ── Popped-out panels ─────────────────────────────────────────────────
+//
+// One panel in its own frameless window. Same renderer bundle, same preload,
+// same CSP — it is the app's entry with `#panel=<id>`, which src/main.tsx
+// branches on. Nothing about the security posture changes: a second window
+// with window.krypt has to be exactly as locked down as the first.
+//
+// Frameless is the point ("no bar at the top so it is clean"), and it costs
+// two things the OS normally provides — moving and closing. The renderer owns
+// both: an app-region drag surface, and a close control plus Escape.
+
+const panelWindows = new Map<string, BrowserWindow>();
+
+/** Notifications still on screen. See the comment where one is added. */
+const liveNotifications = new Set<Notification>();
+
+// ── Where each panel window was left ──────────────────────────────────
+//
+// A popped-out panel exists to be arranged and left alone, usually on a second
+// monitor, so reopening it in the middle of the primary display every time
+// defeats the feature. Bounds are remembered per panel id.
+//
+// Its own small file rather than settings: this is per-machine window
+// furniture, it changes on every drag, and a corrupt or missing file has to
+// mean "use the defaults" rather than break anything. Reads are wrapped and
+// every stored value is re-validated on the way out — a saved position is a
+// hint, never something to trust into a window constructor.
+
+const PANEL_BOUNDS_FILE = 'panel-windows.json';
+type Bounds = { x: number; y: number; width: number; height: number };
+let panelBounds: Record<string, Bounds> = {};
+
+function panelBoundsPath(): string {
+  return path.join(app.getPath('userData'), PANEL_BOUNDS_FILE);
+}
+
+function loadPanelBounds(): void {
+  try {
+    const raw = fs.readFileSync(panelBoundsPath(), 'utf8');
+    const v = JSON.parse(raw) as unknown;
+    panelBounds = typeof v === 'object' && v !== null ? (v as Record<string, Bounds>) : {};
+  } catch {
+    panelBounds = {};
+  }
+}
+
+let boundsSaveTimer: NodeJS.Timeout | null = null;
+function savePanelBoundsSoon(): void {
+  if (boundsSaveTimer) return;
+  // Debounced: a drag fires these continuously and this is a disk write.
+  boundsSaveTimer = setTimeout(() => {
+    boundsSaveTimer = null;
+    try {
+      fs.writeFileSync(panelBoundsPath(), JSON.stringify(panelBounds));
+    } catch {
+      /* window furniture that cannot be saved is not worth an error */
+    }
+  }, 800);
+  boundsSaveTimer.unref?.();
+}
+
+const isFiniteInt = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+
+/**
+ * A remembered position, only if it still lands on a screen that exists.
+ *
+ * Monitors get unplugged and resolutions change. Restoring blind would put a
+ * window at x=3000 on a machine that is now one laptop display — visible in
+ * the taskbar, reachable by nothing.
+ */
+function usablePanelBounds(panelId: string): Bounds | null {
+  const b = panelBounds[panelId];
+  if (!b || !isFiniteInt(b.x) || !isFiniteInt(b.y) || !isFiniteInt(b.width) || !isFiniteInt(b.height)) return null;
+  if (b.width < 200 || b.height < 160) return null;
+  // The centre of the title strip has to be inside some display's work area,
+  // which is what makes the window grabbable after it opens.
+  const probe = { x: b.x + Math.round(b.width / 2), y: b.y + 16 };
+  const onScreen = screen.getAllDisplays().some((d) => {
+    const w = d.workArea;
+    return probe.x >= w.x && probe.x <= w.x + w.width && probe.y >= w.y && probe.y <= w.y + w.height;
+  });
+  return onScreen ? b : null;
+}
+
+/** Handed to ipc.ts so it can drive windows without importing this file back. */
+export function windowHost(): { openPanel: (id: string) => { ok: boolean; message: string }; closePanel: (w: BrowserWindow | null) => boolean; focusMain: () => BrowserWindow | null } {
+  return { openPanel: openPanelWindow, closePanel: closePanelWindow, focusMain: focusMainWindow };
+}
+
+/** Only ids the renderer actually has a panel for, and only a shape that can
+ *  never leave the hash it is going into. */
+const PANEL_ID_RE = /^[a-zA-Z0-9_-]{1,40}$/;
+
+function openPanelWindow(panelId: string): { ok: boolean; message: string } {
+  if (!PANEL_ID_RE.test(panelId)) return { ok: false, message: 'Unknown panel' };
+  const existing = panelWindows.get(panelId);
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+    return { ok: true, message: 'Already open' };
+  }
+
+  const saved = usablePanelBounds(panelId);
+  const win = new BrowserWindow({
+    width: saved?.width ?? 420,
+    height: saved?.height ?? 460,
+    ...(saved ? { x: saved.x, y: saved.y } : {}),
+    minWidth: 260,
+    minHeight: 200,
+    // No chrome at all. `resizable` still works: Chromium keeps invisible
+    // resize borders on a frameless window.
+    frame: false,
+    resizable: true,
+    backgroundColor: '#0E0D15',
+    title: 'Krypto Bot',
+    autoHideMenuBar: true,
+    skipTaskbar: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      backgroundThrottling: false,
+      devTools: !app.isPackaged,
+    },
+    show: false,
+  });
+  if (app.isPackaged) win.webContents.on('devtools-opened', () => win.webContents.closeDevTools());
+  // The same navigation and window-open guards the main window gets. A second
+  // window carrying window.krypt has to be as locked down as the first, and
+  // this was missed when the window was added.
+  guardWebContents(win);
+
+  // A panel window that fails is currently invisible in the log: it either
+  // shows nothing or shows the renderer's crash card, and neither says why
+  // from the main side. Say it here, where the app log can be read after the
+  // fact rather than from a DevTools window nobody had open.
+  win.webContents.on('did-fail-load', (_e, code, desc, url) =>
+    logger.error(`panel ${panelId}: did-fail-load ${code} ${desc} (${url})`),
+  );
+  win.webContents.on('render-process-gone', (_e, details) =>
+    logger.error(`panel ${panelId}: render process gone — ${details.reason}`),
+  );
+  win.webContents.on('preload-error', (_e, preloadPath, err) =>
+    logger.error(`panel ${panelId}: preload failed (${preloadPath}) — ${err?.message ?? err}`),
+  );
+  win.webContents.on('console-message', (_e, level, message) => {
+    if (level >= 2) logger.error(`panel ${panelId}: renderer — ${String(message).slice(0, 400)}`);
+  });
+
+  const devUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
+  // NOT applyCsp: it registers a SESSION-wide onHeadersReceived listener, and
+  // Electron keeps only the last one per session — a second call here silently
+  // replaced the main window's. Both windows share the default session, so the
+  // policy the main window installed already covers this one.
+  const hash = `panel=${panelId}`;
+  if (devUrl) {
+    win.loadURL(`${devUrl}#${hash}`).catch((err) => logger.error(`panel loadURL failed: ${err}`));
+  } else {
+    win.loadFile(path.join(process.env.DIST!, 'index.html'), { hash }).catch((err) => logger.error(`panel loadFile failed: ${err}`));
+  }
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.show();
+  });
+  logger.info(`panel ${panelId}: window opened (${devUrl ? 'dev server' : 'file'})`);
+  // Remember where it was left. `moved`/`resized` fire at the END of a drag on
+  // Windows and macOS; the close handler catches a window closed mid-gesture.
+  const remember = (): void => {
+    if (win.isDestroyed() || win.isMinimized()) return;
+    panelBounds[panelId] = win.getBounds();
+    savePanelBoundsSoon();
+  };
+  win.on('moved', remember);
+  win.on('resized', remember);
+  win.on('close', remember);
+  win.on('closed', () => panelWindows.delete(panelId));
+  panelWindows.set(panelId, win);
+  return { ok: true, message: 'Opened' };
+}
+
+/** Close the window a request came from, when that window is a panel. A panel
+ *  window must never be able to close the main one. */
+function closePanelWindow(win: BrowserWindow | null): boolean {
+  if (!win || win.isDestroyed()) return false;
+  for (const [id, w] of panelWindows) {
+    if (w === win) {
+      panelWindows.delete(id);
+      win.close();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The main window, for things that must land there rather than in whichever
+ *  window happens to be first — a notification click, or a coin opened from a
+ *  popped-out panel. */
+function focusMainWindow(): BrowserWindow | null {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (!win) return null;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
   return win;
 }
 
@@ -516,12 +744,34 @@ async function bootstrap(): Promise<void> {
 
   // The configs are loaded: point the wallet watcher at the enabled ones.
   getEngine().syncCopyWatch();
+  // A sell the leader made while our buy was still in flight is an
+  // instruction that has to survive the process, not just the async gap —
+  // otherwise a crash or a quit at the wrong moment leaves the position open
+  // with nothing left remembering it was meant to close (user report,
+  // 2026-09-13). Fresh ones are mirrored now; ones from a long-closed app are
+  // recorded as skipped, loudly, rather than traded on hours late.
+  {
+    const resumed = copyTrade.resumePendingExits();
+    if (resumed.fired > 0) {
+      logger.warn(`${resumed.fired} copy exit(s) parked before shutdown are being mirrored now`);
+    }
+    if (resumed.expired > 0) {
+      logger.warn(
+        `${resumed.expired} copy exit(s) were too old to mirror after the restart — those positions are still held`,
+      );
+    }
+  }
   if (advOrders.pausedCount() > 0) {
     logger.warn(
       `${advOrders.pausedCount()} advanced order(s) restored PAUSED after restart — resume them from the Orders page`,
     );
   }
 
+  // Before registerIpc, so the panel handlers have their windows the moment
+  // they are registered.
+  // Needs app.getPath('userData'), so it happens here rather than at import.
+  loadPanelBounds();
+  setWindowHost(windowHost());
   registerIpc();
   // Follow anything still in flight between chains.
   //
@@ -570,9 +820,37 @@ async function bootstrap(): Promise<void> {
   // first one — not only after the user next opens Settings.
   void import('./engine/liveSigner').then((m) => m.setReferrer(state.referrer));
 
+  /**
+   * Post a flagged runner to the Discord webhook for its chain, if set.
+   *
+   * The URL is per chain and lives with that chain's other runner-alert
+   * settings, so Solana flags and BNB flags can go to different channels.
+   * Never awaited by the caller and never throws: a webhook is a courtesy
+   * copy of a notification that has already been shown.
+   */
+  const sendRunnerWebhook = async (title: string, body: string, target: NotifyTarget): Promise<void> => {
+    const cur = store.load();
+    const url =
+      target.chain === 'solana'
+        ? (cur.strategy.runnerAlerts.webhookUrl ?? '')
+        : (cur.evm[target.chain]?.runnerAlerts?.webhookUrl ?? '');
+    if (!url.trim()) return;
+    const res = await postFlag(url, {
+      title,
+      body,
+      mint: target.mint,
+      chainLabel: target.chain === 'solana' ? 'Solana' : EVM_CHAIN_META[target.chain].name,
+      url: publicTokenUrl(target.chain, target.mint),
+    });
+    // Said once per failure, with the URL redacted — its path carries the
+    // credential. A silent webhook is worse than a noisy one: the whole point
+    // is that someone is relying on it to be watching for them.
+    if (!res.ok) logger.warn(`Discord webhook (${redactWebhook(url)}) did not send: ${res.message}`);
+  };
+
   // Desktop notifications for alerts. Injected rather than imported by the
   // engine so the engine stays free of Electron and testable in Node.
-  getEngine().setNotifier((title, body) => {
+  getEngine().setNotifier((title, body, target) => {
     // The same alert also goes to any paired chat bot. Best-effort and never
     // awaited: a slow chat API must not delay a local notification, let alone
     // the engine tick that produced it.
@@ -581,9 +859,50 @@ async function bootstrap(): Promise<void> {
     } catch {
       /* a chat push must never affect the alert itself */
     }
+    // ...and to this chain's Discord webhook, if the user configured one.
+    // Same best-effort rule, same reason.
+    if (target) {
+      try {
+        void sendRunnerWebhook(title, body, target);
+      } catch {
+        /* a webhook must never affect the alert itself */
+      }
+    }
     if (!Notification.isSupported()) return;
     try {
-      new Notification({ title, body, silent: !store.load().alerts.sound }).show();
+      const n = new Notification({ title, body, silent: !store.load().alerts.sound });
+      // HELD until the toast goes away.
+      //
+      // `n` was a local: once show() returned and this function exited, nothing
+      // referenced the Notification any more, so V8 was free to collect it
+      // while the native toast was still on screen — and with it the click
+      // handler below. The toast appeared, the click did nothing, and no log
+      // line was written because no JS ran. Classic on Windows, where the
+      // toast outlives the call by seconds.
+      liveNotifications.add(n);
+      const release = (): void => { liveNotifications.delete(n); };
+      n.on('close', release);
+      n.on('failed', release);
+      // A notification that cannot be clicked is a dead end: it tells you a
+      // runner was flagged and then makes you go find the coin by hand. The
+      // click brings the window up and puts the token on screen (user
+      // report, 2026-09-13). Notifications with no token behind them — an
+      // update notice, a crash summary — just focus the window.
+      n.on('click', () => {
+        // The MAIN window specifically. `getAllWindows()[0]` used to be the
+        // only window there was; a popped-out panel could now be first, and
+        // raising it would leave the token nowhere to open.
+        logger.info(`notification clicked${target ? `: opening ${target.mint.slice(0, 10)} on ${target.chain}` : ' (no token behind it)'}`);
+        focusMainWindow();
+        if (target) {
+          try {
+            getEngine().requestOpenToken(target.mint, target.chain);
+          } catch {
+            /* the window is up either way, which is most of the point */
+          }
+        }
+      });
+      n.show();
     } catch {
       /* a failed notification must never take down the engine */
     }
