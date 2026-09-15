@@ -7,7 +7,6 @@ import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
 import { SwitchToPaper } from '../components/SwitchToPaper';
-import { FanoutPanel } from '../components/terminal/FanoutPanel';
 import { EvmWalletPanel } from '../components/terminal/EvmWalletPanel';
 import { HoldingsSection } from './Positions';
 import { EVM_CHAIN_META, type EvmChainKind } from '@shared/evm';
@@ -794,7 +793,6 @@ export function WalletPage() {
           <LiveExecutionPanel armed={!!live?.armed} balanceSol={info.balanceSol} />
 
           {/* Fan-out: groups + several wallets buying the same token at once */}
-          {wallets.length > 1 && <FanoutPanel wallets={wallets} armed={!!live?.armed} />}
 
           {/* Backup / danger */}
           <Section title="Backup & removal">

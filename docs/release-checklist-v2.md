@@ -95,15 +95,18 @@ against a live exit. One small live sell on Solana would cover all three.
 
 ## 3. Decisions still open
 
-**~~The Warmer versus our own Terms~~ — DECIDED 2026-09-10: keep it.** The
-one change that came with the decision is shipped: the Wallet Scout excludes
-the user's own wallets on every chain, and purges any it recorded before it
-knew they were ours, so warming can never manufacture activity that the app
-then presents back as somebody's measured record. Pinned by two tests.
+**~~The Warmer versus our own Terms~~ — REVERSED 2026-09-14: removed.** The
+2026-09-10 decision to keep it did not survive a second look. A feature whose
+whole job is to generate buys and sells across wallets one person controls
+reads as wash trading however carefully the copy is worded, and the copy was
+never written. Removed with it: the Copier page's follow-my-manual-trades mode
+and the multi-wallet simultaneous buy, for the same reason. See HANDOFF.md
+"Wallet Lab" for exactly what went and what stayed.
 
-What is left of it is one line of copy: **the Warmer page still never says
-what warming is for.** Everything else on that page explains itself; this does
-not, and it is the page most likely to be read uncharitably.
+The Scout change that came out of the 09-10 decision is kept and still pinned:
+it excludes the user's own wallets on every chain and purges any it recorded
+before it knew they were ours, which is right regardless of what makes the
+trades.
 
 **`blockFeed` on by default** — 5.51 GB/h, no UI toggle. Three options are
 written up in `docs/api-swarm-2026-09-09.md` §8b and none was picked.

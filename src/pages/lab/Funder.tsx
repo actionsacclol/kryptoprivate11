@@ -180,7 +180,7 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
 
       <Section
         title="Collect back"
-        description="Each selected wallet sends everything above rent and fee headroom back to the active wallet. Tokens are not touched — sell them first from the Copier page or the token page."
+        description="Each selected wallet sends everything above rent and fee headroom back to the active wallet. Tokens are not touched — sell them first from the token page."
       >
         <Card>
           <Row label="To" hint="the wallet everything above rent lands in">

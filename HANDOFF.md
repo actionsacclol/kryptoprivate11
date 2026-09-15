@@ -46,7 +46,7 @@ in `STATUS.md` and the auto-memory notes under
 
 ## Layout: a Hub, workspaces, and multi-panelling (2026-09-09)
 
-The app had grown to twenty-five routes in one flat sidebar, so "Warmer" sat
+The app had grown to twenty-five routes in one flat sidebar, so "Funder" sat
 four rows from "Orders" and a page that trades on its own initiative sat beside
 one that only moves when you click. It now opens on a **Hub** and the sidebar
 lists only the workspace you picked.
@@ -419,37 +419,35 @@ Research, every verified address and the probe answers: `docs/robinhood-chain-20
   values, other v4 hook pools (Pools.trade/Bags/Clanker), USDG-quoted execution,
   1inch BYO route, 0x pins on the Solana watchlist. Gas subsidy ends 2026-09-29.
 
-## Wallet Lab — fund, follow, random trading on own wallets (2026-09-03)
+## Wallet Lab — fund groups of your own wallets (2026-09-03, trimmed 2026-09-14)
 
-Four pages under **Automation** (after Copy Trading): **Group Wallets** (`creator` — make a
-group, then create N wallets INTO it: `lab:generateMany(count, prefix, groupId)`), **Funder**
-(`funder` — fund/collect by group or individual wallets), **Warmer** (`warmer` — random
-autotrading on a whole group or one wallet: `lab:randomStart(groupId, walletIds?)`,
-`RandomRunStatus.walletIds`), **Copier** (`copier` — follow the main wallet at a % scale or
-exact amount with delays, plus manual group orders: `live:fanoutBuy` and the new
-`live:fanoutSell` → `engine.fanoutSell`, 100 % per wallet, staggered). Pages live in
-`src/pages/lab/*.tsx` with a shared `useLabData()`; the earlier single "Utility → Wallet Lab"
-page was split the same day. Contract in
-`shared/lab.ts` (types, defaults, validators, `planFund`, `pickTradeSol`, `lossCapHit`;
-pinned by `test/lab.test.mjs`); IPC `lab:*` in `electron/ipc.ts`; per-group settings live
-on the wallet group (`WalletGroup.lab`, `wallet.setGroupLab`).
+Two pages under **Automation** (after Copy Trading): **Group Wallets** (`creator` — make a
+group, then create N wallets INTO it: `lab:generateMany(count, prefix, groupId)`) and
+**Funder** (`funder` — fund/collect by group or individual wallets). Pages live in
+`src/pages/lab/*.tsx` with a shared `useLabData()`. Contract in `shared/lab.ts`
+(`planFund` and the funding constants, pinned by `test/lab.test.mjs`); IPC `lab:*` in
+`electron/ipc.ts`.
 - **Fund / collect** (`engine/fund.ts`): one tx from the ACTIVE wallet with ≤12 transfers per
   tx; collect = each wallet sends spare SOL (above rent + fee) back to the active one. Signer
   intent **`fund`** (`signPolicy.ts`): transfers only, 1–16 of them, destinations restricted
   to `policy.fundTargets` = this install's own public keys, resolved from the store — never
   from the caller. Needs live execution armed (real SOL).
-- **Follow** (`engine.followManualTrade`): after a MANUAL live buy/sell by the active wallet,
-  every member of a group with `lab.follow.enabled` (except the active wallet) repeats it
-  after a random delay: buys at ratio × size or a fixed size, capped by `maxTradeSol`; sells
-  at 100 %. Each leg is `labBuy`/`labSell` → `executeTrade({ walletId })` with the fee, and
-  `ledger.recordFill` per wallet.
-- **Random trading** (`engine/randomLab.ts`): per group, a timer loop — pick an eligible
-  wallet (open < `maxOpenPerWallet`, balance covers the minimum), a random token from the
-  chosen Discover column with liquidity ≥ `minLiquidityUsd` and no hide-severity rug rule,
-  random size/hold/gap, hourly cap; sells fire on their own timers even after Stop (a bag is
-  never abandoned; a failed sell retries in 2 min). **Loss cap is realised cash**:
-  `ledger.cashDeltaFor(run signatures)` — reconciled fills' SOL deltas, fees and tips
-  included. Disarm stops every run. Status pushed as EngineEvent `lab`.
+- **Removed 2026-09-14 (legal exposure).** The **Warmer** (`engine/randomLab.ts`: random
+  autotrading on a group under a realised-loss cap), the **Copier** page's follow-my-manual-
+  trades mode (`engine.followManualTrade`), and the multi-wallet simultaneous buy
+  (`live:fanoutBuy`'s panel + `live:fanoutSell`) are gone. Both manufactured trading activity
+  across wallets one person controls, which reads as wash trading / market manipulation
+  whatever the intent. What went with them: `shared/lab.ts`'s `FollowSettings`,
+  `RandomSettings`, `LabGroupConfig`, `RandomOpen`, `RandomRunStatus`, `pickTradeSol`,
+  `lossCapHit`; `WalletGroup.lab` and `wallet.setGroupLab`; the `lab` EngineEvent; IPC
+  `lab:setFollow`, `lab:setRandom`, `lab:randomStart`, `lab:randomStop`, `lab:status`.
+  `parseGroup` DROPS a `lab` block from an older file rather than carrying it forward
+  (pinned in `test/labguards.test.mjs`). `shared/fanout.ts` and `engine.fanoutBuy` stay —
+  the launcher calls them with exactly ONE wallet for the dev buy.
+- Copy trading's per-wallet legs (`engine.labBuy` / `labSell`, `executeTrade({ walletId })`)
+  stay: a copy config may name the wallet it trades from, and that is one wallet following
+  one stranger, not a fleet trading itself.
+
 - The Observatory orb reads Runners (flagged) instead of Candidates; the sidebar brand
   reads KRYPTO.
 
@@ -709,8 +707,6 @@ Three user reports in one day, all fixed on `release/beta.7` (see
     key-bearing socket URL per save, the socket outliving its switch, and after 31 saves every
     RPC save refused by the 32-entry cap. The snapshot now carries the raw store; `mergeState`
     strips and dedupes any Helius/api-key entry on load.
-  - *Warmer "No such group"*: a fresh group has no `lab` block until its first Save, and Save
-    was disabled with nothing changed. The engine now runs such a group on `defaultGroupConfig()`.
   - *Keystroke saves*: Discover refresh / rows per column (typing "15" gave "105") and the
     hotkey amount (an armed key saved every intermediate digit) commit on blur/Enter, clamped.
   - *Defaults above the live cap*: the order panel defaults under `maxLiveSol` and shows the cap

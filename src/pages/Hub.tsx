@@ -1,7 +1,7 @@
 // The Hub — what the app opens on.
 //
 // Before this, a stranger's first screen was Discover with twenty-five items
-// in one sidebar, and no way to tell that "Warmer" and "Orders" belong to
+// in one sidebar, and no way to tell that "Funder" and "Orders" belong to
 // completely different jobs. The Hub asks one question instead: what are you
 // here to do. Each card is a workspace, and each card says what is actually
 // true about it right now rather than a static blurb — an engine that is not

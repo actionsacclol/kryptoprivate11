@@ -69,12 +69,10 @@ That sounds small. It is the whole design:
 - **Orders** — stop loss, take profit, trailing stop, limit buy/sell (on price or
   market cap), and trigger orders (sell if the creator sells, buy/sell on migration).
   Armed orders draw as lines on the chart. Partial sells work from 1% to 100%.
-- **Group Wallets / Funder / Warmer / Copier** (Automation) — make a group and fill it with
-  wallets; fund them from your main wallet in one transaction (by group or one by one) and
-  collect SOL back; warm a group or a single wallet with random trading under a hard
-  realised-loss cap; have a group copy your manual trades at a % scale or exact size after a
-  delay, and fire manual buys or 100 % sells across a group. Every leg is a normal signed trade
-  with the fee; the signer only ever sends SOL to wallets this install holds.
+- **Group Wallets / Funder** (Automation) — make a group and fill it with wallets, then
+  fund them from your main wallet in one transaction (by group or one by one) and collect
+  SOL back. Groups organise the wallets you hold; nothing trades them on your behalf. The
+  signer only ever sends SOL to wallets this install holds.
 - **Portfolio** — positions joined from the chain (what you hold) and a local fill ledger
   (what you actually paid, read back from the transaction), with realized/unrealized PnL,
   win rate, profit factor, fees, an equity curve, trade history, CSV/JSON export, and

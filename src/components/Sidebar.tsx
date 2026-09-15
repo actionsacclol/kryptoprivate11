@@ -21,7 +21,7 @@ import {
   Sparkles,
   Telescope,
   BookMarked,
-  Wallet, Flame, Coins, Thermometer, Copy, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout } from 'lucide-react';
+  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout } from 'lucide-react';
 import { groupsFor, workspaceSpec, type WorkspaceId } from '../workspaces';
 import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
@@ -49,8 +49,6 @@ export type RouteId =
   | 'trades'
   | 'creator'
   | 'funder'
-  | 'warmer'
-  | 'copier'
   | 'orders'
   | 'wallets'
   | 'scripts'
@@ -127,8 +125,6 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   { id: 'farming', label: 'Farming', hint: 'Not built yet — what it would be, and what has to be true first', icon: Sprout },
   { id: 'creator', label: 'Group Wallets', hint: 'Make a group of wallets to fund, warm or trade together', icon: FolderPlus },
   { id: 'funder', label: 'Funder', hint: 'Fund wallets from the active one, by group or individually; collect back', icon: Coins },
-  { id: 'warmer', label: 'Warmer', hint: 'Random autotrading on a group or one wallet, under a loss cap', icon: Thermometer },
-  { id: 'copier', label: 'Copier', hint: 'Follow the main wallet at a % or exact size; manual orders with a group', icon: Copy },
   { id: 'launches', label: 'Launches', hint: 'Live launch scanner', icon: Rocket },
   { id: 'strategy', label: 'Spellbook', hint: 'Strategy settings', icon: BookMarked },
   { id: 'execution', label: 'Execution', hint: 'Fees, lanes and send plans', icon: Gauge },

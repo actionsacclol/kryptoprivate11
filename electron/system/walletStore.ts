@@ -1,4 +1,3 @@
-import { DEFAULT_FOLLOW, DEFAULT_RANDOM, validateFollow, validateRandom } from '@shared/lab';
 // Multi-wallet state rules — pure, no key material, no `electron` import.
 //
 // Split from wallet.ts on the same principle as signPolicy.ts: that module
@@ -31,8 +30,6 @@ export interface WalletGroup {
   id: string;
   name: string;
   walletIds: string[];
-  /** Wallet Lab settings (follow / random) for this group. */
-  lab?: import('@shared/lab').LabGroupConfig;
 }
 
 export interface WalletsFile {
@@ -62,15 +59,6 @@ const MAX_LABEL = 32;
 /** A cap, not a limit anyone should reach — it exists so a runaway loop or a
  *  pasted list cannot fill the keystore. */
 export const MAX_WALLETS = 20;
-
-function parseLab(raw: unknown): import('@shared/lab').LabGroupConfig | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const o = raw as { follow?: unknown; random?: unknown };
-  const follow = { ...DEFAULT_FOLLOW, ...(o.follow && typeof o.follow === 'object' ? (o.follow as object) : {}) } as import('@shared/lab').FollowSettings;
-  const random = { ...DEFAULT_RANDOM, ...(o.random && typeof o.random === 'object' ? (o.random as object) : {}) } as import('@shared/lab').RandomSettings;
-  if (!validateFollow(follow).ok || !validateRandom(random).ok) return undefined;
-  return { follow, random };
-}
 
 export function emptyFile(): WalletsFile {
   return { version: 2, activeId: null, wallets: [], groups: [] };
@@ -132,11 +120,9 @@ function parseGroup(g: unknown, validIds: Set<string>): WalletGroup | null {
   const walletIds = Array.isArray(o.walletIds)
     ? [...new Set((o.walletIds as unknown[]).filter((id): id is string => typeof id === 'string' && validIds.has(id)))]
     : [];
-  // Wallet Lab settings ride on the group. Kept only when they validate
-  // (2026-09-03: this rebuild used to DROP them on every read, so follow and
-  // warmer settings never persisted — not even within a session).
-  const lab = parseLab(o.lab);
-  return lab ? { id: o.id, name, walletIds, lab } : { id: o.id, name, walletIds };
+  // A `lab` block written by an older build is dropped on read: the follow
+  // and random-trading features it configured no longer exist.
+  return { id: o.id, name, walletIds };
 }
 
 function parseWallet(w: unknown): StoredWallet | null {
@@ -286,15 +272,6 @@ export function setGroupMembers(file: WalletsFile, id: string, walletIds: string
   const groups = [...cur];
   groups[idx] = { ...groups[idx], walletIds: members };
   return { file: { ...file, groups }, ok: true, message: 'Updated' };
-}
-
-export function setGroupLab(file: WalletsFile, id: string, lab: import('@shared/lab').LabGroupConfig): StoreResult {
-  const cur = file.groups ?? [];
-  const idx = cur.findIndex((g) => g.id === id);
-  if (idx < 0) return { file, ok: false, message: 'No such group.' };
-  const groups = [...cur];
-  groups[idx] = { ...groups[idx], lab };
-  return { file: { ...file, groups }, ok: true, message: 'Saved' };
 }
 
 /** The wallets in a group, in the group's order, skipping any that vanished. */

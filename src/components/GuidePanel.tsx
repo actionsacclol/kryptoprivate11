@@ -116,11 +116,10 @@ const GUIDES: Guide[] = [
   {
     id: 'wallets',
     title: 'Multiple wallets',
-    summary: 'Creator, Funder, Warmer, Copier — and the one rule',
+    summary: 'Creator, Funder — and the one rule',
     body: [
-      'Automation holds four pages: create a group and fill it with wallets, fund them from your main wallet and collect back, warm a group with random trading under a hard loss cap, and have a group follow your manual trades or take a group-wide order.',
+      'Automation holds two wallet pages: create a group and fill it with wallets, then fund them from your main wallet and collect back. Groups are a way to organise the wallets you hold — nothing trades them on your behalf.',
       'One wallet signs at a time — the active one — and switching is blocked while armed. Funding only ever moves SOL between wallets this install holds; the signer refuses any other destination, so a bug or a bad input cannot send it elsewhere.',
-      'The warmer is a utility, not a strategy. It is expected to lose fees and slippage on purpose, and its loss cap counts realised losses on closed trades, with open bags carried at cost.',
     ],
   },
   {

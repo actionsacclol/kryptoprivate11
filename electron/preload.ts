@@ -113,26 +113,13 @@ const api = {
     sellAll: () => ipcRenderer.invoke('live:sellAll'),
     setLive: (on: boolean) => ipcRenderer.invoke('live:setLive', on),
     sweepRent: () => ipcRenderer.invoke('live:sweepRent'),
-    fanoutBuy: (
-      mint: string,
-      walletIds: string[],
-      sizing: { mode: 'same' | 'total'; amountSol: number; jitter?: number },
-      opts?: { staggerMaxMs?: number },
-    ) => ipcRenderer.invoke('live:fanoutBuy', mint, walletIds, sizing, opts ?? {}),
-    fanoutSell: (mint: string, walletIds: string[], opts?: { staggerMaxMs?: number }) =>
-      ipcRenderer.invoke('live:fanoutSell', mint, walletIds, opts ?? {}),
   },
-  // Wallet Lab (shared/lab.ts): funding, following, random trading on groups
-  // of the user's OWN wallets. Ids only — never a URL, never a key.
+  // Wallet Lab (shared/lab.ts): creating and funding groups of the user's
+  // OWN wallets. Ids only — never a URL, never a key.
   lab: {
     generateMany: (count: number, labelPrefix?: string, groupId?: string) => ipcRenderer.invoke('lab:generateMany', count, labelPrefix ?? '', groupId ?? ''),
-    setFollow: (groupId: string, cfg: unknown) => ipcRenderer.invoke('lab:setFollow', groupId, cfg),
-    setRandom: (groupId: string, cfg: unknown) => ipcRenderer.invoke('lab:setRandom', groupId, cfg),
     fund: (targets: Array<{ walletId: string; sol: number }>, fromWalletId?: string) => ipcRenderer.invoke('lab:fund', targets, fromWalletId ?? null),
     collect: (walletIds: string[], toWalletId?: string) => ipcRenderer.invoke('lab:collect', walletIds, toWalletId ?? null),
-    randomStart: (groupId: string, walletIds?: string[]) => ipcRenderer.invoke('lab:randomStart', groupId, walletIds ?? null),
-    randomStop: (groupId: string) => ipcRenderer.invoke('lab:randomStop', groupId),
-    status: () => ipcRenderer.invoke('lab:status'),
   },
   card: {
     saveFile: (name: string, bytes: Uint8Array) => ipcRenderer.invoke('card:saveFile', name, bytes),

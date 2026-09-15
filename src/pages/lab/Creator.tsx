@@ -56,7 +56,7 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
   const toast = useToast();
   const modal = useModal();
   const data = useLabData();
-  const { wallets, groups, armed, active, balanceOf, busy, setBusy, setWallets, applyGroups, reload, refreshBalances, runs } = data;
+  const { wallets, groups, armed, active, balanceOf, busy, setBusy, setWallets, applyGroups, reload, refreshBalances } = data;
 
   // ── Groups ───────────────────────────────────────────────────────────
   const [newGroup, setNewGroup] = useState('');
@@ -78,23 +78,9 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
     }
   };
   const deleteGroup = async (g: WalletGroupView): Promise<void> => {
-    if (runs.some((r) => r.groupId === g.id && r.running)) return toast.error('Stop this group’s warmer run first');
-    // A run is only ever rendered THROUGH its group, and every run comes back
-    // from a restart not running — so deleting the group of a stopped run with
-    // open bags hides those bags for good. They keep selling on their timers
-    // with nowhere to report it.
-    const openBags = runs.filter((r) => r.groupId === g.id).flatMap((r) => r.open);
-    if (openBags.length) {
-      return toast.error(
-        `This group’s warmer still holds ${openBags.length} bag(s): ${openBags
-          .map((o) => o.symbol || o.mint.slice(0, 6))
-          .slice(0, 4)
-          .join(', ')}${openBags.length > 4 ? '…' : ''}. Sell them first — deleting the group would hide them.`,
-      );
-    }
     const yes = await modal.confirm({
       title: `Delete group “${g.name}”`,
-      message: 'The wallets stay; only the grouping and its follow / warmer settings are removed.',
+      message: 'The wallets stay; only the grouping is removed.',
       confirmLabel: 'Delete',
       destructive: true,
     });
@@ -164,7 +150,7 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
       {/* ── 1. Groups ── */}
       <Section
         title="1 · Groups"
-        description="A group is what the other pages act on: Funder funds it, Warmer trades it, Copier makes it follow the active wallet. Create one first."
+        description="A group is what the Funder acts on: it funds every member from your active wallet and collects back. Create one first."
       >
         <Card>
           <div className="flex items-center gap-2">

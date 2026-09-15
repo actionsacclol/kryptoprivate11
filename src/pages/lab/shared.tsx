@@ -1,13 +1,12 @@
-// Shared plumbing for the four wallet pages under Automation — Wallet
-// Creator, Funder, Warmer, Copier (2026-09-03). Each page acts on the same
-// data: the wallet list, the groups (with their lab settings), live state
-// (armed or not) and the warmer runs. Everything real-money on those pages
-// goes through the signer policy and the trade pipeline; the contract is
-// shared/lab.ts and the engine owns the money.
+// Shared plumbing for the wallet pages under Automation — Wallet Creator and
+// Funder. Both act on the same data: the wallet list, the groups, and live
+// state (armed or not). Everything real-money on those pages goes through the
+// signer policy and the trade pipeline; the contract is shared/lab.ts and the
+// engine owns the money.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LiveState, WalletGroupView, WalletSummary } from '@shared/types';
-import { MAX_LAB_WALLETS_PER_CALL, type RandomRunStatus } from '@shared/lab';
+import { MAX_LAB_WALLETS_PER_CALL } from '@shared/lab';
 import { cls } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
 
@@ -53,7 +52,6 @@ export interface LabData {
   wallets: WalletSummary[];
   groups: WalletGroupView[];
   live: LiveState | null;
-  runs: RandomRunStatus[];
   armed: boolean;
   /** Why real-money actions are disabled, or null. */
   armedReason: string | null;
@@ -65,7 +63,6 @@ export interface LabData {
   busy: string | null;
   setBusy: (b: string | null) => void;
   setWallets: (w: WalletSummary[]) => void;
-  setRuns: React.Dispatch<React.SetStateAction<RandomRunStatus[]>>;
   /** Apply an IPC result that carries the group list; toast on failure. */
   applyGroups: (r: { ok: boolean; message: string; data?: WalletGroupView[] }) => void;
   reload: () => Promise<void>;
@@ -77,28 +74,24 @@ export function useLabData(): LabData {
   const [wallets, setWallets] = useState<WalletSummary[]>([]);
   const [groups, setGroups] = useState<WalletGroupView[]>([]);
   const [live, setLive] = useState<LiveState | null>(null);
-  const [runs, setRuns] = useState<RandomRunStatus[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const armedRef = useRef<boolean | null>(null);
   armedRef.current = live?.armed ?? null;
 
   const reload = useCallback(async () => {
-    const [l, g, s, r] = await Promise.all([
+    const [l, g, s] = await Promise.all([
       window.krypt.wallet.list(),
       window.krypt.wallet.groups(),
       window.krypt.live.state(),
-      window.krypt.lab.status(),
     ]);
     if (l.ok && l.data) setWallets(l.data);
     if (g.ok && g.data) setGroups(g.data);
     if (s.ok && s.data) setLive(s.data);
-    if (r.ok && r.data) setRuns(r.data);
   }, []);
 
   useEffect(() => {
     void reload();
     const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'lab') setRuns(ev.runs);
       // Arming/disarming changes what these pages may do. The engine pushes
       // status every second; only an actual change is worth a round-trip,
       // and an unchanged answer keeps the same object so nothing re-renders.
@@ -147,7 +140,6 @@ export function useLabData(): LabData {
     wallets,
     groups,
     live,
-    runs,
     armed,
     armedReason: armed ? null : 'Arm live execution on the Wallet page first — this moves real SOL',
     active,
@@ -157,7 +149,6 @@ export function useLabData(): LabData {
     busy,
     setBusy,
     setWallets,
-    setRuns,
     applyGroups,
     reload,
     refreshBalances,

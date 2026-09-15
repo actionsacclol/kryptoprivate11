@@ -108,10 +108,10 @@ for (const c of SCOUT_CHAINS) state.set(c, freshState());
  * The user's own addresses, per chain.
  *
  * The Scout exists to find someone ELSE worth following. Your own wallets in a
- * "top traders" list are noise at best — and with the Warmer running they are
- * manufactured noise: warming buys and sells on a schedule, so it produces
- * exactly the round trips this page ranks on. Recording them would mean
- * presenting our own generated activity back to the user as a measurement.
+ * "top traders" list are noise at best — and anything this install trades on
+ * them (a script, a copy config, your own clicks) produces exactly the round
+ * trips this page ranks on. Recording them would mean presenting our own
+ * activity back to the user as a measurement.
  *
  * Injected rather than imported so this module keeps no dependency on the
  * wallet stores, and refreshed whenever wallets change.

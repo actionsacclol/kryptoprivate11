@@ -49,8 +49,6 @@ import * as recorder from './recorder';
 import * as feeEstimator from './feeEstimator';
 import * as jitoTips from './jitoTips';
 import * as tradePrewarm from './prewarm';
-import * as randomLab from './randomLab';
-import { between as labBetween, DEFAULT_FOLLOW, defaultGroupConfig, type FollowSettings } from '@shared/lab';
 import { quoteSellLamports } from './jupiterRoute';
 import { prewarm, TOKEN_2022_PROGRAM, type PrewarmedAddresses } from './addresses';
 import { parseMintExtensions, mintWarning } from './mintExtensions';
@@ -494,44 +492,6 @@ export class SniperEngine {
       log: (level, line) => this.log(level, line),
     });
 
-    randomLab.attach({
-      armed: () => this.armed && this.getSettings().execution.liveEnabled,
-      // A group gets its lab block on the first Save; a fresh one has none.
-      // Start on defaults used to answer "No such group" for a group that was
-      // on screen (Save was disabled with nothing changed, so no way out).
-      config: (groupId) => {
-        const g = wallet.groups().find((x) => x.id === groupId);
-        return g ? (g.lab ?? defaultGroupConfig()) : null;
-      },
-      members: (groupId) => wallet.groups().find((g) => g.id === groupId)?.members ?? [],
-      activePublicKey: () => wallet.publicKey(),
-      balanceSol: async (publicKey) => {
-        const r = await getBalance(this.getSettings().rpc.httpUrl, publicKey);
-        return r.ok && r.data !== undefined ? r.data / 1e9 : null;
-      },
-      candidates: async (universe, minLiquidityUsd) => {
-        try {
-          const rows = await market.discover(universe, 40, '1h');
-          return rows
-            .filter((t) => (t.liquidityUsd ?? 0) >= minLiquidityUsd && !t.rug?.hide)
-            .map((t) => ({ mint: t.mint, symbol: t.symbol }));
-        } catch {
-          return [];
-        }
-      },
-      buy: (walletId, mint, sol) => this.labBuy(walletId, mint, sol),
-      sell: (walletId, mint) => this.labSell(walletId, mint),
-      // The ledger answers in lamports and says how many of the signatures it
-      // could not price at all; `unknown > 0` means the loss cap cannot be
-      // judged, and the lab refuses to trade rather than read it as 0.
-      realizedFor: (signatures) => {
-        const d = ledger.cashDeltaFor(signatures);
-        return { sol: d.solLamports / 1e9, unknown: d.unknown };
-      },
-      log: (level, line) => this.log(level, line),
-      emit: (runs) => this.emit({ kind: 'lab', runs }),
-    });
-
     market.attach({
       // Prefer the Helius endpoint when a key exists. The house rule is that
       // the key is spent only on execution-critical calls, never on the
@@ -612,8 +572,8 @@ export class SniperEngine {
     });
     ledger.onSettled((f) => {
       if (f.side !== 'sell' || f.state !== 'reconciled') return;
-      // Wallet Lab legs are owned by OTHER wallets; a warmer that loses fees
-      // on purpose must never trip the active wallet's streak breaker.
+      // A fill owned by ANOTHER wallet in this install must never trip the
+      // active wallet's streak breaker — the streak is about one signer.
       if (f.wallet && f.wallet !== wallet.publicKey()) return;
       const pnl = ledger.realizedPnlForSell(f);
       const next = nextConsecutiveLosses(this.liveConsecutiveLosses, pnl);
@@ -1764,7 +1724,6 @@ export class SniperEngine {
       else if (res.stage === 'confirm') this.emitFill(mint, 'buy', res.signature, 'failed');
     }
     // Wallet Lab: groups that FOLLOW the active wallet repeat a manual buy.
-    if (opts.manual && !simulateOnly && res.ok) this.followManualTrade('buy', mint, capped);
     // Auto-sell template: arm the exit the user already decided on. These are
     // ordinary advanced orders — they appear on the Orders page and can be
     // cancelled — placed the moment there is a position to protect, rather
@@ -3034,34 +2993,12 @@ export class SniperEngine {
    *  the user has been told. */
   private priceGap = new Map<string, { since: number; warned: boolean }>();
 
-  /** Last lab-driven reconcile sweep, so the 12 s poll runs one every 30 s. */
-  private lastLabReconcileAt = 0;
-
-  private reconcileForLab(): void {
-    const now = Date.now();
-    if (now - this.lastLabReconcileAt < 30_000) return;
-    if (!randomLab.status().some((r) => r.running)) return;
-    this.lastLabReconcileAt = now;
-    const s = this.getSettings();
-    void ledger
-      .reconcilePending(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, wallet.publicKey())
-      .catch(() => undefined);
-  }
 
   private startOrdersPoll(): void {
     if (this.ordersPollTimer) return;
     const tick = async (): Promise<void> => {
       // A slow provider must not stack ticks behind itself.
       if (this.ordersPollBusy) return;
-      // Keep a running Wallet Lab's fills moving toward a terminal state.
-      // `recordFill` runs exactly ONE reconcile round; every later retry comes
-      // from `reconcilePending`, whose only other caller is the portfolio
-      // build — which is demand-driven, so a warmer left alone on its own page
-      // never triggered one. Since the lab's loss cap now fails closed, a fill
-      // that missed that first round stops the run after its 60 s grace
-      // instead of quietly reading as 0. This costs nothing when the ledger
-      // has nothing pending, and only runs while a lab run is live.
-      this.reconcileForLab();
       this.ordersPollBusy = true;
       try {
         // Orders AND alerts share this loop — both need prices for mints the
@@ -3237,7 +3174,6 @@ export class SniperEngine {
       );
     }
     this.log(res.ok ? 'info' : 'warn', `manual sell ${pct}% (${res.stage}): ${res.message}`);
-    if (res.ok) this.followManualTrade('sell', mint, null, pct);
     // Only a full exit clears the mint from live tracking — a partial sell
     // leaves a real position behind that the exit paths must keep watching.
     if (pct >= 100) {
@@ -3704,7 +3640,7 @@ export class SniperEngine {
     }
     recorder.record('lab_buy', { walletId, mint, sol, ok: res.ok, stage: res.stage, signature: res.signature ?? null });
     // `stage` travels with the result so the caller can tell "did not happen"
-    // from "broadcast, not confirmed yet". randomLab keyed its whole
+    // from "broadcast, not confirmed yet". The lab runner keyed its whole
     // bookkeeping off `ok` alone, so a PENDING buy took the failure branch —
     // no bag, no armSell, no hand-over — while the signature stayed in the
     // run and dragged realised down by the full cost of a position nothing
@@ -3764,142 +3700,12 @@ export class SniperEngine {
     }
     recorder.record('lab_sell', { walletId, mint, pct: share, ok: res.ok, stage: res.stage, signature: res.signature ?? null });
     // Same reason as labBuy: 'pending' is a broadcast sell that has not
-    // confirmed. randomLab must not retry it as a failure — the bag may
+    // confirmed. A retry must not read it as a failure — the bag may
     // already be gone — nor drop it from the run's accounting.
     return { ok: res.ok, message: res.message, signature: res.signature ?? null, stage: res.stage ?? null };
   }
 
-  /**
-   * Groups set to FOLLOW the active wallet repeat its manual trade: each
-   * member (except the active wallet) buys at the configured size, or sells
-   * the SAME share of its bag that the active wallet sold, after its own
-   * random delay. Fire-and-forget; every leg is a normal signed trade with
-   * the platform fee, a follower that cannot cover the size sits out, and
-   * one summary toast reports how the legs went.
-   */
-  private followManualTrade(side: 'buy' | 'sell', mint: string, solSpent: number | null, pct = 100): void {
-    const active = wallet.publicKey();
-    const groups = wallet.groups().filter((g) => g.lab?.follow?.enabled);
-    if (!groups.length || !active) return;
-    const s = this.getSettings();
-    const seen = new Set<string>();
-    const tally = { ok: 0, failed: 0, skipped: 0, done: 0 };
-    const finish = (): void => {
-      tally.done++;
-      if (tally.done < seen.size) return;
-      const parts = [`${tally.ok} ${side === 'buy' ? 'bought' : 'sold'}`];
-      if (tally.failed) parts.push(`${tally.failed} failed`);
-      if (tally.skipped) parts.push(`${tally.skipped} sat out`);
-      this.emit({ kind: 'toast', level: tally.failed ? 'warn' : 'info', message: `Followers on ${mint.slice(0, 6)}…: ${parts.join(', ')}` });
-    };
 
-    // ── Plan every leg BEFORE any of them is scheduled ────────────────
-    //
-    // `fanoutBuy` refuses when the TOTAL is over `maxLiveSol`, "so a fan-out
-    // can never spend more than a single trade is allowed to". A followed
-    // manual buy is the same shape and had no such check (lab-4): the total
-    // was only ever bounded per leg, by `maxTradeSol` and then again by
-    // labBuy's own clamp, so with the shipped defaults (cap 0.05, follow
-    // maxTradeSol 0.05, up to 19 non-active wallets) one 0.05 SOL buy spent
-    // 0.95 SOL — nineteen times the cap — and the only signal was a toast
-    // counting LEGS, emitted after they were already on their timers.
-    //
-    // So the deduped set and its SOL total are computed first, the total is a
-    // refusal in fanoutBuy's own words, and the toast states the SOL.
-    interface FollowLeg { g: { name: string }; m: { id: string; label: string; publicKey: string }; f: FollowSettings; size: number }
-    const legs: FollowLeg[] = [];
-    for (const g of groups) {
-      const f: FollowSettings = { ...DEFAULT_FOLLOW, ...(g.lab?.follow ?? {}) };
-      if (side === 'sell' && !f.followSells) continue;
-      for (const m of g.members) {
-        if (m.publicKey === active || seen.has(m.id)) continue;
-        seen.add(m.id);
-        const want = f.sizeMode === 'fixed' ? f.fixedSol : (solSpent ?? 0) * f.ratio;
-        legs.push({ g, m, f, size: Math.round(Math.min(want, f.maxTradeSol) * 10_000) / 10_000 });
-      }
-    }
-    if (!legs.length) return;
-
-    let plannedSol = 0;
-    if (side === 'buy') {
-      // The planned total, not the eventual one: a wallet too poor to cover
-      // its leg sits out later, and a budget that only counted the legs that
-      // succeeded would not be a budget. Same reasoning as planFanout's.
-      plannedSol = legs.reduce((a, l) => a + (l.size >= 0.001 ? l.size : 0), 0);
-      if (plannedSol > s.execution.maxLiveSol) {
-        const msg = `Follow total ${plannedSol.toFixed(3)} SOL across ${legs.length} wallet(s) exceeds the ${s.execution.maxLiveSol} SOL live cap`;
-        this.log('warn', `follow: refused — ${msg}`);
-        this.emit({ kind: 'toast', level: 'warn', message: `${msg} — no follower bought. Lower the follow size or raise the cap.` });
-        recorder.record('follow_refused', { mint, side, wallets: legs.length, totalSol: plannedSol, cap: s.execution.maxLiveSol });
-        return;
-      }
-    }
-
-    for (const { g, m, f, size } of legs) {
-      {
-        const delay = Math.round(labBetween(f.delayMinMs, f.delayMaxMs));
-        setTimeout(() => {
-          void (async () => {
-            if (side === 'buy') {
-              if (!(size >= 0.001)) {
-                tally.skipped++;
-                return;
-              }
-              const bal = await getBalance(s.rpc.httpUrl, m.publicKey);
-              if (bal.ok && bal.data !== undefined && bal.data / 1e9 < size + 0.02) {
-                tally.skipped++;
-                this.log('info', `follow: ${m.label} sits out — ${(bal.data / 1e9).toFixed(4)} SOL cannot cover ${size} SOL plus fees (${g.name})`);
-                return;
-              }
-              const r = await this.labBuy(m.id, mint, size);
-              if (r.ok) tally.ok++;
-              else tally.failed++;
-              this.log(r.ok ? 'info' : 'warn', `follow: ${m.label} ${r.ok ? 'bought' : 'buy failed'} ${size} SOL of ${mint.slice(0, 8)}… (${g.name})${r.ok ? '' : ` — ${r.message.slice(0, 100)}`}`);
-            } else {
-              const r = await this.labSell(m.id, mint, pct);
-              if (r.ok) tally.ok++;
-              else tally.failed++;
-              this.log(r.ok ? 'info' : 'warn', `follow: ${m.label} ${r.ok ? 'sold' : 'sell failed'} ${Math.round(pct)}% of ${mint.slice(0, 8)}… (${g.name})${r.ok ? '' : ` — ${r.message.slice(0, 100)}`}`);
-            }
-          })()
-            .catch((e) => {
-              tally.failed++;
-              this.log('warn', `follow: ${m.label} ${side} leg threw — ${e instanceof Error ? e.message : String(e)}`);
-            })
-            .finally(finish);
-        }, delay);
-      }
-    }
-    if (legs.length) {
-      // The SOL, not just the count: "19 wallets will buy" is not a number a
-      // user can weigh against their cap.
-      const what = side === 'buy' ? `buy ${plannedSol.toFixed(3)} SOL of` : `sell ${Math.round(pct)}% of`;
-      this.emit({ kind: 'toast', level: 'info', message: `${legs.length} follower wallet(s) will ${what} ${mint.slice(0, 6)}… after their delays` });
-    }
-  }
-
-  /** Every listed wallet sells 100 % of `mint`, staggered a little so the
-   *  sells do not all land in one slot. Copier "manual orders with a group". */
-  async fanoutSell(
-    mint: string,
-    walletIds: string[],
-    opts: { staggerMaxMs?: number } = {},
-  ): Promise<{ ok: boolean; message: string; results: Array<{ walletId: string; ok: boolean; message: string; signature: string | null }> }> {
-    const s = this.getSettings();
-    if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'Arm live execution first', results: [] };
-    const stagger = Math.max(0, Math.min(3000, opts.staggerMaxMs ?? 500));
-    const results = await Promise.all(
-      walletIds.map(async (walletId) => {
-        if (stagger > 0) await new Promise((r) => setTimeout(r, Math.floor(Math.random() * stagger)));
-        const r = await this.labSell(walletId, mint);
-        return { walletId, ok: r.ok, message: r.message, signature: r.signature };
-      }),
-    );
-    const landed = results.filter((r) => r.ok).length;
-    recorder.record('fanout_sell', { mint, wallets: results.length, landed });
-    this.log(landed === results.length ? 'info' : 'warn', `fan-out sell ${mint.slice(0, 8)}…: ${landed}/${results.length} landed`);
-    return { ok: landed === results.length, message: `${landed}/${results.length} sells landed${landed === results.length ? '' : ' — see the rows for what did not'}`, results };
-  }
 
   /** Say something on the desktop that did not originate there — a trade
    *  asked for from a paired chat, for instance. The user should never learn
@@ -3910,9 +3716,6 @@ export class SniperEngine {
     this.notify('Krypto Bot', line);
   }
 
-  labStatus(): import('@shared/lab').RandomRunStatus[] {
-    return randomLab.status();
-  }
 
   /** Read every wallet's SOL balance (public RPC, parallel) and note it in
    *  the store so the Lab pages can show what a group actually holds. */
@@ -4222,7 +4025,6 @@ export class SniperEngine {
       this.armed = false;
       this.lastDisarmReason = reason;
       tradePrewarm.stop();
-      randomLab.stopAll(`live execution disarmed (${reason})`);
       this.log('info', `live trading disarmed (${reason})`);
       recorder.record('disarmed', { reason });
       try {

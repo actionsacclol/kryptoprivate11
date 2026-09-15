@@ -1,7 +1,7 @@
 // Workspaces — the app's top-level organisation.
 //
 // The app grew to twenty-five routes in one flat sidebar, which made two
-// unrelated jobs look like one list: "Warmer" sat four rows from "Orders",
+// unrelated jobs look like one list: "Funder" sat four rows from "Orders",
 // and a page that trades on its own initiative sat next to one that only
 // moves when you click. Workspaces isolate those jobs. You land on the Hub,
 // pick what you are doing, and the sidebar then shows only that job's pages.
@@ -98,14 +98,14 @@ export const WORKSPACES: WorkspaceSpec[] = [
     id: 'wallets',
     title: 'Wallet Utilities',
     blurb: 'Your keys, and the wallet groups you fund, warm and mirror.',
-    routes: ['wallet', 'walletrobinhood', 'walletbnb', 'swap', 'bridge', 'creator', 'funder', 'warmer', 'copier'],
+    routes: ['wallet', 'walletrobinhood', 'walletbnb', 'swap', 'bridge', 'creator', 'funder'],
     groups: [
       { label: 'Your wallets', routes: ['wallet', 'walletrobinhood', 'walletbnb'] },
       // Its own heading. It is neither a wallet nor part of the Lab's
       // many-wallet machinery — it is the one thing on this workspace that
       // acts on what a single wallet is holding right now.
       { label: 'Tools', routes: ['swap', 'bridge'] },
-      { label: 'Wallet Lab', routes: ['creator', 'funder', 'warmer', 'copier'] },
+      { label: 'Wallet Lab', routes: ['creator', 'funder'] },
     ],
     icon: 'wallet',
     ready: true,

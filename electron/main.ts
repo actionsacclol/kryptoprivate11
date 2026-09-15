@@ -27,7 +27,6 @@ import * as market from './data/market';
 import * as templateStore from './system/templateStore';
 import * as evmScanner from './evm/scanner';
 import * as walletScout from './engine/walletScout';
-import * as randomLab from './engine/randomLab';
 import * as paperBook from './engine/paperBook';
 import * as bridgeStore from './engine/bridgeStore';
 import * as alertStore from './engine/alerts';
@@ -669,20 +668,6 @@ async function bootstrap(): Promise<void> {
   walletScout.init(app.getPath('userData'));
   evmScanner.initModels(app.getPath('userData'));
   ledger.init(app.getPath('userData'));
-  {
-    const restored = randomLab.init(app.getPath('userData'));
-    if (restored) logger.info(`wallet lab: ${restored} open position(s) restored from the last session — their sells are re-armed`);
-    // lab-runs.json is the ONLY record of which lab wallet holds which bag,
-    // so an unreadable one is not an empty one. It also fails closed, which
-    // the durable log has to carry even though the dialog below says it too:
-    // a support question a week later reads the log, not a dismissed box.
-    const labFail = randomLab.failure();
-    if (labFail) {
-      logger.warn(
-        `wallet lab: ${labFail} — the open bags it records were NOT loaded, and this session will not write over the file`,
-      );
-    }
-  }
   // The only record of money that has left one chain and not reached the
   // other. Registered here with every other fail-closed store: a user whose
   // in-flight list reads "none" when it really means "could not read" would
@@ -717,7 +702,6 @@ async function bootstrap(): Promise<void> {
       { what: 'settings', why: store.failure() },
       { what: 'trade ledger', why: ledger.failure() },
       { what: 'copy trading', why: copyTrade.failure() },
-      { what: 'Wallet Lab runs', why: randomLab.failure() },
       { what: 'scripts and rules', why: automation.failure() },
       { what: 'advanced orders', why: advOrders.failure() },
       // The highest-stakes one on this list: it records transfers that have
@@ -1057,13 +1041,6 @@ app.on('window-all-closed', () => {
 
 let quitDrained = false;
 app.on('before-quit', (e) => {
-  // Wallet Lab first, before anything else gets a chance to run. engine.stop()
-  // never touches the lab's armed flag and the only other stopAll is inside
-  // disarm(), so without this a warmer tick could start a fresh LIVE buy
-  // during the ~8.5 s drain below — a brand new bag opened by an app that is
-  // closing. Sells already on their own timers are unaffected: a bag is never
-  // abandoned (randomLab.ts).
-  randomLab.stopAll('app is quitting');
   // Scripts next: their sandboxes are windows, and a script must not fire
   // into a closing engine.
   void automation.shutdown();

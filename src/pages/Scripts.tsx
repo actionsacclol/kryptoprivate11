@@ -106,7 +106,7 @@ export function ScriptsPage() {
   // edits the draft. Arming while they disagree is how a script gets armed at
   // a size the screen is not showing — or worse, flipped to live in the editor
   // and armed with no live confirmation, because the saved copy still says
-  // paper. The Warmer page already refuses this; so do we.
+  // paper. Refuse it here rather than let a paper script spend.
   const dirty = useMemo(() => {
     if (!current || !draft) return false;
     return JSON.stringify({ ...draft, updatedAt: 0 }) !== JSON.stringify({ ...current, updatedAt: 0 });

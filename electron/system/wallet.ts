@@ -55,7 +55,6 @@ import {
   type StoredWallet,
   type WalletsFile,
   type WalletGroup,
-  setGroupLab as setGroupLabInStore,
 } from './walletStore';
 import type { WalletInfo, WalletSummary } from '@shared/types';
 
@@ -324,7 +323,6 @@ export interface GroupView {
   name: string;
   /** Member wallets, resolved to public data for the UI. */
   members: Array<{ id: string; label: string; publicKey: string }>;
-  lab?: import('@shared/lab').LabGroupConfig;
 }
 
 export function groups(): GroupView[] {
@@ -333,12 +331,7 @@ export function groups(): GroupView[] {
     id: g.id,
     name: g.name,
     members: groupWallets(file, g.id).map((w) => ({ id: w.id, label: w.label, publicKey: w.publicKey })),
-    lab: g.lab,
   }));
-}
-
-export function setGroupLab(id: string, lab: import('@shared/lab').LabGroupConfig): { ok: boolean; message: string } {
-  return commit(setGroupLabInStore(loadFile(), id, lab));
 }
 
 /** Several wallets in one go (Wallet Lab). Stops at the first refusal. */

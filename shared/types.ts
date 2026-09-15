@@ -54,8 +54,6 @@ export interface WalletGroupView {
   id: string;
   name: string;
   members: Array<{ id: string; label: string; publicKey: string }>;
-  /** Wallet Lab settings for this group (follow / random). Absent = defaults. */
-  lab?: import('./lab').LabGroupConfig;
 }
 
 /** Outcome of a user-initiated SOL withdrawal (wallet:withdraw). */
@@ -880,8 +878,6 @@ export type EngineEvent =
   | { kind: 'runner'; runner: import('./runners').RunnerFlag }
   /** The whole flag list, pushed when expiry removed some of it. */
   | { kind: 'runners'; runners: import('./runners').RunnerFlag[] }
-  /** Wallet Lab random-trading runs changed (started, traded, stopped). */
-  | { kind: 'lab'; runs: import('./lab').RandomRunStatus[] }
   /** EVM rail (shared/evm.ts). A fill that landed, reconciled or failed on
    *  `fill.chain`; the panels re-read that chain's portfolio on it. */
   | { kind: 'evmFill'; fill: import('./evm').EvmFill; state: 'landed' | 'reconciled' | 'failed' }

@@ -15,7 +15,6 @@ import { validateSettingsPatch } from './system/settingsValidation';
 import type { AiAnalysis } from '@shared/ai';
 import * as wallet from './system/wallet';
 import * as fund from './engine/fund';
-import * as randomLab from './engine/randomLab';
 import * as lab from '@shared/lab';
 import { getBalance } from './engine/rpcClient';
 import * as bots from './system/bots';
@@ -250,9 +249,9 @@ export function registerIpc(): void {
    * Keep the Wallet Scout's idea of "your wallets" current.
    *
    * Called at boot and after anything that can add or remove one. The Scout
-   * ranks wallets by round trips, and the Warmer manufactures round trips on
-   * the user's OWN wallets — so without this, warming activity comes back to
-   * the user as if it were somebody else's measured record.
+   * ranks wallets by round trips, and this install makes round trips on the
+   * user's OWN wallets — so without this, the user's own activity comes back
+   * to them as if it were somebody else's measured record.
    */
   const refreshScoutOwnership = (): void => {
     try {
@@ -696,28 +695,6 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle('wallet:remove', (_e, id: unknown) => {
-    const targetId = typeof id === 'string' && id ? id : wallet.info().id;
-    // A Wallet Lab bag lives in ONE wallet, and only that wallet's key can
-    // sell it. `wallet.remove` drops the wallet, its group membership AND
-    // the encrypted secret, with no backup — so removing a wallet that is
-    // holding leaves tokens no key on this machine can ever reach, while
-    // the lab's own message tells the user to "collect from the group
-    // first", naming a group the wallet is no longer in. Refuse instead,
-    // and name what is actually in there. `randomLab.status()` reports the
-    // open bags per run; a bag survives a Stop, so this is not gated on the
-    // run still being armed.
-    if (targetId) {
-      const holding = randomLab
-        .status()
-        .flatMap((run) => run.open.filter((o) => o.walletId === targetId).map((o) => ({ run, open: o })));
-      if (holding.length) {
-        const what = holding.map(({ open }) => open.symbol || `${open.mint.slice(0, 8)}…`).join(', ');
-        const groups = [...new Set(holding.map(({ run }) => run.groupId))].join(', ');
-        return fail(
-          `This wallet still holds ${holding.length} Wallet Lab bag(s): ${what}. Removing it would destroy the only key that can sell them. Sell or collect from the Warmer first (group ${groups}), then remove the wallet.`,
-        );
-      }
-    }
     // Disarm FIRST and unconditionally. Removing any wallet can promote a
     // different one to active, and staying armed across that change is the
     // same hazard `wallet:select` refuses outright.
@@ -1740,26 +1717,6 @@ export function registerIpc(): void {
     for (const k of Object.keys(defaults)) if (k in src) out[k] = src[k];
     return out as T;
   };
-  ipcMain.handle('lab:setFollow', (_e, groupId: unknown, cfg: unknown) => {
-    if (typeof groupId !== 'string') return fail('Invalid group');
-    const g = wallet.groups().find((x) => x.id === groupId);
-    if (!g) return fail('No such group');
-    const next = pickLab(lab.DEFAULT_FOLLOW, g.lab?.follow, cfg);
-    const v = lab.validateFollow(next);
-    if (!v.ok) return fail(v.message);
-    const r = wallet.setGroupLab(groupId, { follow: next, random: g.lab?.random ?? { ...lab.DEFAULT_RANDOM } });
-    return r.ok ? ok(r.message, wallet.groups()) : fail(r.message);
-  });
-  ipcMain.handle('lab:setRandom', (_e, groupId: unknown, cfg: unknown) => {
-    if (typeof groupId !== 'string') return fail('Invalid group');
-    const g = wallet.groups().find((x) => x.id === groupId);
-    if (!g) return fail('No such group');
-    const next = pickLab(lab.DEFAULT_RANDOM, g.lab?.random, cfg);
-    const v = lab.validateRandom(next);
-    if (!v.ok) return fail(v.message);
-    const r = wallet.setGroupLab(groupId, { follow: g.lab?.follow ?? { ...lab.DEFAULT_FOLLOW }, random: next });
-    return r.ok ? ok(r.message, wallet.groups()) : fail(r.message);
-  });
   ipcMain.handle('lab:fund', async (_e, targets: unknown, fromWalletId: unknown) => {
     if (!getEngine().liveState().armed || !store.load().execution.liveEnabled) return fail('Arm live execution first — funding moves real SOL');
     if (!Array.isArray(targets) || targets.length === 0 || targets.length > 20) return fail('Pick 1–20 wallets');
@@ -1801,78 +1758,15 @@ export function registerIpc(): void {
     logger.info(`lab collect: ${landed}/${r.length} wallet(s) sent back`);
     return ok(`${landed}/${r.length} collected`, r.map((x) => ({ walletId: x.walletId, ok: x.ok, message: x.message, sol: x.lamports / 1e9, signature: x.signature })));
   });
-  ipcMain.handle('lab:randomStart', (_e, groupId: unknown, walletIds: unknown) => {
-    if (typeof groupId !== 'string') return fail('Invalid group');
-    if (walletIds !== undefined && walletIds !== null && !(Array.isArray(walletIds) && walletIds.every((x) => typeof x === 'string'))) return fail('Invalid wallet list');
-    if (!getEngine().liveState().armed || !store.load().execution.liveEnabled) return fail('Arm live execution first — random trading spends real SOL');
-    const r = randomLab.start(groupId, Array.isArray(walletIds) ? (walletIds as string[]) : undefined);
-    return r.ok && r.status ? ok(r.message, r.status) : fail(r.message);
-  });
-  ipcMain.handle('lab:randomStop', (_e, groupId: unknown) => {
-    if (typeof groupId !== 'string') return fail('Invalid group');
-    const r = randomLab.stop(groupId);
-    return r.ok && r.status ? ok(r.message, r.status) : fail(r.message);
-  });
-  ipcMain.handle('lab:status', () => ok('ok', getEngine().labStatus()));
   ipcMain.handle('wallet:refreshAll', async () => {
     const noted = await getEngine().refreshAllBalances();
     return ok(`${noted} balance(s) read`, wallet.list());
   });
-  ipcMain.handle('live:fanoutSell', async (_e, mint: unknown, walletIds: unknown, opts: unknown) => {
-    if (typeof mint !== 'string' || mint.length < 32) return fail('Invalid mint address');
-    if (!Array.isArray(walletIds) || walletIds.length === 0 || walletIds.length > 20 || !walletIds.every((x) => typeof x === 'string')) return fail('Pick 1–20 wallets');
-    const own = new Set(wallet.list().map((w) => w.id));
-    if (!(walletIds as string[]).every((id) => own.has(id))) return fail('A wallet is not one of yours');
-    const o = (opts && typeof opts === 'object' ? opts : {}) as { staggerMaxMs?: unknown };
-    try {
-      const res = await getEngine().fanoutSell(mint, walletIds as string[], { staggerMaxMs: typeof o.staggerMaxMs === 'number' ? o.staggerMaxMs : undefined });
-      return res.ok ? ok(res.message, res) : { ok: false, message: res.message, data: res };
-    } catch (err) {
-      return fail(`Fan-out sell error: ${(err as Error).message}`);
-    }
-  });
-
-  // The same four bounds `live:fanoutSell` above already applies, plus a real
+  // Four bounds on the wallet list and the size, plus a real
   // base58 test on the mint. The blast radius is bounded downstream, so this
   // is defence in depth — but a buy handler that trusts more than its own
   // sell twin is exactly the asymmetry the EVM handlers were hardened away
   // from, and this one spends SOL rather than returning it.
-  ipcMain.handle('live:fanoutBuy', async (_e, mint: unknown, walletIds: unknown, sizing: unknown, opts: unknown) => {
-    if (!isAddress(mint)) return fail('Invalid mint address');
-    if (!Array.isArray(walletIds) || walletIds.length === 0 || walletIds.length > 20 || !walletIds.every((x) => typeof x === 'string')) {
-      return fail('Pick 1–20 wallets');
-    }
-    const own = new Set(wallet.list().map((w) => w.id));
-    if (!(walletIds as string[]).every((id) => own.has(id))) return fail('A wallet is not one of yours');
-    const sz = sizing as { mode?: unknown; amountSol?: unknown; jitter?: unknown } | null;
-    const mode = sz?.mode === 'total' ? 'total' : 'same';
-    const amountSol = Number(sz?.amountSol);
-    if (!Number.isFinite(amountSol) || amountSol <= 0) return fail('Amount must be positive');
-    // Jitter is a FRACTION of each share (shared/fanout.ts: 0..0.9), which is
-    // exactly why it is checked here rather than left to the clamp down
-    // there: a caller that sent it as a percentage ("30") would be silently
-    // clamped to 0.9 and every share randomised ±90 %. Refuse, don't clamp.
-    const jitterRaw = Number(sz?.jitter);
-    const jitterGiven = sz?.jitter !== undefined && sz?.jitter !== null;
-    if (jitterGiven && (!Number.isFinite(jitterRaw) || jitterRaw < 0 || jitterRaw > 0.9)) {
-      return fail('Jitter must be a fraction between 0 and 0.9');
-    }
-    const jitter = jitterGiven ? jitterRaw : 0;
-    const staggerRaw = (opts as { staggerMaxMs?: unknown } | null)?.staggerMaxMs;
-    const staggerMaxMs = typeof staggerRaw === 'number' && Number.isFinite(staggerRaw) ? staggerRaw : 0;
-    try {
-      const res = await getEngine().fanoutBuy(
-        mint,
-        walletIds as string[],
-        { mode, amountSol, jitter },
-        { staggerMaxMs },
-      );
-      return res.ok ? ok(res.message, res) : { ok: false, message: res.message, data: res };
-    } catch (err) {
-      return fail(`Fan-out error: ${(err as Error).message}`);
-    }
-  });
-
   ipcMain.handle('live:sellToken', async (_e, mint: string, percent: unknown) => {
     if (typeof mint !== 'string' || mint.length < 32) return fail('Invalid mint address');
     const pct = percent === undefined ? 100 : Number(percent);

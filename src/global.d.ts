@@ -15,7 +15,6 @@ import type {
 } from '@shared/market';
 import type { CreatorHistory, LaunchIntelReport } from '@shared/launchintel';
 import type { AiAnalysis } from '@shared/ai';
-import type { FollowSettings, RandomSettings, RandomRunStatus } from '@shared/lab';
 import type { BotKind } from '@shared/bots';
 import type { CreditUsage } from '@shared/credits';
 import type { BotStatus } from '../electron/system/bots';
@@ -162,29 +161,17 @@ declare global {
         sellAll: () => Promise<IpcResult>;
         setLive: (on: boolean) => Promise<IpcResult<{ live: LiveState; liveEnabled: boolean }>>;
         sweepRent: () => Promise<IpcResult<{ closed: number; recoveredSolEst: number }>>;
-        fanoutBuy: (
-          mint: string,
-          walletIds: string[],
-          sizing: { mode: 'same' | 'total'; amountSol: number; jitter?: number },
-          opts?: { staggerMaxMs?: number },
-        ) => Promise<IpcResult<{ ok: boolean; message: string; results: Array<{ walletId: string; ok: boolean; stage: string; message: string; signature: string | null }> }>>;
         /** Every listed wallet sells 100 % of the mint. */
-        fanoutSell: (mint: string, walletIds: string[], opts?: { staggerMaxMs?: number }) => Promise<IpcResult<{ ok: boolean; message: string; results: Array<{ walletId: string; ok: boolean; message: string; signature: string | null }> }>>;
       };
       lab: {
         /** Generate `count` wallets at once (labels "<prefix> 1", "<prefix> 2", …). Returns the full wallet list. */
         /** Creates `count` wallets; with `groupId` they join that group at once. Returns the full wallet list. */
         generateMany: (count: number, labelPrefix?: string, groupId?: string) => Promise<IpcResult<WalletSummary[]>>;
-        setFollow: (groupId: string, cfg: FollowSettings) => Promise<IpcResult<WalletGroupView[]>>;
-        setRandom: (groupId: string, cfg: RandomSettings) => Promise<IpcResult<WalletGroupView[]>>;
         /** One transaction from the ACTIVE wallet to the listed own wallets. */
         fund: (targets: Array<{ walletId: string; sol: number }>, fromWalletId?: string) => Promise<IpcResult<{ signature: string; sentSol: number; count: number }>>;
         /** Each listed wallet sends its spare SOL back to the ACTIVE wallet (one tx per wallet). */
         collect: (walletIds: string[], toWalletId?: string) => Promise<IpcResult<Array<{ walletId: string; ok: boolean; message: string; sol: number; signature: string | null }>>>;
         /** Warm the whole group, or only `walletIds` (a subset of its members). */
-        randomStart: (groupId: string, walletIds?: string[]) => Promise<IpcResult<RandomRunStatus>>;
-        randomStop: (groupId: string) => Promise<IpcResult<RandomRunStatus>>;
-        status: () => Promise<IpcResult<RandomRunStatus[]>>;
       };
       card: {
         /** Save an encoded animated card through a save dialog. */

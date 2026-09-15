@@ -292,7 +292,7 @@ export function FarmingPage() {
 
       <Section
         title="Not built yet"
-        description="There is no switch on this page and nothing is scheduled. The runner would reuse the Wallet Lab's Warmer machinery — sized trades, randomised cadence, a hard budget — pointed at one deep pair."
+        description="There is no switch on this page and nothing is scheduled. A runner would need sized trades, a randomised cadence and a hard budget, pointed at one deep pair — none of it is wired."
       >
         <Card>
           <div className="flex items-start gap-3">

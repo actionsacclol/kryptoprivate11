@@ -1,5 +1,5 @@
-// Wallet Lab guards: the signer's 'fund' intent, and lab settings surviving
-// the wallet-file parser.
+// Wallet Lab guards: the signer's 'fund' intent, and what the wallet-file
+// parser does with settings from a build that had more features.
 import assert from 'node:assert';
 import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction, TransactionInstruction } from '@solana/web3.js';
 import { checkOutflowForTest } from './.signpolicy.mjs';
@@ -73,7 +73,7 @@ const ME = me.publicKey.toBase58();
   console.log('ok  fund: the allowlist is inert for other intents');
 }
 
-// ── parseFile keeps valid lab settings and drops invalid ones ─────────
+// ── parseFile drops a `lab` block written by an older build ──────────
 {
   const now = Date.now();
   const raw = {
@@ -85,20 +85,16 @@ const ME = me.publicKey.toBase58();
     ],
     groups: [
       { id: 'g1', name: 'Fleet', walletIds: ['w2'], lab: { follow: { enabled: true, ratio: 0.25 }, random: { maxLossSol: 0.02 } } },
-      { id: 'g2', name: 'Bad', walletIds: ['w2'], lab: { follow: { enabled: true, delayMinMs: 500, delayMaxMs: 10 } } },
     ],
   };
   const f = parseFile(raw, now, () => 'id');
   assert.ok(f, 'file parses');
   const g1 = f.groups.find((g) => g.id === 'g1');
-  assert.ok(g1?.lab, 'lab kept');
-  assert.equal(g1.lab.follow.enabled, true);
-  assert.equal(g1.lab.follow.ratio, 0.25);
-  assert.equal(g1.lab.follow.maxTradeSol, 0.05, 'missing fields filled from defaults');
-  assert.equal(g1.lab.random.maxLossSol, 0.02);
-  const g2 = f.groups.find((g) => g.id === 'g2');
-  assert.equal(g2?.lab, undefined, 'an invalid lab block is dropped rather than persisted');
-  console.log('ok  parseFile keeps valid lab settings, fills defaults, drops invalid ones');
+  assert.ok(g1, 'the group itself survives — only its dead settings go');
+  assert.equal(g1.name, 'Fleet');
+  assert.deepEqual(g1.walletIds, ['w2']);
+  assert.equal(g1.lab, undefined, 'follow and random trading are gone; their saved config is not carried forward');
+  console.log('ok  parseFile drops a legacy lab block and keeps the group');
 }
 
 // ── a non-finite jitter or floor never yields a plan of NaN shares ────

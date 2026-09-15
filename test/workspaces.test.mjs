@@ -73,7 +73,7 @@ test('the three workspaces asked for exist and hold the right pages', () => {
   assert.equal(workspaceOf('scripts'), 'automation', 'and its home is Automation');
 
   const utils = routesFor('wallets');
-  for (const r of ['creator', 'funder', 'warmer', 'copier']) {
+  for (const r of ['creator', 'funder']) {
     assert.ok(utils.includes(r), `wallet utilities holds ${r}`);
   }
 });

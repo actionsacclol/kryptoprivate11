@@ -42,8 +42,6 @@ const WatchlistPage = lazy(() => ROUTE_LOADERS.watchlist().then((m) => ({ defaul
 const RunnersPage = lazy(() => ROUTE_LOADERS.runners().then((m) => ({ default: m.RunnersPage })));
 const CreatorPage = lazy(() => ROUTE_LOADERS.creator().then((m) => ({ default: m.CreatorPage })));
 const FunderPage = lazy(() => ROUTE_LOADERS.funder().then((m) => ({ default: m.FunderPage })));
-const WarmerPage = lazy(() => ROUTE_LOADERS.warmer().then((m) => ({ default: m.WarmerPage })));
-const CopierPage = lazy(() => ROUTE_LOADERS.copier().then((m) => ({ default: m.CopierPage })));
 const ScriptsPage = lazy(() => ROUTE_LOADERS.scripts().then((m) => ({ default: m.ScriptsPage })));
 const OrdersPage = lazy(() => ROUTE_LOADERS.orders().then((m) => ({ default: m.OrdersPage })));
 const TradesPage = lazy(() => ROUTE_LOADERS.trades().then((m) => ({ default: m.TradesPage })));
@@ -281,8 +279,6 @@ export default function App() {
                   {route === 'runners' && <RunnersPage onOpenToken={openToken} />}
                   {route === 'creator' && <CreatorPage onOpenToken={openToken} />}
                   {route === 'funder' && <FunderPage onOpenToken={openToken} />}
-                  {route === 'warmer' && <WarmerPage onOpenToken={openToken} />}
-                  {route === 'copier' && <CopierPage onOpenToken={openToken} />}
                   {route === 'trades' && <TradesPage onOpenToken={openToken} />}
                   {route === 'orders' && <OrdersPage onOpenToken={openToken} />}
                   {route === 'dashboard' && <Dashboard onNavigate={navigate} />}
