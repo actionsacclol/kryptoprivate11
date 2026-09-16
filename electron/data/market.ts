@@ -50,10 +50,12 @@ import {
   type TokenSummary,
   type TradeRow,
   type TraderScanRow,
+  humanWait,
 } from '@shared/market';
 import {
   cached,
   cooldownRemainingMs,
+  parkIsQuota,
   memo,
   providerHost,
   putCache,
@@ -249,6 +251,9 @@ export function providerStatuses(): ProviderStatus[] {
       lastCallAt: t.lastCallAt,
       latencyMs: t.latencyMs,
       cooldownMs: cooldownRemainingMs(id),
+      // A spent plan and a throttle need different words: one waits, the
+      // other needs the user to do something.
+      cooldownIsQuota: parkIsQuota(id),
       queued: queueDepth(id),
     };
   });
@@ -263,7 +268,11 @@ export function providerStatuses(): ProviderStatus[] {
 export function parkNote(only?: ProviderId[]): string {
   const parked = parkedProviders().filter((id) => !only || only.includes(id));
   if (!parked.length) return '';
-  const parts = parked.map((id) => `${PROVIDER_META[id].label} (retrying in ${Math.ceil(cooldownRemainingMs(id) / 1000)}s)`);
+  const parts = parked.map((id) =>
+    parkIsQuota(id)
+      ? `${PROVIDER_META[id].label} (no allowance left)`
+      : `${PROVIDER_META[id].label} (retrying in ${humanWait(cooldownRemainingMs(id))})`,
+  );
   return `Rate limited by ${parts.join(', ')}.`;
 }
 
@@ -1690,9 +1699,41 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       : subMinute
         ? `No ${interval} data. Sub-minute candles come from the live feed (start the engine and open this token) or from Birdeye with an API key.`
         : parked
-          ? `Chart provider rate limited — retrying in ${Math.ceil(Math.max(cooldownRemainingMs('geckoterminal'), cooldownRemainingMs('birdeye')) / 1000)}s.`
+          ? chartParkNote()
           : 'No candle source returned data for this token.',
   };
+}
+
+/**
+ * Why there is no chart, when a provider is parked.
+ *
+ * It used to report the LONGER of the two waits as one "rate limited" line.
+ * Once a spent allowance could park a provider for six hours that produced
+ * "retrying in 21596s" — a number nobody can read, about a provider that may
+ * not even be the one that would have served this chart (reported
+ * 2026-09-16). So: name the providers actually down, say the wait in human
+ * units, and separate a spent plan from a throttle — the first needs the
+ * user to do something, the second only needs time.
+ */
+function chartParkNote(): string {
+  const down = (['geckoterminal', 'birdeye'] as const).filter((id) => cooldownRemainingMs(id) > 0);
+  if (!down.length) return 'No candle source returned data for this token.';
+  const spent = down.filter((id) => parkIsQuota(id));
+  const slow = down.filter((id) => !parkIsQuota(id));
+  const parts: string[] = [];
+  if (spent.length) {
+    parts.push(
+      `${spent.map((id) => PROVIDER_META[id].label).join(' and ')} ${spent.length === 1 ? 'has' : 'have'} no allowance left — ` +
+        'top up the plan or switch it off in Settings.',
+    );
+  }
+  if (slow.length) {
+    parts.push(
+      `${slow.map((id) => PROVIDER_META[id].label).join(' and ')} rate limited — retrying in ` +
+        `${humanWait(Math.min(...slow.map((id) => cooldownRemainingMs(id))))}.`,
+    );
+  }
+  return parts.join(' ');
 }
 
 /**

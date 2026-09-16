@@ -10,7 +10,7 @@
 // page, which is the thing the ticker was doing wrong.
 
 import { memo, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { Plus, X } from 'lucide-react';
 import { nativeSymbolOf } from '@shared/evm';
 import { tabKey, tabLabel, type TokenTab } from '../state/tokenTabs';
 import { cls } from '../utils/format';
@@ -23,19 +23,29 @@ interface Props {
   onSelect: (t: TokenTab) => void;
   onClose: (key: string) => void;
   onCloseAll: () => void;
+  /** Open a new one. There was no way to do that from the bar itself at
+   *  first — tabs only ever appeared as a side effect of opening a token
+   *  somewhere else, which is not how anyone expects a tab bar to work
+   *  (reported 2026-09-16). This goes to the finder. */
+  onNew: () => void;
 }
 
-export const TokenTabs = memo(function TokenTabs({ tabs, activeKey, onSelect, onClose, onCloseAll }: Props) {
+export const TokenTabs = memo(function TokenTabs({ tabs, activeKey, onSelect, onClose, onCloseAll, onNew }: Props) {
   // Ctrl+Tab / Ctrl+Shift+Tab cycle, Alt+1..9 jump. Deliberately NOT Ctrl+W:
   // that closes the Electron window, and a trader reaching for it to shut a
   // chart would lose the app. Registered without capture so the trading
   // hotkeys (which use capture) always win a contested key.
   useEffect(() => {
-    if (tabs.length === 0) return;
     const onKey = (e: KeyboardEvent): void => {
       const el = e.target as HTMLElement | null;
       const typing = !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
       if (typing) return;
+      if (e.ctrlKey && !e.shiftKey && (e.key === 't' || e.key === 'T')) {
+        e.preventDefault();
+        onNew();
+        return;
+      }
+      if (tabs.length === 0) return;
       if (e.ctrlKey && e.key === 'Tab') {
         e.preventDefault();
         const i = tabs.findIndex((t) => tabKey(t) === activeKey);
@@ -53,13 +63,16 @@ export const TokenTabs = memo(function TokenTabs({ tabs, activeKey, onSelect, on
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [tabs, activeKey, onSelect]);
-
-  if (tabs.length === 0) return null;
+  }, [tabs, activeKey, onSelect, onNew]);
 
   return (
     <div className="flex items-stretch border-b border-white/10 bg-black/40 select-none">
       <div className="flex-1 flex items-stretch overflow-x-auto scrollbar-thin">
+        {tabs.length === 0 && (
+          <span className="flex items-center px-3 text-label text-krypt-muted/50">
+            No tokens open — find one to start a tab.
+          </span>
+        )}
         {tabs.map((t, i) => {
           const key = tabKey(t);
           const active = key === activeKey;
@@ -102,6 +115,16 @@ export const TokenTabs = memo(function TokenTabs({ tabs, activeKey, onSelect, on
           );
         })}
       </div>
+      {/* New tab. Ctrl+T as well, which is the key every hand already knows
+          for this and which nothing else in the app uses. */}
+      <button
+        onClick={onNew}
+        title="Open another token (Ctrl+T)"
+        aria-label="Open another token"
+        className="flex items-center px-3 text-krypt-muted/70 hover:text-white hover:bg-white/[0.06] border-l border-white/10 transition flex-shrink-0"
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </button>
       {tabs.length > 1 && (
         <button
           onClick={onCloseAll}

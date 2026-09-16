@@ -104,6 +104,7 @@ export const TokenTabsLive = memo(function TokenTabsLive({
   onSelect,
   onClose,
   onCloseAll,
+  onNew,
   onResolve,
 }: {
   tabs: TokenTab[];
@@ -111,6 +112,7 @@ export const TokenTabsLive = memo(function TokenTabsLive({
   onSelect: (t: TokenTab) => void;
   onClose: (key: string) => void;
   onCloseAll: () => void;
+  onNew: () => void;
   onResolve: (key: string, symbol: string) => void;
 }) {
   const { columns } = useTerminal();
@@ -135,5 +137,5 @@ export const TokenTabsLive = memo(function TokenTabsLive({
     }
   }, [named, tabs, onResolve]);
 
-  return <TokenTabs tabs={named} activeKey={activeKey} onSelect={onSelect} onClose={onClose} onCloseAll={onCloseAll} />;
+  return <TokenTabs tabs={named} activeKey={activeKey} onSelect={onSelect} onClose={onClose} onCloseAll={onCloseAll} onNew={onNew} />;
 });

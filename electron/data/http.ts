@@ -18,6 +18,7 @@
 // Nothing here is reachable from the renderer except through the typed
 // market:* IPC channels, which never accept a host or a URL.
 
+import { humanWait } from '@shared/market';
 import type { ProviderId } from '@shared/market';
 import { describeBody } from './refusals';
 
@@ -432,6 +433,7 @@ function park(id: HttpProviderId, retryAfter: string | null, quota = false): num
   // the provider is telling us to come back next billing period, and every
   // knock before then is another certain failure.
   if (quota) {
+    quotaParked.add(id);
     const until = now + QUOTA_PARK_MS;
     if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
     slowStartUntil.set(id, until + SLOW_START_MS);
@@ -489,7 +491,6 @@ function park(id: HttpProviderId, retryAfter: string | null, quota = false): num
  */
 const QUOTA_PHRASES = [
   'compute unit',
-  'usage limit',
   'quota exceeded',
   'quota exhausted',
   'out of credits',
@@ -506,13 +507,30 @@ const QUOTA_PHRASES = [
  *  few minutes, short enough that a top-up is noticed the same day. */
 const QUOTA_PARK_MS = 6 * 60 * 60_000;
 
-/** Does this failure mean the ALLOWANCE is spent rather than the rate? */
+/**
+ * Does this failure mean the ALLOWANCE is spent rather than the rate?
+ *
+ * **429 is deliberately not here.** It is definitionally "too fast", the
+ * status free providers return constantly, and a six-hour park on one that
+ * was merely throttled is a far worse outcome than a slow stand-down on one
+ * that really is spent. A provider that answers a dead plan with 429 is
+ * caught by the failure-streak breaker below instead, which needs to
+ * recognise nothing.
+ */
 export function isQuotaExhausted(status: number, message: string): boolean {
   if (status === 402) return true; // Payment Required means exactly this
-  if (status !== 400 && status !== 401 && status !== 403 && status !== 429) return false;
+  if (status !== 400 && status !== 401 && status !== 403) return false;
   const m = message.toLowerCase();
   return QUOTA_PHRASES.some((p) => m.includes(p));
 }
+
+/** Is this provider parked because its ALLOWANCE is spent, rather than
+ *  because it was going too fast? The two need different words. */
+export function parkIsQuota(id: HttpProviderId): boolean {
+  return quotaParked.has(id) && cooldownRemainingMs(id) > 0;
+}
+const quotaParked = new Set<HttpProviderId>();
+
 
 /**
  * The net under every other rule: a provider that keeps failing is stood
@@ -604,7 +622,9 @@ function parkedResult<T>(id: HttpProviderId): FetchResult<T> {
   const cooling = cooldownRemainingMs(id);
   return {
     ok: false,
-    message: `${id}: rate limited, retrying in ${Math.ceil(cooling / 1000)}s`,
+    message: parkIsQuota(id)
+      ? `${id}: allowance spent — paused ${humanWait(cooling)}`
+      : `${id}: rate limited, retrying in ${humanWait(cooling)}`,
     ms: 0,
     status: 429,
   };
@@ -851,6 +871,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
       // …and ends the streak. One good answer is enough: the streak is about
       // a provider that is not working, not about its lifetime record.
       failStreak.delete(id);
+      quotaParked.delete(id);
       softParkFromHeaders(id, res.headers);
       const ms = Date.now() - started;
       s.samples.push(ms);

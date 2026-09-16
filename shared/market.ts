@@ -69,6 +69,9 @@ export interface ProviderStatus {
   latencyMs: number | null;
   /** Parked after a 429: milliseconds until it is asked again, else 0. */
   cooldownMs: number;
+  /** The park is a SPENT ALLOWANCE, not a throttle — it will not clear by
+   *  waiting a little longer. Absent on telemetry built before 2026-09-16. */
+  cooldownIsQuota?: boolean;
   /** Calls waiting in its queue right now. */
   queued: number;
 }
@@ -1407,4 +1410,20 @@ export function describeSocials(s: TokenSummary): DescriptiveFacts['socials'] {
   const telegram = !!s.socials.telegram;
   const website = !!s.socials.website;
   return { hasAny: twitter || telegram || website, twitter, telegram, website };
+}
+
+/**
+ * A wait, in units a person reads.
+ *
+ * Seconds stopped being readable the moment a park could be hours: a spent
+ * API allowance rendered as "retrying in 21596s" (reported 2026-09-16).
+ * Defined here because main formats the same waits into log lines and the
+ * renderer into labels, and two implementations would drift.
+ */
+export function humanWait(ms: number): string {
+  const s = Math.ceil(ms / 1000);
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m} min`;
+  return `${Math.round(m / 6) / 10} h`;
 }

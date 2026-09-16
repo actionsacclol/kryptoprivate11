@@ -212,6 +212,19 @@ export default function App() {
     [activeKey, route],
   );
 
+  /**
+   * "New tab" — go to the finder.
+   *
+   * A token tab needs a token, and the app has one place for choosing one.
+   * So this does not open a blank tab (there is nothing to put in it); it
+   * takes you to Discover, and the tab appears when you pick something.
+   */
+  const newTab = useCallback(() => {
+    setTarget('discover');
+    setWorkspace((cur) => (routesFor(cur).includes('discover') ? cur : workspaceOf('discover')));
+    startTransition(() => setRoute('discover'));
+  }, []);
+
   /** A tab whose label was worked out downstream keeps it from now on. */
   const noteTabSymbol = useCallback((key: string, symbol: string) => {
     setTabs((cur) => (cur.some((t) => tabKey(t) === key && !t.symbol) ? cur.map((t) => (tabKey(t) === key ? { ...t, symbol } : t)) : cur));
@@ -332,6 +345,7 @@ export default function App() {
             onSelect={selectTab}
             onClose={dropTab}
             onCloseAll={dropAllTabs}
+            onNew={newTab}
             onResolve={noteTabSymbol}
           />
         )}

@@ -12,6 +12,7 @@
 //         it parks, it never un-parks, and legitimate data is untouched;
 //   12-13. Jupiter's host, gap and window all follow the user's key.
 import assert from 'node:assert';
+import { humanWait } from './.marketshared.mjs';
 import {
   getJson,
   cooldownRemainingMs,
@@ -393,6 +394,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await getJson('rugcheck', '/after');
   assert.equal(hits.length, before + 1, 'and the counter restarted from the success');
   console.log('ok  one success clears the streak');
+}
+
+
+// A 429 is a RATE limit and must never be read as a spent plan, however it
+// is worded. Free providers 429 constantly, and a six-hour park on one that
+// was merely throttled is far worse than a slow stand-down on one that is
+// genuinely spent — the failure-streak breaker covers that case anyway.
+{
+  stubFetch(() => res(429, JSON.stringify({ message: 'monthly limit exceeded' }), { 'retry-after': '5' }));
+  const r = await getJson('rugcheck', '/throttle-worded-like-quota');
+  assert.equal(r.ok, false);
+  assert.ok(!/allowance spent/.test(r.message), r.message);
+  const cooling = cooldownRemainingMs('rugcheck');
+  assert.ok(cooling > 0 && cooling <= 120_000, `a normal 429 park, not hours — got ${Math.round(cooling / 1000)}s`);
+  console.log('ok  a 429 is a rate limit whatever words it carries');
+}
+
+// Durations people can read. "retrying in 21596s" is what a six-hour park
+// looked like in a message written when every park was seconds.
+{
+  assert.equal(humanWait(4_000), '4s');
+  assert.equal(humanWait(89_000), '89s');
+  assert.equal(humanWait(90_000), '2 min');
+  assert.equal(humanWait(21_596_000), '6 h');
+  console.log('ok  a wait is rendered in units a person reads');
 }
 
 console.log('\nhttp layer: all rate-limit rules hold');

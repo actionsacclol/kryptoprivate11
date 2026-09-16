@@ -42,6 +42,7 @@ function BoundedInt({
 }
 import { AlertCircle, CheckCircle2, MinusCircle } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
+import { humanWait } from '@shared/market';
 import type { ProviderId, ProviderStatus } from '@shared/market';
 import { Card, GhostButton, Section, Switch } from '../common';
 import { useTerminal } from '../../state/TerminalProvider';
@@ -196,8 +197,18 @@ export function MarketDataSettings({
                     <span>{p.latencyMs === null ? '—' : `${p.latencyMs}ms`}</span>
                     {p.lastCallAt && <span>{fmtAgo(p.lastCallAt)} ago</span>}
                     {p.cooldownMs > 0 && (
-                      <span className="text-arc-gold" title="The provider answered 429; nothing is sent to it until this runs out.">
-                        rate limited · retrying in {Math.ceil(p.cooldownMs / 1000)}s
+                      <span
+                        className="text-arc-gold"
+                        title={
+                          p.cooldownIsQuota
+                            ? 'The provider says its allowance is spent. Waiting will not clear it — top up the plan or switch it off.'
+                            : 'The provider answered 429; nothing is sent to it until this runs out.'
+                        }
+                      >
+                        {/* Seconds are unreadable once a park can be hours:
+                            a spent allowance showed as "retrying in 21596s"
+                            (reported 2026-09-16). */}
+                        {p.cooldownIsQuota ? `no allowance left · paused ${humanWait(p.cooldownMs)}` : `rate limited · retrying in ${humanWait(p.cooldownMs)}`}
                       </span>
                     )}
                     {p.queued > 5 && <span title="Calls waiting in this provider&apos;s queue.">{p.queued} queued</span>}
