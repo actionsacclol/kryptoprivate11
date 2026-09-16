@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { validateSettingsPatch as v } from './.settingsvalidation.mjs';
-import { DEFAULT_SETTINGS } from './.types.mjs';
+import { DEFAULT_SETTINGS, resolveRpc } from './.types.mjs';
 
 // Ordinary updates pass through unchanged.
 {
@@ -379,4 +379,76 @@ console.log('settingsvalidation: all tests passed');
   assert.equal(r.ok, false);
   assert.match(r.message, /webhookUrl/);
   console.log('ok  a webhook refusal names the field');
+}
+
+// ── The execution endpoint (2026-09-15) ──────────────────────────────
+//
+// `rpc.fastHttpUrl` is the fast lane for a provider of your own, and it is
+// what every live buy and sell goes through. A bad value here is not a
+// cosmetic problem: an http:// paste used to be exactly how an EVM endpoint
+// silently fell back to the public one.
+
+{
+  const r = v({ rpc: { ...DEFAULT_SETTINGS.rpc, fastHttpUrl: 'https://my.endpoint.example/?api-key=abc' } });
+  assert.equal(r.ok, true, r.message);
+  assert.equal(r.patch.rpc.fastHttpUrl, 'https://my.endpoint.example/?api-key=abc');
+  console.log('ok  an https execution endpoint is accepted');
+}
+
+{
+  for (const bad of ['http://my.endpoint.example', 'ws://nope', 'not a url']) {
+    const r = v({ rpc: { ...DEFAULT_SETTINGS.rpc, fastHttpUrl: bad } });
+    assert.equal(r.ok, false, `${bad} MUST be refused`);
+    assert.match(r.message, /fastHttpUrl/, 'and the refusal names the field');
+  }
+  // Empty is the default and means "nothing changes" — it must always save,
+  // or clearing the field would be impossible.
+  assert.equal(v({ rpc: { ...DEFAULT_SETTINGS.rpc, fastHttpUrl: '' } }).ok, true);
+  console.log('ok  a non-https execution endpoint is refused, and empty always saves');
+}
+
+{
+  // The other two Solana URLs are deliberately NOT held to https: people run
+  // a local validator, and http://127.0.0.1 is a legitimate httpUrl.
+  const r = v({ rpc: { ...DEFAULT_SETTINGS.rpc, httpUrl: 'http://127.0.0.1:8899' } });
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  a local validator is still a valid plain endpoint');
+}
+
+{
+  // What actually decides where an order goes.
+  const base = { ...DEFAULT_SETTINGS.rpc };
+  assert.equal(resolveRpc(base).execHttpUrl, undefined, 'nothing configured = no fast lane, as before');
+
+  const keyed = resolveRpc({ ...base, heliusApiKey: 'KEY123456' });
+  assert.match(keyed.execHttpUrl, /helius-rpc\.com/, 'a key still derives the lane');
+
+  const own = resolveRpc({ ...base, fastHttpUrl: 'https://mine.example/rpc' });
+  assert.equal(own.execHttpUrl, 'https://mine.example/rpc', 'a typed endpoint fills it with no key at all');
+
+  // A URL someone typed WINS over a key they also happen to have: silently
+  // preferring the key would make the field a lie.
+  const both = resolveRpc({ ...base, heliusApiKey: 'KEY123456', fastHttpUrl: 'https://mine.example/rpc' });
+  assert.equal(both.execHttpUrl, 'https://mine.example/rpc');
+  console.log('ok  resolveRpc: a typed execution endpoint wins over a derived one');
+}
+
+{
+  // The round-trip trap (2026-09-08): a RESOLVED rpc block must never be
+  // persisted, so the derived field is not something the validator accepts.
+  const resolved = resolveRpc({ ...DEFAULT_SETTINGS.rpc, heliusApiKey: 'KEY123456' });
+  const r = v({ rpc: resolved });
+  assert.equal(r.ok, true, r.message);
+  assert.equal('execHttpUrl' in r.patch.rpc, false, 'the derived lane is dropped, never stored');
+  console.log('ok  a resolved rpc block round-trips without persisting the derived endpoint');
+}
+
+{
+  // The scanner's curve-variant filter. An enum, so a junk value must be
+  // refused rather than silently becoming "hide everything".
+  for (const m of ['all', 'standard', 'mayhem']) {
+    assert.equal(v({ strategy: { ...DEFAULT_SETTINGS.strategy, mayhemFilter: m } }).ok, true, m);
+  }
+  assert.equal(v({ strategy: { ...DEFAULT_SETTINGS.strategy, mayhemFilter: 'none' } }).ok, false);
+  console.log('ok  the mayhem filter takes its three modes and refuses anything else');
 }

@@ -160,6 +160,51 @@ export function Execution() {
               ))}
             </div>
           </div>
+          {/* Which pump curve variants the scanner even looks at. Here
+              rather than in Strategy because it is a decision about what the
+              scanner spends its attention and its RPC budget on, not a gate
+              on a launch it evaluated — a filtered launch never gets a mint
+              check, an eval window or a scorer pass. */}
+          <div className="rounded-lg border border-white/10 bg-black/25 p-3 lg:col-span-2">
+            <div className="mb-2 flex items-baseline gap-2">
+              <span className="text-value font-semibold text-white">Mayhem coins</span>
+              <span className="text-body text-krypt-muted">which pump curves the Solana scanner watches</span>
+            </div>
+            <div className="grid gap-1.5 sm:grid-cols-3">
+              {(
+                [
+                  ['all', 'All (default)', 'Every pump.fun launch, standard and mayhem alike. What the scanner has always done.'],
+                  ['standard', 'No mayhem', 'Standard curves only. A launch the app cannot classify still shows — hiding one for a reason it cannot state would hide a real launch.'],
+                  ['mayhem', 'Mayhem only', 'Only launches it can SEE are mayhem. An unclassified launch is not shown, because "mayhem only" that includes unknowns is not mayhem only.'],
+                ] as const
+              ).map(([mode, label, desc]) => (
+                <button
+                  key={mode}
+                  onClick={() => void updateSettings({ strategy: { ...settings.strategy, mayhemFilter: mode } })}
+                  className={cls(
+                    'rounded-md border px-3 py-2 text-left transition',
+                    (settings.strategy.mayhemFilter ?? 'all') === mode
+                      ? 'border-krypt-purple/60 bg-krypt-purple/15'
+                      : 'border-white/10 bg-white/[0.02] hover:border-white/20',
+                  )}
+                >
+                  <div className={cls('text-note font-semibold', (settings.strategy.mayhemFilter ?? 'all') === mode ? 'text-white' : 'text-krypt-muted')}>
+                    {label}
+                  </div>
+                  <div className="mt-0.5 text-label leading-relaxed text-krypt-muted/80">{desc}</div>
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">
+              A mayhem coin trades against inflated virtual reserves — hundreds of SOL rather than the standard 30 —
+              so it can run to a six-figure market cap while still on the bonding curve. Read free from the launch
+              event, so this costs no extra request.
+              {(settings.strategy.mayhemFilter ?? 'all') !== 'all' && (status.launchesFiltered ?? 0) > 0 ? (
+                <span className="text-krypt-muted"> {status.launchesFiltered} launch{status.launchesFiltered === 1 ? '' : 'es'} hidden this session.</span>
+              ) : null}
+              {' '}Solana only — the EVM launchpads have no equivalent.
+            </p>
+          </div>
           {/* The mode, above the lane switches it governs. Named for the
               thing traders search for, described by the ROUTE rather than a
               promise — we cannot measure how much sandwiching this avoids,

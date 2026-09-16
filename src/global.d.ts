@@ -17,8 +17,10 @@ import type { CreatorHistory, LaunchIntelReport } from '@shared/launchintel';
 import type { AiAnalysis } from '@shared/ai';
 import type { BotKind } from '@shared/bots';
 import type { CreditUsage } from '@shared/credits';
+import type { KryptoHolding } from '@shared/krypto';
 import type { BotStatus } from '../electron/system/bots';
 import type { RecorderStats } from '../electron/engine/recorder';
+import type { ProbeResult as RpcProbeResult } from '../electron/engine/rpcProbe';
 import type { MerklAnswer, RewardOpportunity, WalletReward } from '../electron/data/providers/merkl';
 import type { OrderTemplate } from '@shared/orderTemplates';
 import type { NewOrderRequest, OrdersSnapshot } from '@shared/orders';
@@ -115,9 +117,16 @@ declare global {
       backtest: {
         dataset: () => Promise<IpcResult<BacktestTrade[]>>;
       };
+      krypto: {
+        /** The live holding across every wallet, and whether it waives the fee.
+         *  Pass true to force a fresh read (a button, never a poll). */
+        holding: (refresh?: boolean) => Promise<IpcResult<KryptoHolding & { waived: boolean; thresholdTokens: number }>>;
+      };
       rpc: {
         credits: () => Promise<IpcResult<CreditUsage>>;
         health: () => Promise<IpcResult<{ rejected: { host: string; code: '401' | '403'; message: string } | null }>>;
+        /** Time the endpoints this install actually uses. A button, not a poll. */
+        probe: () => Promise<IpcResult<RpcProbeResult[]>>;
         resetCredits: () => Promise<IpcResult<CreditUsage>>;
       };
       bots: {
@@ -355,6 +364,8 @@ declare global {
         };
         discover: (chain: EvmChainKind, column: DiscoverColumn, limit: number) => Promise<IpcResult<TokenSummary[]>>;
         summary: (chain: EvmChainKind, address: string) => Promise<IpcResult<TokenSummary>>;
+        /** Several tokens on one chain, sharing the fetches. Keyed by lower-case address. */
+        summaries: (chain: EvmChainKind, addresses: string[]) => Promise<IpcResult<Record<string, TokenSummary>>>;
         token: (chain: EvmChainKind, address: string) => Promise<IpcResult<EvmTokenDetail>>;
         candles: (chain: EvmChainKind, address: string, interval: CandleInterval, limit: number) => Promise<IpcResult<CandleSeries>>;
         /** `amount` is native (ETH / BNB) for a buy, percent of the holding for a sell. */

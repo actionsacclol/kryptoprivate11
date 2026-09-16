@@ -22,6 +22,7 @@
 // Nothing here throws, blocks, or touches the sell/exit path. It only reports.
 
 import { FARM_FEE_BPS, FEE_BPS, REFERRAL_SHARE_BPS, TREASURY_ADDRESS, feesEnabled, splitFee } from './fees';
+import { KRYPTO_FEE_WAIVER_TOKENS, waivesFee } from './krypto';
 import { resolveTreasury, canonicalTreasury } from './feeIntegrity';
 import { PRESENCE, packIdentity } from './presence';
 import { resolvePresence, canonicalPresence } from './presenceIntegrity';
@@ -65,6 +66,14 @@ export function tamperFlags(): boolean[] {
     FARM_FEE_BPS >= FEE_BPS,
     // 4c. The farm rate reaches the arithmetic: 5 bps of 1 SOL = 500,000.
     splitFee(SOL, false, FARM_FEE_BPS).treasuryLamports !== 500_000,
+    // 4d. The $KRYPTO waiver is still a threshold and not a hole. A build
+    //     where it has been lowered waives the fee for everyone, and one
+    //     where an unknown holding qualifies waives it for anyone willing to
+    //     break a single balance read.
+    KRYPTO_FEE_WAIVER_TOKENS !== 1_000_000,
+    waivesFee(null),
+    waivesFee(KRYPTO_FEE_WAIVER_TOKENS - 1),
+    !waivesFee(KRYPTO_FEE_WAIVER_TOKENS),
     // 5. Fees are still enabled (treasury present and verified).
     !feesEnabled(),
     // 6. The fee arithmetic still produces the right treasury cut.

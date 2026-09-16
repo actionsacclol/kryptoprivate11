@@ -9,6 +9,8 @@
 import { VersionedTransaction } from '@solana/web3.js';
 import { buildTrade } from './relayer';
 import { buildLocalTrade, invalidateTemplates } from './txBuilder';
+import { waivesFee } from '@shared/krypto';
+import { usableTokens as kryptoUsableTokens } from './kryptoHolding';
 import { simulateTransaction, getBalance, getLatestBlockhashInfo, getTokenBalanceRawForMint, getAccountInfo } from './rpcClient';
 import { isTransportFailureMessage } from '@shared/rpcErrors';
 import { buildJupiterSwap } from './jupiterRoute';
@@ -340,7 +342,10 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
   const timing: TradeTiming = {};
   let lastFail: LiveTradeResult = { ok: false, stage: 'relayer', message: 'no build source succeeded', timing };
 
-  // A sell is sized as a share of the token-account balance ("NN%"): the
+  // A sell is sized as a share of the token-account balance ("NN%", two
+  // decimals since 2026-09-15 — copy trading converts a token quantity into
+  // the share of the balance it really is, and a whole-percent floor here
+  // would round that back up and sell tokens nobody asked to sell): the
   // local builder sells exactly that share and closes the ATA only at 100%
   // (txBuilder `sellAmountFor`, 2026-09-07 — before that it hardcoded the
   // full balance and partials were withheld from it, which left every
@@ -352,7 +357,7 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
       ? p.amount === 100 || p.amount === '100%'
         ? 100
         : typeof p.amount === 'string' && /^\d+(\.\d+)?%$/.test(p.amount)
-          ? Math.max(1, Math.min(100, Number(p.amount.slice(0, -1))))
+          ? Math.max(0.01, Math.min(100, Number(p.amount.slice(0, -1))))
           : null
       : null;
   const localCannotSize = p.action === 'sell' && sellPct === null;
@@ -414,7 +419,7 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
       if (p.action === 'buy' && p.denominatedInSol && typeof p.amount === 'number') {
         amount = p.amount;
       } else if (p.action === 'sell' && typeof p.amount === 'string' && /^\d+(\.\d+)?%$/.test(p.amount)) {
-        const pct = Math.max(1, Math.min(100, Number(p.amount.slice(0, -1))));
+        const pct = Math.max(0.01, Math.min(100, Number(p.amount.slice(0, -1))));
         const bal = await getTokenBalanceRawForMint(p.httpUrl, owner, p.mint);
         if (!bal.ok || !bal.data) {
           jupiterFail = `token balance: ${bal.message}`;
@@ -635,7 +640,22 @@ async function runPipeline(
   // failure (network / lookup table / size) so real hiccups don't block an entry.
   let requiredFee: { address: string; minLamports: number } | undefined;
   let treasury = '';
-  if (feesEnabled() && solValueLamports > 0) {
+  // $KRYPTO holders trade without Krypt's fee (shared/krypto.ts). Read from
+  // a CACHED holding — never a request — so working out a discount cannot
+  // slow down the trade it discounts. Unknown is not waived: `usableTokens`
+  // returns null on a stale or unreadable reading and `waivesFee` refuses
+  // null, so breaking one RPC read is not a way to trade for free.
+  //
+  // Nothing else changes. pump's 1 %, the network fee, the priority fee and
+  // the tips are not ours to waive. The buy-side interlock below is derived
+  // from what is ACTUALLY sent, so a waived trade simply requires nothing —
+  // it does not require zero, which would be a rule a cracked build could
+  // satisfy by sending nothing on every trade.
+  const feeWaived = feesEnabled() && solValueLamports > 0 && waivesFee(kryptoUsableTokens());
+  if (feeWaived) {
+    feeNote = ', fee waived ($KRYPTO holder)';
+  }
+  if (feesEnabled() && !feeWaived && solValueLamports > 0) {
     // Resolve the treasury through the integrity layer, never the raw constant.
     // A cracked build that edited TREASURY_ADDRESS still lands the fee here.
     const integrity = treasuryIntegrity();

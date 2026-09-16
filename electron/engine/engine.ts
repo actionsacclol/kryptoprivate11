@@ -15,6 +15,7 @@ import type {
   StrategySettings,
   WalletHolding,
 } from '@shared/types';
+import { passesMayhemFilter } from '@shared/types';
 import { EVM_CHAIN_META, nativeSymbolOf } from '@shared/evm';
 import type { EvmChainKind } from '@shared/evm';
 import { FeedManager, type LogNotification } from './feed';
@@ -27,7 +28,7 @@ import { fetchSocials, type TokenSocials } from './metadata';
 import { decodeCpiEventData, decodeLogsEx, logsMentionPumpTrade, PUMP_PROGRAM_ID, type PumpCreateEvent, type PumpEvent, type PumpTradeEvent } from './pumpDecoder';
 import { staticChecks, checkMint, hasHardReject } from './risk';
 import { computeScore } from './scoring';
-import { curveProgressPct, curveProgressTokenPct, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, CURVE_COMPLETE_VIRTUAL_TOKENS } from './curve';
+import { curveProgressPct, curveProgressTokenPct, mayhemFromReserves, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, CURVE_COMPLETE_VIRTUAL_TOKENS } from './curve';
 import { oddsFeaturesFromTrades, scoreOdds } from '@shared/odds';
 import type { LaunchTrade } from '@shared/launchintel';
 import { runnerVerdict, runnerNotification, pruneRunners, markCreatorSold, RunnerRateLimit, ODDS_TAPE_CAP, type RunnerFlag } from '@shared/runners';
@@ -63,6 +64,8 @@ import * as walletWatcher from './walletWatcher';
 import { PAPER_FILL_MODEL, paperToPosition, modelledPaperFill, paperHistoryRows } from '@shared/paper';
 import * as alerts from './alerts';
 import * as copyTrade from './copyTrade';
+import * as kryptoHolding from './kryptoHolding';
+import { KRYPTO_TOKEN, isValidMint } from '@shared/krypto';
 import * as automation from './automation';
 import * as scriptSandbox from '../system/scriptSandbox';
 import { positionPnl, type ScriptPosition } from '@shared/automation';
@@ -189,6 +192,32 @@ function isDustHolding(h: { amountRaw: string; uiAmount: number }): boolean {
 }
 
 const PROGRAM_CHECK_INTERVAL_MS = 10 * 60_000;
+/**
+ * How often copy trading re-reads the balances its open positions live in.
+ *
+ * "Recheck balances periodically and flag leftovers even when the ledger
+ * says closed" — the fourth of the four fixes asked for on 2026-09-15. A
+ * leftover does not change between one minute and the next, and the sweep
+ * takes at most a handful of reads per pass, so this is deliberately slow.
+ */
+const COPY_SWEEP_INTERVAL_MS = 90_000;
+
+/**
+ * A chain timestamp (unix SECONDS) as ms, or null when it is not credible.
+ *
+ * Pump's TradeEvent carries the Clock's `unix_timestamp`. It is free and
+ * exact — but it is also a number off the wire, and a nonsense one must not
+ * be allowed to make every trade look ancient, because copyTrade refuses a
+ * stale entry. Anything before the program existed or in the future is
+ * "unknown", which every caller already treats as "do not judge the age".
+ */
+const CHAIN_TIME_FLOOR_MS = Date.UTC(2021, 0, 1);
+function chainTimeMs(seconds: number | null | undefined): number | null {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return null;
+  const ms = seconds * 1_000;
+  if (ms < CHAIN_TIME_FLOOR_MS || ms > Date.now() + 60 * 60_000) return null;
+  return ms;
+}
 /** The one hard pause the engine may lift by itself, once the decoder has been
  *  re-checked against chain. Layout-drift pauses are a different signal with a
  *  different remedy and are NOT auto-cleared. */
@@ -197,7 +226,10 @@ const PROGRAM_UPGRADE_PAUSE = 'Pump program was redeployed — decoder must be r
 /** What main hands the engine so copy trading can reach the EVM rail. */
 export interface EvmCopyBridge {
   buy(chain: EvmChainKind, token: string, amountNative: number, walletId?: string): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; spentSol?: number }>;
-  sell(chain: EvmChainKind, token: string, pct: number, walletId?: string): Promise<{ ok: boolean; message: string; signature?: string }>;
+  /** `amountRaw` sells EXACTLY that many base units and the percent is
+   *  ignored — the rail has taken an exact size since the BNB audit, and
+   *  copy trading is the caller that knows one (2026-09-15). */
+  sell(chain: EvmChainKind, token: string, pct: number, walletId?: string, amountRaw?: string): Promise<{ ok: boolean; message: string; signature?: string }>;
   /** Why a LIVE copy cannot go out on this chain right now, or null. */
   blocked(chain: EvmChainKind): string | null;
   maxLive(chain: EvmChainKind): number | null;
@@ -208,6 +240,18 @@ export interface EvmCopyBridge {
    *  sell whose size the log did not carry. Optional: a rail that cannot
    *  answer leaves such a sell unmirrored, as it was before. */
   holdingOf?(chain: EvmChainKind, owner: string, token: string): Promise<number | null>;
+  /** What THIS install holds of a token on the chain, in base units, with
+   *  the token's decimals — the number a mirrored sell is sized from and
+   *  settled against. Null when it cannot be read; never zero for an
+   *  unreadable balance. */
+  tokensOf?(chain: EvmChainKind, token: string, walletId?: string): Promise<{ raw: string; decimals: number } | null>;
+  /** Base units a confirmed transaction moved, from the EVM ledger's
+   *  reconciliation of that hash. Waits for it; null if it never settles. */
+  fillTokens?(chain: EvmChainKind, hash: string): Promise<{ raw: string; decimals: number } | null>;
+  /** The ledger's record of a BUY of `token` around `atMs`, for recovering
+   *  the quantity of a copy opened before quantities were tracked. Refuses
+   *  an ambiguous match. */
+  buyFill?(chain: EvmChainKind, token: string, atMs: number, walletId?: string): Promise<{ raw: string; decimals: number } | null>;
   /** What this install holds on the chain right now, for a script's own
    *  position list. Optional: a rail that cannot answer leaves a live EVM
    *  script with an EMPTY list, which refuses an exit rather than offering it
@@ -232,6 +276,20 @@ export interface EvmCopyBridge {
    *  absent leaves a script's `walletSol` UNKNOWN rather than showing it the
    *  Solana balance, which is a different number about a different chain. */
   wallet?(chain: EvmChainKind): { native: number | null; address: string | null } | null;
+  /**
+   * Is this chain's leader feed running, and when did it last poll?
+   *
+   * A followed wallet on an EVM chain is only seen through that chain's
+   * SCANNER, which the user starts. An armed copy config on a stopped
+   * scanner watches nothing at all, silently.
+   */
+  leaderFeed?(chain: EvmChainKind): { running: boolean; lastPollAt: number | null } | null;
+  /**
+   * Make sure that feed is running, because a config was just enabled on it.
+   * Returns null when it is (or has just been started), or why it cannot be.
+   * Idempotent — an already-running scanner is a no-op.
+   */
+  ensureLeaderFeed?(chain: EvmChainKind): string | null;
 }
 
 export class SniperEngine {
@@ -248,7 +306,7 @@ export class SniperEngine {
   private statusTimer: NodeJS.Timeout | null = null;
   private eventTimes: number[] = [];
   private decodeLatencies: number[] = [];
-  private counters = { seen: 0, evaluated: 0, entered: 0, rejected: 0 };
+  private counters = { seen: 0, evaluated: 0, entered: 0, rejected: 0, filtered: 0 };
   private startedAt: number | null = null;
   private feedState: EngineStatus['feed'] = 'stopped';
   private lastEventAt = 0;
@@ -298,6 +356,10 @@ export class SniperEngine {
   private liveChain: Promise<void> = Promise.resolve();
   private liveBuys = 0;
   private liveSells = 0;
+  /** When the live counters last started from zero, and why — so the ledger
+   *  can say "this is a new session" instead of looking wiped. */
+  private liveSessionAt: number | null = null;
+  private liveSessionWhy: string | null = null;
   // Live-buy pipeline breaker: consecutive pre-broadcast failures (validate/
   // simulate/relayer) mean the pipeline is broken (underfunded wallet, dead
   // RPC, relayer change) — NOT market losses. Without this, an underfunded
@@ -406,7 +468,7 @@ export class SniperEngine {
     setRpcFallback(
       () => {
         const rpc = this.getSettings().rpc;
-        return rpc.heliusHttpUrl && rpc.heliusHttpUrl !== rpc.httpUrl ? rpc.httpUrl : '';
+        return rpc.execHttpUrl && rpc.execHttpUrl !== rpc.httpUrl ? rpc.httpUrl : '';
       },
       (line) => this.log('warn', line),
       // A refused key is not a blip to bury in the log: it is a setting the
@@ -427,7 +489,7 @@ export class SniperEngine {
         // A key the endpoint has already refused would just reconnect-loop.
         return isEndpointRejected(keyed) ? rpc.wssUrl : keyed;
       },
-      heliusHttpUrl: () => this.getSettings().rpc.heliusHttpUrl ?? '',
+      execHttpUrl: () => this.getSettings().rpc.execHttpUrl ?? '',
       commitment: () => this.getSettings().rpc.commitment,
       onLogs: (n) => {
         this.onLogs(n);
@@ -456,9 +518,9 @@ export class SniperEngine {
       },
       httpUrl: () => {
         const rpc = this.getSettings().rpc;
-        return rpc.heliusHttpUrl ?? rpc.httpUrl;
+        return rpc.execHttpUrl ?? rpc.httpUrl;
       },
-      onSwap: ({ wallet: leader, swap, signature, at }) => {
+      onSwap: ({ wallet: leader, swap, signature, at, tradeAt }) => {
         // The leader's fill IS a price for that mint, and often the only
         // one this app has for a token the launch feed never carried.
         this.rememberPrice(swap.mint, swap.priceSol);
@@ -473,6 +535,10 @@ export class SniperEngine {
           soldFraction: swap.soldFraction,
           tokens: swap.tokens,
           at,
+          // When they actually traded, from the block. A transaction the
+          // watcher recovered after a socket gap can be minutes old, and
+          // copyTrade refuses to enter on one and says how late an exit is.
+          tradeAt,
           signature,
         });
         // User scripts see the same trade (Automation → Scripts, "Followed wallet traded").
@@ -501,7 +567,7 @@ export class SniperEngine {
       // 2026-08-24), which is exactly the call the holders panel needs.
       httpUrl: () => {
         const rpc = this.getSettings().rpc;
-        return rpc.heliusHttpUrl ?? rpc.httpUrl;
+        return rpc.execHttpUrl ?? rpc.httpUrl;
       },
       data: () => this.getSettings().data,
       heliusKey: () => this.getSettings().rpc.heliusApiKey ?? '',
@@ -530,7 +596,7 @@ export class SniperEngine {
         void (async () => {
           try {
             const rpc = this.getSettings().rpc;
-            const httpUrl = rpc.heliusHttpUrl ?? rpc.httpUrl;
+            const httpUrl = rpc.execHttpUrl ?? rpc.httpUrl;
             const info = await getAccountInfo(httpUrl, poolHint);
             if (!info.ok || !info.data) return;
             if (info.data.owner !== dbcWatcher.DBC_PROGRAM_ID) return; // not a DBC curve
@@ -610,7 +676,7 @@ export class SniperEngine {
         const owner = wallet.publicKey();
         if (!owner) return null;
         const s = this.getSettings();
-        const r = await getTokenBalanceRawForMint(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner, mint);
+        const r = await getTokenBalanceRawForMint(s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner, mint);
         return r.ok && r.data ? r.data.raw : null;
       },
       log: (level, line) => this.log(level, line),
@@ -624,6 +690,24 @@ export class SniperEngine {
       toast: (level, message) => this.emit({ kind: 'toast', level, message }),
       changed: () => this.emit({ kind: 'alerts', alerts: alerts.all() }),
     });
+
+    // $KRYPTO holdings decide whether Krypt's fee applies. Every wallet this
+    // install has keys for counts, not the active signer alone — someone who
+    // keeps their bag in one wallet and trades from another is one user.
+    kryptoHolding.attach({
+      wallets: () => wallet.list().map((w) => w.publicKey),
+      httpUrl: () => {
+        const s2 = this.getSettings();
+        return s2.rpc.execHttpUrl ?? s2.rpc.httpUrl;
+      },
+      // Cached only. This runs on a timer, and a price lookup that reached
+      // the network here would put a provider round trip behind a fee rule.
+      priceUsd: (mint) => market.summaryIfCached(mint)?.priceUsd ?? null,
+    });
+    if (isValidMint(KRYPTO_TOKEN.mint)) {
+      void this.refreshKrypto();
+      this.kryptoTimer = setInterval(() => void this.refreshKrypto(), 120_000);
+    }
 
     copyTrade.attach({
       buy: async (mint, sol, opts) => {
@@ -672,14 +756,24 @@ export class SniperEngine {
       sell: async (mint, pct, opts) => {
         if (opts?.chain && opts.chain !== 'solana') {
           if (!this.evmCopy) return { ok: false, message: 'EVM copy trading is not available in this build' };
-          return this.evmCopy.sell(opts.chain, mint, pct, opts.walletId);
+          return this.evmCopy.sell(opts.chain, mint, pct, opts.walletId, opts.tokensRaw);
         }
         if (opts?.walletId) {
-          const lr = await this.labSell(opts.walletId, mint, pct);
+          const labShare = pct >= 100 ? pct : ((await this.pctForTokens(mint, opts.tokensRaw, opts.walletId)) ?? pct);
+          const lr = await this.labSell(opts.walletId, mint, labShare);
           if (lr.ok) return { ok: true, message: lr.message, signature: lr.signature ?? undefined };
           return { ok: false, message: lr.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${lr.message})` : lr.message, signature: lr.signature ?? undefined };
         }
-        const r = await this.manualSell(mint, pct, { slippagePct: opts?.slippagePct });
+        // An exact quantity beats a percentage of the whole account: the
+        // copier knows how many base units the copy holds, and this converts
+        // that to the share of the CURRENT balance it really is, to two
+        // decimal places, instead of the copier guessing from cost basis and
+        // rounding to a whole percent. An unreadable balance falls back to
+        // the percentage the copier computed, which is what used to be sent;
+        // and at 100 % there is nothing to convert — "all of it" is all of
+        // it — so a full exit costs no extra read.
+        const share = pct >= 100 ? pct : ((await this.pctForTokens(mint, opts?.tokensRaw)) ?? pct);
+        const r = await this.manualSell(mint, share, { slippagePct: opts?.slippagePct });
         if (r.ok) return { ok: true, message: r.message, signature: r.signature };
         return {
           ok: false,
@@ -713,11 +807,49 @@ export class SniperEngine {
         if (chain && chain !== 'solana') return this.evmCopy?.holdingOf?.(chain, leader, mint) ?? null;
         const s2 = this.getSettings();
         try {
-          const r = await getTokenBalanceForMint(s2.rpc.heliusHttpUrl ?? s2.rpc.httpUrl, leader, mint);
+          const r = await getTokenBalanceForMint(s2.rpc.execHttpUrl ?? s2.rpc.httpUrl, leader, mint);
           return r.ok && typeof r.data === 'number' ? r.data : null;
         } catch {
           return null;
         }
+      },
+      // What the copy WALLET holds of a mint, in base units. The copier
+      // sizes an exit from it, settles one against it, and the leftover
+      // sweep compares its own book to it. Null is "unreadable", which the
+      // copier reads as unknown — never as zero.
+      walletTokens: async (mint, opts) => {
+        if (opts?.chain && opts.chain !== 'solana') {
+          return (await this.evmCopy?.tokensOf?.(opts.chain, mint, opts.walletId)) ?? null;
+        }
+        const owner = opts?.walletId ? wallet.publicKeyOf(opts.walletId) : wallet.publicKey();
+        if (!owner) return null;
+        const s2 = this.getSettings();
+        try {
+          const r = await getTokenBalanceRawForMint(s2.rpc.execHttpUrl ?? s2.rpc.httpUrl, owner, mint);
+          if (!r.ok || !r.data) return null;
+          return { raw: r.data.raw.toString(), decimals: r.data.decimals ?? 0 };
+        } catch {
+          return null;
+        }
+      },
+      // Base units a confirmed fill actually moved, from the ledger's own
+      // reconciliation of that signature — the transaction's token delta,
+      // not an inference from a balance. Waits for it, because the copier
+      // calling this is always off the hot path.
+      fillTokens: async (signature, opts) => {
+        if (opts?.chain && opts.chain !== 'solana') {
+          return (await this.evmCopy?.fillTokens?.(opts.chain, signature)) ?? null;
+        }
+        return this.awaitFillTokens(signature);
+      },
+      // The ledger's record of a copy's buy, for a row opened before the
+      // quantity was tracked. Ambiguity is REFUSED in both implementations:
+      // the number sizes a real sell, and unknown is already safe.
+      buyFill: async (mint, atMs, opts) => {
+        if (opts?.chain && opts.chain !== 'solana') {
+          return (await this.evmCopy?.buyFill?.(opts.chain, mint, atMs, opts.walletId)) ?? null;
+        }
+        return this.ledgerBuyFill(mint, atMs, opts?.walletId);
       },
       priceSol: (mint, chain) =>
         chain && chain !== 'solana' ? (this.evmCopy?.price(chain, mint) ?? null) : (this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null),
@@ -749,6 +881,10 @@ export class SniperEngine {
       toast: (level, message) => this.emit({ kind: 'toast', level, message }),
       changed: () => this.emit({ kind: 'copy', snapshot: copyTrade.snapshot() }),
       watchStatus: () => walletWatcher.status(),
+      // Solana wallets are watched one subscription each; an EVM leader is
+      // seen through its chain's scanner poll, and a config on a stopped one
+      // is a follower watching nothing.
+      leaderFeed: (chain) => (chain === 'solana' ? null : (this.evmCopy?.leaderFeed?.(chain) ?? null)),
     });
 
     // User scripts and rules. Same pipeline as a hand-placed order — a
@@ -961,7 +1097,7 @@ export class SniperEngine {
       },
       httpUrl: () => {
         const rpc = this.getSettings().rpc;
-        return rpc.heliusHttpUrl ?? rpc.httpUrl;
+        return rpc.execHttpUrl ?? rpc.httpUrl;
       },
       commitment: () => this.getSettings().rpc.commitment,
       onTick: (t) => {
@@ -1051,6 +1187,8 @@ export class SniperEngine {
     // Reset live-session tracking so breakers measure this session only.
     this.liveBuys = 0;
     this.liveSells = 0;
+    this.liveSessionAt = Date.now();
+    this.liveSessionWhy = 'the scanner was started';
     this.liveConsecutiveLosses = 0;
     this.liveConsecutiveSendFails = 0;
     this.liveBlockedReason = null;
@@ -1188,7 +1326,7 @@ export class SniperEngine {
         .sort((a, b) => b.row.detectedAt - a.row.detectedAt)
         .map((t) => t.row.mint)
         .slice(0, 8);
-      const v = await verifyDecoder(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, samples);
+      const v = await verifyDecoder(s.rpc.execHttpUrl ?? s.rpc.httpUrl, samples);
       for (const c of v.checks) this.log(c.pass ? 'info' : 'warn', `decoder check ${c.name}: ${c.pass ? 'PASS' : 'FAIL'} — ${c.detail}`);
       recorder.record('decoder_verify', { programId: PUMP_PROGRAM_ID, deployedSlot, ok: v.ok, checks: v.checks });
       if (!v.ok) {
@@ -1479,6 +1617,7 @@ export class SniperEngine {
       launchesEntered: this.counters.entered,
       runnersFlagged: this.runners.length,
       launchesRejected: this.counters.rejected,
+      launchesFiltered: this.counters.filtered,
       openPositions: this.positions.openCount(),
       closedPositions: this.positions.closedCount(),
       realizedPnlSol: Math.round(this.positions.realizedPnlSol() * 1e6) / 1e6,
@@ -1494,6 +1633,8 @@ export class SniperEngine {
       liveActive: this.manualLiveActive(),
       liveBuys: this.liveBuys,
       liveSells: this.liveSells,
+      liveSessionStartedAt: this.liveSessionAt,
+      liveSessionReason: this.liveSessionWhy,
       liveRealizedPnlSol:
         this.liveBaselineLamports !== null && this.walletBalanceLamports !== null
           ? Math.round((this.walletBalanceLamports + this.sweptLamports - this.liveBaselineLamports) / 1e3) / 1e6
@@ -1524,7 +1665,7 @@ export class SniperEngine {
     // The periodic poll runs all day — keep it on the free endpoint. Spend
     // Helius credits on the better getPriorityFeeEstimate only while real
     // buys are actually armed, when fee quality pays for itself.
-    const feeUrl = this.autoLiveActive() ? (s.rpc.heliusHttpUrl ?? s.rpc.httpUrl) : s.rpc.httpUrl;
+    const feeUrl = this.autoLiveActive() ? (s.rpc.execHttpUrl ?? s.rpc.httpUrl) : s.rpc.httpUrl;
     const [fee] = await Promise.all([
       feeEstimator.estimate(feeUrl, scope),
       s.execution.useJito ? jitoTips.refresh() : Promise.resolve(jitoTips.current()),
@@ -1670,7 +1811,7 @@ export class SniperEngine {
         this.emit({ kind: 'toast', level: 'warn', message: plan.note });
       }
     }
-    const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
+    const httpUrl = s.rpc.execHttpUrl ?? s.rpc.httpUrl;
     // A dry run feeds the paper book, which needs the mint's decimals to turn
     // the simulated token receipt into a countable amount. Read them from the
     // chain (one cheap call, paper only); unknown stays unknown.
@@ -1741,7 +1882,7 @@ export class SniperEngine {
     if ((res.ok || res.stage === 'pending') && !simulateOnly && res.signature) {
       ledger.recordFill(
         { mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'buy', requested: capped, signature: res.signature },
-        { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner: wallet.publicKey() },
+        { httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner: wallet.publicKey() },
       );
     }
     this.log(res.ok ? 'info' : 'warn', `live ${simulateOnly ? 'dry-run' : 'trade'} (${res.stage}): ${res.message}`);
@@ -1978,7 +2119,7 @@ export class SniperEngine {
     if (!plan.ok) return { ok: false, message: plan.message, results: [] };
 
     const local = await this.localBuildParamsAsync(mint);
-    const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
+    const httpUrl = s.rpc.execHttpUrl ?? s.rpc.httpUrl;
     const run = async (walletId: string, sol: number) => {
       const res = await executeTrade({
         action: 'buy',
@@ -2103,7 +2244,7 @@ export class SniperEngine {
         denominatedInSol: true,
         slippagePct: s.execution.liveSlippagePct,
         priorityFeeSol: this.priorityFeeSolFor('buy'),
-        httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+        httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
         simulateOnly: false,
         local: this.localBuildParams(mint),
         exec: s.execution,
@@ -2246,7 +2387,7 @@ export class SniperEngine {
         denominatedInSol: false,
         slippagePct: Math.max(s.execution.liveSlippagePct, 15),
         priorityFeeSol: this.exitParams(s.execution).priorityFeeSol,
-        httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+        httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
         simulateOnly: false,
         local: this.localBuildParams(mint),
         exec: s.execution,
@@ -2456,6 +2597,86 @@ export class SniperEngine {
    *  configs are loaded. */
   syncCopyWatch(): void {
     walletWatcher.setWallets([...copyTrade.activeWallets()]);
+    // An EVM leader has no subscription of its own: it is seen through that
+    // chain's scanner poll. Following one while the scanner is stopped is a
+    // config that watches nothing and says nothing about it — so enabling one
+    // starts the feed it needs. Idempotent, and it never STOPS a feed: the
+    // user may have started that scanner themselves.
+    for (const chain of copyTrade.activeChains()) {
+      if (chain === 'solana') continue;
+      const why = this.evmCopy?.ensureLeaderFeed?.(chain) ?? null;
+      if (why) this.log('warn', `copy: following a wallet on ${chain} needs that chain's scanner, which will not start — ${why}`);
+    }
+    this.syncCopySweep();
+  }
+
+  /**
+   * How often the $KRYPTO holding behind the fee waiver is re-read.
+   *
+   * One `getMultipleAccounts` for every wallet, so the cost does not grow
+   * with the trade rate — and the fee path never waits for it, it reads the
+   * last answer. Two minutes keeps a wallet that just bought in from paying
+   * fees for long, without polling a balance nobody is watching.
+   */
+  private kryptoTimer: NodeJS.Timeout | null = null;
+  private kryptoWaived = false;
+
+  /** Re-read the holding, and say so in the log when the answer changes. */
+  private async refreshKrypto(): Promise<void> {
+    if (!isValidMint(KRYPTO_TOKEN.mint)) return;
+    // The price comes from the market layer's cache, so ask it to have one.
+    // Failure is fine: an unpriceable token leaves the holding unknown, and
+    // unknown does not waive.
+    try {
+      await market.summary(KRYPTO_TOKEN.mint);
+    } catch {
+      /* the holding read below reports the missing price itself */
+    }
+    await kryptoHolding.refresh();
+    const now = kryptoHolding.feeWaived();
+    kryptoHolding.logState(this.kryptoWaived, now);
+    this.kryptoWaived = now;
+  }
+
+  private copySweepTimer: NodeJS.Timeout | null = null;
+  private copySweepBusy = false;
+
+  /**
+   * Run the copy balance sweep exactly while there is something to sweep.
+   *
+   * Not tied to `start()`: copy trading follows a wallet whether or not the
+   * scanner is running, and a LIVE config comes back from a restart DISARMED
+   * while its positions come back open — which is precisely where a leftover
+   * would sit unnoticed.
+   */
+  private syncCopySweep(): void {
+    const wanted = copyTrade.needsSweep();
+    if (wanted && !this.copySweepTimer) {
+      this.copySweepTimer = setInterval(() => void this.copySweepTick(), COPY_SWEEP_INTERVAL_MS);
+      void this.copySweepTick();
+    } else if (!wanted && this.copySweepTimer) {
+      clearInterval(this.copySweepTimer);
+      this.copySweepTimer = null;
+    }
+  }
+
+  /** One pass: recover any quantity the book is missing, then compare what
+   *  it thinks it holds against what the chains say. Never overlaps itself —
+   *  a slow RPC must not stack passes on an endpoint already parked. */
+  private async copySweepTick(): Promise<void> {
+    if (this.copySweepBusy) return;
+    this.copySweepBusy = true;
+    try {
+      await copyTrade.backfillQuantities();
+      await copyTrade.sweepBalances();
+    } catch (e) {
+      this.log('warn', `copy balance sweep: ${(e as Error).message}`);
+    } finally {
+      this.copySweepBusy = false;
+    }
+    // Everything it was watching may have just closed. Stop rather than wake
+    // every 90 s to find nothing.
+    if (this.copySweepTimer && !copyTrade.needsSweep()) this.syncCopySweep();
   }
 
   // ── Alerts (term.txt §17) ────────────────────────────────────────
@@ -2614,7 +2835,7 @@ export class SniperEngine {
 
   private async buildPortfolioSummary(startedAt = Date.now()): Promise<import('@shared/portfolio').PortfolioSummary> {
     const s = this.getSettings();
-    const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
+    const httpUrl = s.rpc.execHttpUrl ?? s.rpc.httpUrl;
     // The wallet this build is FOR. wallet:select cannot cancel a build in
     // flight; one that straddles the switch is returned to its caller but
     // never kept or broadcast as the new wallet's (review 2026-09-08).
@@ -2848,6 +3069,128 @@ export class SniperEngine {
       }
     }
     return { spentSol, priceSol };
+  }
+
+  /**
+   * What share of a wallet's CURRENT balance `tokensRaw` base units are, as a
+   * percentage to two decimals — or null when there is nothing to size
+   * against, in which case the caller keeps the percentage it already had.
+   *
+   * The sell rail is percentage-of-balance all the way down (the local
+   * builder, the Jupiter route and the relayer all take "NN%"), so this is
+   * the join between a caller that knows a QUANTITY — copy trading, which
+   * knows exactly how many tokens a copy holds — and a pipeline that takes a
+   * share. Doing the conversion here, against a balance read at request
+   * time, is the difference between selling the copy's tokens and selling
+   * whatever fraction a cost-basis ratio happened to work out to.
+   */
+  private async pctForTokens(mint: string, tokensRaw?: string, walletId?: string): Promise<number | null> {
+    if (!tokensRaw || !/^\d+$/.test(tokensRaw)) return null;
+    let want: bigint;
+    try {
+      want = BigInt(tokensRaw);
+    } catch {
+      return null;
+    }
+    if (want <= 0n) return null;
+    const owner = walletId ? wallet.publicKeyOf(walletId) : wallet.publicKey();
+    if (!owner) return null;
+    const s = this.getSettings();
+    const r = await getTokenBalanceRawForMint(s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner, mint).catch(() => null);
+    if (!r || !r.ok || !r.data || r.data.raw <= 0n) return null;
+    if (want >= r.data.raw) return 100;
+    // Rounded UP. The failure this exists to fix is systematically selling
+    // short, and one basis point of overshoot is cheaper than a remainder.
+    const bps = (want * 10_000n + r.data.raw - 1n) / r.data.raw;
+    return Math.max(0.01, Math.min(100, Number(bps) / 100));
+  }
+
+  /**
+   * Base units a signature's fill actually moved, waiting for the ledger to
+   * reconcile it. Null when it never settles, or when the chain's delta
+   * could not be read — never zero, and never a guess.
+   */
+  private awaitFillTokens(signature: string, timeoutMs = 30_000): Promise<{ raw: string; decimals: number } | null> {
+    const readOf = (f: import('./ledger').Fill | undefined): { raw: string; decimals: number } | null => {
+      if (!f || f.state !== 'reconciled' || f.tokenDeltaRaw === null) return null;
+      try {
+        const raw = BigInt(f.tokenDeltaRaw);
+        const abs = raw < 0n ? -raw : raw;
+        return abs > 0n ? { raw: abs.toString(), decimals: f.decimals ?? 0 } : null;
+      } catch {
+        return null;
+      }
+    };
+    const known = ledger.all().find((x) => x.signature === signature);
+    if (known && known.state !== 'pending') return Promise.resolve(readOf(known));
+    return new Promise((resolve) => {
+      let off: (() => void) | null = null;
+      let done = false;
+      const finish = (v: { raw: string; decimals: number } | null): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        off?.();
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      off = ledger.onSettled((f) => {
+        if (f.signature === signature) finish(readOf(f));
+      });
+      // Settled between the read above and the subscription: the listener
+      // would never fire, and the wait would run to its timeout for an
+      // answer that is already on the shelf.
+      const again = ledger.all().find((x) => x.signature === signature);
+      if (again && again.state !== 'pending') finish(readOf(again));
+    });
+  }
+
+  /**
+   * The ledger's record of a BUY of `mint` this install made around `atMs`,
+   * in base units — how a copy row opened before quantities were tracked
+   * recovers its own size.
+   *
+   * The copy's buy IS a fill here: the ledger reconciled that transaction's
+   * own token delta when it landed. Matching is deliberately strict, because
+   * the number goes on to size a real sell:
+   *
+   *   • one reconciled buy of that mint by that wallet → that is the one;
+   *   • several → the closest to `atMs`, and only if it is inside five
+   *     minutes AND a clear minute closer than the runner-up;
+   *   • anything else → null, which leaves the copy on the old percentage
+   *     path rather than on a quantity from somebody else's trade.
+   */
+  private ledgerBuyFill(mint: string, atMs: number, walletId?: string): { raw: string; decimals: number } | null {
+    const owner = walletId ? wallet.publicKeyOf(walletId) : wallet.publicKey();
+    if (!owner) return null;
+    const near = ledger
+      .all()
+      .filter(
+        (f) =>
+          f.mint === mint &&
+          f.side === 'buy' &&
+          f.state === 'reconciled' &&
+          f.tokenDeltaRaw !== null &&
+          f.decimals !== null &&
+          // A fill from before multi-wallet carries no owner. It belongs to
+          // whichever wallet was active then, which we cannot know, so it is
+          // only trusted for the active signer.
+          (f.wallet === owner || (f.wallet === null && owner === wallet.publicKey())),
+      )
+      .sort((a, b) => Math.abs(a.at - atMs) - Math.abs(b.at - atMs));
+    if (!near.length) return null;
+    if (near.length > 1) {
+      const best = Math.abs(near[0].at - atMs);
+      const next = Math.abs(near[1].at - atMs);
+      if (best > 5 * 60_000 || next - best < 60_000) return null;
+    }
+    try {
+      const raw = BigInt(near[0].tokenDeltaRaw as string);
+      const abs = raw < 0n ? -raw : raw;
+      return abs > 0n ? { raw: abs.toString(), decimals: near[0].decimals as number } : null;
+    } catch {
+      return null;
+    }
   }
 
   // ── Advanced orders (term.txt §2) ────────────────────────────────
@@ -3098,7 +3441,7 @@ export class SniperEngine {
       // GeckoTerminal gap) used to sit on EVERY exit purely to price this
       // fee. Now it is only asked when nothing local knows, and for at most
       // 250 ms — an unpriced sell goes unbilled, never late.
-      const balP = getTokenBalanceForMint(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner, mint);
+      const balP = getTokenBalanceForMint(s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner, mint);
       let priceSol: number | null =
         this.tokens.get(mint)?.row.priceSol ?? this.freshPriceSol(mint) ?? tape.lastPriceSol(mint) ?? null;
       if (priceSol === null || priceSol <= 0) {
@@ -3122,7 +3465,11 @@ export class SniperEngine {
     opts: { slippagePct?: number } = {},
   ): Promise<import('./liveSigner').LiveTradeResult> {
     const s = this.getSettings();
-    const pct = Math.max(1, Math.min(100, Math.round(percent)));
+    // Two decimals: a caller that knows a token QUANTITY (copy trading) has
+    // already converted it to the share of the balance it really is, and
+    // rounding that to a whole percent here would put up to 1 % of the
+    // position back in the wallet. Whole-number callers are unchanged.
+    const pct = Math.max(0.01, Math.min(100, Math.round(percent * 100) / 100));
     // Paper mode sells from the paper book at the current price. A real
     // sell needs Live; the two never cross.
     if (this.paperMode()) return this.paperSell(mint, pct);
@@ -3151,7 +3498,7 @@ export class SniperEngine {
         15,
       ),
       priorityFeeSol: exit.priorityFeeSol,
-      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
       simulateOnly: false,
       // Every sell gets the local builder (ATA close at 100%, no relayer fee, and the
       // only route that builds on a bonding curve the relayer 400s on); the
@@ -3170,7 +3517,7 @@ export class SniperEngine {
     if ((res.ok || res.stage === 'pending') && res.signature) {
       ledger.recordFill(
         { mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'sell', requested: pct, signature: res.signature },
-        { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner: wallet.publicKey() },
+        { httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner: wallet.publicKey() },
       );
     }
     this.log(res.ok ? 'info' : 'warn', `manual sell ${pct}% (${res.stage}): ${res.message}`);
@@ -3224,7 +3571,7 @@ export class SniperEngine {
 
   private async readHoldings(owner: string): Promise<{ ok: boolean; message: string; data?: WalletHolding[] }> {
     const s = this.getSettings();
-    const httpUrl = s.rpc.heliusHttpUrl ?? s.rpc.httpUrl;
+    const httpUrl = s.rpc.execHttpUrl ?? s.rpc.httpUrl;
     const r = await getTokenAccountsByOwner(httpUrl, owner);
     if (!r.ok || !r.data) return { ok: false, message: r.message };
     const held = r.data.filter((h) => h.uiAmount > 0);
@@ -3267,6 +3614,15 @@ export class SniperEngine {
     }
     if (mine.size === 0) return;
     copyTrade.reconcileHoldings(new Set(data.filter((h) => h.uiAmount > 0).map((h) => h.mint)), { configIds: mine });
+    // …and the other direction: a copy the book calls CLOSED that the wallet
+    // still holds tokens for. A mirrored sell is a share of a balance and can
+    // come back short, and until 2026-09-15 nothing compared the two — a user
+    // had 83,236 NON sitting outside every position view because the record
+    // said the copy was done (report, 2026-09-15). Same read, no extra cost.
+    copyTrade.reconcileQuantities(
+      new Map(data.filter((h) => h.uiAmount > 0).map((h) => [h.mint, { raw: h.amountRaw, decimals: h.decimals }])),
+      { configIds: mine },
+    );
   }
 
   /** What a held mint's own bytes say about its sellability — a Token-2022
@@ -3387,7 +3743,7 @@ export class SniperEngine {
           denominatedInSol: false,
           slippagePct: Math.max(e.execution.liveSlippagePct, 15),
           priorityFeeSol: exit.priorityFeeSol,
-          httpUrl: e.rpc.heliusHttpUrl ?? e.rpc.httpUrl,
+          httpUrl: e.rpc.execHttpUrl ?? e.rpc.httpUrl,
           simulateOnly: false,
           local: await this.localBuildParamsForSell(tkn.mint),
           estProceedsLamports: this.estSellProceedsLamports(tkn.mint, 100).catch(() => undefined),
@@ -3401,7 +3757,7 @@ export class SniperEngine {
         if ((res.ok || res.stage === 'pending') && res.signature) {
           ledger.recordFill(
             { mint: tkn.mint, symbol: tkn.symbol ?? '', side: 'sell', requested: 100, signature: res.signature },
-            { httpUrl: e.rpc.heliusHttpUrl ?? e.rpc.httpUrl, owner: wallet.publicKey() },
+            { httpUrl: e.rpc.execHttpUrl ?? e.rpc.httpUrl, owner: wallet.publicKey() },
           );
         }
         recorder.record('sell_all_item', { mint: tkn.mint, reason, ok: res.ok, stage: res.stage, signature: res.signature ?? null, note: res.message.slice(0, 220) });
@@ -3419,7 +3775,7 @@ export class SniperEngine {
       // Relayer-path sells leave their ATA (and its rent) behind — reclaim
       // everything empty now that the book is (as) flat (as it gets).
       const { sweepAtaRent } = await import('./rentSweep');
-      const swept = await sweepAtaRent(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl);
+      const swept = await sweepAtaRent(s.rpc.execHttpUrl ?? s.rpc.httpUrl);
       recorder.record('rent_sweep', { ok: swept.ok, closed: swept.closed, recoveredSolEst: swept.recoveredSolEst, note: swept.message.slice(0, 220) });
       if (swept.closed > 0) this.log('info', `rent sweep after sell-all: ${swept.message}`);
     });
@@ -3438,7 +3794,7 @@ export class SniperEngine {
     let result: { ok: boolean; message: string; closed: number; recoveredSolEst: number } = { ok: false, message: 'not run', closed: 0, recoveredSolEst: 0 };
     const done = new Promise<void>((resolve) => {
       this.runLive(async () => {
-        result = await sweepAtaRent(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl);
+        result = await sweepAtaRent(s.rpc.execHttpUrl ?? s.rpc.httpUrl);
         recorder.record('rent_sweep', { ok: result.ok, closed: result.closed, recoveredSolEst: result.recoveredSolEst, note: result.message.slice(0, 220) });
         if (result.closed > 0) {
           this.log('info', `rent sweep: ${result.message}`);
@@ -3628,7 +3984,7 @@ export class SniperEngine {
       denominatedInSol: true,
       slippagePct: s.execution.liveSlippagePct,
       priorityFeeSol: this.priorityFeeSolFor('buy'),
-      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
       simulateOnly: false,
       local: await this.localBuildParamsAsync(mint),
       exec: s.execution,
@@ -3636,7 +3992,7 @@ export class SniperEngine {
       wssUrl: this.confirmWssUrl(),
     });
     if ((res.ok || res.stage === 'pending') && res.signature) {
-      ledger.recordFill({ mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'buy', requested: sol, signature: res.signature }, { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner });
+      ledger.recordFill({ mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'buy', requested: sol, signature: res.signature }, { httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner });
     }
     recorder.record('lab_buy', { walletId, mint, sol, ok: res.ok, stage: res.stage, signature: res.signature ?? null });
     // `stage` travels with the result so the caller can tell "did not happen"
@@ -3667,7 +4023,9 @@ export class SniperEngine {
     if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'live execution is not armed', signature: null };
     const owner = wallet.publicKeyOf(walletId);
     if (!owner) return { ok: false, message: 'no such wallet', signature: null };
-    const share = Math.max(1, Math.min(100, Math.round(pct)));
+    // Two decimals, like `manualSell`: a copy config pinned to a lab wallet
+    // exits through here, and it sizes from base units.
+    const share = Math.max(0.01, Math.min(100, Math.round(pct * 100) / 100));
     // A lab wallet is not the active one, so the engine tracks no balance for
     // it — and a lab wallet is exactly the kind that runs down to dust. One
     // getBalance is affordable here (the Wallet Lab is a deliberate action,
@@ -3682,7 +4040,7 @@ export class SniperEngine {
       denominatedInSol: false,
       slippagePct: Math.max(s.execution.liveSlippagePct, 15),
       priorityFeeSol: exit.priorityFeeSol,
-      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
       simulateOnly: false,
       local: await this.localBuildParamsForSell(mint),
       exec: exit.exec,
@@ -3690,7 +4048,7 @@ export class SniperEngine {
       wssUrl: this.confirmWssUrl(),
     });
     if ((res.ok || res.stage === 'pending') && res.signature) {
-      ledger.recordFill({ mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'sell', requested: share, signature: res.signature }, { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, owner });
+      ledger.recordFill({ mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'sell', requested: share, signature: res.signature }, { httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner });
     }
     // Selling the ACTIVE wallet's own bag this way (a group that includes it)
     // must leave the engine's position tracking as a manual sell would.
@@ -3755,7 +4113,7 @@ export class SniperEngine {
     if (!this.armed) return null;
     const s = this.getSettings();
     return {
-      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
       wssUrl: this.confirmWssUrl(),
       useJito: !!s.execution.useJito,
       useHeliusSender: !!s.execution.useHeliusSender,
@@ -3986,6 +4344,10 @@ export class SniperEngine {
     this.sweptLamports = 0;
     this.liveBaselineLamports = this.walletBalanceLamports;
     this.liveBalanceAtLastSell = this.walletBalanceLamports;
+    // Re-arming rebaselines the loss breakers on purpose (above). That also
+    // zeroes what the session ledger shows, so the ledger is told why.
+    this.liveSessionAt = Date.now();
+    this.liveSessionWhy = 'live execution was armed';
     if (this.liveBaselineLamports === null) void this.captureLiveBaseline();
     this.log('warn', 'live trading ARMED — real transactions will be signed');
     recorder.record('armed', { available: LIVE_EXECUTION_AVAILABLE });
@@ -4525,6 +4887,17 @@ export class SniperEngine {
   private onCreate(ev: PumpCreateEvent, n: LogNotification): void {
     if (this.tokens.has(ev.mint)) return;
     const s = this.getSettings();
+    // Curve variant, free off the create event's reserves — a mayhem coin
+    // starts at hundreds of virtual SOL rather than the standard 30. Refused
+    // BEFORE anything is tracked: a launch the user does not want to see
+    // should not take a slot, a mint check, an eval window or a scorer pass.
+    // 'all' is the default and this is then never reached.
+    const isMayhem = mayhemFromReserves(ev.virtualSolReserves);
+    if (!passesMayhemFilter(isMayhem, s.strategy.mayhemFilter)) {
+      this.counters.seen++;
+      this.counters.filtered++;
+      return;
+    }
     this.counters.seen++;
     creators.recordLaunch(ev.creator);
     const rec = creators.get(ev.creator);
@@ -4571,7 +4944,13 @@ export class SniperEngine {
       decided: false,
       curveComplete: false,
       dumpRecorded: false,
-      addr: safePrewarm(ev.mint, ev.creator),
+      // Derived BELOW, and only for a launch that survived the static
+      // checks. MEASURED 2026-09-15: three PDAs cost 922 µs — forty-eight
+      // times a whole log decode — and it was being paid on the synchronous
+      // create path for every launch on the firehose, including the ones
+      // rejected on the very next line. A hard-rejected launch is never
+      // traded, so it never needs an address.
+      addr: null,
     };
     this.tokens.set(ev.mint, t);
     this.launchOrder.push(ev.mint);
@@ -4589,6 +4968,7 @@ export class SniperEngine {
     if (hasHardReject(flags)) {
       this.reject(t, flags.filter((f) => f.hard).map((f) => f.label).join('; '));
     } else {
+      t.addr = safePrewarm(ev.mint, ev.creator);
       this.updatePhase(t, 'evaluating');
       // Async mint safety check — lands inside the evaluation window.
       void checkMint(s.rpc.httpUrl, ev.mint).then((safety) => {
@@ -4704,6 +5084,11 @@ export class SniperEngine {
           // cost (user report, 2026-09-13).
           tokens: Number(ev.tokenAmount) / 1e6,
           at: n.receivedAt,
+          // The pump event carries the chain's own clock for the trade, so
+          // this rail dates itself with no extra read at all. It was the last
+          // one that could not, which left it the one path a stale delivery
+          // could still enter on (2026-09-15).
+          tradeAt: chainTimeMs(ev.timestamp),
           signature: n.signature,
         });
       }

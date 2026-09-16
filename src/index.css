@@ -148,11 +148,6 @@
   }
   .animate-dust { animation: dust-drift 90s linear infinite; }
 
-  @keyframes tape {
-    from { transform: translateX(0); }
-    to   { transform: translateX(-50%); }
-  }
-  .animate-tape { animation: tape 40s linear infinite; }
 
   /* Spark travelling along a pipeline connector. */
   @keyframes spark-run {
@@ -187,7 +182,6 @@ html.lite *::after {
   transition: none !important;
 }
 html.lite .animate-dust,
-html.lite .animate-tape,
 html.lite .animate-spark,
 html.lite .animate-ink,
 html.lite .animate-fade-in,

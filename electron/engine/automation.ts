@@ -576,6 +576,14 @@ export function snapshot(): ScriptSnapshot {
     stats,
     logs,
     liveBlockedReason: host?.liveBlockedReason() ?? null,
+    // Per chain: a script only ever runs on one, and the reason it cannot
+    // execute is that chain's. Asking Solana on behalf of a Robinhood script
+    // is how an unarmed EVM rail looked like a page with nothing wrong.
+    blockedByChain: {
+      solana: host?.liveBlockedReason('solana') ?? null,
+      robinhood: host?.liveBlockedReason('robinhood') ?? null,
+      bnb: host?.liveBlockedReason('bnb') ?? null,
+    },
     killSwitch,
     templates: host?.templates() ?? [],
   };

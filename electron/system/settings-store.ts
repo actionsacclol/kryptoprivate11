@@ -117,11 +117,11 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
     delete merged.apiKey;
     return merged;
   }
-  // heliusHttpUrl is DERIVED by resolveRpc() and embeds the API key — if a
+  // execHttpUrl is DERIVED by resolveRpc() and embeds the API key — if a
   // resolved rpc object ever reaches this boundary, drop it so the key is
   // stored once (its own field) and never duplicated into settings.json.
   const rpc = { ...d.rpc, ...(loaded.rpc ?? {}) };
-  delete rpc.heliusHttpUrl;
+  delete rpc.execHttpUrl;
   // The Helius feed socket is derived too (key + heliusFeedSocket, appended
   // by resolveRpc). A resolved copy that reached the store — every RPC save
   // until 2026-09-08 — is dropped here, and duplicates with it.

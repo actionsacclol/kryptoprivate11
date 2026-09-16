@@ -425,9 +425,18 @@ export function parseRetryAfterMs(value: string | null): number | null {
   return Math.max(2_000, Math.min(RATE_LIMIT_COOLDOWN_MAX_MS, ms));
 }
 
-/** Park the provider after a 429. Returns the park length chosen. */
-function park(id: HttpProviderId, retryAfter: string | null): number {
+/** Park the provider after a refusal. Returns the park length chosen. */
+function park(id: HttpProviderId, retryAfter: string | null, quota = false): number {
   const now = Date.now();
+  // A spent allowance does not escalate and does not listen to Retry-After:
+  // the provider is telling us to come back next billing period, and every
+  // knock before then is another certain failure.
+  if (quota) {
+    const until = now + QUOTA_PARK_MS;
+    if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
+    slowStartUntil.set(id, until + SLOW_START_MS);
+    return QUOTA_PARK_MS;
+  }
   const prev = parkStrikes.get(id);
   const count = prev && now - prev.lastAt < STRIKE_DECAY_MS ? prev.count + 1 : 1;
   parkStrikes.set(id, { count, lastAt: now });
@@ -450,6 +459,98 @@ function park(id: HttpProviderId, retryAfter: string | null): number {
   if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
   slowStartUntil.set(id, until + SLOW_START_MS);
   return length;
+}
+
+/**
+ * "You are out of allowance", as opposed to "you are going too fast".
+ *
+ * MEASURED on a user's session, 2026-09-16: Birdeye answered
+ * `HTTP 400 — Compute units usage limit exceeded` and the app made
+ * **1,743 calls and collected 1,743 errors**. Every one failed, and every one
+ * was retried, because only a 429 parked a provider and this is a 400.
+ *
+ * The two are not the same thing and must not share a cool-down:
+ *
+ *   • A 429 says SLOW DOWN. Waiting twenty seconds fixes it, so the park is
+ *     short and the ladder tops out at two minutes.
+ *   • A spent plan says STOP. The allowance resets on the provider's own
+ *     billing clock — usually a month, sometimes a day — and retrying at any
+ *     speed cannot help. Twenty seconds later is 1,743 more failures.
+ *
+ * So a quota refusal parks for hours, and says what it is. The user's fix is
+ * to top up the plan or turn the provider off, and neither of those happens
+ * faster because the app kept knocking.
+ *
+ * Matched on the MESSAGE, not the status, because providers disagree about
+ * the status: Birdeye uses 400, others use 402 Payment Required or a 403.
+ * The phrases below are the ones that actually appeared, kept narrow — a
+ * false positive here silences a working provider for six hours, so "limit"
+ * or "exceeded" alone is deliberately not enough.
+ */
+const QUOTA_PHRASES = [
+  'compute unit',
+  'usage limit',
+  'quota exceeded',
+  'quota exhausted',
+  'out of credits',
+  'insufficient credits',
+  'credit limit',
+  'monthly limit',
+  'daily limit',
+  'plan limit',
+  'payment required',
+  'upgrade your plan',
+];
+
+/** Six hours. Long enough that a monthly allowance is not re-tested every
+ *  few minutes, short enough that a top-up is noticed the same day. */
+const QUOTA_PARK_MS = 6 * 60 * 60_000;
+
+/** Does this failure mean the ALLOWANCE is spent rather than the rate? */
+export function isQuotaExhausted(status: number, message: string): boolean {
+  if (status === 402) return true; // Payment Required means exactly this
+  if (status !== 400 && status !== 401 && status !== 403 && status !== 429) return false;
+  const m = message.toLowerCase();
+  return QUOTA_PHRASES.some((p) => m.includes(p));
+}
+
+/**
+ * The net under every other rule: a provider that keeps failing is stood
+ * down, whatever it is failing with.
+ *
+ * The quota classifier above needs to RECOGNISE a phrase. This one does not
+ * need to understand anything — it counts. A provider whose last
+ * `FAIL_STREAK_PARK` calls all failed is not serving this app right now, and
+ * the next call is very probably the same failure again. That is the general
+ * form of the Birdeye case (1,743 for 1,743) and it would have stopped it at
+ * ten instead of at seventeen hundred, without anyone having predicted the
+ * wording of the error.
+ *
+ * Deliberately generous and short: ten in a row, and a park that starts at a
+ * minute and doubles to an hour. It must not fire on the ordinary bad
+ * afternoon a free provider has — one success clears it completely.
+ */
+const failStreak = new Map<HttpProviderId, number>();
+const FAIL_STREAK_PARK = 10;
+const STREAK_PARK_MS = 60_000;
+const STREAK_PARK_MAX_MS = 60 * 60_000;
+
+function noteFailure(id: HttpProviderId, why: string): void {
+  const n = (failStreak.get(id) ?? 0) + 1;
+  failStreak.set(id, n);
+  if (n < FAIL_STREAK_PARK || cooldownRemainingMs(id) > 0) return;
+  // Every FAIL_STREAK_PARK-th failure in an unbroken run extends the park,
+  // so a provider that is still dead after the first minute earns two, then
+  // four — and one that recovers pays nothing.
+  const doublings = Math.floor(n / FAIL_STREAK_PARK) - 1;
+  const length = Math.min(STREAK_PARK_MAX_MS, STREAK_PARK_MS * 2 ** doublings);
+  const until = Date.now() + length;
+  if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
+  slowStartUntil.set(id, until + SLOW_START_MS);
+  const st = stats.get(id);
+  if (st) {
+    st.lastError = `${id}: ${n} failures in a row — paused ${Math.ceil(length / 60_000)}m. Last: ${why.replace(`${id}: `, '')}`;
+  }
 }
 
 /**
@@ -692,7 +793,16 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
           }
         }
         let msg: string;
-        if (res.status === 429) {
+        // A SPENT ALLOWANCE is not a rate limit, whatever status carries it.
+        // Birdeye says it with HTTP 400 ("Compute units usage limit
+        // exceeded"), which used to take the plain-error branch below and
+        // park for nothing at all — measured on a user's session, 1,743
+        // calls and 1,743 errors, every one of them certain to fail.
+        if (isQuotaExhausted(res.status, detail)) {
+          const parkedMs = park(id, null, true);
+          msg = `${id}: allowance spent — ${detail || `HTTP ${res.status}`}. Paused ${Math.round(parkedMs / 3_600_000)}h; top up the plan or switch it off in Settings.`;
+          void res.body?.cancel().catch(() => undefined);
+        } else if (res.status === 429) {
           const parkedMs = park(id, res.headers.get('retry-after'));
           msg = `${id}: rate limited (429) — pausing ${Math.ceil(parkedMs / 1000)}s`;
           // An unread body pins a keep-alive socket until GC.
@@ -702,6 +812,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         }
         s.errors += 1;
         s.lastError = msg;
+        noteFailure(id, msg);
         return { ok: false, message: msg, ms: Date.now() - started, status };
       }
       // A 2xx is not yet a success. The body is read FIRST — still streamed,
@@ -713,11 +824,16 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
       const verdict = describeBody(id, res.status, res.headers, text);
       if (verdict.verdict === 'refused') {
         // Exactly the 429 path: same park(), same Retry-After clamp, same
-        // escalation, same strike decay. Nothing is un-parked.
-        const parkedMs = park(id, res.headers.get('retry-after'));
-        const msg = `${id}: rate limited (HTTP ${res.status}${verdict.detail ? ` — ${verdict.detail}` : ''}) — pausing ${Math.ceil(parkedMs / 1000)}s`;
+        // escalation, same strike decay. Nothing is un-parked. Unless the
+        // refusal names a spent ALLOWANCE, which no cool-down fixes.
+        const spent = isQuotaExhausted(res.status, verdict.detail ?? '');
+        const parkedMs = park(id, spent ? null : res.headers.get('retry-after'), spent);
+        const msg = spent
+          ? `${id}: allowance spent — ${verdict.detail ?? `HTTP ${res.status}`}. Paused ${Math.round(parkedMs / 3_600_000)}h; top up the plan or switch it off in Settings.`
+          : `${id}: rate limited (HTTP ${res.status}${verdict.detail ? ` — ${verdict.detail}` : ''}) — pausing ${Math.ceil(parkedMs / 1000)}s`;
         s.errors += 1;
         s.lastError = msg;
+        noteFailure(id, msg);
         return { ok: false, message: msg, ms: Date.now() - started, status };
       }
       if (verdict.verdict === 'error') {
@@ -726,11 +842,15 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         const msg = `${id}: HTTP ${res.status}${verdict.detail ? ` — ${verdict.detail}` : ' — error body'}`;
         s.errors += 1;
         s.lastError = msg;
+        noteFailure(id, msg);
         return { ok: false, message: msg, ms: Date.now() - started, status };
       }
       // A success clears any lingering park — unless the provider's own
       // counters say the next call would be the one refused.
       blockedUntil.delete(id);
+      // …and ends the streak. One good answer is enough: the streak is about
+      // a provider that is not working, not about its lifetime record.
+      failStreak.delete(id);
       softParkFromHeaders(id, res.headers);
       const ms = Date.now() - started;
       s.samples.push(ms);
@@ -747,6 +867,10 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
             : `${id}: ${raw}`;
       s.errors += 1;
       s.lastError = msg;
+      // A transport failure counts too. "fetch failed" on a loop is the same
+      // waste as a 400 on a loop, and three providers in the reported
+      // session were failing exactly that way.
+      noteFailure(id, msg);
       return { ok: false, message: msg, ms: Date.now() - started, status };
     }
   };

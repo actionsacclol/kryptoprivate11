@@ -119,7 +119,7 @@ export interface RpcSettings {
    *  Resolved via resolveRpc() at the engine boundary; never stored inside
    *  the URLs. The key is spent ONLY on execution-critical calls (live
    *  simulate/send/confirm, send-time fee estimates, tx-template sampling)
-   *  via the derived `heliusHttpUrl` — bulk traffic (mint checks on every
+   *  via the derived `execHttpUrl` — bulk traffic (mint checks on every
    *  launch, the WS firehose) stays on free public endpoints, because the
    *  free tier's 1M credits/month die in ~30h if the firehose runs on it. */
   heliusApiKey: string;
@@ -161,9 +161,31 @@ export interface RpcSettings {
    *  list is hardcoded and the renderer cannot extend it (no URL over IPC);
    *  publicnode is the only free host that accepts blockSubscribe (2026-08-30). */
   blockWssUrl?: string;
-  /** Derived by resolveRpc() when a key is set — never persisted. Used only
-   *  by execution-critical paths; everything else uses `httpUrl`. */
-  heliusHttpUrl?: string;
+  /**
+   * A paid endpoint of your own for the EXECUTION lane (2026-09-15).
+   *
+   * The fast lane used to be reachable only by pasting a Helius key, which
+   * left everyone on QuickNode, Triton, Shyft or their own validator with
+   * one choice: put it in `httpUrl` and pay for the bulk traffic too — the
+   * mint checks on every launch, the holder reads, the template sampling.
+   * This is the other half of that switch: execution-critical calls go here,
+   * everything else stays on `httpUrl`.
+   *
+   * https only, checked main-side. Empty = the Helius key decides, exactly
+   * as before. Set, it WINS over the derived Helius URL: a URL someone typed
+   * is a stated intent, and silently preferring a key they also happen to
+   * have would make the field a lie.
+   */
+  fastHttpUrl?: string;
+  /**
+   * The endpoint execution-critical work actually uses, derived by
+   * resolveRpc() — NEVER persisted, and never handed to the renderer (see
+   * the settings round-trip trap, 2026-09-08).
+   *
+   * Called `heliusHttpUrl` until 2026-09-15, when a key stopped being the
+   * only way to fill it.
+   */
+  execHttpUrl?: string;
   /** HTTP JSON-RPC endpoint used for account lookups (mint safety checks). */
   httpUrl: string;
   /** Commitment level for the log subscription. `processed` = fastest. */
@@ -184,7 +206,11 @@ export const DEFAULT_BLOCK_FEED_WSS_URL: string = BLOCK_FEED_WSS_URLS[0];
  *  so the UI never shows derived URLs and the key never persists twice. */
 export function resolveRpc(rpc: RpcSettings): RpcSettings {
   const key = (rpc.heliusApiKey ?? '').trim();
-  if (!key) return rpc;
+  // A typed endpoint wins over a derived one: someone who pasted a URL means
+  // it, and quietly preferring a key they also have would make the field a
+  // lie. Either way `execHttpUrl` is the one name the engine reads.
+  const fast = (rpc.fastHttpUrl ?? '').trim();
+  if (!key) return fast ? { ...rpc, execHttpUrl: fast } : rpc;
   return {
     ...rpc,
     // Feed socket is opt-in: every WS push bills a credit, and the firehose
@@ -194,11 +220,47 @@ export function resolveRpc(rpc: RpcSettings): RpcSettings {
     extraWssUrls: rpc.heliusFeedSocket
       ? [...(rpc.extraWssUrls ?? []), `wss://mainnet.helius-rpc.com/?api-key=${key}`]
       : rpc.extraWssUrls,
-    heliusHttpUrl: `https://mainnet.helius-rpc.com/?api-key=${key}`,
+    execHttpUrl: fast || `https://mainnet.helius-rpc.com/?api-key=${key}`,
   };
 }
 
+/**
+ * Which pump.fun curve variants the Solana scanner looks at.
+ *
+ * A "mayhem" coin trades against inflated virtual reserves — hundreds of SOL
+ * rather than the standard 30 — so it can run to a six-figure cap while
+ * still on the curve. That is a different instrument with different
+ * mechanics, and traders split cleanly on whether they want it: some only
+ * want mayhem, some want it nowhere near their feed.
+ *
+ * 'all' is the default and is exactly the old behaviour.
+ */
+export type MayhemFilter = 'all' | 'standard' | 'mayhem';
+
+/**
+ * Does a launch pass the filter?
+ *
+ * `isMayhem` is null when the app could not tell — the classic create-event
+ * layout carries no reserves. An unknown is treated as NOT KNOWN TO BE
+ * MAYHEM, which is exactly what it is: it survives 'standard' (hiding a
+ * launch for a reason the app cannot state would hide a real launch) and it
+ * is refused by 'mayhem' ("mayhem only" that includes unknowns is not
+ * mayhem only). Both readings put the unknown on the side that makes no
+ * claim the app cannot support.
+ */
+export function passesMayhemFilter(isMayhem: boolean | null, filter: MayhemFilter | undefined): boolean {
+  if (!filter || filter === 'all') return true;
+  if (filter === 'mayhem') return isMayhem === true;
+  return isMayhem !== true;
+}
+
 export interface StrategySettings {
+  /**
+   * Which curve variants reach the scanner (Solana only — the EVM
+   * launchpads have no equivalent). Optional: absent on every save written
+   * before 2026-09-15 and read as 'all'.
+   */
+  mayhemFilter?: MayhemFilter;
   /** Seconds of live flow observed before an entry decision is made. */
   evalWindowSec: number;
   /** Minimum unique (non-creator) buyers inside the eval window. */
@@ -522,6 +584,28 @@ export interface EngineStatus {
   /** Potential runners flagged this session (see shared/runners.ts). */
   runnersFlagged: number;
   launchesRejected: number;
+  /**
+   * Launches the curve-variant filter turned away before anything looked at
+   * them (`strategy.mayhemFilter`). Counted separately from `rejected`,
+   * which is a strategy decision about a launch it DID evaluate — a filter
+   * that quietly inflated the rejection count would misreport the scanner's
+   * own hit rate. Optional: absent on a status built before 2026-09-15.
+   */
+  launchesFiltered?: number;
+  /**
+   * When the LIVE session's counters last started from zero, and why.
+   *
+   * The session ledger shows two different accountings — paper positions
+   * when idle, live-session counters when armed — and swaps between them the
+   * moment `liveActive` changes. To anyone watching, that swap is
+   * indistinguishable from the numbers being wiped, which is what a user
+   * reported on 2026-09-16 ("the session ledger resets"). Both resets are
+   * deliberate (arming rebaselines the loss breakers on purpose), so the fix
+   * is not to stop resetting — it is to say so. Absent on a status built
+   * before this existed; null when nothing has started a live session.
+   */
+  liveSessionStartedAt?: number | null;
+  liveSessionReason?: string | null;
   openPositions: number;
   closedPositions: number;
   /** Paper PnL in SOL, after modeled fees. */
@@ -909,6 +993,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     // WS URL here (Settings > Solana RPC) for a third — more sockets = less loss.
     extraWssUrls: ['wss://solana-rpc.publicnode.com'],
     heliusApiKey: '',
+    fastHttpUrl: '',
     heliusFeedSocket: false,
     httpUrl: 'https://api.mainnet-beta.solana.com',
     commitment: 'processed',
@@ -947,6 +1032,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     exitOnFlowReversal: true,
     maxSessionLossSol: 0.5,
     maxConsecutiveLosses: 4,
+    mayhemFilter: 'all',
     runnerAlerts: { enabled: true, minBucket: 'top1_5', maxPerHour: 12, webhookUrl: '' },
     paperEntries: false,
   },
@@ -994,11 +1080,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
   recorderDir: '',
   recorderMaxGb: 2,
   recordFirehose: false,
-  shadowDipBuy: true,
-  shadowStratLab: true,
-  shadowMigration: true,
-  // Off by default: Rich Presence opens an outbound connection and publishes
-  // engine state. "No telemetry" (README) must be true out of the box.
+  // The three shadow modules are RESEARCH instrumentation: they trade
+  // nothing, they exist to measure strategy families against the live tape,
+  // and each one writes rows through the recorder and does per-event work on
+  // the AMM feed. They shipped ON from the era when finding a strategy was
+  // the point. That programme is over (docs/), the product is a terminal
+  // someone trades in, and a fresh install should not be collecting data for
+  // a study nobody is running. Off by default; the switches are in Settings
+  // and an existing user's own choice is untouched (settings merge OVER
+  // defaults), so this only changes what a NEW install does.
+  shadowDipBuy: false,
+  shadowStratLab: false,
+  shadowMigration: false,
+  // ON since 3.0.0, deliberately: Rich Presence publishes to the Discord
+  // client on THIS machine and nothing reaches us — the privacy policy says
+  // so in those words, and revision 5 turns it on for existing installs too
+  // (settings-store migrateUnsafe) so the feature is not silently off for
+  // everyone who predates it. One click in Settings turns it off.
   discordRpcEnabled: true,
   autoStartEngine: false,
   shadowMode: true,

@@ -59,6 +59,7 @@ import { RunnerRateLimit } from '@shared/runners';
 import { logger } from '../system/logger';
 import * as copyTrade from '../engine/copyTrade';
 import { balanceOf as erc20BalanceOf } from './erc20';
+import { blockTimeMs } from './client';
 import { shortError } from './pons';
 import * as scout from '../engine/walletScout';
 import { tradeId } from '@shared/walletScout';
@@ -512,6 +513,17 @@ function notePrice(chain: EvmChainKind, token: string, quoteWei: bigint, tokensR
   return price;
 }
 
+/**
+ * Hand a followed wallet's trade to copy trading.
+ *
+ * `blockNumber` is what dates it. The scanner resumes from its cursor, so a
+ * stall, a slow endpoint or a restart hands `ingestTrades` a backlog of real
+ * blocks — and stamping those with the poll's own clock told the copier that
+ * a leader buy from twenty minutes ago had just happened. One `getBlock` per
+ * block, cached, and only for the blocks a followed wallet actually traded
+ * in. Unreadable stays null, which copyTrade reads as "age unknown" and
+ * treats exactly as it did before block times existed.
+ */
 async function forwardCopy(
   chain: EvmChainKind,
   token: string,
@@ -523,13 +535,21 @@ async function forwardCopy(
   txHash: string,
   price: number | null,
   now: number,
+  blockNumber: bigint,
 ): Promise<void> {
   try {
+    // Both reads at once. This runs in front of a mirrored EXIT, and dating
+    // the trade must not cost it a serial round trip — the whole point of
+    // the change is that an exit arrives on time.
+    const [tradeAt, remaining] = await Promise.all([
+      blockTimeMs(chain, blockNumber),
+      // Their remaining balance decides the share of a sell; unreadable stays
+      // null, which the copy engine records as a skipped exit rather than
+      // guessing. A buy needs no such read.
+      isBuy ? Promise.resolve(null) : erc20BalanceOf(chain, token as Address, trader as Address),
+    ]);
     let soldFraction: number | null = null;
-    if (!isBuy) {
-      // Their remaining balance decides the share; unreadable stays null,
-      // which the copy engine records as a skipped exit rather than guessing.
-      const remaining = await erc20BalanceOf(chain, token as Address, trader as Address);
+    if (!isBuy && remaining !== null) {
       const sold = tokensRaw < 0n ? -tokensRaw : tokensRaw;
       const total = sold + remaining;
       soldFraction = total > 0n ? Number((sold * 10_000n) / total) / 10_000 : null;
@@ -543,6 +563,7 @@ async function forwardCopy(
       sol: native,
       priceSol: price ?? 0,
       at: now,
+      tradeAt,
       signature: txHash,
       soldFraction,
       tokens: Number(tokensRaw < 0n ? -tokensRaw : tokensRaw) / 1e18,
@@ -580,7 +601,7 @@ async function ingestTrades(chain: EvmChainKind, from: bigint, to: bigint): Prom
         const price = notePrice(chain, copyToken, t.quoteWei, t.tokensRaw, now);
         if (price !== null && openCopies.has(copyToken)) copyTrade.markToMarket(copyToken, price, chain);
         if (followed.size && followed.has(t.trader.toLowerCase())) {
-          void forwardCopy(chain, copyToken, symbolOf(copyToken), t.trader, t.isBuy, Number(t.quoteWei) / 1e18, t.tokensRaw, t.txHash, price, now);
+          void forwardCopy(chain, copyToken, symbolOf(copyToken), t.trader, t.isBuy, Number(t.quoteWei) / 1e18, t.tokensRaw, t.txHash, price, now, t.blockNumber);
         }
       }
       scout.note('robinhood', t.trader, curve, t.isBuy, Number(t.quoteWei) / 1e18, Number(t.tokensRaw), now, tradeId(`${t.txHash}:${t.logIndex}`, curve, t.trader, t.isBuy));
@@ -622,7 +643,7 @@ async function ingestTrades(chain: EvmChainKind, from: bigint, to: bigint): Prom
         const price = notePrice(chain, token, t.quoteWei, t.tokensRaw, now);
         if (price !== null && openCopies.has(token)) copyTrade.markToMarket(token, price, chain);
         if (followed.size && followed.has(t.trader.toLowerCase())) {
-          void forwardCopy(chain, token, symbolOf(token), t.trader, t.isBuy, amount, t.tokensRaw, t.txHash, price, now);
+          void forwardCopy(chain, token, symbolOf(token), t.trader, t.isBuy, amount, t.tokensRaw, t.txHash, price, now, t.blockNumber);
         }
       }
       recorder.record('tape_trade', {

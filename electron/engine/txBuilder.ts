@@ -1251,9 +1251,24 @@ function u64le(v: bigint): Buffer {
 }
 
 /** The share a sell asks for, clamped to 1–100 and whole; absent = all. */
+/**
+ * A sell share, clamped and kept to two decimal places.
+ *
+ * Two decimals, not whole percent, since 2026-09-15: copy trading sizes an
+ * exit from the base units a copy actually holds and hands the pipeline the
+ * share of the balance that really is. Rounding that to a whole percent put
+ * up to 1 % of the position back in the wallet on every mirrored sell, which
+ * is exactly the kind of remainder the copier was rewritten to stop leaving.
+ * A caller passing a whole number is unaffected — 5 still means 5.
+ *
+ * The floor is one hundredth of a percent rather than one percent for the
+ * same reason: a floor that rounds a small share UP sells tokens nobody
+ * asked to sell, and the Jupiter route has always honoured two decimals, so
+ * a whole-percent floor here also made the two routes disagree.
+ */
 export function sellPctOf(pct: number | undefined): number {
   if (pct === undefined || !Number.isFinite(pct)) return 100;
-  return Math.max(1, Math.min(100, Math.round(pct)));
+  return Math.max(0.01, Math.min(100, Math.round(pct * 100) / 100));
 }
 
 /** Raw tokens a `pct`% sell moves out of a balance: everything at 100,
@@ -1261,7 +1276,7 @@ export function sellPctOf(pct: number | undefined): number {
  *  uses, so a ladder step sells the same amount whichever route builds it. */
 export function sellAmountFor(balance: bigint, pct: number | undefined): bigint {
   const share = sellPctOf(pct);
-  return share >= 100 ? balance : (balance * BigInt(share)) / 100n;
+  return share >= 100 ? balance : (balance * BigInt(Math.round(share * 100))) / 10_000n;
 }
 
 /**

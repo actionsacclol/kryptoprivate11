@@ -152,6 +152,50 @@ export async function summary(chain: EvmChainKind, address: string, opts: { hold
   return hit ?? (await buildSummary(chain, token, opts));
 }
 
+/**
+ * Summaries for several tokens on one chain, with the shared work done once.
+ *
+ * The watchlist asked for each pinned EVM token separately — one IPC hop,
+ * one venue resolution and one DexScreener round trip each, every twenty
+ * seconds. The Solana half has been batched since 2026-09-08; this is the
+ * other half (2026-09-15).
+ *
+ * Batching is a PRE-WARM, not a second code path: the DexScreener pairs for
+ * the whole list are fetched in one request and written under the very keys
+ * `buildSummary` reads, and then each summary is built exactly as it always
+ * was. That matters because a divergent batch path is how two views of the
+ * same token start disagreeing.
+ *
+ * A token that fails is simply absent from the map — the caller says so
+ * rather than being handed a row that means "we could not read it".
+ */
+export async function summaryMany(
+  chain: EvmChainKind,
+  addresses: string[],
+  opts: { holders?: boolean } = {},
+): Promise<Map<string, TokenSummary>> {
+  const out = new Map<string, TokenSummary>();
+  const unique = [...new Set(addresses.filter(Boolean).map(lower))];
+  if (!unique.length) return out;
+  const meta = EVM_CHAIN_META[chain];
+  // One request for every token's pairs; `summary` below then finds them
+  // cached. Failure here is silent on purpose — it only costs the saving.
+  await ds.tokenPairsOnMany(meta.dexscreenerChain, unique, { priority: true }).catch(() => undefined);
+  // `nativeUsd` is memoised per chain, so asking once ahead of the fan-out
+  // keeps the first summary from being the only one that pays for it.
+  await nativeUsd(chain).catch(() => undefined);
+  await Promise.all(
+    unique.map(async (token) => {
+      try {
+        out.set(token, await summary(chain, token, opts));
+      } catch {
+        /* an unreadable token is absent, never a row of zeroes */
+      }
+    }),
+  );
+  return out;
+}
+
 function curveOf(v: Venue): EvmCurveState | null {
   if (v.curve) return ponsToShared(v.curve);
   if (v.fourMeme) return fourmeme.toShared(v.fourMeme);

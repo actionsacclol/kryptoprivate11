@@ -54,13 +54,68 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * Derived addresses, by their own inputs.
+ *
+ * A PDA is a pure function of (seeds, program), so this is a memo and never
+ * a guess. It is here because the derivation is genuinely expensive:
+ * MEASURED 2026-09-15, `prewarm` (three PDAs) costs **922 µs**, against 19 µs
+ * to decode a whole log notification. Each `findProgramAddress` walks bumps
+ * from 255 down, sha256-ing and then decompressing an ed25519 point per
+ * attempt until one is off-curve.
+ *
+ * The inputs repeat far more than they look like they do: the same creator
+ * launches again and again (creator history is a whole feature), and the
+ * volume accumulator and fee PDAs for OUR OWN wallet are re-derived on every
+ * single trade build.
+ *
+ * Bounded, because the mint-keyed entries never repeat and would otherwise
+ * grow with the tape.
+ */
+const pdaCache = new Map<string, string>();
+const PDA_CACHE_MAX = 4_096;
+
 /** Solana findProgramAddressSync: walk bump 255→0 until the hash is off-curve. */
 function findProgramAddress(seeds: Uint8Array[], programId: Uint8Array): string {
+  // The seeds and the program ARE the identity of the result. Latin-1 keeps
+  // each byte one character, so the key is exact and costs no base58 pass.
+  // Length-prefixed, so two different seed splits can never collide into
+  // one key. Latin-1 keeps each byte one character and costs no base58.
+  let k = '';
+  for (const s of seeds) k += `${s.length}:${Buffer.from(s).toString('latin1')}`;
+  k += `|${Buffer.from(programId).toString('latin1')}`;
+  const hit = pdaCache.get(k);
+  if (hit !== undefined) {
+    // Re-insert on a hit, so eviction below is LEAST RECENTLY USED rather
+    // than first-in. It matters: the mint-keyed entries never repeat and
+    // churn the cache — at 20 launches a second the whole 4,096 cycles in
+    // about a minute — so under plain FIFO the entries that are hit on
+    // EVERY trade build (our own wallet's volume accumulator and fee PDAs)
+    // would be thrown out roughly once a minute and re-derived at ~300 us
+    // each. A Map preserves insertion order, so delete-then-set is the move.
+    pdaCache.delete(k);
+    pdaCache.set(k, hit);
+    return hit;
+  }
+
   for (let bump = 255; bump >= 0; bump--) {
     const hash = sha256(concatBytes([...seeds, new Uint8Array([bump]), programId, PDA_MARKER]));
-    if (!isOnCurve(hash)) return base58Encode(hash);
+    if (!isOnCurve(hash)) {
+      const out = base58Encode(hash);
+      if (pdaCache.size >= PDA_CACHE_MAX) {
+        const oldest = pdaCache.keys().next().value;
+        if (oldest !== undefined) pdaCache.delete(oldest);
+      }
+      pdaCache.set(k, out);
+      return out;
+    }
   }
   throw new Error('unable to find a program-derived address (exhausted bumps)');
+}
+
+/** Test seam: the memo is an optimisation and must never change an answer. */
+export function _clearPdaCache(): void {
+  pdaCache.clear();
 }
 
 const key = (b58: string): Uint8Array => base58Decode(b58);

@@ -17,7 +17,7 @@ import { lastRows, rememberRows } from '../state/routeCache';
 // refreshes on a slower cadence than Discover does, and not at all while
 // the window is hidden.
 
-export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
+export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind, symbol?: string) => void }) {
   const term = useTerminal();
   // Paint the last rows this session saw for each pin — the previous visit,
   // or Discover's own feed — on the first frame; the batch below refreshes
@@ -53,25 +53,40 @@ export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string, cha
         solana.length
           ? window.krypt.market.summaries(solana.map((p) => p.mint))
           : Promise.resolve({ ok: true, message: 'ok', data: {} as Record<string, TokenSummary> }),
+        // One call per CHAIN, not per pin: the rail fetches the whole
+        // chain's pairs in a single DexScreener request and builds the rows
+        // from that. This used to be one IPC hop and one round trip per
+        // pinned token, every twenty seconds (2026-09-15).
         Promise.all(
-          evm.map((p) =>
-            window.krypt.evm
-              .summary(p.chain as 'robinhood' | 'bnb', p.mint)
-              .then((x) => {
-                if (x.ok && x.data) return { pin: p.pin, row: x.data };
-                evmProblem ??= x.message || 'The EVM rail did not answer for a pinned token';
-                return null;
-              })
-              .catch((e: unknown) => {
-                evmProblem ??= (e as Error)?.message || 'The EVM rail did not answer for a pinned token';
-                return null;
-              }),
-          ),
+          (['robinhood', 'bnb'] as const)
+            .map((ch) => ({ ch, pins: evm.filter((p) => p.chain === ch) }))
+            .filter((g) => g.pins.length > 0)
+            .map((g) =>
+              window.krypt.evm
+                .summaries(g.ch, g.pins.map((p) => p.mint))
+                .then((x) => {
+                  if (!x.ok || !x.data) {
+                    evmProblem ??= x.message || 'The EVM rail did not answer for a pinned token';
+                    return [];
+                  }
+                  // Keyed by lower-case address; a pin keeps its own casing.
+                  return g.pins
+                    .map((p) => {
+                      const row = x.data?.[p.mint.toLowerCase()];
+                      return row ? { pin: p.pin, row } : null;
+                    })
+                    .filter((v): v is { pin: string; row: TokenSummary } => v !== null);
+                })
+                .catch((e: unknown) => {
+                  evmProblem ??= (e as Error)?.message || 'The EVM rail did not answer for a pinned token';
+                  return [] as Array<{ pin: string; row: TokenSummary }>;
+                }),
+            ),
         ),
       ]);
       const merged: Record<string, TokenSummary> = {};
       if (r.ok && r.data) for (const p of solana) if (r.data[p.mint]) merged[p.pin] = r.data[p.mint];
-      for (const hit of evmRows) if (hit) merged[hit.pin] = hit.row;
+      for (const group of evmRows) for (const hit of group) merged[hit.pin] = hit.row;
       const solanaNote = r.message !== 'ok' ? r.message : null;
       if (Object.keys(merged).length || (r.ok && !evm.length)) {
         // A parked provider leaves the previous rows on screen with a note.
@@ -151,8 +166,11 @@ export function WatchlistPage({ onOpenToken }: { onOpenToken: (mint: string, cha
                 key={pin}
                 token={t}
                 window={term.filters.window}
-                onOpen={() => onOpenToken(mint, chain)}
-                onQuickBuy={() => onOpenToken(mint, chain)}
+                // The symbol travels with the click so the token's tab is
+                // named the moment it opens, rather than showing an address
+                // until something else happens to resolve it.
+                onOpen={() => onOpenToken(mint, chain, t.symbol)}
+                onQuickBuy={() => onOpenToken(mint, chain, t.symbol)}
                 quickBuySol={0.1}
                 watched
                 onToggleWatch={() => term.toggleWatch(mint, chain)}

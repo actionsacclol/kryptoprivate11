@@ -46,7 +46,7 @@ export interface PriorityFeedHost {
   /** Helius websocket URL, or empty when no key is configured. */
   wssUrl(): string;
   /** Helius HTTP URL for fills, or empty when no key is configured. */
-  heliusHttpUrl(): string;
+  execHttpUrl(): string;
   commitment(): 'processed' | 'confirmed';
   /** Delivered straight into the engine's normal log path. */
   onLogs(n: LogNotification): void;
@@ -405,7 +405,7 @@ export function fillStats(): { requested: number; decoded: number; queued: numbe
  * caller guarantees this is a HELD mint's transaction — never the firehose.
  */
 export function requestFill(signature: string): void {
-  if (!host || !signature || !host.heliusHttpUrl()) return;
+  if (!host || !signature || !host.execHttpUrl()) return;
   if (fillQueue.has(signature)) return;
   if (fillQueue.size >= FILL_QUEUE_CAP) return;
   fillQueue.set(signature, 0);
@@ -432,7 +432,7 @@ async function runFillBatch(): Promise<void> {
     if (fillQueue.size) armFillTimer();
     return;
   }
-  const url = host.heliusHttpUrl();
+  const url = host.execHttpUrl();
   if (!url) {
     fillQueue.clear();
     return;

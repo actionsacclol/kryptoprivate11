@@ -3,6 +3,8 @@ import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import { EVM_CHAIN_META, EVM_FEE_BPS, VENUE_LABEL, type EvmChainKind, type EvmQuote, type EvmTokenState } from '@shared/evm';
 import { cls, fmtUsd, shortAddr } from '../../utils/format';
+import { KRYPTO_TOKEN } from '@shared/krypto';
+import { useKryptoWaiver } from '../../state/useKryptoWaiver';
 import { fmtNative, fmtTokens, isPendingResult, PENDING_TOAST, rawToNumber, weiToNumber } from '../../utils/evm';
 import { useToast } from '../../state/ToastProvider';
 import { useModal } from '../../state/ModalProvider';
@@ -50,6 +52,7 @@ export function EvmTradePanel({
 }) {
   const toast = useToast();
   const modal = useModal();
+  const waiver = useKryptoWaiver();
   const meta = EVM_CHAIN_META[chain];
   const sym = meta.nativeSymbol;
   const { evm, refresh } = useEvmState(chain);
@@ -307,9 +310,19 @@ export function EvmTradePanel({
           </span>
         </div>
         <div className="flex items-center justify-between gap-3">
-          <span className="text-krypt-muted/80">Krypt fee {feesOn ? `${(EVM_FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}%` : ''}</span>
-          <span className="font-mono text-white/70 tabular-nums">
-            {feesOn ? (quote ? `${fmtNative(feeNative, sym)}${feeNative !== null && nativeUsd ? ` (${fmtUsd(feeNative * nativeUsd)})` : ''}` : '—') : 'no platform fee yet'}
+          {/* The $KRYPTO waiver covers every chain, so this line has to know
+              about it too — the quote is already priced with it main-side. */}
+          <span className="text-krypt-muted/80">
+            Krypt fee {feesOn && !waiver.waived ? `${(EVM_FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}%` : ''}
+          </span>
+          <span className={cls('font-mono tabular-nums', waiver.waived ? 'text-emerald-300/80' : 'text-white/70')}>
+            {!feesOn
+              ? 'no platform fee yet'
+              : waiver.waived
+                ? `waived (${KRYPTO_TOKEN.symbol} holder)`
+                : quote
+                  ? `${fmtNative(feeNative, sym)}${feeNative !== null && nativeUsd ? ` (${fmtUsd(feeNative * nativeUsd)})` : ''}`
+                  : '—'}
           </span>
         </div>
         <div className="flex items-center justify-between gap-3">

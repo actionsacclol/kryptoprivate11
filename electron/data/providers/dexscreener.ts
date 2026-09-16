@@ -332,14 +332,16 @@ export interface DsPairLite {
   socials: TokenSocials;
 }
 
-export async function tokenPairsOn(chain: string, address: string, opts: { priority?: boolean } = {}): Promise<DsPairLite[]> {
-  const hit = await memo<DsPairLite[]>(`ds:pairs:${chain}:${address.toLowerCase()}`, 15_000, async () => {
-    const r = await getJson<DsPair[]>('dexscreener', `/token-pairs/v1/${encodeURIComponent(chain)}/${encodeURIComponent(address)}`, { priority: opts.priority });
-    if (!r.ok || !Array.isArray(r.data)) return null;
-    const pairs = r.data.filter((p) => p?.chainId === chain && p.pairAddress);
-    const vol = (p: DsPair): number => num(p.volume?.h1) ?? num(p.volume?.h6) ?? 0;
-    pairs.sort((a, b) => vol(b) - vol(a) || (num(b.liquidity?.usd) ?? 0) - (num(a.liquidity?.usd) ?? 0));
-    const out: DsPairLite[] = pairs.slice(0, 8).map((p) => {
+/** The memo key `tokenPairsOn` reads. Shared so a batch can fill it. */
+const pairsKey = (chain: string, address: string): string => `ds:pairs:${chain}:${address.toLowerCase()}`;
+const PAIRS_TTL_MS = 15_000;
+
+/** Rank and trim one token's pairs into the lite shape the app stores. */
+function toLite(chain: string, rows: DsPair[]): DsPairLite[] {
+  const pairs = rows.filter((p) => p?.chainId === chain && p.pairAddress);
+  const vol = (p: DsPair): number => num(p.volume?.h1) ?? num(p.volume?.h6) ?? 0;
+  pairs.sort((a, b) => vol(b) - vol(a) || (num(b.liquidity?.usd) ?? 0) - (num(a.liquidity?.usd) ?? 0));
+  return pairs.slice(0, 8).map((p) => {
       let twitter: string | null = null;
       let telegram: string | null = null;
       let website: string | null = null;
@@ -373,8 +375,57 @@ export async function tokenPairsOn(chain: string, address: string, opts: { prior
         imageUrl: typeof p.info?.imageUrl === 'string' && p.info.imageUrl.startsWith('https://') ? p.info.imageUrl : null,
         socials: { twitter, telegram, website, dexPaid: !!p.info },
       };
-    });
+  });
+}
+
+export async function tokenPairsOn(chain: string, address: string, opts: { priority?: boolean } = {}): Promise<DsPairLite[]> {
+  const hit = await memo<DsPairLite[]>(pairsKey(chain, address), PAIRS_TTL_MS, async () => {
+    const r = await getJson<DsPair[]>('dexscreener', `/token-pairs/v1/${encodeURIComponent(chain)}/${encodeURIComponent(address)}`, { priority: opts.priority });
+    if (!r.ok || !Array.isArray(r.data)) return null;
+    const out = toLite(chain, r.data);
     return out.length ? out : null;
   });
   return hit ?? [];
+}
+
+/**
+ * The pairs for MANY tokens on one chain, in one request per 30.
+ *
+ * `/tokens/v1/{chain}/{a,b,c}` is the same route `tokenInfoMany` uses for
+ * Solana, and it works for every chain DexScreener indexes. Results are
+ * written under the very key `tokenPairsOn` memoises, so a caller that warms
+ * this first and then builds summaries one at a time makes NO further
+ * request — which is how the watchlist stopped spending one round trip per
+ * pinned EVM token (2026-09-15).
+ *
+ * A token the batch returns nothing for is left uncached rather than cached
+ * empty: "the batch did not mention it" is not "it has no pairs", and a
+ * negative cache built from an absence would hide a token from its own page.
+ */
+export async function tokenPairsOnMany(chain: string, addresses: string[], opts: { priority?: boolean } = {}): Promise<void> {
+  const wanted = [...new Set(addresses.filter(Boolean).map((a) => a.toLowerCase()))].filter((a) => cached<DsPairLite[]>(pairsKey(chain, a)) === null);
+  if (wanted.length < 2) return; // one token is not a batch — let the single route handle it
+  for (const chunk of chunkMints(wanted)) {
+    const rows = await memo<DsPair[]>(`ds:pairsbatch:${chain}:${chunk.join(',')}`, PAIRS_TTL_MS, async () => {
+      const r = await getJson<DsPair[]>(
+        'dexscreener',
+        `/tokens/v1/${encodeURIComponent(chain)}/${chunk.map(encodeURIComponent).join(',')}`,
+        { priority: opts.priority },
+      );
+      return r.ok && Array.isArray(r.data) ? r.data : null;
+    });
+    if (!rows) continue;
+    const byToken = new Map<string, DsPair[]>();
+    for (const p of rows) {
+      const base = p?.baseToken?.address?.toLowerCase();
+      if (!base || p.chainId !== chain || !p.pairAddress) continue;
+      const list = byToken.get(base);
+      if (list) list.push(p);
+      else byToken.set(base, [p]);
+    }
+    for (const [token, pairs] of byToken) {
+      const lite = toLite(chain, pairs);
+      if (lite.length) putCache(pairsKey(chain, token), lite, PAIRS_TTL_MS);
+    }
+  }
 }

@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Clipboard, Code2, ListChecks, Play, Plus, Power, Trash2 } from 'lucide-react';
-import type { ChainKind } from '@shared/evm';
+import { nativeSymbolOf, type ChainKind } from '@shared/evm';
 import {
   ALERT_KINDS,
   DEFAULT_BUDGET,
@@ -19,6 +19,8 @@ import {
   actionAvailableOn,
   chainLabel,
   fieldAvailableOn,
+  nativeFieldLabel,
+  nativeText,
   scriptChain,
   triggerAvailableOn,
   RULE_TRIGGERS,
@@ -112,9 +114,32 @@ export function ScriptsPage() {
     return JSON.stringify({ ...draft, updatedAt: 0 }) !== JSON.stringify({ ...current, updatedAt: 0 });
   }, [current, draft]);
 
+  /**
+   * Which chain's scripts the list is showing.
+   *
+   * A script runs on ONE chain and can only ever see and spend that chain's
+   * money, so a single mixed list was the wrong shape: a user picked New
+   * script, got the Solana default, and had no reason to think the chain was
+   * a thing they had to choose (report, 2026-09-15). The tab is the choice,
+   * made before there is a script to make it on.
+   */
+  const [tab, setTab] = useState<ChainKind>('solana');
+  const chainCounts = useMemo(() => {
+    const out: Record<ChainKind, number> = { solana: 0, robinhood: 0, bnb: 0 };
+    for (const s of snap?.scripts ?? []) out[scriptChain(s)] += 1;
+    return out;
+  }, [snap]);
+  const shown = useMemo(() => (snap?.scripts ?? []).filter((s) => scriptChain(s) === tab), [snap, tab]);
+
+  // Opening a script from anywhere else moves the tab to its chain, so the
+  // list never shows one chain while the editor holds another.
+  useEffect(() => {
+    if (current) setTab(scriptChain(current));
+  }, [current]);
+
   const startNew = (kind: 'rules' | 'code'): void => {
     setSelected(null);
-    setDraft({ ...defaultScript(kind) });
+    setDraft({ ...defaultScript(kind, tab) });
   };
 
   const save = async (): Promise<void> => {
@@ -145,7 +170,13 @@ export function ScriptsPage() {
     if (on && s.mode === 'live') {
       const okGo = await modal.confirm({
         title: 'Arm a LIVE script',
-        message: `"${s.name}" will spend real SOL on its own, up to ${s.budget.maxSolPerTrade} SOL a trade, ${s.budget.maxBuysPerDay} buys a day, and stop itself after ${s.budget.maxLossSolPerDay} SOL of realised loss in a day. You can turn it off any time; the kill switch stops every script at once.`,
+        // The money this names is the CHAIN's money: telling someone their
+        // Robinhood script will spend SOL is telling them something false
+        // about their own funds, right at the moment they arm it.
+        message: nativeText(
+          `"${s.name}" will spend real SOL on its own, up to ${s.budget.maxSolPerTrade} SOL a trade, ${s.budget.maxBuysPerDay} buys a day, and stop itself after ${s.budget.maxLossSolPerDay} SOL of realised loss in a day. You can turn it off any time; the kill switch stops every script at once.`,
+          scriptChain(s),
+        ),
         confirmLabel: 'Arm it',
         destructive: true,
       });
@@ -201,6 +232,40 @@ export function ScriptsPage() {
       <div className="grid lg:grid-cols-[320px_1fr] gap-4 items-start">
         {/* List */}
         <div className="space-y-3">
+          {/* One tab per chain. A script can only see and spend the money of
+              the chain it is on, so the chain is picked BEFORE the script
+              exists rather than found later inside its editor. */}
+          <div className="flex rounded-lg border border-white/10 overflow-hidden">
+            {(['solana', 'robinhood', 'bnb'] as const).map((ch) => (
+              <button
+                key={ch}
+                onClick={() => setTab(ch)}
+                title={chainLabel(ch)}
+                className={cls(
+                  'flex-1 px-2 py-2 text-body font-semibold transition flex items-center justify-center gap-1.5',
+                  tab === ch ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
+                )}
+              >
+                {ch === 'solana' ? 'Solana' : ch === 'bnb' ? 'BNB' : 'Robinhood'}
+                {chainCounts[ch] > 0 && <span className="text-label text-krypt-muted/70">{chainCounts[ch]}</span>}
+              </button>
+            ))}
+          </div>
+          {/* A live script on this chain that the chain cannot execute. The
+              page used to show only Solana's reason, so an unarmed EVM rail
+              looked like a page with nothing wrong on it. */}
+          {(() => {
+            const why = snap?.blockedByChain?.[tab] ?? null;
+            if (!why || !shown.some((s) => s.mode === 'live' && s.enabled)) return null;
+            return (
+              <div className="rounded-lg border border-arc-gold/35 bg-arc-gold/10 px-3 py-2 flex items-start gap-2">
+                <AlertTriangle className="h-3.5 w-3.5 text-arc-gold flex-shrink-0 mt-0.5" />
+                <p className="text-label text-arc-gold/90">
+                  A live script here is armed but {chainLabel(tab)} cannot execute — {why}.
+                </p>
+              </div>
+            );
+          })()}
           <div className="flex gap-2">
             <PrimaryButton onClick={() => startNew('rules')} className="flex-1 !py-2 text-xs">
               <ListChecks className="h-3.5 w-3.5" /> New rule
@@ -212,11 +277,16 @@ export function ScriptsPage() {
           <Card padded={false} className="divide-y divide-white/5">
             {!snap ? (
               <div className="p-4 text-xs text-krypt-muted">Loading…</div>
-            ) : snap.scripts.length === 0 ? (
-              <div className="p-4 text-xs text-krypt-muted">No scripts yet. A rule is three dropdowns; a script is a few lines of JavaScript. Both start in paper mode.</div>
+            ) : shown.length === 0 ? (
+              <div className="p-4 text-xs text-krypt-muted">
+                {snap.scripts.length === 0
+                  ? 'No scripts yet. A rule is three dropdowns; a script is a few lines of JavaScript. Both start in paper mode.'
+                  : `No scripts on ${chainLabel(tab)} yet — the ones you have are on another tab. A new one here trades ${nativeSymbolOf(tab)}.`}
+              </div>
             ) : (
-              snap.scripts.map((s) => {
+              shown.map((s) => {
                 const st: ScriptStats | undefined = snap.stats[s.id];
+                const coin = nativeSymbolOf(scriptChain(s));
                 return (
                   <button
                     key={s.id}
@@ -226,16 +296,15 @@ export function ScriptsPage() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-semibold text-white truncate">{s.name}</span>
                       <span className="flex items-center gap-1.5 flex-shrink-0">
-                        {scriptChain(s) !== 'solana' && <Badge tone="neutral">{scriptChain(s) === 'bnb' ? 'BNB' : 'Robinhood'}</Badge>}
                         <Badge tone={s.mode === 'live' ? 'danger' : 'neutral'}>{s.mode}</Badge>
                         <Badge tone={s.enabled ? 'success' : 'neutral'}>{s.enabled ? (s.kind === 'code' && st && !st.running ? 'starting' : 'on') : 'off'}</Badge>
                       </span>
                     </div>
-                    <div className="mt-1 text-body text-krypt-muted truncate">{s.kind === 'rules' ? describeRules(s.rules) : `script · ${s.code.split('\n').length} lines`}</div>
+                    <div className="mt-1 text-body text-krypt-muted truncate">{s.kind === 'rules' ? describeRules(s.rules, scriptChain(s)) : `script · ${s.code.split('\n').length} lines`}</div>
                     {st && (
                       <div className="mt-1 text-label font-mono text-krypt-muted/70">
                         today {st.buysToday}b/{st.sellsToday}s · {st.realizedSolToday >= 0 ? '+' : ''}
-                        {st.realizedSolToday.toFixed(3)} SOL · open {st.openCount}
+                        {st.realizedSolToday.toFixed(3)} {coin} · open {st.openCount}
                         {st.errorsInARow > 0 && <span className="text-rose-300"> · {st.errorsInARow} errors</span>}
                       </div>
                     )}
@@ -342,8 +411,8 @@ export function ScriptsPage() {
                     {current?.mode === 'live'
                       ? current.enabled
                         ? 'This script is armed and live. Saving restarts it immediately with the new code — it stays armed.'
-                        : 'Live spends real SOL on its own. This script is already saved as live; arming is a separate confirmed switch.'
-                      : 'Live spends real SOL on its own. Saving as live disarms the script; arming is a separate confirmed switch.'}
+                        : nativeText('Live spends real SOL on its own. This script is already saved as live; arming is a separate confirmed switch.', scriptChain(draft))
+                      : nativeText('Live spends real SOL on its own. Saving as live disarms the script; arming is a separate confirmed switch.', scriptChain(draft))}
                     {!liveEnabled && ' Live execution is off in Settings, so a live script would refuse every trade until it is on.'}
                   </div>
                 )}
@@ -353,13 +422,13 @@ export function ScriptsPage() {
 
                 {/* Budget */}
                 <div className="grid grid-cols-5 gap-3">
-                  <Field label="Max per trade" hint="SOL">
+                  <Field label="Max per trade" hint={nativeSymbolOf(scriptChain(draft))}>
                     <input type="number" step="0.01" value={draft.budget.maxSolPerTrade} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxSolPerTrade: Number(e.target.value) } })} className={inputCls} />
                   </Field>
                   <Field label="Buys per day">
                     <input type="number" value={draft.budget.maxBuysPerDay} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxBuysPerDay: Number(e.target.value) } })} className={inputCls} />
                   </Field>
-                  <Field label="Daily loss stop" hint="SOL">
+                  <Field label="Daily loss stop" hint={nativeSymbolOf(scriptChain(draft))}>
                     <input type="number" step="0.01" value={draft.budget.maxLossSolPerDay} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxLossSolPerDay: Number(e.target.value) } })} className={inputCls} />
                   </Field>
                   <Field label="Open positions">
@@ -402,7 +471,7 @@ export function ScriptsPage() {
                 )}
               </div>
 
-              {current && snap && <ScriptLog lines={snap.logs[current.id] ?? []} stats={snap.stats[current.id]} />}
+              {current && snap && <ScriptLog lines={snap.logs[current.id] ?? []} stats={snap.stats[current.id]} coin={nativeSymbolOf(scriptChain(current))} />}
             </>
           )}
         </div>
@@ -458,6 +527,10 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
   // unknown never satisfies a rule, so such a rule would look armed and never
   // once fire. Same for actions with no implementation on the rail.
   const chain = scriptChain(draft);
+  // Every label, hint and unit in the model is written in SOL because the
+  // field IDS are a stored rule's schema. What the user reads follows the
+  // chain they are actually on.
+  const coinText = (text: string): string => nativeFieldLabel(text, chain, nativeSymbolOf(chain));
   const fieldsFor = RULE_FIELDS.filter((f) => scopes.includes(f.scope) && fieldAvailableOn(f.id, chain));
   const actionsFor = RULE_ACTIONS.filter(
     (a) =>
@@ -520,10 +593,10 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
               const kind = f?.kind ?? 'number';
               return (
                 <div key={i} className="grid grid-cols-[1fr_auto_1fr_auto] gap-2 items-center">
-                  <select value={c.field} onChange={(e) => setCond(i, { field: e.target.value as RuleField })} className={selectCls} title={f ? `${f.hint || f.label} · ${f.unit} · null when ${f.nullWhen}` : ''}>
+                  <select value={c.field} onChange={(e) => setCond(i, { field: e.target.value as RuleField })} className={selectCls} title={f ? `${coinText(f.hint || f.label)} · ${coinText(f.unit)} · null when ${f.nullWhen}` : ''}>
                     {fieldsFor.map((x) => (
                       <option key={x.id} value={x.id}>
-                        {x.label}
+                        {coinText(x.label)}
                       </option>
                     ))}
                   </select>
@@ -535,14 +608,14 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
                     ))}
                   </select>
                   {kind === 'boolean' ? (
-                    <span className="text-body text-krypt-muted">{f?.hint || f?.unit}</span>
+                    <span className="text-body text-krypt-muted">{coinText(f?.hint || f?.unit || '')}</span>
                   ) : (
                     <input
                       type={kind === 'number' ? 'number' : 'text'}
                       step="any"
                       value={c.value}
                       onChange={(e) => setCond(i, { value: kind === 'number' ? Number(e.target.value) : e.target.value })}
-                      placeholder={f?.unit}
+                      placeholder={coinText(f?.unit ?? '')}
                       className={inputCls}
                     />
                   )}
@@ -570,7 +643,7 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
                     </option>
                   ))}
                 </select>
-                <ActionParams a={a} set={(next) => setAction(i, next)} templates={templates} />
+                <ActionParams a={a} set={(next) => setAction(i, next)} templates={templates} chain={chain} />
                 <GhostButton onClick={() => setRules({ actions: r.actions.filter((_, j) => j !== i) })} className="!py-1 !px-2 text-xs">
                   ✕
                 </GhostButton>
@@ -587,11 +660,12 @@ function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (
   );
 }
 
-function ActionParams({ a, set, templates }: { a: RuleAction; set: (a: RuleAction) => void; templates: Array<{ id: string; name: string }> }) {
-  const hint = RULE_ACTIONS.find((x) => x.id === a.type)?.hint ?? '';
+function ActionParams({ a, set, templates, chain }: { a: RuleAction; set: (a: RuleAction) => void; templates: Array<{ id: string; name: string }>; chain: ChainKind }) {
+  const coin = nativeSymbolOf(chain);
+  const hint = nativeText(RULE_ACTIONS.find((x) => x.id === a.type)?.hint ?? '', chain);
   switch (a.type) {
     case 'buy':
-      return <input type="number" step="0.01" value={a.sol} onChange={(e) => set({ type: 'buy', sol: Number(e.target.value) })} className={inputCls} placeholder="SOL" />;
+      return <input type="number" step="0.01" value={a.sol} onChange={(e) => set({ type: 'buy', sol: Number(e.target.value) })} className={inputCls} placeholder={coin} />;
     case 'sell':
       return <input type="number" value={a.pct} onChange={(e) => set({ type: 'sell', pct: Number(e.target.value) })} className={inputCls} placeholder="% of what is held" />;
     case 'stop_loss':
@@ -618,14 +692,14 @@ function ActionParams({ a, set, templates }: { a: RuleAction; set: (a: RuleActio
         <div className="flex items-center gap-2">
           <select value={a.basis} onChange={(e) => set({ ...a, basis: e.target.value as 'mcap_usd' | 'price_sol' })} className={selectCls}>
             <option value="mcap_usd">market cap USD</option>
-            <option value="price_sol">price SOL</option>
+            <option value="price_sol">price {coin}</option>
           </select>
           <input type="number" step="any" value={a.value} onChange={(e) => set({ ...a, value: Number(e.target.value) })} className={cls(inputCls, 'w-32')} placeholder="level" />
           {a.type === 'limit_buy' ? (
             <>
               <span className="text-body text-krypt-muted">→ buy</span>
               <input type="number" step="0.01" value={a.sol} onChange={(e) => set({ ...a, sol: Number(e.target.value) })} className={cls(inputCls, 'w-24')} />
-              <span className="text-body text-krypt-muted">SOL</span>
+              <span className="text-body text-krypt-muted">{coin}</span>
             </>
           ) : (
             <>
@@ -763,7 +837,7 @@ function VariableGuide({ guideChain = 'solana' as ChainKind }: { guideChain?: Ch
   return (
     <div className="space-y-3 text-body">
       <div className="text-krypt-muted">
-        Always present: <code className="text-white/80">mint</code>, <code className="text-white/80">symbol</code>, <code className="text-white/80">name</code>, <code className="text-white/80">priceHistory</code> (SOL, oldest first).
+        Always present: <code className="text-white/80">mint</code>, <code className="text-white/80">symbol</code>, <code className="text-white/80">name</code>, <code className="text-white/80">priceHistory</code> ({nativeSymbolOf(guideChain)}, oldest first).
       </div>
       {groups
         .filter(([scope]) => RULE_FIELDS.some((f) => f.scope === scope && fieldAvailableOn(f.id, guideChain)))
@@ -777,8 +851,8 @@ function VariableGuide({ guideChain = 'solana' as ChainKind }: { guideChain?: Ch
                   <td className="py-1 pr-2 font-mono text-white/85 whitespace-nowrap">{f.id}</td>
                   <td className="py-1 pr-2 text-krypt-muted/80 whitespace-nowrap">{f.kind}</td>
                   <td className="py-1 text-krypt-muted">
-                    {f.hint || f.label}
-                    {f.unit ? ` · ${f.unit}` : ''}
+                    {nativeFieldLabel(f.hint || f.label, guideChain, nativeSymbolOf(guideChain))}
+                    {f.unit ? ` · ${nativeFieldLabel(f.unit, guideChain, nativeSymbolOf(guideChain))}` : ''}
                     <span className="text-krypt-muted/60"> · null when {f.nullWhen}</span>
                   </td>
                 </tr>
@@ -793,11 +867,11 @@ function VariableGuide({ guideChain = 'solana' as ChainKind }: { guideChain?: Ch
 
 // ── Log ───────────────────────────────────────────────────────────────
 
-function ScriptLog({ lines, stats }: { lines: ScriptLogLine[]; stats?: ScriptStats }) {
+function ScriptLog({ lines, stats, coin }: { lines: ScriptLogLine[]; stats?: ScriptStats; coin: string }) {
   return (
     <Section
       title="Log"
-      description={stats ? `Last run ${fmtAgo(stats.lastRunAt)} · today ${stats.buysToday} buys, ${stats.sellsToday} sells, ${stats.realizedSolToday >= 0 ? '+' : ''}${stats.realizedSolToday.toFixed(4)} SOL realised · ${stats.openCount} open · fired on ${stats.firedMints} tokens${stats.lastError ? ` · last error: ${stats.lastError}` : ''}` : ''}
+      description={stats ? `Last run ${fmtAgo(stats.lastRunAt)} · today ${stats.buysToday} buys, ${stats.sellsToday} sells, ${stats.realizedSolToday >= 0 ? '+' : ''}${stats.realizedSolToday.toFixed(4)} ${coin} realised · ${stats.openCount} open · fired on ${stats.firedMints} tokens${stats.lastError ? ` · last error: ${stats.lastError}` : ''}` : ''}
     >
       <Card padded={false} className="max-h-[320px] overflow-auto">
         {lines.length === 0 ? (

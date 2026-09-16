@@ -71,6 +71,7 @@ const api = {
   rpc: {
     credits: () => ipcRenderer.invoke('rpc:credits'),
     health: () => ipcRenderer.invoke('rpc:health'),
+    probe: () => ipcRenderer.invoke('rpc:probe'),
     resetCredits: () => ipcRenderer.invoke('rpc:resetCredits'),
   },
   bots: {
@@ -283,6 +284,7 @@ const api = {
     sell: (chain: EvmChainKind, address: string, pct: number, simulateOnly: boolean) => ipcRenderer.invoke('evm:sell', chain, address, pct, simulateOnly),
     /** Get out of everything on this chain. Never simulated. */
     sellAll: (chain: EvmChainKind) => ipcRenderer.invoke('evm:sellAll', chain),
+    summaries: (chain: EvmChainKind, addresses: string[]) => ipcRenderer.invoke('evm:summaries', chain, addresses),
     holdings: (chain: EvmChainKind) => ipcRenderer.invoke('evm:holdings', chain),
     portfolio: (chain: EvmChainKind) => ipcRenderer.invoke('evm:portfolio', chain),
     fills: (chain: EvmChainKind) => ipcRenderer.invoke('evm:fills', chain),

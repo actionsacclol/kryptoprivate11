@@ -1,7 +1,8 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { Sidebar, type RouteId } from './Sidebar';
 import type { WorkspaceId } from '../workspaces';
-import { Ticker } from './viz/Ticker';
+import { TokenTabs } from './TokenTabs';
+import { tabKey, type TokenTab } from '../state/tokenTabs';
 import { useAppState } from '../state/AppStateProvider';
 import { loadPinned, subscribePinned } from '../panels/pinned';
 import { useTerminal } from '../state/TerminalProvider';
@@ -83,7 +84,56 @@ export const SidebarLive = memo(function SidebarLive({
   );
 });
 
-export const TickerLive = memo(function TickerLive() {
-  const { launches } = useAppState();
-  return <Ticker launches={launches} />;
+/**
+ * The token tab bar, with its labels resolved here rather than in the root.
+ *
+ * A tab is stored as an address plus whatever symbol the click that opened
+ * it happened to know. Most openers know one; some (a pin restored at boot,
+ * a notification, a pasted address) do not. This is the same lookup the
+ * sidebar already does for the open token, in the same place and for the
+ * same reason: `columns` is replaced on every Discover poll, so the
+ * subscription belongs in a leaf and not in `App`, where it would re-render
+ * every route on each tick.
+ *
+ * A symbol it resolves is handed back up once, so the tab keeps its name
+ * after the token drops out of the columns — and across a restart.
+ */
+export const TokenTabsLive = memo(function TokenTabsLive({
+  tabs,
+  activeKey,
+  onSelect,
+  onClose,
+  onCloseAll,
+  onResolve,
+}: {
+  tabs: TokenTab[];
+  activeKey: string | null;
+  onSelect: (t: TokenTab) => void;
+  onClose: (key: string) => void;
+  onCloseAll: () => void;
+  onResolve: (key: string, symbol: string) => void;
+}) {
+  const { columns } = useTerminal();
+  const symbolOf = useMemo(() => {
+    const by = new Map<string, string>();
+    for (const col of Object.values(columns)) {
+      for (const r of col.rows) if (r.symbol && !by.has(r.mint)) by.set(r.mint, r.symbol);
+    }
+    return by;
+  }, [columns]);
+
+  const named = useMemo(
+    () => tabs.map((t) => (t.symbol ? t : { ...t, symbol: symbolOf.get(t.mint) })),
+    [tabs, symbolOf],
+  );
+
+  // Report upward, so the name survives the row leaving the columns. In an
+  // effect rather than during render: this writes state that App owns.
+  useEffect(() => {
+    for (const t of named) {
+      if (t.symbol && !tabs.find((x) => tabKey(x) === tabKey(t))?.symbol) onResolve(tabKey(t), t.symbol);
+    }
+  }, [named, tabs, onResolve]);
+
+  return <TokenTabs tabs={named} activeKey={activeKey} onSelect={onSelect} onClose={onClose} onCloseAll={onCloseAll} />;
 });

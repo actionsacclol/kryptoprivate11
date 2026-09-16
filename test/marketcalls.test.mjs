@@ -232,6 +232,22 @@ function install() {
         const mint = decodeURIComponent(p.split('/').pop());
         return json({ pairs: [dsPair(mint, mintIndex.get(mint) ?? 0)] });
       }
+      // `/tokens/v1/{chain}/{a,b,c}` — Solana's batch and, since 2026-09-15,
+      // every other chain's. Counted per chain so the EVM watchlist batch is
+      // measurable without disturbing the Solana numbers above.
+      if (/^\/tokens\/v1\/[^/]+\//.test(p) && !p.startsWith('/tokens/v1/solana/')) {
+        const chain = p.split('/')[3];
+        const addrs = decodeURIComponent(p.slice(`/tokens/v1/${chain}/`.length)).split(',').filter(Boolean);
+        bump('ds:chainbatch');
+        return json(addrs.slice(0, 30).map((a, i) => ({ ...dsPair(a, i), chainId: chain })));
+      }
+      if (p.startsWith('/token-pairs/v1/')) {
+        bump('ds:chainsingle');
+        const parts = p.split('/');
+        const chain = parts[3];
+        const addr = decodeURIComponent(parts[4] ?? '');
+        return json([{ ...dsPair(addr, 0), chainId: chain }]);
+      }
       if (p.startsWith('/tokens/v1/solana/')) {
         const mints = decodeURIComponent(p.slice('/tokens/v1/solana/'.length)).split(',').filter(Boolean);
         bump('ds:batch');
@@ -512,6 +528,45 @@ test('the Discover poll is gated on document visibility', () => {
   assert.ok(poll.includes('document.hidden'), 'the poll checks document.hidden');
   assert.ok(poll.includes("addEventListener('visibilitychange'"), 'and reloads when the window comes back');
   assert.ok(poll.includes("removeEventListener('visibilitychange'"), 'and removes the listener on teardown');
+});
+
+
+// ── The EVM watchlist batch (2026-09-15) ──────────────────────────────
+//
+// The Solana half of the watchlist has been batched since 2026-09-08; each
+// pinned EVM token still cost its own DexScreener round trip, every twenty
+// seconds. `tokenPairsOnMany` warms the very key `tokenPairsOn` reads, which
+// is the whole mechanism — if the keys ever stop matching, the batch becomes
+// a request that saves nothing and nobody would see it.
+
+test('tokenPairsOnMany warms the very cache tokenPairsOn reads', async () => {
+  http.clearCache();
+  resetCounts();
+  const addrs = Array.from({ length: 5 }, (_, i) => `0x${String(i + 1).repeat(40).slice(0, 40)}`);
+  await ds.tokenPairsOnMany('bsc', addrs);
+  assert.equal(n('ds:chainbatch'), 1, 'one request for the whole list');
+  for (const a of addrs) {
+    const pairs = await ds.tokenPairsOn('bsc', a);
+    assert.ok(pairs.length > 0, `${a} still answers per token`);
+  }
+  assert.equal(n('ds:chainsingle'), 0, 'from the warmed cache, with no extra request');
+});
+
+test('a single token is not batched — the one-token route is already one request', async () => {
+  http.clearCache();
+  resetCounts();
+  await ds.tokenPairsOnMany('bsc', ['0x' + 'a'.repeat(40)]);
+  assert.equal(n('ds:chainbatch'), 0, 'a batch of one would be a second round trip, not a saving');
+});
+
+test('the chain batch is capped like the Solana one, and casing does not split it', async () => {
+  http.clearCache();
+  resetCounts();
+  const addrs = Array.from({ length: 31 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, 'b')}`);
+  // The same address in two casings is ONE token: an 0x address is
+  // case-insensitive and a split would buy the same row twice.
+  await ds.tokenPairsOnMany('bsc', [...addrs, addrs[0].toUpperCase().replace('0X', '0x')]);
+  assert.equal(n('ds:chainbatch'), 2, '31 tokens is two chunks of at most 30');
 });
 
 // ── Go ────────────────────────────────────────────────────────────────

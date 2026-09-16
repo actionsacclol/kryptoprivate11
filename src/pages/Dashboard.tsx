@@ -199,6 +199,20 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
                     <span className="text-micro font-bold uppercase tracking-wider text-rose-300 px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30">live</span>
                   )}
                 </div>
+                {/* WHICH accounting this is, and since when.
+                    This panel shows two different sets of numbers — paper
+                    positions when idle, live-session counters when armed —
+                    and swaps between them the instant `liveActive` changes.
+                    To anyone watching, that swap is indistinguishable from
+                    the numbers being wiped, which is what was reported on
+                    2026-09-16. Both resets are deliberate (arming
+                    rebaselines the loss breakers on purpose), so the fix is
+                    to SAY which one you are looking at. */}
+                <div className="mt-0.5 text-label text-krypt-muted/60">
+                  {status.liveActive
+                    ? `Live session${status.liveSessionStartedAt ? ` · started ${fmtDur(Date.now() - status.liveSessionStartedAt)} ago` : ''}${status.liveSessionReason ? ` when ${status.liveSessionReason}` : ''}`
+                    : 'Paper session · research positions, not real money'}
+                </div>
                 <NumberTicker
                   value={livePnl}
                   format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(4)} SOL`}

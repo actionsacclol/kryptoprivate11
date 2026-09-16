@@ -23,6 +23,9 @@ import {
   defaultRules,
   defaultScript,
   describeRules,
+  describeAction,
+  nativeText,
+  nativeFieldLabel,
   evaluateRules,
   positionPnl,
   validateRules,
@@ -1092,6 +1095,61 @@ test('bot.order cannot arm more buys than the budget allows, however fast it is 
   const armed = h.calls.orders.filter((o) => o.kind === 'buy_on_migration');
   assert.equal(armed.length, 1, `the budget is 1 buy a day, ${armed.length} were armed`);
   assert.equal(auto._runtimeOf(s.id).buysToday, 1, 'and exactly one was reserved');
+});
+
+// ── A script's money is its CHAIN's money ─────────────────────────────
+//
+// The rule model stores every money field with a `Sol` id, because the ids
+// are a saved rule's schema and renaming them would break every stored
+// script. The LABELS were supposed to follow the chain — `nativeFieldLabel`
+// was written for exactly that on 2026-09-11 and then never called anywhere.
+// So a script on Robinhood Chain described itself in SOL at every turn, and
+// a user reported believing their EVM script was trading SOL (2026-09-15).
+
+test('a rule describes itself in the coin its chain actually spends', () => {
+  const r = { ...defaultRules('robinhood'), actions: [{ type: 'buy', sol: 0.02 }] };
+  assert.match(describeRules(r, 'robinhood'), /buy 0\.02 ETH/, describeRules(r, 'robinhood'));
+  assert.match(describeRules(r, 'bnb'), /buy 0\.02 BNB/);
+  assert.match(describeRules(r, 'solana'), /buy 0\.02 SOL/, 'and Solana is untouched');
+  assert.match(describeRules(r), /buy 0\.02 SOL/, 'the default stays Solana for every existing caller');
+});
+
+test('an action describes itself in the chain coin, on every money-carrying kind', () => {
+  assert.equal(describeAction({ type: 'buy', sol: 0.5 }, 'robinhood'), 'buy 0.5 ETH');
+  assert.equal(describeAction({ type: 'limit_buy', sol: 0.5, basis: 'price_sol', value: 2 }, 'bnb'), 'limit buy 0.5 BNB at 2 BNB');
+  assert.equal(describeAction({ type: 'limit_sell', pct: 50, basis: 'mcap_usd', value: 1000 }, 'bnb'), 'limit sell 50% at $1000 mcap', 'a USD level stays USD');
+  assert.equal(describeAction({ type: 'sell', pct: 50 }, 'robinhood'), 'sell 50%', 'a percentage has no coin in it');
+});
+
+test('a condition label follows the chain, while the field ID does not move', () => {
+  const f = RULE_FIELDS.find((x) => x.id === 'priceSol');
+  assert.equal(f.label, 'Price (SOL)', 'the stored model is unchanged');
+  assert.equal(nativeFieldLabel(f.label, 'robinhood', 'ETH'), 'Price (ETH)');
+  assert.equal(nativeFieldLabel(f.label, 'solana', 'SOL'), 'Price (SOL)');
+  // The id is a saved rule's schema: renaming it would break every script.
+  assert.equal(f.id, 'priceSol');
+});
+
+test('prose follows the chain too — the sentence someone reads before arming', () => {
+  const line = 'Live spends real SOL on its own.';
+  assert.equal(nativeText(line, 'robinhood'), 'Live spends real ETH on its own.');
+  assert.equal(nativeText(line, 'bnb'), 'Live spends real BNB on its own.');
+  assert.equal(nativeText(line, 'solana'), line);
+  // Only the whole word. "SOLANA" and "sold" must survive intact.
+  assert.equal(nativeText('SOLANA sold 5 SOL', 'bnb'), 'SOLANA sold 5 BNB');
+});
+
+test('a save refused for size says the refusal in the right coin', () => {
+  const s = {
+    ...defaultScript('rules', 'robinhood'),
+    name: 'Big',
+    mode: 'live',
+    rules: { ...defaultRules('robinhood'), conditions: [], actions: [{ type: 'buy', sol: 9 }] },
+  };
+  const v = validateScript(s, { maxLiveSol: 1 });
+  assert.equal(v.ok, false);
+  assert.match(v.message, /ETH/, v.message);
+  assert.ok(!/SOL/.test(v.message), `no SOL in an ETH script's refusal: ${v.message}`);
 });
 
 async function run() {

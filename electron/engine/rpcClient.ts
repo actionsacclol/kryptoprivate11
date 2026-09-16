@@ -883,6 +883,11 @@ export interface TokenBalanceEntry {
 }
 
 export interface RawTransaction {
+  /** Unix SECONDS the block landed, or null when the node has pruned it.
+   *  The only honest answer to "when did the leader actually trade?" — a
+   *  copier that times a trade by when it READ it cannot tell a fresh sell
+   *  from one it recovered forty minutes later (2026-09-15). */
+  blockTime?: number | null;
   meta: {
     err: unknown;
     logMessages?: string[];

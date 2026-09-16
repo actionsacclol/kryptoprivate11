@@ -10,6 +10,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { resolveRpc, type AppSettings, type EngineEvent, type IpcResult } from '@shared/types';
+import * as rpcProbe from './engine/rpcProbe';
+import * as kryptoHolding from './engine/kryptoHolding';
+import * as evmTrade from './evm/trade';
+import { KRYPTO_FEE_WAIVER_TOKENS } from '@shared/krypto';
 import * as store from './system/settings-store';
 import { validateSettingsPatch } from './system/settingsValidation';
 import type { AiAnalysis } from '@shared/ai';
@@ -214,7 +218,7 @@ const isAddress = (v: unknown): v is string => typeof v === 'string' && BASE58_A
 /** The Solana endpoint a bridge reads and sends on — the same one trades use. */
 export function bridgeDeps(): bridge.BridgeDeps {
   const s = store.load();
-  return { httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl };
+  return { httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl };
 }
 
 /**
@@ -842,6 +846,15 @@ export function registerIpc(): void {
     return ok('Accepted', { version: TERMS_VERSION, acceptedAt: row.acceptedAt, written });
   });
 
+  // What this install holds of $KRYPTO, and whether that waives Krypt's fee.
+  // A cached reading, the same one the signer uses — the two must never be
+  // able to disagree, or the app would show "waived" and charge anyway.
+  ipcMain.handle('krypto:holding', async (_e, refresh: unknown) => {
+    if (refresh === true) await kryptoHolding.refresh();
+    const h = kryptoHolding.current();
+    return ok('ok', { ...h, waived: kryptoHolding.feeWaived(), thresholdTokens: KRYPTO_FEE_WAIVER_TOKENS });
+  });
+
   ipcMain.handle('rpc:credits', () => ok('ok', heliusBudget.current()));
 
   // Whether an endpoint is currently refusing our key. Polled by the panel
@@ -849,6 +862,31 @@ export function registerIpc(): void {
   ipcMain.handle('rpc:health', async () => {
     const m = await import('./engine/rpcClient');
     return ok('ok', { rejected: m.rpcCredentialsRejected() });
+  });
+
+  // Measure the endpoints this install is configured to use, so a paid one
+  // can be told from a slow one. A BUTTON, never a poll: it is five requests
+  // per endpoint against the wire with none of the client's parks or buckets
+  // in the way, which is the point of it and also why it must not run itself.
+  ipcMain.handle('rpc:probe', async () => {
+    const s = store.load();
+    const r = resolveRpc(s.rpc);
+    const seen = new Set<string>();
+    const endpoints: Array<{ label: string; url: string }> = [];
+    const add = (label: string, url: string | undefined): void => {
+      const u = (url ?? '').trim();
+      if (!u || seen.has(u)) return;
+      seen.add(u);
+      endpoints.push({ label, url: u });
+    };
+    // Named by the JOB each one does, because that is what a user is
+    // deciding about — not by which field it came from.
+    add('Execution (buys, sells, confirmations)', r.execHttpUrl);
+    add('Everything else (mint checks, balances, holders)', r.httpUrl);
+    if (endpoints.length === 0) return fail('No HTTP endpoint is configured');
+    const owner = wallet.publicKey() || undefined;
+    const results = await rpcProbe.probeAll(endpoints, owner);
+    return ok('ok', results);
   });
 
   ipcMain.handle('rpc:resetCredits', () => {
@@ -1041,7 +1079,7 @@ export function registerIpc(): void {
     const s = store.load();
     return {
       cfg: s.launch,
-      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
       activeSolanaWalletId: wallet.list().find((w) => w.active)?.id ?? null,
       activeEvmWalletId: evmWallet.list('robinhood').find((w) => w.active)?.id ?? null,
       // The EVM referrer, not the Solana one: this only reaches
@@ -1074,7 +1112,7 @@ export function registerIpc(): void {
   const swapDeps = (): swap.SwapDeps => {
     const s = store.load();
     return {
-      httpUrl: s.rpc.heliusHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
       referrer: s.referrer,
       live: getEngine().liveState().armed && s.execution.liveEnabled,
     };
@@ -1258,7 +1296,7 @@ export function registerIpc(): void {
     const key = wallet.publicKeyOf(id);
     if (!key) return fail('The launch wallet no longer exists.');
     try {
-      return ok('ok', await pumpFees.readCreatorFees(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, key));
+      return ok('ok', await pumpFees.readCreatorFees(s.rpc.execHttpUrl ?? s.rpc.httpUrl, key));
     } catch (err) {
       return fail(`Could not read creator fees: ${safeErr(err)}`);
     }
@@ -1272,7 +1310,7 @@ export function registerIpc(): void {
     const id = s.launch.walletId;
     if (!id) return fail('No Solana launch wallet is set.');
     try {
-      const r = await pumpFees.claimCreatorFees(s.rpc.heliusHttpUrl ?? s.rpc.httpUrl, id);
+      const r = await pumpFees.claimCreatorFees(s.rpc.execHttpUrl ?? s.rpc.httpUrl, id);
       return r.ok ? ok(r.message, r) : fail(r.message);
     } catch (err) {
       return fail(`Claim error: ${safeErr(err)}`);
@@ -1565,6 +1603,22 @@ export function registerIpc(): void {
       return fail(`Sell error: ${safeErr(err)}`);
     }
   });
+  // Several pinned tokens at once. One DexScreener request for the whole
+  // list instead of one per token — the watchlist polls every 20 s, and the
+  // Solana half has been batched since 2026-09-08.
+  ipcMain.handle('evm:summaries', async (_e, chain: unknown, addresses: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    if (!Array.isArray(addresses) || addresses.length > 60 || !addresses.every((a) => typeof a === 'string' && isEvmAddress(a))) {
+      return fail('Invalid token list');
+    }
+    try {
+      return ok('ok', await evmRail.summaries(c, addresses as string[]));
+    } catch (err) {
+      return fail(`Summaries failed: ${safeErr(err)}`);
+    }
+  });
+
   ipcMain.handle('evm:holdings', async (_e, chain: unknown) => {
     const c = chainOf(chain);
     if (!c) return fail('Unknown chain');
@@ -1740,7 +1794,7 @@ export function registerIpc(): void {
       resolved.push({ publicKey: pk, lamports });
     }
     if (totalLamports > lab.MAX_FUND_BATCH_LAMPORTS) return fail(`Fund at most ${lab.MAX_FUND_BATCH_LAMPORTS / 1e9} SOL per batch`);
-    const httpUrl = resolveRpc(store.load().rpc).heliusHttpUrl ?? store.load().rpc.httpUrl;
+    const httpUrl = resolveRpc(store.load().rpc).execHttpUrl ?? store.load().rpc.httpUrl;
     const r = await fund.fundWallets(httpUrl, resolved, fromId);
     logger.info(`lab fund: ${r.message}${r.signature ? ` ${r.signature.slice(0, 12)}…` : ''}`);
     const data = { signature: r.signature ?? '', sentSol: r.sentLamports / 1e9, count: r.count };
@@ -1750,7 +1804,7 @@ export function registerIpc(): void {
   ipcMain.handle('lab:collect', async (_e, walletIds: unknown, toWalletId: unknown) => {
     if (!getEngine().liveState().armed || !store.load().execution.liveEnabled) return fail('Arm live execution first — collecting moves real SOL');
     if (!Array.isArray(walletIds) || walletIds.length === 0 || walletIds.length > 20 || !walletIds.every((x) => typeof x === 'string')) return fail('Pick 1–20 wallets');
-    const httpUrl = resolveRpc(store.load().rpc).heliusHttpUrl ?? store.load().rpc.httpUrl;
+    const httpUrl = resolveRpc(store.load().rpc).execHttpUrl ?? store.load().rpc.httpUrl;
     const toId = typeof toWalletId === 'string' && toWalletId ? toWalletId : undefined;
     if (toId && !wallet.list().some((w) => w.id === toId)) return fail('The wallet to collect to is not one of yours');
     const r = await fund.collectToActive(httpUrl, walletIds as string[], toId);
@@ -2380,15 +2434,46 @@ export function registerIpc(): void {
   // on Robinhood Chain and BNB. Prices come from what the Observatory last
   // saw (its feed is the leader watcher on these chains), facts from the
   // rail's summary, and the gate is the chain's own arm switch.
+  // The $KRYPTO fee waiver covers the EVM rails too. Injected here because
+  // `evm/trade.ts` is kept free of the Solana half of the app.
+  evmTrade.setFeeWaiver(() => kryptoHolding.feeWaived());
+
   getEngine().setEvmCopy({
     buy: async (chain, token, amountNative, walletId) => {
       const r = await evmRail.buy(chain, token, amountNative, false, { walletId });
       return { ok: r.ok, message: r.message, signature: r.hash ?? undefined, pending: r.stage === 'pending', spentSol: r.amountIn ? Number(BigInt(r.amountIn)) / 1e18 : undefined };
     },
-    sell: async (chain, token, pct, walletId) => {
-      const r = await evmRail.sell(chain, token, pct, false, { walletId });
+    // `amountRaw` wins over the percent in the rail, which is the point: a
+    // mirrored copy sell is sized from the base units the copy holds, not
+    // from a share of a balance that also contains hand-bought bags.
+    sell: async (chain, token, pct, walletId, amountRaw) => {
+      const r = await evmRail.sell(chain, token, pct, false, { walletId, amountRaw });
       return { ok: r.ok, message: r.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${r.message})` : r.message, signature: r.hash ?? undefined };
     },
+    // The three reads copy trading settles a position with: what this wallet
+    // holds, what a confirmed transaction moved, and — for a copy opened
+    // before quantities were tracked — the ledger's record of its buy.
+    tokensOf: (chain, token, walletId) => evmRail.tokensOf(chain, token, walletId),
+    fillTokens: (chain, hash) => evmRail.fillTokens(chain, hash),
+    buyFill: async (chain, token, atMs, walletId) => evmRail.buyFill(chain, token, atMs, walletId),
+    // A followed wallet on an EVM chain is seen ONLY through that chain's
+    // scanner poll — there is no per-wallet subscription here the way Solana
+    // has one. An armed copy config on a stopped scanner therefore watched
+    // nothing, silently (2026-09-15). Enabling one starts the feed it needs;
+    // `start` is idempotent and this never stops one the user started.
+    leaderFeed: (chain) => {
+      const st = evmScanner.status(chain);
+      return { running: st.running, lastPollAt: st.lastPollAt || null };
+    },
+    ensureLeaderFeed: (chain) => {
+      const r = evmScanner.start(chain);
+      return r.ok ? null : r.message;
+    },
+    // A leader's balance, so an EVM sell whose size the log did not carry can
+    // still be recovered exactly (`recoverFraction`). The bridge has declared
+    // this since the rail was generalised; nothing ever implemented it, so
+    // every such sell went unmirrored on both EVM chains.
+    holdingOf: (chain, owner, token) => evmRail.holdingOf(chain, owner, token),
     blocked: (chain) => {
       const s = store.load();
       if (!s.evm[chain].enabled) return `${EVM_CHAIN_META[chain].name} is switched off in Settings`;

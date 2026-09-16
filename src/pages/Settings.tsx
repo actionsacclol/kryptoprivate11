@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { ProbeResult as RpcProbeResult } from '../../electron/engine/rpcProbe';
 import { Card, GhostButton, Page, PrimaryButton, Section, Switch, TextInput } from '../components/common';
 import { MarketDataSettings } from '../components/terminal/MarketDataSettings';
 import { HotkeySettings } from '../components/terminal/HotkeySettings';
@@ -10,6 +11,8 @@ import { CreditMeter } from '../components/terminal/CreditMeter';
 import { RpcKeyWarning } from '../components/terminal/RpcKeyWarning';
 import { EvmSettingsCard } from '../components/terminal/EvmSettingsCard';
 import { feePctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
+import { KRYPTO_FEE_WAIVER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
+import { useKryptoWaiver } from '../state/useKryptoWaiver';
 import type { RecorderStats } from '../../electron/engine/recorder';
 
 // Measured 2026-08-30 by replaying E:/data/2026-07-25.jsonl (a 10 GB, 18.6 h
@@ -89,10 +92,12 @@ function RecorderStatsPanel({ enabled }: { enabled: boolean }) {
 export function SettingsPage() {
   const { settings, updateSettings, status } = useAppState();
   const toast = useToast();
+  const waiver = useKryptoWaiver();
   const [wss, setWss] = useState(settings.rpc.wssUrl);
   const [extraWss, setExtraWss] = useState((settings.rpc.extraWssUrls ?? []).join('\n'));
   const [heliusKey, setHeliusKey] = useState(settings.rpc.heliusApiKey ?? '');
   const [http, setHttp] = useState(settings.rpc.httpUrl);
+  const [fastHttp, setFastHttp] = useState(settings.rpc.fastHttpUrl ?? '');
   const [commitment, setCommitment] = useState(settings.rpc.commitment);
   const [dirInput, setDirInput] = useState(settings.recorderDir);
 
@@ -105,6 +110,7 @@ export function SettingsPage() {
     setExtraWss((settings.rpc.extraWssUrls ?? []).join('\n'));
     setHeliusKey(settings.rpc.heliusApiKey ?? '');
     setHttp(settings.rpc.httpUrl);
+    setFastHttp(settings.rpc.fastHttpUrl ?? '');
     setCommitment(settings.rpc.commitment);
   }, [settings.rpc]);
 
@@ -134,6 +140,14 @@ export function SettingsPage() {
       toast.error('HTTP URL must start with https://');
       return;
     }
+    // https only, and main checks the same thing: this one carries every live
+    // buy and sell, so an http:// paste that fell back to the public endpoint
+    // would be a speed setting doing the opposite of what it says.
+    const fast = fastHttp.trim();
+    if (fast && !fast.startsWith('https://')) {
+      toast.error('The execution endpoint must start with https://');
+      return;
+    }
     void updateSettings({
       rpc: {
         // Preserve fields this form does not edit (block-feed standby etc.);
@@ -145,6 +159,7 @@ export function SettingsPage() {
         heliusFeedSocket: settings.rpc.heliusFeedSocket ?? false,
         heliusMonthlyCredits: settings.rpc.heliusMonthlyCredits ?? 1_000_000,
         httpUrl: http.trim(),
+        fastHttpUrl: fast,
         commitment,
       },
     });
@@ -219,6 +234,18 @@ export function SettingsPage() {
             <div className="text-xs font-semibold uppercase tracking-wider text-krypt-muted mb-1.5">HTTP (account lookups)</div>
             <TextInput value={http} onChange={setHttp} placeholder="https://api.mainnet-beta.solana.com" />
           </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-krypt-muted mb-1.5">
+              Execution endpoint <span className="text-krypt-muted/50 normal-case tracking-normal">— optional, any provider</span>
+            </div>
+            <TextInput value={fastHttp} onChange={setFastHttp} placeholder="https://your-endpoint.example.com/?api-key=…" />
+            <div className="text-body text-krypt-muted/70 mt-1">
+              The same fast lane a Helius key buys, for a provider of your own — QuickNode, Triton, Shyft, your
+              own validator. Live buys, sells, confirmations, send-time fee estimates and template sampling go
+              here; mint checks, balances and holder reads stay on the HTTP endpoint above, so you are not
+              paying for the bulk traffic. Set, it wins over the Helius key. Empty, nothing changes.
+            </div>
+          </div>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold uppercase tracking-wider text-krypt-muted">Commitment</span>
@@ -238,6 +265,8 @@ export function SettingsPage() {
             </div>
             <PrimaryButton onClick={saveRpc}>Save RPC settings</PrimaryButton>
           </div>
+
+          <EndpointProbe />
 
           {/* ── the standby block feed ────────────────────────────────────
               It has been on by default since it was built and had no control
@@ -324,10 +353,30 @@ export function SettingsPage() {
           <p className="text-body leading-relaxed text-krypt-muted">
             {feesEnabled() ? (
               <>
-                Krypt takes <span className="text-white">{feePctLabel()} of each trade</span>, both sides — about half
-                what most memecoin terminals charge, where 1% is the going rate. It funds referral rewards and keeps
-                Krypt in development, and is charged in the same transaction as the trade itself. The launchpad&apos;s
-                own fee (about 1% per side on pump.fun) is separate and does not come to Krypt.
+                {/* Said in the present tense about THIS install: a holder
+                    reading "Krypt takes 0.5%" on the settings page while
+                    being charged nothing is being told something false about
+                    their own money. */}
+                {waiver.waived ? (
+                  <>
+                    <span className="text-emerald-300">Krypt charges you nothing on your trades right now</span> — you
+                    hold {waiver.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol},
+                    over the {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} the waiver needs. Without it Krypt takes{' '}
+                    {feePctLabel()} of each trade, both sides.{' '}
+                  </>
+                ) : (
+                  <>
+                    Krypt takes <span className="text-white">{feePctLabel()} of each trade</span>, both sides — about half
+                    what most memecoin terminals charge, where 1% is the going rate.{' '}
+                    <span className="text-white/80">
+                      Hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in this app and it
+                      is waived entirely.
+                    </span>{' '}
+                  </>
+                )}
+                It funds referral rewards and keeps Krypt in development, and is charged in the same transaction as the
+                trade itself. The launchpad&apos;s own fee (about 1% per side on pump.fun) is separate and does not come
+                to Krypt — the waiver cannot touch it.
               </>
             ) : (
               <>This build has no fee address configured, so Krypt charges nothing on your trades.</>
@@ -511,5 +560,73 @@ function BlocklistImporter() {
         <PrimaryButton onClick={onImport} disabled={busy}>{busy ? 'Importing…' : 'Import addresses'}</PrimaryButton>
       </div>
     </Card>
+  );
+}
+
+/**
+ * Time the endpoints this install actually uses.
+ *
+ * Custom RPC has been settable for a long time; what was missing was any way
+ * to tell whether it helped. Someone pastes a paid endpoint, sees no number
+ * change anywhere, and has to take it on faith. This is the number.
+ *
+ * A button, never a poll: it is five requests per endpoint straight at the
+ * wire with none of the client's pacing in the way, which is what makes it a
+ * measurement and also why it must not run itself.
+ */
+function EndpointProbe() {
+  const toast = useToast();
+  const [rows, setRows] = useState<RpcProbeResult[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async (): Promise<void> => {
+    setBusy(true);
+    const r = await window.krypt.rpc.probe();
+    setBusy(false);
+    if (!r.ok) {
+      toast.error(r.message);
+      return;
+    }
+    setRows(r.data ?? []);
+  };
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-krypt-muted">Endpoint speed</div>
+          <div className="text-body text-krypt-muted/70 mt-0.5">
+            Five round trips to each endpoint you have configured, saved settings only. The median is what an
+            order meets; the slot says whether a fast answer is a fresh one.
+          </div>
+        </div>
+        <GhostButton onClick={() => void run()} disabled={busy} className="!py-1.5 !px-3 text-xs flex-shrink-0">
+          {busy ? 'Measuring…' : 'Measure'}
+        </GhostButton>
+      </div>
+      {rows && rows.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {rows.map((r) => (
+            <div key={`${r.label}:${r.host}`} className="font-mono text-body">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="text-white/85 truncate">{r.label}</span>
+                <span className={r.ok ? 'text-white' : 'text-rose-300'}>
+                  {/* Honest null: an endpoint that did not answer has no time,
+                      and a 0 there would read as instant. */}
+                  {r.medianMs === null ? '—' : `${r.medianMs} ms`}
+                  {r.bestMs !== null && r.bestMs !== r.medianMs ? <span className="text-krypt-muted/60"> (best {r.bestMs})</span> : null}
+                </span>
+              </div>
+              <div className="text-label text-krypt-muted/60 truncate">
+                {r.host}
+                {r.behindSlots !== null && r.behindSlots > 1 ? ` · ${r.behindSlots} slots behind the freshest` : ''}
+                {r.servesTokenAccounts === false ? ' · refuses holder and balance reads' : ''}
+                {r.message && r.message !== 'ok' ? ` · ${r.message}` : ''}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

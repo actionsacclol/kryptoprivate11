@@ -28,7 +28,7 @@ import {
   type CopyTrade,
   type CopyWatchStatus,
   type LeaderRoundTrip,
-  type LeaderStats, chainOf } from '@shared/copytrade';
+  type LeaderStats, chainOf, isDustRemainder, rawOf, uiTokens } from '@shared/copytrade';
 import { FEE_BPS } from '@shared/fees';
 import * as recorder from './recorder';
 
@@ -56,6 +56,12 @@ export interface CopyExecResult {
   spentSol?: number;
   /** The fill price in SOL per token, when the host knows it. */
   fillPriceSol?: number;
+  /** Base units the fill moved, when the host already knows them. Usually it
+   *  does not — reconciliation is a round trip behind the broadcast — and
+   *  `fillTokens` is then the way to ask for the number once it exists. */
+  filledRaw?: string;
+  /** Decimals for `filledRaw`. */
+  tokenDecimals?: number;
 }
 
 /** Per-execution overrides. A host free to ignore them still type-checks. */
@@ -66,6 +72,18 @@ export interface CopyExecOpts {
   walletId?: string;
   /** The chain the copy goes out on; absent = Solana. */
   chain?: ChainKind;
+  /**
+   * Sell EXACTLY this many base units (2026-09-15).
+   *
+   * `sell` takes a percentage of the whole token account, which is the wrong
+   * unit for a mirror: the copier knows how many tokens the copy holds, and
+   * converting that to a percentage of a balance that includes other bags —
+   * and then to an integer — is where the quantity went missing. A host that
+   * honours this sizes from the number; one that cannot is free to ignore it
+   * and use `pct`, which is always passed alongside as the best percentage
+   * equivalent the copier could compute.
+   */
+  tokensRaw?: string;
 }
 
 export interface CopyHost {
@@ -121,8 +139,47 @@ export interface CopyHost {
   log(level: 'info' | 'warn' | 'error', line: string): void;
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   changed(): void;
-  /** The wallet watcher's per-wallet status, for the snapshot. */
+  /**
+   * Base units of `mint` the wallet this config signs with holds RIGHT NOW,
+   * with the mint's decimals. Null when it cannot be read.
+   *
+   * The chain is the only authority on what is actually there. It sizes an
+   * exit, it settles one, and it is what the leftover sweep compares our
+   * book against. An unreadable balance is never zero and never "all of it".
+   */
+  walletTokens?(mint: string, opts?: CopyExecOpts): Promise<{ raw: string; decimals: number } | null>;
+  /**
+   * Base units a CONFIRMED fill moved, once the chain has been read for it.
+   *
+   * May wait for reconciliation — the caller is always off the hot path —
+   * and answers null when the signature never settles. Null is "I do not
+   * know how much moved", which leaves the copy's quantity untouched rather
+   * than guessed.
+   */
+  fillTokens?(signature: string, opts?: CopyExecOpts): Promise<{ raw: string; decimals: number } | null>;
+  /**
+   * The confirmed BUY of `mint` this install made around `atMs`, in base
+   * units — the ledger's own record of a copy whose signature we never kept.
+   *
+   * Only the host can answer it: the ledger knows what this install actually
+   * traded, and with which wallet. It must REFUSE an ambiguous match rather
+   * than pick one, because the number it returns goes on to size a real
+   * sell, and "unknown" already has a safe meaning everywhere below.
+   */
+  buyFill?(mint: string, atMs: number, opts?: CopyExecOpts): Promise<{ raw: string; decimals: number } | null>;
+  /** The wallet watcher's per-wallet status, for the snapshot. Solana only:
+   *  that is the rail with a subscription per wallet. */
   watchStatus?(): Record<string, CopyWatchStatus>;
+  /**
+   * Is the leader feed for this chain actually running?
+   *
+   * Solana watches a wallet directly, one subscription each. The EVM chains
+   * have no such thing — a followed wallet there is seen only through that
+   * chain's SCANNER poll, which the user starts. An armed config on a
+   * stopped scanner is a follower that watches nothing, and until 2026-09-15
+   * the panel had no way to say so. Null = the host cannot tell.
+   */
+  leaderFeed?(chain: ChainKind): { running: boolean; lastPollAt: number | null } | null;
 }
 
 let host: CopyHost | null = null;
@@ -404,13 +461,32 @@ export function snapshot(): CopySnapshot {
   const leaderStats: Record<string, LeaderStats> = {};
   for (const w of new Set(configs.map((c) => c.wallet))) leaderStats[w] = leaderStatsFor(w);
   const blocked = host?.liveBlockedReason() ?? null;
+  // Solana wallets come from the watcher, one subscription each. An EVM
+  // leader is seen through that chain's scanner poll instead, so its status
+  // is the FEED's — and a config whose feed is off needs to say that rather
+  // than render nothing, which is what it did until 2026-09-15.
+  const watch: Record<string, CopyWatchStatus> = { ...(host?.watchStatus?.() ?? {}) };
+  for (const c of configs) {
+    const chain = chainOf(c);
+    if (chain === 'solana' || watch[c.wallet]) continue;
+    const feed = host?.leaderFeed?.(chain) ?? null;
+    if (!feed) continue;
+    const book = leaderStats[c.wallet];
+    watch[c.wallet] = {
+      state: feed.running ? (feed.lastPollAt === null ? 'connecting' : 'watching') : 'off',
+      lastSeenAt: feed.lastPollAt,
+      lastSwapAt: book?.lastTradeAt ?? null,
+      seen: 0,
+      swaps: (book?.buys ?? 0) + (book?.sells ?? 0),
+    };
+  }
   return {
     configs: all(),
     stats,
     recent: trades.slice(0, 100).map((t) => ({ ...t })),
     liveExecutable: blocked === null,
     liveBlockedReason: blocked,
-    watch: host?.watchStatus?.() ?? {},
+    watch,
     leaders: leaderStats,
     loadFailure,
   };
@@ -707,7 +783,117 @@ export interface WalletTrade {
   soldFraction?: number | null;
   /** Tokens moved, UI units (walletSwap). Absent = derived from the price. */
   tokens?: number;
+  /**
+   * When the LEADER's transaction actually landed, ms — not when we read it
+   * (2026-09-15).
+   *
+   * `at` is delivery time, so without this a trade recovered after a socket
+   * gap is indistinguishable from one that just happened, and the copier
+   * would enter a position the leader opened half an hour ago at today's
+   * price. Absent or null means "unknown", which is treated as NOW: every
+   * rail that cannot date a trade behaves exactly as it did before.
+   */
+  tradeAt?: number | null;
 }
+
+/**
+ * Clock skew between this machine and the chain, ms.
+ *
+ * Every rail now dates its trades from a CHAIN clock (a Solana block time, a
+ * pump event's `unix_timestamp`, an EVM block timestamp) and the staleness
+ * rules below compare that to `Date.now()`. On a machine whose clock is five
+ * minutes fast, every single trade would look five minutes old and copying
+ * would stop dead — a hard failure caused by something that has nothing to
+ * do with trading.
+ *
+ * So the ages are measured RELATIVE to the fastest delivery actually
+ * observed. The minimum of the recent samples is whatever is constant
+ * between us and the chain: clock offset plus the floor of the delivery
+ * path. Subtracting it leaves "how much later than usual did this arrive",
+ * which is the question the rules are really asking, and it self-corrects
+ * when the clock is fixed.
+ */
+const SKEW_SAMPLES = 64;
+/**
+ * An offset is only believed once it has been seen this many times.
+ *
+ * With one sample the minimum IS that sample, so a single trade recovered
+ * forty minutes late would define itself as "normal" and sail through the
+ * very rules built to catch it. Below the threshold the raw age is used, so
+ * an uncalibrated session errs toward refusing a stale trade rather than
+ * acting on one. The cost is the mirror image: a machine with a badly set
+ * clock refuses its first few copies and then corrects itself.
+ */
+const SKEW_MIN_SAMPLES = 5;
+const skewRing: number[] = [];
+
+/** Note one delivery's raw lateness. Called ONCE per trade, on arrival. */
+function noteSkew(t: WalletTrade, now = Date.now()): void {
+  if (typeof t.tradeAt !== 'number' || !(t.tradeAt > 0)) return;
+  skewRing.push(now - t.tradeAt);
+  if (skewRing.length > SKEW_SAMPLES) skewRing.shift();
+}
+
+/** The constant part, never negative — a clock BEHIND the chain gives
+ *  negative samples, and treating those as an offset would make everything
+ *  look late rather than early. */
+function clockSkewMs(): number {
+  if (skewRing.length < SKEW_MIN_SAMPLES) return 0;
+  let min = Infinity;
+  for (const v of skewRing) if (v < min) min = v;
+  return min > 0 ? min : 0;
+}
+
+/**
+ * How late the leader's trade is by the time we are acting on it, ms.
+ *
+ * Zero when the rail cannot date the trade — an unknown age must not refuse
+ * anything, or a chain without block times would stop copying altogether.
+ */
+function ageOf(t: WalletTrade, now = Date.now()): number {
+  if (typeof t.tradeAt !== 'number' || !(t.tradeAt > 0)) return 0;
+  return Math.max(0, now - t.tradeAt - clockSkewMs());
+}
+
+/** Test seam: what the module currently thinks the offset is. */
+export function _clockSkewMs(): number {
+  return clockSkewMs();
+}
+
+/** A readable "4 minutes"/"35 seconds" for a message a user reads. */
+function ageText(ms: number): string {
+  const s = Math.round(ms / 1_000);
+  if (s < 90) return `${s} second${s === 1 ? '' : 's'}`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m} minute${m === 1 ? '' : 's'}`;
+  const h = Math.round(m / 6) / 10;
+  return `${h} hour${h === 1 ? '' : 's'}`;
+}
+
+/**
+ * Past this, a mirrored SELL is on the record rather than in the market.
+ *
+ * The same number and the same reasoning as a parked exit resumed after a
+ * restart: "they sold, so get out" is worth honouring through a gap, and it
+ * is NOT worth honouring on an instruction old enough that mirroring it at
+ * today's price is a fresh trading decision nobody made. Reached now that a
+ * trade carries its real time — a sell recovered after a socket gap gets the
+ * same rule an interrupted one always had.
+ */
+const LATE_EXIT_MAX_AGE_MS = 15 * 60_000;
+/** Past this an exit says how late it was, on the record and in the toast. */
+const LATE_EXIT_NOTE_MS = 20_000;
+/**
+ * Past this, an ENTRY is refused.
+ *
+ * Copying a buy the leader made minutes ago is buying a different trade at a
+ * different price — the leg the 2026-09-13 report lost money on, and the
+ * reason `staleBuys` exists for the in-flight case. This is the general rule
+ * the in-flight one is a special case of. A configured delay is the user's
+ * own choice to be late, so it is added on rather than counted against them.
+ */
+const MAX_ENTRY_AGE_MS = 60_000;
+const entryAgeLimit = (c: CopyConfig): number => MAX_ENTRY_AGE_MS + Math.max(0, c.delayMs);
 
 /** Signatures already evaluated, newest last; bounded. */
 const handled = new Set<string>();
@@ -770,6 +956,14 @@ function routeSell(t: WalletTrade): SellRoute {
  */
 const supersededSkips = new Map<string, string>();
 
+/** Chains with at least one ENABLED config — the chains whose leader feed
+ *  has to be running for following to mean anything. */
+export function activeChains(): Set<ChainKind> {
+  const out = new Set<ChainKind>();
+  for (const c of configs) if (c.enabled) out.add(chainOf(c));
+  return out;
+}
+
 /** Mints with an open copy, paper or live — the engine keeps them priced. */
 export function openMints(chain?: ChainKind): string[] {
   return [...new Set(trades.filter((t) => t.state === 'open' && (chain === undefined || (t.chain ?? 'solana') === chain)).map((t) => t.mint))];
@@ -793,6 +987,10 @@ export function onWalletTrade(t: WalletTrade): void {
 
   const route: SellRoute = t.isBuy ? (alreadyHandled(t.signature) ? 'drop' : 'new') : routeSell(t);
   if (route === 'drop') return;
+  // One sample per delivery, before anything below asks how late it is — so
+  // the very first trade of a session measures zero against itself and is
+  // never refused for an offset nothing has calibrated yet.
+  noteSkew(t);
 
   if (route === 'new') {
     // Their record first: scored whatever the configs below decide. An
@@ -876,7 +1074,7 @@ const restoredExits = new Map<string, WalletTrade>();
  * Past the window the exit is not silently dropped either — it is recorded
  * as skipped, saying what it was and that the position is still held.
  */
-const PENDING_EXIT_MAX_AGE_MS = 15 * 60_000;
+const PENDING_EXIT_MAX_AGE_MS = LATE_EXIT_MAX_AGE_MS;
 
 const flightKey = (configId: string, mint: string): string => `${configId}:${mint}`;
 
@@ -1044,11 +1242,333 @@ async function recoverFraction(t: WalletTrade, h: CopyHost): Promise<number | nu
   return f;
 }
 
+// ── Quantities ────────────────────────────────────────────────────────
+//
+// Everything above this line sizes a copy in SOL. A mirrored sell cannot
+// be. `h.sell` takes a percentage of the whole token account, and the
+// percentage the copier used to send was the leader's fraction scaled by
+// this config's share of what the WALLET PAID for the bag. A cost share and
+// a token share are only the same number when every buy filled at the same
+// price, which is never — so the sell went out the wrong size, and the book
+// wrote the leader's fraction down as done regardless.
+//
+// A user's NON copy is the whole bug in one line: the exit was recorded as
+// 100 %, the request sold 52 % of the remaining tokens, the transaction
+// succeeded, 83,236 NON stayed in the wallet, and the copy was marked
+// closed — inventory outside every open-position view the app has.
+//
+// So a live copy is settled in base units, from confirmed fills:
+//
+//   • what the buy delivered      → `tokensRaw`      (noteBuyQuantity)
+//   • what this copy still holds  → `tokensLeftRaw`
+//   • what a sell asked for       → `ExitPlan.wantRaw`
+//   • what it actually moved      → `settleExit`, from the fill
+//   • what may be called closed   → only a remainder that is dust
+//
+// A row with no tracked quantity keeps the old percentage path exactly.
+// Unknown is never read as zero and never as "all of it".
+
+/** Whole tokens, for a line a human reads. Never used for sizing. */
+function fmtTokens(raw: bigint, decimals: number | null | undefined): string {
+  const n = uiTokens(raw, decimals);
+  return n >= 1 ? Math.round(n).toLocaleString() : n.toPrecision(3);
+}
+
+/**
+ * Attach the base units a live copy's buy actually delivered.
+ *
+ * Off the hot path deliberately: the copy is already open and recorded, and
+ * this number is only needed by an exit. A failure here is silent and
+ * harmless — the row simply keeps an unknown quantity, and every path below
+ * reads unknown as "use the old percentage".
+ */
+async function noteBuyQuantity(c: CopyConfig, rowId: string, res: CopyExecResult): Promise<void> {
+  const h = host;
+  if (!h) return;
+  let got: { raw: string; decimals: number } | null =
+    res.filledRaw !== undefined && typeof res.tokenDecimals === 'number'
+      ? { raw: res.filledRaw, decimals: res.tokenDecimals }
+      : null;
+  if (!got && res.signature && h.fillTokens) {
+    try {
+      got = await h.fillTokens(res.signature, { walletId: c.walletId ?? undefined, chain: chainOf(c) });
+    } catch {
+      got = null;
+    }
+  }
+  const raw = got ? rawOf(got.raw) : null;
+  if (raw === null || raw <= 0n) return;
+  // The row may have been sliced or closed while the chain was read. It is
+  // still the same copy, and its quantity is still this.
+  const row = trades.find((x) => x.id === rowId);
+  if (!row || row.tokensRaw) return;
+  row.tokensRaw = raw.toString();
+  row.tokenDecimals = got!.decimals;
+  // Anything already sold off this row came out of a quantity nobody knew,
+  // so the remainder is what `remainingPct` says of what we now know.
+  const pct = Math.max(0, Math.min(100, row.remainingPct ?? 100));
+  row.tokensLeftRaw = ((raw * BigInt(Math.round(pct * 100))) / 10_000n).toString();
+  persist();
+  h.changed();
+}
+
+/** What one mirrored sell means to do, in base units. */
+interface ExitPlan {
+  /** Base units to sell; null when the copy's quantity is not tracked, 0n
+   *  when their trim is smaller than one base unit of our position. */
+  wantRaw: bigint | null;
+  /** The percentage handed to the host. Exact against `balanceRaw` when the
+   *  quantity is known; the old cost-scaled estimate when it is not. */
+  pct: number;
+  /** What the wallet held when the plan was made, or null when unreadable. */
+  balanceRaw: bigint | null;
+  decimals: number | null;
+  /** Row id → base units of `wantRaw` that row is contributing. */
+  share: Map<string, bigint>;
+  /** Row id → base units that row held before the sell. */
+  before: Map<string, bigint>;
+}
+
+/** What a settled sell did to one copy row. */
+interface RowSettlement {
+  /** Share of what the ROW held that actually left, 0–1. */
+  fraction: number;
+  soldRaw: bigint;
+  wantedRaw: bigint;
+}
+
+async function readWalletTokens(h: CopyHost, c: CopyConfig, mint: string): Promise<{ raw: bigint; decimals: number } | null> {
+  if (!h.walletTokens) return null;
+  try {
+    const r = await h.walletTokens(mint, { walletId: c.walletId ?? undefined, chain: chainOf(c) });
+    const raw = r ? rawOf(r.raw) : null;
+    return raw === null ? null : { raw, decimals: r!.decimals };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Size one mirrored sell.
+ *
+ * Every live row for the mint must carry a tracked quantity or the total is
+ * not the position — selling a total that is missing a row leaves that row's
+ * tokens behind while the book calls the whole thing done, which is this bug
+ * in miniature. One missing quantity therefore drops the WHOLE plan back to
+ * the old percentage path: wrong in a way the record has always described,
+ * rather than wrong in a way it hides.
+ */
+async function planExit(c: CopyConfig, rows: CopyTrade[], mint: string, fraction: number, h: CopyHost): Promise<ExitPlan> {
+  const plan: ExitPlan = {
+    wantRaw: null,
+    pct: Math.max(1, Math.min(100, Math.round(fraction * 100))),
+    balanceRaw: null,
+    decimals: null,
+    share: new Map(),
+    before: new Map(),
+  };
+
+  let tracked = 0n;
+  let complete = rows.length > 0;
+  for (const x of rows) {
+    const left = rawOf(x.tokensLeftRaw);
+    if (left === null) {
+      complete = false;
+      break;
+    }
+    plan.before.set(x.id, left);
+    tracked += left;
+    if (plan.decimals === null && typeof x.tokenDecimals === 'number') plan.decimals = x.tokenDecimals;
+  }
+
+  if (!complete || tracked <= 0n) {
+    plan.before.clear();
+    plan.pct = walletPctFor(c, rows, mint, fraction);
+    return plan;
+  }
+
+  // A full exit is the whole tracked quantity, exactly. A partial one is
+  // that quantity times their fraction in integer arithmetic — a millionth
+  // is finer than any leader's sell is measured to.
+  let want = fraction >= 1 ? tracked : (tracked * BigInt(Math.round(fraction * 1_000_000))) / 1_000_000n;
+  if (want <= 0n) {
+    plan.before.clear();
+    plan.wantRaw = 0n;
+    return plan;
+  }
+
+  const bal = await readWalletTokens(h, c, mint);
+  if (bal) {
+    plan.balanceRaw = bal.raw;
+    plan.decimals = bal.decimals;
+    // The chain is the ceiling. Our book can only ever be stale high — a
+    // hand sell, a stop-loss rung, another config's mirror.
+    if (want > bal.raw) want = bal.raw;
+    if (bal.raw > 0n) {
+      // Percent × 100, rounded UP: the last basis point is worth overshooting
+      // for, because the failure being fixed here is systematically selling
+      // short, and the overshoot is capped at 0.01 % of the wallet.
+      const bps = want >= bal.raw ? 10_000n : (want * 10_000n + bal.raw - 1n) / bal.raw;
+      plan.pct = Math.max(0.01, Math.min(100, Number(bps) / 100));
+    }
+  }
+
+  plan.wantRaw = want;
+  // Split what we ask for across the rows in proportion to what each still
+  // holds, so a copy built from two buys settles both rows, not one.
+  let assigned = 0n;
+  rows.forEach((x, i) => {
+    const before = plan.before.get(x.id) ?? 0n;
+    let part = i === rows.length - 1 ? want - assigned : (want * before) / tracked;
+    if (part < 0n) part = 0n;
+    if (part > before) part = before;
+    plan.share.set(x.id, part);
+    assigned += part;
+  });
+  return plan;
+}
+
+/**
+ * What the sell actually moved, in base units, or null.
+ *
+ * The transaction's own token delta first — that is the number, not an
+ * inference. A balance re-read second: what the wallet held before this sell
+ * minus what it holds after. Null last, and null leaves the quantity
+ * unsettled rather than assumed away.
+ */
+async function soldRawOf(c: CopyConfig, mint: string, plan: ExitPlan, res: CopyExecResult, h: CopyHost): Promise<bigint | null> {
+  const direct = res.filledRaw !== undefined ? rawOf(res.filledRaw) : null;
+  if (direct !== null && direct > 0n) return direct;
+  if (res.signature && h.fillTokens) {
+    try {
+      // Bounded. `fillTokens` waits for the ledger to reconcile, which is
+      // the exact number — but this runs INSIDE the exit chain for the mint,
+      // so every second here is a second the top-up sell and the leader's
+      // next sell of this token both wait. A balance read is a hair less
+      // precise and available immediately, and the sweep checks either.
+      const r = await Promise.race([
+        h.fillTokens(res.signature, { walletId: c.walletId ?? undefined, chain: chainOf(c) }),
+        new Promise<undefined>((done) => setTimeout(() => done(undefined), SETTLE_FILL_WAIT_MS)),
+      ]);
+      const raw = r ? rawOf(r.raw) : null;
+      if (raw !== null && raw > 0n) return raw;
+      if (r === undefined) {
+        h.log('info', `copy: the ${mint.slice(0, 8)} sell had not reconciled in ${SETTLE_FILL_WAIT_MS / 1_000}s — settling from the balance instead`);
+      }
+    } catch {
+      /* fall through to the balance read */
+    }
+  }
+  if (plan.balanceRaw === null) return null;
+  const after = await readWalletTokens(h, c, mint);
+  if (!after) return null;
+  const moved = plan.balanceRaw - after.raw;
+  return moved > 0n ? moved : 0n;
+}
+
+/**
+ * Book what the sell did against the rows it came out of.
+ *
+ * Returns the ACTUAL share of each row that left, which is what the slice
+ * record and the close decision are made from. Null when the quantity was
+ * never tracked, and the caller then falls back to the leader's fraction —
+ * the old behaviour, reached only when there is no better number.
+ */
+async function settleExit(
+  c: CopyConfig,
+  rows: CopyTrade[],
+  mint: string,
+  plan: ExitPlan,
+  res: CopyExecResult,
+  h: CopyHost,
+): Promise<Map<string, RowSettlement> | null> {
+  if (plan.wantRaw === null || plan.wantRaw <= 0n) return null;
+  const measured = await soldRawOf(c, mint, plan, res, h);
+  // A confirmed sell that cannot be measured is credited with what it was
+  // asked for: that is the best reading of a transaction that landed, and
+  // the balance sweep checks it against the chain afterwards. It is never
+  // credited with the leader's fraction, which is the number that had
+  // nothing to do with our wallet in the first place.
+  const actual = measured ?? plan.wantRaw;
+  const want = plan.wantRaw;
+
+  const out = new Map<string, RowSettlement>();
+  for (const x of rows) {
+    const before = plan.before.get(x.id) ?? 0n;
+    const asked = plan.share.get(x.id) ?? 0n;
+    if (before <= 0n) {
+      out.set(x.id, { fraction: 0, soldRaw: 0n, wantedRaw: asked });
+      continue;
+    }
+    let got = want > 0n ? (actual * asked) / want : 0n;
+    if (got > before) got = before;
+    if (got < 0n) got = 0n;
+    x.tokensLeftRaw = (before - got).toString();
+    if (plan.decimals !== null && typeof x.tokenDecimals !== 'number') x.tokenDecimals = plan.decimals;
+    out.set(x.id, { fraction: Number(got) / Number(before), soldRaw: got, wantedRaw: asked });
+  }
+
+  // The chain is the ceiling, applied now rather than 90 seconds later by
+  // the sweep. What the wallet held before this sell, minus what the sell
+  // moved, is everything left of the mint — so our rows cannot between them
+  // still own more than that. They can claim to when the book went stale
+  // high (a hand sell, a stop-loss rung, another config's mirror took some
+  // while this exit was being planned), and a row left claiming tokens that
+  // are not there is exactly the state this whole rewrite is about.
+  if (plan.balanceRaw !== null) {
+    const after = plan.balanceRaw - actual > 0n ? plan.balanceRaw - actual : 0n;
+    const claimed = rows.reduce((a, x) => a + (rawOf(x.tokensLeftRaw) ?? 0n), 0n);
+    if (claimed > after) {
+      for (const x of rows) {
+        const left = rawOf(x.tokensLeftRaw) ?? 0n;
+        x.tokensLeftRaw = (claimed > 0n ? (left * after) / claimed : 0n).toString();
+      }
+      h.log(
+        'info',
+        `copy: the ${mint.slice(0, 8)} book claimed ${claimed} base units after this sell and the wallet holds ${after} — ` +
+          'the difference left by some other sale, so the copy is credited with what is actually there',
+      );
+    }
+  }
+
+  const short = want - actual;
+  if (short > 0n && !isDustRemainder(short, want)) {
+    h.log(
+      'warn',
+      `copy: mirrored sell of ${mint.slice(0, 8)} asked for ${want} base units and moved ${actual} — ` +
+        `${short} still in the wallet, so the copy stays open for them`,
+    );
+  }
+  return out;
+}
+
 /** One sell of `fraction` of what is left of copy `x`: the slice record,
- *  and the copy itself moved on (remainder, realised, closed when spent). */
-function applyExit(x: CopyTrade, fraction: number, exit: number | null, t: WalletTrade, signature: string | null): CopyTrade {
+ *  and the copy itself moved on (remainder, realised, closed when spent).
+ *
+ *  `fraction` is OUR share — what actually left this row — which is the same
+ *  as the leader's only when the mirror was exact. `q` carries the settled
+ *  quantities when there are any; without it the row is moved on by
+ *  percentage exactly as it was before quantities existed. */
+function applyExit(
+  x: CopyTrade,
+  fraction: number,
+  exit: number | null,
+  t: WalletTrade,
+  signature: string | null,
+  q?: { leaderFraction: number; settled: RowSettlement | null },
+): CopyTrade {
   const remaining = x.remainingPct ?? 100;
-  const slicePct = fraction >= 1 ? remaining : remaining * fraction;
+  const totalRaw = rawOf(x.tokensRaw);
+  const settled = q?.settled ?? null;
+  // The share of the whole copy this slice sold. From base units when they
+  // are known: a percentage carried through a fraction of a fraction drifts,
+  // and base units do not.
+  const slicePct =
+    settled && totalRaw !== null && totalRaw > 0n
+      ? Math.min(remaining, (Number(settled.soldRaw) / Number(totalRaw)) * 100)
+      : fraction >= 1
+        ? remaining
+        : remaining * fraction;
   const cost = x.ourSol * (slicePct / 100);
   const pnl =
     exit !== null && x.entryPriceSol !== null && x.entryPriceSol > 0
@@ -1072,12 +1592,42 @@ function applyExit(x: CopyTrade, fraction: number, exit: number | null, t: Walle
     reason: null,
     kind: 'exit',
     parentId: x.id,
-    soldPct: Math.round(fraction * 100),
+    soldPct: Math.max(0, Math.min(100, Math.round(fraction * 100))),
     signature,
   };
-  x.remainingPct = Math.max(0, remaining - slicePct);
+  if (settled) {
+    slice.soldRaw = settled.soldRaw.toString();
+    slice.tokenDecimals = x.tokenDecimals ?? null;
+    // Only when they differ: a record that repeats the same number twice is
+    // noise, and the point of these two fields is the gap between them.
+    if (settled.wantedRaw !== settled.soldRaw) slice.wantedRaw = settled.wantedRaw.toString();
+  }
+  if (q && Math.round(q.leaderFraction * 100) !== slice.soldPct) {
+    slice.leaderPct = Math.max(0, Math.min(100, Math.round(q.leaderFraction * 100)));
+  }
+
   if (pnl !== null) x.realizedSol = (x.realizedSol ?? 0) + pnl;
   if (exit !== null) x.exitPriceSol = exit;
+
+  const leftRaw = settled ? rawOf(x.tokensLeftRaw) : null;
+  if (leftRaw !== null && totalRaw !== null && totalRaw > 0n) {
+    // Base units decide. This is the rule the NON copy needed: a leader's
+    // full exit does not close our row — our tokens leaving does.
+    x.remainingPct = Math.max(0, Math.min(100, (Number(leftRaw) / Number(totalRaw)) * 100));
+    if (isDustRemainder(leftRaw, totalRaw)) {
+      x.remainingPct = 0;
+      x.state = 'closed';
+      x.closedAt = t.at;
+      x.leftoverRaw = null;
+    } else {
+      x.state = 'open';
+      x.closedAt = null;
+      x.reason = `partly sold — ${fmtTokens(leftRaw, x.tokenDecimals)} ${x.symbol || 'tokens'} still held`;
+    }
+    return slice;
+  }
+
+  x.remainingPct = Math.max(0, remaining - slicePct);
   if (x.remainingPct <= 0.5) {
     x.remainingPct = 0;
     x.state = 'closed';
@@ -1117,14 +1667,19 @@ function stillConfigured(id: string): boolean {
 }
 
 /**
- * The percentage of OUR TOKEN ACCOUNT that mirrors the leader's fraction.
+ * The percentage of OUR TOKEN ACCOUNT that mirrors the leader's fraction,
+ * WITHOUT a tracked quantity — the fallback, not the main path.
  *
  * `h.sell` sells a percentage of everything this wallet holds of the mint,
  * not a percentage of the copy. When the wallet also holds a hand-bought bag
  * of the same token, mirroring "40 %" as 40 % sells 40 % of that bag too —
  * SOL the copier was never given permission to spend (copy-2). Scaling by
- * this config's share of our own basis fixes it. A host that cannot say what
- * we paid leaves the ratio at 1, which is the old behaviour exactly.
+ * this config's share of our own basis fixes that, and introduces its own
+ * error: a cost share is not a token share unless every buy filled at the
+ * same price. That error is what `planExit` removes when the copy's base
+ * units are known. This stays for the rows that have none — a copy opened
+ * before 2026-09-15, a rail with no balance reader — where it remains
+ * strictly better than mirroring the fraction unscaled.
  */
 function walletPctFor(c: CopyConfig, open: CopyTrade[], mint: string, fraction: number): number {
   let ratio = 1;
@@ -1134,6 +1689,156 @@ function walletPctFor(c: CopyConfig, open: CopyTrade[], mint: string, fraction: 
     if (ours > 0) ratio = Math.min(1, ours / basis);
   }
   return Math.max(1, Math.min(100, Math.round(fraction * ratio * 100)));
+}
+
+/**
+ * At most this many sell requests per mirrored exit.
+ *
+ * A sell is a share of a balance that moves under it, so one request can
+ * come back short — that is the observed failure, not a hypothetical. When
+ * the leader has fully exited, the copier tries once more for the measured
+ * remainder and then stops: an unbounded retry against a token that cannot
+ * be sold burns fees forever, and a leftover the user can see beats a loop
+ * they cannot.
+ */
+const EXIT_MAX_ATTEMPTS = 2;
+
+/** What the live half of a mirrored exit produced. */
+interface LiveExit {
+  slices: CopyTrade[];
+  signature: string | null;
+  /** A sell confirmed, so the exit is not "skipped". */
+  traded: boolean;
+}
+
+/**
+ * Mirror one leader sell onto the live rows, and settle it against the
+ * chain.
+ *
+ * The loop is the fix for the reported bug in one place: size from base
+ * units, send, measure what actually moved, book THAT, and — when the leader
+ * is fully out and a real remainder is still sitting in the wallet — ask for
+ * exactly the remainder once more. Nothing here closes a row; `applyExit`
+ * does that, and only on a dust remainder.
+ */
+async function mirrorSell(
+  c: CopyConfig,
+  t: WalletTrade,
+  liveRows: CopyTrade[],
+  fraction: number,
+  exit: number | null,
+  h: CopyHost,
+): Promise<LiveExit> {
+  const out: LiveExit = { slices: [], signature: null, traded: false };
+  const who = c.label || c.wallet.slice(0, 6);
+  const what = t.symbol || t.mint.slice(0, 8);
+  const leaderPct = Math.max(1, Math.min(100, Math.round(fraction * 100)));
+
+  for (let attempt = 0; attempt < EXIT_MAX_ATTEMPTS; attempt += 1) {
+    const rows = liveRows.filter((x) => x.state === 'open');
+    if (!rows.length) break;
+    // A pass that has not sold anything yet still owes the leader's own
+    // fraction; one that has is only ever chasing the remainder the last one
+    // left behind, which is all of what is still tracked.
+    const askFor = out.traded ? 1 : fraction;
+    const plan = await planExit(c, rows, t.mint, askFor, h);
+    if (plan.wantRaw !== null && plan.wantRaw <= 0n) {
+      if (attempt === 0) {
+        out.slices.push(
+          exitSkipped(rows[0], t, leaderPct, `not executed — ${who} sold ${leaderPct}% of their bag, which is less than one token of ours`),
+        );
+      }
+      break;
+    }
+
+    const res = await h.sell(t.mint, plan.pct, {
+      slippagePct: c.maxSlippagePct,
+      walletId: c.walletId ?? undefined,
+      chain: chainOf(c),
+      tokensRaw: plan.wantRaw !== null ? plan.wantRaw.toString() : undefined,
+    });
+    if (!stillConfigured(c.id)) return out;
+
+    if (!res.ok) {
+      if (/nothing to sell|zero token balance/i.test(res.message)) {
+        // Our own orders already emptied the bag. Nothing to mirror — say so
+        // on the record rather than invent a fill or leave it "open".
+        for (const x of rows) {
+          x.state = 'closed';
+          x.closedAt = t.at;
+          x.remainingPct = 0;
+          x.tokensLeftRaw = '0';
+          x.leftoverRaw = null;
+          x.reason = 'nothing left to sell — your own orders had already sold it';
+        }
+        persist();
+        h.changed();
+        h.log('info', `copy: ${who} sold ${what} but this wallet holds none — record closed`);
+        break;
+      }
+      // The chain disagrees with the size we asked for, which means the
+      // balance moved between the read that planned this and the send. Worth
+      // exactly one re-plan against a fresh read — this is a race, not a
+      // refusal, and the EVM rail states it as one.
+      if (/more than this wallet holds/i.test(res.message) && attempt + 1 < EXIT_MAX_ATTEMPTS) {
+        h.log('info', `copy: the ${what} balance moved under the mirrored sell — re-sizing from a fresh read`);
+        continue;
+      }
+      // Nothing sold yet means the whole exit failed. Otherwise this was a
+      // top-up that did not land, and the slice from the first pass is
+      // already real — the row stays open for the remainder and says so.
+      if (!out.traded) {
+        out.slices.push(exitSkipped(rows[0], t, leaderPct, res.message.slice(0, 160)));
+        h.log('warn', `copy sell FAILED (${who} sold ${leaderPct}% of ${what}): ${res.message}`);
+        h.toast('error', `Copy sell failed — ${leaderPct}% of ${what}: ${res.message}`);
+      } else {
+        h.log('warn', `copy: top-up sell for the ${what} remainder failed: ${res.message}`);
+      }
+      break;
+    }
+
+    out.traded = true;
+    out.signature = res.signature ?? out.signature;
+    const settled = await settleExit(c, rows, t.mint, plan, res, h);
+    for (const x of rows) {
+      out.slices.push(
+        applyExit(x, settled?.get(x.id)?.fraction ?? fraction, exit, t, res.signature ?? null, {
+          leaderFraction: fraction,
+          settled: settled?.get(x.id) ?? null,
+        }),
+      );
+    }
+
+    if (attempt === 0) {
+      // Say how late, when it was. "Sold late" is the complaint; a number on
+      // the record is how someone can tell a slow rail from a slow leader.
+      const behind = ageOf(t);
+      h.toast(
+        'success',
+        `Copied sell: ${leaderPct}% of ${what} with ${who}` + (behind > LATE_EXIT_NOTE_MS ? ` — ${ageText(behind)} after they did` : ''),
+      );
+      if (behind > LATE_EXIT_NOTE_MS) {
+        h.log('warn', `copy: mirrored ${who}'s ${what} sell ${ageText(behind)} after it landed on chain`);
+      }
+    }
+
+    // Is there anything left that we meant to have sold? Only a full leader
+    // exit is topped up: a leader who trimmed 40 % has no remainder by
+    // definition, and re-selling one would be trading past their instruction.
+    if (fraction < 1) break;
+    const stillOpen = rows.filter((x) => x.state === 'open' && rawOf(x.tokensLeftRaw) !== null);
+    if (!stillOpen.length) break;
+    if (attempt + 1 >= EXIT_MAX_ATTEMPTS) {
+      const left = stillOpen.reduce((a, x) => a + (rawOf(x.tokensLeftRaw) ?? 0n), 0n);
+      h.toast(
+        'warn',
+        `Copy sell came back short — ${fmtTokens(left, stillOpen[0].tokenDecimals)} ${what} are still in your wallet. ` +
+          `The copy stays open for them; sell by hand if you want out now.`,
+      );
+    }
+  }
+
+  return out;
 }
 
 async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
@@ -1182,14 +1887,33 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
     );
     return;
   }
-  const pct = Math.max(1, Math.min(100, Math.round(fraction * 100)));
+  const theirs = fraction;
+  const pct = Math.max(1, Math.min(100, Math.round(theirs * 100)));
   const exit = t.priceSol > 0 ? t.priceSol : (h.priceSol(t.mint, chainOf(c)) ?? null);
-  let signature: string | null = null;
 
-  // Paper rows are booked whatever happens below: bookkeeping costs nothing,
-  // needs no order, and is exactly what would have happened had the config
-  // never been flipped.
-  const booked: CopyTrade[] = [...paperRows];
+  // How late this instruction is. A sell recovered after a socket gap can be
+  // many minutes old, and the rule is the one a parked exit has always
+  // followed through a restart: mirror it while it is still current, record
+  // it loudly when it is not. Before trades carried their real time this
+  // could not be asked, so an hours-old sell went out as if it were new.
+  const late = ageOf(t);
+  if (late > LATE_EXIT_MAX_AGE_MS) {
+    record(
+      exitSkipped(
+        rows[0],
+        t,
+        pct,
+        `not executed — ${who} sold this ${ageText(late)} ago and it only reached this app now. ` +
+          'Too old to mirror at today’s price, so nothing was sold. You still hold it.',
+      ),
+    );
+    h.toast('error', `${what}: ${who} sold it ${ageText(late)} ago — too late to mirror. You still hold it; sell by hand if you want out.`);
+    return;
+  }
+
+  const slices: CopyTrade[] = [];
+  let traded = false;
+  let signature: string | null = null;
 
   if (liveRows.length) {
     if (c.mode !== 'live') {
@@ -1210,39 +1934,25 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
         record(exitSkipped(liveRows[0], t, pct, `not executed — ${blocked}`));
         h.toast('warn', `Copy sell skipped — ${who} sold ${pct}% of ${what}, but ${blocked}`);
       } else {
-        const sellPct = walletPctFor(c, liveRows, t.mint, fraction);
-        const res = await h.sell(t.mint, sellPct, { slippagePct: c.maxSlippagePct, walletId: c.walletId ?? undefined, chain: chainOf(c) });
+        const live = await mirrorSell(c, t, liveRows, theirs, exit, h);
         if (!stillConfigured(c.id)) return;
-        if (res.ok) {
-          signature = res.signature ?? null;
-          booked.push(...liveRows);
-          h.toast('success', `Copied sell: ${pct}% of ${what} with ${who}`);
-        } else if (/nothing to sell|zero token balance/i.test(res.message)) {
-          // Our own orders already emptied the bag. Nothing to mirror — say
-          // so on the record rather than invent a fill or leave it "open".
-          for (const x of liveRows) {
-            x.state = 'closed';
-            x.closedAt = t.at;
-            x.remainingPct = 0;
-            x.reason = 'nothing left to sell — your own orders had already sold it';
-          }
-          persist();
-          h.changed();
-          h.log('info', `copy: ${who} sold ${what} but this wallet holds none — record closed`);
-        } else {
-          record(exitSkipped(liveRows[0], t, pct, res.message.slice(0, 160)));
-          h.log('warn', `copy sell FAILED (${who} sold ${pct}% of ${what}): ${res.message}`);
-          h.toast('error', `Copy sell failed — ${pct}% of ${what}: ${res.message}`);
-        }
+        slices.push(...live.slices);
+        signature = live.signature;
+        traded = live.traded;
       }
     }
   }
 
-  if (!booked.length) return;
-  for (const x of booked) {
-    const slice = applyExit(x, fraction, exit, t, x.mode === 'live' ? signature : null);
-    trades.unshift(slice);
-  }
+  // Paper rows are booked whatever happened above: bookkeeping costs
+  // nothing, needs no order, and is exactly what would have happened had the
+  // config never been flipped. Booked HERE, after the live half, so a config
+  // unfollowed mid-sell does not leave a paper row moved on by a slice that
+  // was never recorded.
+  for (const x of paperRows) slices.push(applyExit(x, theirs, exit, t, null));
+  if (paperRows.length) traded = true;
+
+  if (!slices.length) return;
+  for (const s of slices) trades.unshift(s);
   // This sell DID happen, so an earlier "could not tell how much" row for the
   // same leader transaction was never true (copy-13).
   if (skipKey) {
@@ -1255,7 +1965,7 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
   if (trades.length > MAX_TRADES) trades.length = MAX_TRADES;
   persist();
   h.changed();
-  recorder.record('copy_close', { configId: c.id, mint: t.mint, mode: c.mode, pct, signature });
+  if (traded) recorder.record('copy_close', { configId: c.id, mint: t.mint, mode: c.mode, pct, signature });
 }
 
 async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
@@ -1281,6 +1991,15 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
     reason: null,
   };
 
+  // An entry the leader made minutes ago is a different trade at a different
+  // price. `staleBuys` already refuses the case where they EXITED while our
+  // buy was queued; this is the general rule that case is an instance of, and
+  // it is what makes a recovered trade safe to replay at all.
+  const stale = ageOf(t);
+  if (stale > entryAgeLimit(c)) {
+    record({ ...base, reason: `not executed — they bought this ${ageText(stale)} ago, too old to copy` });
+    return;
+  }
   const limit = limitHit(c);
   if (limit) {
     record({ ...base, reason: limit });
@@ -1382,6 +2101,11 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
       record({ ...base, reason: 'not executed — they had already sold before this copy was sent' });
       return;
     }
+    const oldPaper = ageOf(t);
+    if (oldPaper > entryAgeLimit(c)) {
+      record({ ...base, reason: `not executed — their buy was ${ageText(oldPaper)} old by the time this copy could be sent` });
+      return;
+    }
     record({ ...base, state: 'open', entryPriceSol: entry });
     h.log('info', `paper-copy ${c.label || c.wallet.slice(0, 6)}: ${base.ourSol} SOL of ${t.symbol}`);
     recorder.record('copy_open', { configId: c.id, mint: t.mint, mode: 'paper', ourSol: base.ourSol, entry });
@@ -1414,6 +2138,15 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
     h.toast('warn', `Copy skipped — ${c.label || c.wallet.slice(0, 6)} sold ${t.symbol} before your buy went out`);
     return;
   }
+  // Checked again HERE, at the last gate before real money leaves: the token
+  // facts and the configured delay above can take a while, and the age that
+  // matters is the one at the moment of sending.
+  const aged = ageOf(t);
+  if (aged > entryAgeLimit(c)) {
+    record({ ...base, reason: `not executed — their buy was ${ageText(aged)} old by the time this copy could be sent` });
+    h.toast('warn', `Copy skipped — ${c.label || c.wallet.slice(0, 6)}'s ${t.symbol} buy was ${ageText(aged)} old before yours could go out`);
+    return;
+  }
   // From here the transaction can reach the chain, so it can no longer be
   // abandoned — only followed by an exit.
   const flight = buysInFlight.get(key);
@@ -1430,13 +2163,20 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
     // position is real and must be openable — with the caveat ON the record,
     // not hidden (copy-5).
     const unconfirmed = !res.ok && res.pending === true;
-    record({
+    const row: CopyTrade = {
       ...base,
       ourSol: spent,
       state: 'open',
       entryPriceSol: fill,
       reason: unconfirmed ? 'broadcast — not confirmed yet' : null,
-    });
+      signature: res.signature ?? null,
+    };
+    record(row);
+    // How many tokens the buy actually delivered, once the chain says so.
+    // Not awaited: the copy is open and recorded either way, and this number
+    // is only needed by an exit — which is minutes away at the fastest, and
+    // falls back to the percentage path if it is not here yet.
+    void noteBuyQuantity(c, row.id, res);
     h.toast(
       unconfirmed ? 'info' : 'success',
       `Copied ${c.label || c.wallet.slice(0, 6)}: ${spent} SOL of ${t.symbol}${unconfirmed ? ' (unconfirmed)' : ''}`,
@@ -1501,6 +2241,11 @@ export function reconcileHoldings(
     x.state = 'closed';
     x.closedAt = now;
     x.remainingPct = 0;
+    // The mint is not in the wallet at all, so whatever the book thought this
+    // copy still held, it does not. Zeroing it here keeps the leftover sweep
+    // from flagging a row it has just closed for the opposite reason.
+    if (rawOf(x.tokensLeftRaw) !== null) x.tokensLeftRaw = '0';
+    x.leftoverRaw = null;
     x.reason = 'closed — these tokens are no longer in the wallet (sold by hand, or by one of your orders)';
     closed += 1;
   }
@@ -1510,6 +2255,364 @@ export function reconcileHoldings(
     host?.log('info', `copy: closed ${closed} copy row${closed === 1 ? '' : 's'} whose tokens are no longer held`);
   }
   return closed;
+}
+
+/** Rows already announced as leftovers. A flag is news once, not every poll. */
+const flaggedLeftovers = new Set<string>();
+
+/**
+ * How long a copy row is left alone after it last moved.
+ *
+ * A sell that has just confirmed is not in the next balance read yet, and
+ * neither is a buy that has just landed — so a sweep run inside this window
+ * would zero a quantity the chain simply has not caught up with, or flag
+ * every fresh exit as a leftover. Past it, silence from the chain means the
+ * tokens really are (or are not) there.
+ */
+const LEFTOVER_GRACE_MS = 60_000;
+
+/**
+ * Compare a set of copy rows for ONE mint against the balance the chain
+ * reports, and move the book — never the wallet — to match.
+ *
+ * Three things happen, all of them comparisons and none of them a trade:
+ *
+ *   • a copy the wallet holds none of has its tracked quantity zeroed —
+ *     whatever our book said, those tokens are not there;
+ *   • tracked quantities are scaled down to fit the balance when they add up
+ *     to more than it, because several rows can each think they own tokens a
+ *     hand sell already took;
+ *   • a CLOSED row still holding a non-dust remainder is flagged, said out
+ *     loud once, and shown on the record until it is resolved.
+ */
+function applyBalance(
+  mint: string,
+  rows: CopyTrade[],
+  balance: bigint,
+  decimals: number | null,
+  now: number,
+): { flagged: number; cleared: number; changed: boolean } {
+  let flagged = 0;
+  let cleared = 0;
+  let changed = false;
+  // A row that moved a moment ago is described by a read the chain has not
+  // served yet. Applied to every branch below, not only to the flag.
+  const settledRows = rows.filter((x) => now - Math.max(x.at, x.closedAt ?? 0) >= LEFTOVER_GRACE_MS);
+  if (!settledRows.length) return { flagged, cleared, changed };
+
+  if (balance <= 0n) {
+    for (const x of settledRows) {
+      const had = (rawOf(x.tokensLeftRaw) ?? 0n) > 0n;
+      if (!had && !x.leftoverRaw && x.state !== 'open') continue;
+      x.tokensLeftRaw = '0';
+      if (x.leftoverRaw) cleared += 1;
+      x.leftoverRaw = null;
+      flaggedLeftovers.delete(x.id);
+      if (x.state === 'open') {
+        // The wallet holds none of this mint. `reconcileHoldings` says the
+        // same thing for Solana off a full holdings read; the EVM rails have
+        // no such read, so without this an EVM copy sold by hand stayed open
+        // forever — the 2026-09-13 bug, still live on those chains.
+        x.state = 'closed';
+        x.closedAt = now;
+        x.remainingPct = 0;
+        x.reason = 'closed — these tokens are no longer in the wallet (sold by hand, or by one of your orders)';
+      }
+      changed = true;
+    }
+    return { flagged, cleared, changed };
+  }
+
+  // Our book can only be stale HIGH. Scale it back to the chain rather than
+  // let two rows claim the same tokens.
+  const tracked = settledRows.reduce((a, x) => a + (rawOf(x.tokensLeftRaw) ?? 0n), 0n);
+  if (tracked > balance) {
+    for (const x of settledRows) {
+      const left = rawOf(x.tokensLeftRaw) ?? 0n;
+      const fitted = (left * balance) / tracked;
+      if (fitted !== left) {
+        x.tokensLeftRaw = fitted.toString();
+        changed = true;
+      }
+    }
+  }
+
+  for (const x of settledRows) {
+    if (decimals !== null && typeof x.tokenDecimals !== 'number') {
+      x.tokenDecimals = decimals;
+      changed = true;
+    }
+    const left = rawOf(x.tokensLeftRaw) ?? 0n;
+    const total = rawOf(x.tokensRaw);
+    const dust = total === null ? left <= 0n : isDustRemainder(left, total);
+
+    if (x.state !== 'closed' || dust) {
+      // An open row holding its own tokens is the ordinary case, and a
+      // closed one down to dust is a finished copy.
+      if (x.leftoverRaw) {
+        x.leftoverRaw = null;
+        flaggedLeftovers.delete(x.id);
+        cleared += 1;
+        changed = true;
+      }
+      continue;
+    }
+
+    const leftover = left < balance ? left : balance;
+    if (x.leftoverRaw === leftover.toString()) continue;
+    x.leftoverRaw = leftover.toString();
+    x.reason =
+      `marked closed, but ${fmtTokens(leftover, x.tokenDecimals ?? decimals)} ${x.symbol || 'tokens'} from this copy ` +
+      'are still in your wallet — sell them by hand, or leave them for the next sell this wallet mirrors';
+    flagged += 1;
+    changed = true;
+    if (!flaggedLeftovers.has(x.id)) {
+      flaggedLeftovers.add(x.id);
+      if (flaggedLeftovers.size > 500) {
+        const oldest = flaggedLeftovers.values().next().value;
+        if (oldest !== undefined) flaggedLeftovers.delete(oldest);
+      }
+      host?.log(
+        'warn',
+        `copy: ${x.symbol || mint.slice(0, 8)} is marked closed but ${leftover} base units from that copy are still held`,
+      );
+      host?.toast(
+        'warn',
+        `${x.symbol || mint.slice(0, 8)}: a copy is marked closed but ${fmtTokens(leftover, x.tokenDecimals ?? decimals)} tokens are still in your wallet.`,
+      );
+    }
+  }
+  return { flagged, cleared, changed };
+}
+
+/** Live copy rows carrying a tracked quantity, by mint, for one scope. */
+function quantityRows(pick: (x: CopyTrade) => boolean): Map<string, CopyTrade[]> {
+  const byMint = new Map<string, CopyTrade[]>();
+  for (const x of trades) {
+    if (x.mode !== 'live' || x.kind === 'exit') continue;
+    if (rawOf(x.tokensLeftRaw) === null) continue;
+    if (buysInFlight.has(flightKey(x.configId, x.mint))) continue;
+    if (!pick(x)) continue;
+    const list = byMint.get(x.mint);
+    if (list) list.push(x);
+    else byMint.set(x.mint, [x]);
+  }
+  return byMint;
+}
+
+/**
+ * Check the copy book against a COMPLETE holdings read (2026-09-15).
+ *
+ * `reconcileHoldings` above answers "are these tokens gone?". This answers
+ * the question that caught nobody: "our record says this copy is finished —
+ * is it?". A sell sized as a share of a balance can come back short, and
+ * when it does the old book wrote the leader's fraction down as done and
+ * moved on, leaving real inventory outside every open-position view. That is
+ * the reported bug, and this is the net under it.
+ *
+ * `held` must be a COMPLETE, successful read of one Solana wallet's holdings
+ * — a failed read is not an empty wallet — and `configIds` names the configs
+ * that wallet actually signs for. `sweepBalances` below is the per-mint
+ * version, for the chains that have no such read.
+ */
+export function reconcileQuantities(
+  held: Map<string, { raw: string; decimals: number }>,
+  opts: { configIds?: Set<string>; now?: number } = {},
+): { flagged: number; cleared: number } {
+  const only = opts.configIds ?? null;
+  const now = opts.now ?? Date.now();
+  let flagged = 0;
+  let cleared = 0;
+  let changed = false;
+  const byMint = quantityRows((x) => (x.chain ?? 'solana') === 'solana' && (only === null || only.has(x.configId)));
+  for (const [mint, rows] of byMint) {
+    const r = applyBalance(mint, rows, rawOf(held.get(mint)?.raw) ?? 0n, held.get(mint)?.decimals ?? null, now);
+    flagged += r.flagged;
+    cleared += r.cleared;
+    changed = changed || r.changed;
+  }
+  if (changed) {
+    persist();
+    host?.changed();
+  }
+  return { flagged, cleared };
+}
+
+/**
+ * At most this many balance reads per sweep.
+ *
+ * The sweep exists to catch a leftover, which is a thing that does not
+ * change between one minute and the next. Reading every open copy's mint on
+ * every pass would put a burst of `getTokenAccountsByOwner` against an
+ * endpoint the user is already rate-limited by, so the mints are taken
+ * least-recently-swept first and the rest wait for the next pass.
+ */
+const SWEEP_MAX_READS = 8;
+
+/**
+ * How long a settling exit waits for the ledger to reconcile its own fill.
+ *
+ * The fill's token delta is the exact number, but waiting for it holds the
+ * mint's exit chain: the top-up sell and the leader's NEXT sell of the same
+ * token both queue behind it. Eight seconds, then the balance read — which
+ * is immediate, and which the sweep re-checks anyway.
+ */
+const SETTLE_FILL_WAIT_MS = 8_000;
+/** `${walletId}:${chain}:${mint}` → when the sweep last read that balance. */
+const lastSwept = new Map<string, number>();
+
+/**
+ * Re-read balances for the mints live copies are open on, and reconcile.
+ *
+ * The Solana path gets this for free off `readHoldings`, which is a complete
+ * wallet read the app already makes. The EVM rails have no such read, and a
+ * copy signed by a wallet that is not the active one is not described by the
+ * active wallet's holdings either — so this asks the host for exactly the
+ * balances the book has an opinion about, one at a time, and nothing else.
+ *
+ * A balance that cannot be read is skipped. Unreadable is not empty.
+ */
+export async function sweepBalances(opts: { max?: number; now?: number } = {}): Promise<{ read: number; flagged: number; cleared: number }> {
+  const h = host;
+  const out = { read: 0, flagged: 0, cleared: 0 };
+  if (!h?.walletTokens) return out;
+  const now = opts.now ?? Date.now();
+
+  // One read per (signing wallet, chain, mint). Rows sharing all three share
+  // the answer, which is what `applyBalance` is given.
+  const groups = new Map<string, { c: CopyConfig; mint: string; rows: CopyTrade[] }>();
+  for (const [mint, rows] of quantityRows(() => true)) {
+    for (const x of rows) {
+      const c = configs.find((y) => y.id === x.configId);
+      if (!c) continue;
+      // Nothing can change for a finished row the book agrees is empty.
+      if (x.state === 'closed' && (rawOf(x.tokensLeftRaw) ?? 0n) === 0n && !x.leftoverRaw) continue;
+      if (now - Math.max(x.at, x.closedAt ?? 0) < LEFTOVER_GRACE_MS) continue;
+      const key = `${c.walletId ?? ''}:${chainOf(c)}:${mint}`;
+      const g = groups.get(key);
+      if (g) g.rows.push(x);
+      else groups.set(key, { c, mint, rows: [x] });
+    }
+  }
+
+  const due = [...groups.entries()]
+    .sort((a, b) => (lastSwept.get(a[0]) ?? 0) - (lastSwept.get(b[0]) ?? 0))
+    .slice(0, opts.max ?? SWEEP_MAX_READS);
+
+  let changed = false;
+  for (const [key, g] of due) {
+    if (!stillConfigured(g.c.id)) continue;
+    const bal = await readWalletTokens(h, g.c, g.mint);
+    lastSwept.set(key, Date.now());
+    if (lastSwept.size > 500) {
+      const oldest = lastSwept.keys().next().value;
+      if (oldest !== undefined) lastSwept.delete(oldest);
+    }
+    if (!bal) continue;
+    out.read += 1;
+    const r = applyBalance(g.mint, g.rows, bal.raw, bal.decimals, now);
+    out.flagged += r.flagged;
+    out.cleared += r.cleared;
+    changed = changed || r.changed;
+  }
+  if (changed) {
+    persist();
+    h.changed();
+  }
+  return out;
+}
+
+/**
+ * Rows the backfill has already tried. A row whose buy is not in the ledger
+ * has no answer to find, and re-scanning for it every sweep is a cost with
+ * no upside.
+ */
+const backfillTried = new Set<string>();
+
+/**
+ * Recover the token quantity for OPEN live copies that have none.
+ *
+ * A copy opened before 2026-09-15 carries no base units, so it exits through
+ * the old cost-ratio percentage and can be closed over tokens that never
+ * left — the reported bug, still reachable for exactly those rows. The
+ * quantity is not lost, though: the copy's buy is a fill in the ledger, and
+ * the ledger reconciled the transaction's own token delta at the time.
+ *
+ * Matched by the buy signature when the row carries one, otherwise by
+ * (wallet, mint) in the ledger — which the host resolves, because only it
+ * knows what this install actually traded. An ambiguous match is REFUSED:
+ * adopting the wrong fill's quantity would size a real sell from a number
+ * about a different trade, and "unknown" already has a safe meaning here.
+ */
+export async function backfillQuantities(limit = 12): Promise<number> {
+  const h = host;
+  if (!h) return 0;
+  const rows = trades
+    .filter(
+      (x) =>
+        x.mode === 'live' &&
+        x.kind !== 'exit' &&
+        x.state === 'open' &&
+        !x.tokensRaw &&
+        !backfillTried.has(x.id) &&
+        !buysInFlight.has(flightKey(x.configId, x.mint)),
+    )
+    .slice(0, limit);
+  if (!rows.length) return 0;
+
+  let filled = 0;
+  for (const row of rows) {
+    backfillTried.add(row.id);
+    const c = configs.find((x) => x.id === row.configId);
+    if (!c) continue;
+    const opts: CopyExecOpts = { walletId: c.walletId ?? undefined, chain: chainOf(c) };
+    let got: { raw: string; decimals: number } | null = null;
+    if (row.signature && h.fillTokens) {
+      try {
+        got = await h.fillTokens(row.signature, opts);
+      } catch {
+        got = null;
+      }
+    }
+    if (!got && h.buyFill) {
+      try {
+        got = await h.buyFill(row.mint, row.at, opts);
+      } catch {
+        got = null;
+      }
+    }
+    const raw = got ? rawOf(got.raw) : null;
+    if (raw === null || raw <= 0n) continue;
+    // Still the same row? It may have been sliced while the ledger was read.
+    const live = trades.find((x) => x.id === row.id);
+    if (!live || live.tokensRaw) continue;
+    live.tokensRaw = raw.toString();
+    live.tokenDecimals = got!.decimals;
+    // Whatever was already sold off this row went out on the old percentage
+    // path, so the remainder is what `remainingPct` says of what we now know.
+    const pct = Math.max(0, Math.min(100, live.remainingPct ?? 100));
+    live.tokensLeftRaw = ((raw * BigInt(Math.round(pct * 100))) / 10_000n).toString();
+    filled += 1;
+  }
+  if (filled > 0) {
+    persist();
+    h.changed();
+    h.log('info', `copy: recovered the token quantity of ${filled} open cop${filled === 1 ? 'y' : 'ies'} from the ledger`);
+  }
+  return filled;
+}
+
+/**
+ * Is there anything for the balance sweep to look at?
+ *
+ * A live config, or a live row still carrying tokens. The second half
+ * matters: a LIVE config comes back from a restart DISARMED while its
+ * positions come back open, and those are exactly the rows a leftover would
+ * sit in unnoticed.
+ */
+export function needsSweep(): boolean {
+  if (configs.some((c) => c.mode === 'live')) return true;
+  return trades.some((x) => x.mode === 'live' && x.kind !== 'exit' && (x.state === 'open' || !!x.leftoverRaw));
 }
 
 /** Mark paper positions to market so open PnL is not stale. */
@@ -1544,6 +2647,10 @@ export function _reset(): void {
   holdingCache.clear();
   recentCopies.clear();
   exitChains.clear();
+  flaggedLeftovers.clear();
+  skewRing.length = 0;
+  lastSwept.clear();
+  backfillTried.clear();
 }
 
 export function _load(c: CopyConfig[], t: CopyTrade[], l: Record<string, LeaderBook> = {}): void {

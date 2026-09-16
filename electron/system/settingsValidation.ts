@@ -142,6 +142,11 @@ const ENUMS: Record<string, readonly unknown[]> = {
   // no IPC channel accepts a URL (terminal-data-providers rule), and a
   // blockSubscribe socket pulls whole blocks from whatever it is pointed at.
   'rpc.blockWssUrl': BLOCK_FEED_WSS_URLS,
+  // Which pump curve variants the scanner watches. An unlisted value would
+  // fall through `passesMayhemFilter`'s last branch and hide every mayhem
+  // launch — a typo that silently narrows the feed is exactly what an enum
+  // table is for.
+  'strategy.mayhemFilter': ['all', 'standard', 'mayhem'],
 };
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
@@ -251,6 +256,16 @@ function checkLeaf(path: string, value: unknown, def: unknown): string | null {
   // the settings page said so; main saved `http://…` and then silently fell
   // back to the public endpoint. The same rule the renderer applies, here.
   if (/^evm\.(robinhood|bnb)\.rpcUrl$/.test(path) && typeof value === 'string' && value.trim()) {
+    const why = evmRpcUrlProblem(value);
+    if (why) return `${path}: ${why}`;
+  }
+  // The Solana execution endpoint, same rule and the same reasoning: this
+  // one carries every live buy and sell, so an http:// paste that silently
+  // fell back to the public endpoint would be a speed setting that quietly
+  // did the opposite. The other two Solana URLs are deliberately NOT checked
+  // this way — a local validator on http://127.0.0.1 is a legitimate
+  // `httpUrl`, and people do run one.
+  if (path === 'rpc.fastHttpUrl' && typeof value === 'string' && value.trim()) {
     const why = evmRpcUrlProblem(value);
     if (why) return `${path}: ${why}`;
   }

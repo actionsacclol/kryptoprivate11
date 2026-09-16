@@ -27,6 +27,24 @@ export const INITIAL_VIRTUAL_SOL = 30n * BigInt(LAMPORTS_PER_SOL);
 export const INITIAL_VIRTUAL_TOKENS = 1_073_000_000n * BigInt(TOKEN_FACTOR);
 const COMPLETE_VIRTUAL_SOL = 115n * BigInt(LAMPORTS_PER_SOL); // 30 virtual + ~85 raised
 
+/**
+ * Is this a "mayhem" curve, from its virtual SOL reserves at creation?
+ *
+ * A standard pump curve starts at exactly `INITIAL_VIRTUAL_SOL` (30 SOL). A
+ * mayhem coin starts far above it — inflated reserves are the whole
+ * mechanic, and they are what lets it run to a six-figure cap while still on
+ * the curve (txBuilder's `is_mayhem_mode` @81 is the authority, but that is
+ * an account read per launch and this is free off the create event).
+ *
+ * NULL when the create event carried no reserves — the classic event layout
+ * does not. Unknown is not "standard": a filter that treated it as one would
+ * be claiming something the app cannot see.
+ */
+export function mayhemFromReserves(virtualSolReserves: bigint | null | undefined): boolean | null {
+  if (typeof virtualSolReserves !== 'bigint' || virtualSolReserves <= 0n) return null;
+  return virtualSolReserves > INITIAL_VIRTUAL_SOL;
+}
+
 /** Ceiling division for positive bigints. */
 function ceilDiv(a: bigint, b: bigint): bigint {
   return (a + b - 1n) / b;

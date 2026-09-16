@@ -598,6 +598,50 @@ export async function head(chain: EvmChainKind): Promise<{ block: number; at: nu
   }
 }
 
+// ── Block times ───────────────────────────────────────────────────────
+//
+// WHEN a trade happened, as opposed to when the scanner got round to reading
+// it. The scanner polls block ranges and resumes from its cursor, so a stall
+// or a restart hands `ingestTrades` a backlog — and every trade in it used to
+// be stamped with the poll's own clock. Copy trading then read a leader buy
+// from twenty minutes ago as brand new and entered on it (2026-09-15).
+//
+// One `getBlock` per block, cached, and only ever asked for a block that
+// contains a FOLLOWED wallet's trade — which is rare, so in steady state this
+// costs nothing. The in-flight promise is cached too: several trades in one
+// block share a single request.
+
+const blockTimes = new Map<string, Promise<number | null>>();
+/** Bounded: a long session must not hold every block it ever dated. */
+const BLOCK_TIME_CACHE = 500;
+
+/**
+ * When a block landed, ms, or null when it cannot be read.
+ *
+ * Null is "unknown" and every caller treats it as such — never as now, and
+ * never as old. A chain whose endpoint will not serve `getBlock` keeps
+ * behaving exactly as it did before block times existed.
+ */
+export async function blockTimeMs(chain: EvmChainKind, blockNumber: bigint): Promise<number | null> {
+  const key = `${chain}:${blockNumber}`;
+  const hit = blockTimes.get(key);
+  if (hit) return hit;
+  const p = client(chain)
+    .getBlock({ blockNumber })
+    .then((b) => (typeof b.timestamp === 'bigint' && b.timestamp > 0n ? Number(b.timestamp) * 1_000 : null))
+    .catch(() => null);
+  blockTimes.set(key, p);
+  if (blockTimes.size > BLOCK_TIME_CACHE) {
+    const oldest = blockTimes.keys().next().value;
+    if (oldest !== undefined && oldest !== key) blockTimes.delete(oldest);
+  }
+  // A failed read must not be cached as a permanent "unknown" for that block.
+  void p.then((v) => {
+    if (v === null) blockTimes.delete(key);
+  });
+  return p;
+}
+
 /** EIP-1559 fee fields under the chain's rule (see EvmChainConfig.feeRule). */
 export async function feeFields(chain: EvmChainKind): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; baseFee: bigint }> {
   const cfg = CHAINS[chain];

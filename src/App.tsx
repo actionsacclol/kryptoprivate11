@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useState, useTransition } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, useTransition } from 'react';
 import { Loader2 } from 'lucide-react';
 import { AUTOMATION_ROUTES, type RouteId } from './components/Sidebar';
 import { ensureRouteCacheSubscribed } from './state/routeCache';
@@ -13,7 +13,8 @@ import { Onboarding } from './components/Onboarding';
 import { AutomationBar } from './components/AutomationBar';
 import { IntegrityBanner } from './components/IntegrityBanner';
 import { TokenSearch } from './components/terminal/TokenSearch';
-import { SidebarLive, TickerLive } from './components/LiveChrome';
+import { SidebarLive, TokenTabsLive } from './components/LiveChrome';
+import { chainForMint, closeTab, loadTabs, neighbourOf, openTab, saveTabs, tabKey, touchTab, type TokenTab } from './state/tokenTabs';
 import { HotkeyHost } from './components/HotkeyHost';
 import { LiteModeHost } from './components/LiteModeHost';
 import { Discover } from './pages/Discover';
@@ -89,8 +90,20 @@ export default function App() {
   useEffect(() => ensureRouteCacheSubscribed(), []);
 
   useEffect(() => prefetchWhenIdle(WARM_ROUTES), []);
-  const [openMint, setOpenMint] = useState<string | null>(null);
-  const [openChain, setOpenChain] = useState<ChainKind>('solana');
+  // ── Open tokens ──────────────────────────────────────────────────
+  //
+  // Several charts at once, clicked between, instead of a round trip through
+  // the watchlist for each one (user report, 2026-09-15: "things can be
+  // pretty fast paced in the low caps"). Only the ACTIVE token renders — a
+  // tab is a remembered address, not a mounted page — so the open list costs
+  // nothing but the strings in it.
+  const [tabs, setTabs] = useState<TokenTab[]>(() => loadTabs());
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  useEffect(() => saveTabs(tabs), [tabs]);
+
+  const active = useMemo(() => tabs.find((t) => tabKey(t) === activeKey) ?? null, [tabs, activeKey]);
+  const openMint = active?.mint ?? null;
+  const openChain = active?.chain ?? 'solana';
 
   // Gated until Onboarding reports otherwise: the shell is inert while the
   // legal/setup overlay is up (or still deciding), so nothing behind it is
@@ -138,16 +151,20 @@ export default function App() {
   // is ~80 ms of work, and a transition let Discover's poll updates
   // interrupt and restart that render (400+ ms measured) — a plain update
   // commits it once.
-  const openToken = useCallback((mint: string, chain?: ChainKind) => {
+  const openToken = useCallback((mint: string, chain?: ChainKind, symbol?: string) => {
     setTarget('token');
-    setOpenMint(mint);
+    // Callers that know the row's chain say so; a bare 0x address (an old
+    // pin, a script) is Robinhood's, the first EVM chain the app had.
+    const ch = chainForMint(mint, chain);
+    // Opening a token already open SELECTS it rather than adding a second
+    // tab for it — which would otherwise happen most to the coin you keep
+    // checking, the one you least want duplicated.
+    setTabs((cur) => openTab(cur, mint, ch, symbol));
+    setActiveKey(tabKey({ mint, chain: ch }));
     // The chart panel follows whatever was opened last, in this window or a
     // popped-out one. Written here because this is the one place every route
     // into a token converges.
-    setChartToken({ mint, chain: chain ?? (isEvmAddress(mint) ? 'robinhood' : 'solana') });
-    // Callers that know the row's chain say so; a bare 0x address (an old
-    // pin, a script) is Robinhood's, the first EVM chain the app had.
-    setOpenChain(chain ?? (isEvmAddress(mint) ? 'robinhood' : 'solana'));
+    setChartToken({ mint, chain: ch });
     // The WORKSPACE moves too, not just the route.
     //
     // A workspace decides what renders at all: while it is 'hub', nothing but
@@ -160,6 +177,54 @@ export default function App() {
     setWorkspace(workspaceOf('token'));
     setRoute('token');
   }, []);
+
+  /** Click a tab: show that token, wherever you were. */
+  const selectTab = useCallback(
+    (t: TokenTab) => {
+      setActiveKey(tabKey(t));
+      setChartToken({ mint: t.mint, chain: t.chain });
+      setTabs((cur) => touchTab(cur, tabKey(t)));
+      setTarget('token');
+      setWorkspace((cur) => (routesFor(cur).includes('token') ? cur : workspaceOf('token')));
+      setRoute('token');
+    },
+    [],
+  );
+
+  /** Close one. The tab to its right takes over, falling back to the left —
+   *  what a browser does, and what the hand expects. Closing the last one
+   *  leaves you on Discover rather than on a blank token page. */
+  const dropTab = useCallback(
+    (key: string) => {
+      setTabs((cur) => {
+        if (activeKey === key) {
+          const next = neighbourOf(cur, key);
+          setActiveKey(next ? tabKey(next) : null);
+          if (next) setChartToken({ mint: next.mint, chain: next.chain });
+          else if (route === 'token') {
+            setTarget('discover');
+            setRoute('discover');
+          }
+        }
+        return closeTab(cur, key);
+      });
+    },
+    [activeKey, route],
+  );
+
+  /** A tab whose label was worked out downstream keeps it from now on. */
+  const noteTabSymbol = useCallback((key: string, symbol: string) => {
+    setTabs((cur) => (cur.some((t) => tabKey(t) === key && !t.symbol) ? cur.map((t) => (tabKey(t) === key ? { ...t, symbol } : t)) : cur));
+  }, []);
+
+  const dropAllTabs = useCallback(() => {
+    setTabs([]);
+    setActiveKey(null);
+    if (route === 'token') {
+      setTarget('discover');
+      setRoute('discover');
+    }
+  }, [route]);
 
   // Still its own function, but only to name the chain: the Hub's rows are
   // Solana. Leaving the Hub is `openToken`'s job now, along with every other
@@ -214,7 +279,7 @@ export default function App() {
           is known to be false; Lite mode unmounts it and disposes the GL
           context. */}
       <AppBackdrop intensity={onHub ? BACKDROP_FULL : BACKDROP_QUIET} />
-      {/* Sidebar and Ticker subscribe to engine AND market state THEMSELVES.
+      {/* The live chrome subscribes to engine AND market state ITSELF.
           App used to call useAppState(), which meant the engine's 1/s status
           push re-rendered the ROOT — and with it every route, including
           Discover's ~10,000 DOM elements. It then still called useTerminal()
@@ -242,14 +307,34 @@ export default function App() {
             aria-hidden="true"
           />
         )}
-        {/* The launch ticker belongs to the engine, so it only shows on the
-            automation side — a terminal user with the engine stopped should
-            not see an empty tape strip across every screen. */}
         {/* Engine controls live with the automation routes, not above a
             chart. AUTOMATION_ROUTES is the same list the sidebar groups by,
             so the bar follows the section rather than a hand-kept list. */}
         {!onHub && AUTOMATION_ROUTES.some((r) => r.id === route) && <AutomationBar />}
-        {!onHub && route !== 'discover' && route !== 'token' && <TickerLive />}
+        {/* This strip used to be the scrolling launch ticker — decoration in
+            the one piece of chrome that could have been doing something.
+            It is the open tokens now.
+
+            TERMINAL ONLY. It is shown across that whole workspace, not just
+            on the token page, because the job it does is getting you BACK to
+            a chart: from the watchlist, from Discover, from an order list,
+            without the round trip through the list you came from (user
+            report, 2026-09-15). Everywhere else it would be a row of chrome
+            about tokens on a page that is not about tokens — the Scripts
+            page and the Funder do not want a chart bar over them.
+
+            `activeKey` is null off the token route, so no tab ever claims to
+            be the one on screen when none is. */}
+        {workspace === 'terminal' && (
+          <TokenTabsLive
+            tabs={tabs}
+            activeKey={route === 'token' ? activeKey : null}
+            onSelect={selectTab}
+            onClose={dropTab}
+            onCloseAll={dropAllTabs}
+            onResolve={noteTabSymbol}
+          />
+        )}
         <main className="flex-1 min-h-0 relative">
           <div
             className={discoverActive ? 'h-full' : 'absolute inset-0 pointer-events-none'}

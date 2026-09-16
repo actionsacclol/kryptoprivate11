@@ -25,7 +25,7 @@
 
 import WebSocket from 'ws';
 import type { CopyWatchStatus } from '@shared/copytrade';
-import { getTransaction, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from './rpcClient';
+import { getSignaturesForAddress, getTransaction, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from './rpcClient';
 import { decodeWalletSwap, type WalletSwap } from './walletSwap';
 
 export interface WalletWatcherHost {
@@ -33,7 +33,7 @@ export interface WalletWatcherHost {
   wssUrl(): string;
   /** HTTP endpoint the leader's transactions are read from. */
   httpUrl(): string;
-  onSwap(ev: { wallet: string; swap: WalletSwap; signature: string; at: number }): void;
+  onSwap(ev: { wallet: string; swap: WalletSwap; signature: string; at: number; tradeAt: number | null }): void;
   log(level: 'info' | 'warn' | 'error', line: string): void;
 }
 
@@ -43,6 +43,13 @@ interface WalletStats {
   seen: number;
   swaps: number;
   overCap: boolean;
+  /** A subscription for this wallet has been acked at least once THIS
+   *  process. Only then is a reconnect a gap worth filling — on the first
+   *  subscribe of a session there is nothing to have missed, and replaying
+   *  a leader's last half hour into their record would double-count it. */
+  subscribed: boolean;
+  /** When a catch-up last ran, so the heartbeat can round-robin. */
+  recoveredAt: number;
 }
 
 /**
@@ -66,9 +73,47 @@ const SUB_GUARD = 64;
 let observedSubCap: number | null = null;
 const PING_MS = 15_000;
 const SILENCE_MS = 25_000;
-const FETCH_ATTEMPTS = 3;
+/**
+ * How hard a followed wallet's transaction is chased before it is given up
+ * on.
+ *
+ * It used to be three tries 700 ms apart — about two seconds — and a give-up
+ * was SILENT. On a rate-limited public endpoint (the default; `rpcClient`
+ * parks a host that 429s) two seconds is nothing, and every transaction lost
+ * that way is a leader trade the copier never acts on: an exit that never
+ * fires reads to the user as a position that "sold late" whenever something
+ * else eventually closes it (report, 2026-09-15). This is an exit decision,
+ * so it is worth tens of seconds and a line in the log when it fails.
+ */
+const FETCH_ATTEMPTS = 6;
 const FETCH_RETRY_MS = 700;
+const FETCH_RETRY_MAX_MS = 8_000;
 const SEEN_CAP = 2_000;
+
+// ── Catch-up ──────────────────────────────────────────────────────────
+//
+// `logsSubscribe` is live-only: whatever a wallet does while the socket is
+// down is never delivered, and nothing here used to ask for it afterwards.
+// A reconnect costs a backoff of up to 30 s, far longer when the host is
+// parked — and a leader's exit inside that window was simply never seen. The
+// position then stayed open until the leader happened to sell again, which
+// is exactly the "eventually sold, 1 h 28 m late" shape of the report.
+//
+// So after a gap, and on a slow round-robin heartbeat (a subscription can
+// also go quietly dead while the socket stays open), the wallet's recent
+// signatures are read and anything unseen is put through the same decode
+// path. `seen` dedupes it against the live feed, and copyTrade applies its
+// own staleness rules to whatever comes out — a recovered BUY is refused for
+// age, a recovered SELL fires only while the instruction is still current.
+
+/** Signatures a catch-up asks for. Two minutes of a busy wallet. */
+const RECOVER_LIMIT = 25;
+/** Nothing older than this is replayed, whatever the gap was. */
+const RECOVER_WINDOW_MS = 30 * 60_000;
+/** One wallet per tick, so following ten leaders costs one read a minute. */
+const RECOVER_TICK_MS = 60_000;
+/** A live subscription is still re-checked this often, in case it is dead. */
+const RECOVER_EVERY_MS = 5 * 60_000;
 
 let host: WalletWatcherHost | null = null;
 let ws: WebSocket | null = null;
@@ -76,6 +121,7 @@ let running = false;
 let nextId = 1;
 let attempts = 0;
 let reconnectTimer: NodeJS.Timeout | null = null;
+let recoverTimer: NodeJS.Timeout | null = null;
 let currentUrl = '';
 let capNotedAt = 0;
 
@@ -98,7 +144,7 @@ export function attach(h: WalletWatcherHost): void {
 function statsFor(wallet: string): WalletStats {
   let s = stats.get(wallet);
   if (!s) {
-    s = { lastSeenAt: null, lastSwapAt: null, seen: 0, swaps: 0, overCap: false };
+    s = { lastSeenAt: null, lastSwapAt: null, seen: 0, swaps: 0, overCap: false, subscribed: false, recoveredAt: 0 };
     stats.set(wallet, s);
   }
   return s;
@@ -164,6 +210,8 @@ export function stop(): void {
   running = false;
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = null;
+  if (recoverTimer) clearInterval(recoverTimer);
+  recoverTimer = null;
   // Re-learned on the next socket: the ceiling belonged to that connection.
   observedSubCap = null;
   pending.clear();
@@ -186,6 +234,7 @@ function start(): void {
   }
   running = true;
   attempts = 0;
+  if (!recoverTimer) recoverTimer = setInterval(recoverTick, RECOVER_TICK_MS);
   connect();
 }
 
@@ -282,6 +331,12 @@ function connect(): void {
       if (wallet && wanted.has(wallet)) {
         wanted.set(wallet, msg.result);
         bySub.set(msg.result, wallet);
+        const st = statsFor(wallet);
+        // A resubscribe means the last one stopped, and whatever the wallet
+        // did in between was never delivered. The FIRST subscribe of a
+        // session has no gap behind it.
+        if (st.subscribed) void recoverGap(wallet, 'the subscription was re-established');
+        st.subscribed = true;
       }
       return;
     }
@@ -361,15 +416,19 @@ function remember(signature: string): boolean {
   return true;
 }
 
-async function onNotification(wallet: string, signature: string, err: unknown): Promise<void> {
+async function onNotification(wallet: string, signature: string, err: unknown, recovered = false): Promise<void> {
   const h = host;
   if (!h) return;
   const s = statsFor(wallet);
-  s.seen += 1;
-  s.lastSeenAt = Date.now();
+  if (!recovered) {
+    s.seen += 1;
+    s.lastSeenAt = Date.now();
+  }
   if (err) return;
   if (!remember(signature)) return;
-  // A just-confirmed transaction can take a beat to be readable.
+  // A just-confirmed transaction can take a beat to be readable, and a
+  // rate-limited host can take a great deal longer than a beat.
+  let why = 'not readable';
   for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt++) {
     if (!wanted.has(wallet)) return;
     const res = await getTransaction(h.httpUrl(), signature);
@@ -378,16 +437,86 @@ async function onNotification(wallet: string, signature: string, err: unknown): 
       if (!swap) return;
       s.swaps += 1;
       s.lastSwapAt = Date.now();
-      h.onSwap({ wallet, swap, signature, at: Date.now() });
+      // WHEN THEY TRADED, not when we read it. A recovered transaction can
+      // be many minutes old, and the copier decides what to do about that.
+      const blockTime = res.data.blockTime;
+      h.onSwap({
+        wallet,
+        swap,
+        signature,
+        at: Date.now(),
+        tradeAt: typeof blockTime === 'number' && blockTime > 0 ? blockTime * 1_000 : null,
+      });
       return;
     }
-    if (res.ok && res.data === null) {
-      await new Promise((r) => setTimeout(r, FETCH_RETRY_MS));
-      continue;
-    }
-    // A transport failure already retried and failed over inside rpcClient.
-    await new Promise((r) => setTimeout(r, FETCH_RETRY_MS));
+    why = res.ok ? 'the node does not have it yet' : res.message;
+    // Backoff, capped: a parked host is not helped by six fast retries, and
+    // `rpcClient` already waits out its own park inside the call.
+    await new Promise((r) => setTimeout(r, Math.min(FETCH_RETRY_MAX_MS, FETCH_RETRY_MS * 2 ** attempt)));
   }
+  // Silence here was the bug: a leader trade that is KNOWN to have happened
+  // and could not be read is a copy that will not fire, and the user had no
+  // way to know it. It stays in `seen`, so a later catch-up will not re-chase
+  // a transaction this endpoint cannot serve.
+  h.log('warn', `wallet watcher: could not read ${wallet.slice(0, 6)}…'s transaction ${signature.slice(0, 8)}… — ${why}. That trade was not copied.`);
+}
+
+/**
+ * Read what a followed wallet did recently and put anything unseen through
+ * the live path.
+ *
+ * Bounded three ways: at most `RECOVER_LIMIT` signatures, nothing older than
+ * `RECOVER_WINDOW_MS`, and everything already in `seen` dropped before a
+ * single transaction is fetched. Oldest first, so a buy and the sell that
+ * followed it arrive in the order they happened.
+ */
+async function recoverGap(wallet: string, why: string): Promise<void> {
+  const h = host;
+  if (!h || !wanted.has(wallet)) return;
+  const s = statsFor(wallet);
+  s.recoveredAt = Date.now();
+  const res = await getSignaturesForAddress(h.httpUrl(), wallet, RECOVER_LIMIT);
+  if (!res.ok || !res.data) {
+    h.log('warn', `wallet watcher: could not catch up on ${wallet.slice(0, 6)}… (${why}) — ${res.message}`);
+    return;
+  }
+  const floor = Date.now() - RECOVER_WINDOW_MS;
+  const missed = res.data
+    .filter((x) => !x.err && !seen.has(x.signature))
+    .filter((x) => typeof x.blockTime !== 'number' || x.blockTime * 1_000 >= floor)
+    .reverse();
+  if (!missed.length) return;
+  h.log('info', `wallet watcher: catching up on ${missed.length} transaction(s) from ${wallet.slice(0, 6)}… (${why})`);
+  for (const x of missed) {
+    if (!wanted.has(wallet)) return;
+    await onNotification(wallet, x.signature, x.err, true);
+  }
+}
+
+/**
+ * One wallet per tick, least recently checked first.
+ *
+ * A live subscription can stop delivering while the socket stays open and
+ * every health check passes — there is no ack for "you are still getting my
+ * notifications". This is the cheap standing answer to that: following ten
+ * leaders costs one `getSignaturesForAddress` a minute, and each wallet is
+ * re-checked every `RECOVER_EVERY_MS`.
+ */
+function recoverTick(): void {
+  if (!running || ws?.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  let oldest: string | null = null;
+  let oldestAt = Infinity;
+  for (const [wallet, id] of wanted) {
+    if (id === null) continue;
+    const at = statsFor(wallet).recoveredAt;
+    if (now - at < RECOVER_EVERY_MS) continue;
+    if (at < oldestAt) {
+      oldestAt = at;
+      oldest = wallet;
+    }
+  }
+  if (oldest) void recoverGap(oldest, 'routine check that nothing was missed');
 }
 
 function scheduleReconnect(why: string): void {

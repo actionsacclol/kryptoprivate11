@@ -28,17 +28,40 @@ function makeHost(over = {}) {
   // `opts` is recorded SEPARATELY: the pinned sell assertion is a deepEqual
   // on { mint, pct } and must stay exactly that shape.
   const calls = { buys: [], sells: [], toasts: [], buyOpts: [], sellOpts: [] };
+  // A simulated token account, when `over.chain` asks for one. `balance` is
+  // what the wallet already holds (a hand-bought bag), `bought` is what the
+  // copy's buy delivers, and `fillShare` is the share of a sell request that
+  // actually moves — which is how the reported bug is reproduced: a sell
+  // that CONFIRMS and moves less than it was asked for.
+  const chain = over.chain ? { decimals: 6, bought: 1_000_000_000n, balance: 0n, ...over.chain } : null;
+  const fills = new Map();
   const host = {
     buy: async (mint, sol, opts) => {
       calls.buys.push({ mint, sol });
       calls.buyOpts.push(opts);
       if (over.buyMs) await new Promise((r) => setTimeout(r, over.buyMs));
-      return over.buyResult ?? { ok: true, message: 'bought', signature: 'sig' };
+      const res = over.buyResult ?? { ok: true, message: 'bought', signature: 'sig' };
+      if (chain && res.ok && res.signature) {
+        chain.balance += chain.bought;
+        fills.set(res.signature, chain.bought);
+      }
+      return res;
     },
     sell: async (mint, pct, opts) => {
       calls.sells.push({ mint, pct });
       calls.sellOpts.push(opts);
-      return over.sellResult ?? { ok: true, message: 'sold', signature: 'sellsig' };
+      if (over.sellResult) return over.sellResult;
+      if (!chain) return { ok: true, message: 'sold', signature: 'sellsig' };
+      const asked = opts?.tokensRaw ? BigInt(opts.tokensRaw) : (chain.balance * BigInt(Math.round(pct * 100))) / 10_000n;
+      // The EVM rail REFUSES an exact size it cannot cover rather than
+      // clamping it — a balance that moved under the plan lands here.
+      if (asked > chain.balance) return { ok: false, message: 'That is more than this wallet holds' };
+      let moved = (asked * BigInt(Math.round((over.fillShare ?? 1) * 10_000))) / 10_000n;
+      if (moved > chain.balance) moved = chain.balance;
+      chain.balance -= moved;
+      const sig = `sellsig${calls.sells.length}`;
+      fills.set(sig, moved);
+      return { ok: true, message: 'sold', signature: sig };
     },
     liveBlockedReason: () => over.liveBlockedReason ?? null,
     priceSol: () => (over.priceSol === undefined ? 0.001 : over.priceSol),
@@ -51,6 +74,27 @@ function makeHost(over = {}) {
   // The optional methods exist only when a test asks for them — the module
   // must work against a host that implements none of them.
   if (over.ourCostBasisSol !== undefined) host.ourCostBasisSol = () => over.ourCostBasisSol;
+  if (chain) {
+    calls.tokenReads = [];
+    host.walletTokens = async (mint) => {
+      calls.tokenReads.push(mint);
+      // An unreadable balance is null, never zero — the distinction the
+      // whole sweep rests on.
+      return over.unreadableBalance ? null : { raw: chain.balance.toString(), decimals: chain.decimals };
+    };
+    host.fillTokens = async (sig) => (fills.has(sig) ? { raw: fills.get(sig).toString(), decimals: chain.decimals } : null);
+    calls.chain = chain;
+  }
+  if (over.leaderFeed !== undefined) {
+    host.leaderFeed = (chain) => (chain === 'solana' ? null : over.leaderFeed);
+  }
+  if (over.buyFill !== undefined) {
+    calls.buyFills = [];
+    host.buyFill = async (mint, atMs) => {
+      calls.buyFills.push({ mint, atMs });
+      return over.buyFill;
+    };
+  }
   if (over.buyBlockedReason !== undefined) host.buyBlockedReason = () => over.buyBlockedReason;
   if (over.maxLiveSol !== undefined) host.maxLiveSol = () => over.maxLiveSol;
   if (over.leaderHolding !== undefined) {
@@ -564,6 +608,568 @@ test('a mark-to-market for one chain leaves the same mint on another alone', () 
   assert.deepEqual(copy.openMints('bnb'), [EVM_MINT.toLowerCase()]);
   assert.deepEqual([...copy.activeWallets('bnb')], [], 'no BNB config is enabled');
   void h;
+});
+
+// ── A copy is settled in TOKENS, not in what it cost (2026-09-15) ─────
+//
+// The reported bug, in the reporter's words: "undersized sells followed by
+// incorrect 'closed' bookkeeping, not simply failed transactions". A NON
+// copy's final exit was recorded as 100 %, the live request sold 52 % of the
+// remaining tokens, the transaction succeeded, 83,236 NON were left behind,
+// and the app marked the copy fully closed — inventory outside every
+// open-position view it has.
+//
+// Two separate faults, pinned separately below: the sell was SIZED from a
+// cost-basis ratio rather than from the tokens the copy holds, and the book
+// was moved by the LEADER's fraction rather than by what actually left the
+// wallet.
+
+test('a mirrored sell is sized from the copy TOKENS, not from what the bag cost', async () => {
+  // We hold 3× the copy: 2e9 base units bought by hand plus the copy's 1e9.
+  // Their full exit is 1e9 of a 3e9 balance — 33.34 %. The cost-basis path
+  // would have said 20 % (1 SOL of a 5 SOL basis), and 20 % of the balance
+  // is 0.6e9: 40 % of the copy left behind, under a "sold 100 %" record.
+  const h = await openLiveCopy({ chain: { balance: 2_000_000_000n, bought: 1_000_000_000n }, ourCostBasisSol: 5 });
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 2, priceSol: 0.002, soldFraction: 1, signature: 'x1' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1);
+  assert.equal(h.calls.sells[0].pct, 33.34, `the token share, not the cost share: ${h.calls.sells[0].pct}`);
+  assert.equal(h.calls.sellOpts[0].tokensRaw, '1000000000', 'and the quantity itself reaches the host');
+  assert.equal(h.calls.chain.balance, 2_000_000_000n, 'the hand-bought bag is untouched');
+  const parent = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(parent.state, 'closed', 'the copy is out, so it closes');
+  assert.equal(parent.tokensLeftRaw, '0');
+});
+
+test('a full exit that only half-fills leaves the copy OPEN for the remainder — the NON bug', async () => {
+  // Every sell moves 52 % of what it was asked for and reports success,
+  // which is exactly what the reported transaction did.
+  const h = await openLiveCopy({ chain: { bought: 160_000_000_000n }, fillShare: 0.52 });
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 2, priceSol: 0.002, soldFraction: 1, signature: 'x2' }));
+  await tick();
+
+  const snap = copy.snapshot();
+  const parent = snap.recent.find((t) => t.kind !== 'exit');
+  assert.equal(parent.state, 'open', 'the tokens are still here, so the copy is NOT closed');
+  assert.equal(parent.closedAt, null);
+  assert.match(parent.reason, /still held/);
+
+  // One top-up attempt for the measured remainder, then it stops and says so
+  // rather than looping against a token it cannot fully sell.
+  assert.equal(h.calls.sells.length, 2, `one mirror and one top-up: ${h.calls.sells.length}`);
+  assert.equal(h.calls.sellOpts[0].tokensRaw, '160000000000');
+  assert.equal(h.calls.sellOpts[1].tokensRaw, '76800000000', 'the top-up asks for what was measured, not a percentage');
+  assert.equal(parent.tokensLeftRaw, '36864000000');
+  assert.equal(h.calls.chain.balance, 36_864_000_000n, 'and the book agrees with the wallet');
+
+  const exits = snap.recent.filter((t) => t.kind === 'exit');
+  assert.equal(exits.length, 2, 'one slice per sell that landed');
+  const first = exits[exits.length - 1];
+  assert.equal(first.soldPct, 52, 'the slice records what WE sold');
+  assert.equal(first.leaderPct, 100, 'and what they sold, because the two differ');
+  assert.equal(first.soldRaw, '83200000000');
+  assert.equal(first.wantedRaw, '160000000000', 'the gap is on the record, not hidden');
+  assert.ok(
+    h.calls.toasts.some((t) => t.level === 'warn' && /still in your wallet/.test(t.message)),
+    `the shortfall is said out loud: ${JSON.stringify(h.calls.toasts.map((t) => t.message))}`,
+  );
+});
+
+test('a full exit that fills completely closes the copy, once', async () => {
+  const h = await openLiveCopy({ chain: { bought: 160_000_000_000n } });
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 2, priceSol: 0.002, soldFraction: 1, signature: 'x3' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1, 'nothing to top up');
+  assert.deepEqual(h.calls.sells[0], { mint: MINT, pct: 100 });
+  const parent = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(parent.state, 'closed');
+  assert.equal(parent.remainingPct, 0);
+  assert.equal(parent.tokensLeftRaw, '0');
+  const exit = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.equal(exit.soldPct, 100);
+  assert.equal(exit.leaderPct, undefined, 'they match, so there is nothing extra to say');
+});
+
+test('a PARTIAL exit that comes back short is never topped up — that would trade past them', async () => {
+  const h = await openLiveCopy({ chain: { bought: 1_000_000_000n }, fillShare: 0.5 });
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'x4' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1, 'they trimmed 40 %; there is no remainder to chase');
+  assert.equal(h.calls.sellOpts[0].tokensRaw, '400000000');
+  const parent = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(parent.state, 'open');
+  assert.equal(parent.tokensLeftRaw, '800000000', 'only what actually left is booked');
+  assert.equal(parent.remainingPct, 80);
+  const exit = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.equal(exit.soldPct, 20, 'ours');
+  assert.equal(exit.leaderPct, 40, 'theirs');
+});
+
+test('a dust remainder still closes the copy — the chain rarely leaves a balance exactly empty', async () => {
+  const h = await openLiveCopy({ chain: { bought: 1_000_000_000n }, fillShare: 0.999 });
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 2, priceSol: 0.002, soldFraction: 1, signature: 'x5' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1, 'a tenth of a percent is not worth a second transaction');
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'closed');
+});
+
+test('a copy with NO tracked quantity keeps the old percentage path exactly', async () => {
+  // A row opened before quantities existed, or a rail whose host cannot read
+  // a balance. Unknown is never read as zero and never as "all of it".
+  const h = await openLiveCopy({ ourCostBasisSol: 5 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'x6' }));
+  await tick();
+  assert.deepEqual(h.calls.sells, [{ mint: MINT, pct: 8 }], '40 % of our fifth of the bag, as before');
+  assert.equal(h.calls.sellOpts[0].tokensRaw, undefined, 'and no quantity is invented');
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').remainingPct, 60);
+});
+
+// ── The balance sweep (Rob's fourth ask) ──────────────────────────────
+//
+// "Recheck balances periodically and flag/reconcile leftovers even when the
+// ledger says closed." `reconcileHoldings` above answers "are these tokens
+// gone?"; this answers the question that caught nobody.
+
+const closedRowWithLeftover = (configId, over = {}) => ({
+  id: 'ct-non',
+  configId,
+  mode: 'live',
+  wallet: WALLET,
+  mint: MINT,
+  symbol: 'NON',
+  at: Date.now() - 600_000,
+  theirSol: 1,
+  ourSol: 1,
+  entryPriceSol: 0.001,
+  exitPriceSol: 0.002,
+  closedAt: Date.now() - 300_000,
+  pnlSol: 0.1,
+  state: 'closed',
+  reason: null,
+  remainingPct: 0,
+  tokensRaw: '160000000000',
+  tokensLeftRaw: '83236000000',
+  tokenDecimals: 6,
+  ...over,
+});
+
+test('a copy marked closed while its tokens are still held is FLAGGED, and said once', async () => {
+  const h = setup();
+  save({ mode: 'live' });
+  const c = copy.all()[0];
+  copy._load([c], [closedRowWithLeftover(c.id)]);
+  const held = () => new Map([[MINT, { raw: '83236000000', decimals: 6 }]]);
+
+  const r = copy.reconcileQuantities(held(), { configIds: new Set([c.id]) });
+  assert.equal(r.flagged, 1);
+  const row = copy.snapshot().recent[0];
+  assert.equal(row.leftoverRaw, '83236000000');
+  assert.match(row.reason, /marked closed/);
+  assert.match(row.reason, /83,236/, 'in tokens, not base units — a human reads this');
+  assert.ok(h.calls.toasts.some((t) => t.level === 'warn' && /still in your wallet/.test(t.message)));
+  assert.equal(h.calls.sells.length, 0, 'a sweep never trades');
+
+  const said = h.calls.toasts.length;
+  copy.reconcileQuantities(held(), { configIds: new Set([c.id]) });
+  assert.equal(h.calls.toasts.length, said, 'the holdings poll runs every couple of seconds — say it once');
+});
+
+test('the flag clears when the leftovers finally leave the wallet', async () => {
+  setup();
+  save({ mode: 'live' });
+  const c = copy.all()[0];
+  copy._load([c], [closedRowWithLeftover(c.id, { leftoverRaw: '83236000000' })]);
+  const r = copy.reconcileQuantities(new Map(), { configIds: new Set([c.id]) });
+  assert.equal(r.cleared, 1);
+  const row = copy.snapshot().recent[0];
+  assert.equal(row.leftoverRaw, null);
+  assert.equal(row.tokensLeftRaw, '0');
+});
+
+test('the sweep scales a book that claims more tokens than the wallet holds', async () => {
+  // Two copies of one mint, and a hand sell took most of it. Each row
+  // thinking it still owns its own tokens is how one balance gets counted
+  // twice; the chain is the ceiling.
+  setup();
+  save({ mode: 'live' });
+  const c = copy.all()[0];
+  copy._load([c], [
+    closedRowWithLeftover(c.id, { id: 'a', state: 'open', remainingPct: 100, tokensRaw: '100', tokensLeftRaw: '100' }),
+    closedRowWithLeftover(c.id, { id: 'b', state: 'open', remainingPct: 100, tokensRaw: '100', tokensLeftRaw: '100' }),
+  ]);
+  copy.reconcileQuantities(new Map([[MINT, { raw: '50', decimals: 6 }]]), { configIds: new Set([c.id]) });
+  const rows = copy.snapshot().recent;
+  assert.equal(rows.find((x) => x.id === 'a').tokensLeftRaw, '25');
+  assert.equal(rows.find((x) => x.id === 'b').tokensLeftRaw, '25');
+});
+
+test('a sweep scoped to other configs, or run inside the grace window, leaves a row alone', async () => {
+  const h = setup();
+  save({ mode: 'live' });
+  const c = copy.all()[0];
+  copy._load([c], [closedRowWithLeftover(c.id)]);
+  const held = new Map([[MINT, { raw: '83236000000', decimals: 6 }]]);
+  assert.equal(copy.reconcileQuantities(held, { configIds: new Set(['someone-else']) }).flagged, 0);
+  // A sell that has just confirmed is not in the next holdings read yet.
+  copy._load([c], [closedRowWithLeftover(c.id, { closedAt: Date.now() })]);
+  assert.equal(copy.reconcileQuantities(held, { configIds: new Set([c.id]) }).flagged, 0);
+  // The only toast here is the one arming the config; nothing was flagged.
+  assert.equal(h.calls.toasts.filter((t) => /still in your wallet/.test(t.message)).length, 0);
+});
+
+// ── Legacy rows recover their quantity from the ledger ────────────────
+//
+// A copy opened before 2026-09-15 carries no base units, so it exits through
+// the old cost-ratio percentage and can be closed over tokens that never
+// left. The quantity is not lost: the copy's buy is a fill in the ledger,
+// and the ledger reconciled that transaction's own token delta at the time.
+
+test('an open copy with no tracked quantity recovers it from the ledger', async () => {
+  const h = await openLiveCopy({ buyFill: { raw: '160000000000', decimals: 6 } });
+  // Simulate the pre-2026-09-15 shape: the row exists, the quantity does not.
+  const row = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  copy._load(copy.all(), [{ ...row, tokensRaw: undefined, tokensLeftRaw: undefined, tokenDecimals: undefined, signature: null }]);
+
+  assert.equal(await copy.backfillQuantities(), 1);
+  const after = copy.snapshot().recent[0];
+  assert.equal(after.tokensRaw, '160000000000');
+  assert.equal(after.tokensLeftRaw, '160000000000');
+  assert.equal(after.tokenDecimals, 6);
+  assert.deepEqual(h.calls.buyFills, [{ mint: MINT, atMs: row.at }]);
+});
+
+test('a partly sold legacy row recovers the remainder, not the whole buy', async () => {
+  const h = await openLiveCopy({ buyFill: { raw: '1000000000', decimals: 6 } });
+  const row = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  // 40 % already went out on the old percentage path.
+  copy._load(copy.all(), [{ ...row, remainingPct: 60, tokensRaw: undefined, tokensLeftRaw: undefined, signature: null }]);
+  await copy.backfillQuantities();
+  const after = copy.snapshot().recent[0];
+  assert.equal(after.tokensRaw, '1000000000', 'what the buy delivered');
+  assert.equal(after.tokensLeftRaw, '600000000', 'what is left of it');
+  assert.equal(h.calls.buyFills.length, 1);
+});
+
+test('a ledger that cannot name the buy leaves the row unknown, and is not asked twice', async () => {
+  const h = await openLiveCopy({ buyFill: null });
+  const row = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  copy._load(copy.all(), [{ ...row, tokensRaw: undefined, tokensLeftRaw: undefined, signature: null }]);
+  assert.equal(await copy.backfillQuantities(), 0);
+  assert.equal(copy.snapshot().recent[0].tokensRaw, undefined, 'unknown, never guessed');
+  assert.equal(await copy.backfillQuantities(), 0);
+  assert.equal(h.calls.buyFills.length, 1, 'a row with no answer is not re-scanned every sweep');
+});
+
+test('a row that kept its buy signature is settled from the fill, never from a ledger scan', async () => {
+  const h = await openLiveCopy({ chain: { bought: 500n }, buyFill: { raw: '999', decimals: 6 } });
+  await tick();
+  const row = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  copy._load(copy.all(), [{ ...row, tokensRaw: undefined, tokensLeftRaw: undefined }]);
+  await copy.backfillQuantities();
+  assert.equal(copy.snapshot().recent[0].tokensRaw, '500', 'the fill its own signature names');
+  assert.equal(h.calls.buyFills.length, 0, 'no time-window match was needed');
+});
+
+// ── The periodic balance sweep ────────────────────────────────────────
+//
+// The Solana path gets a comparison free off `readHoldings`. The EVM rails
+// have no such read, and a copy signed by a wallet that is not the active
+// one is not described by the active wallet's holdings either.
+
+test('the periodic sweep reads the balances the book has an opinion about, and nothing else', async () => {
+  const h = await openLiveCopy({ chain: { bought: 1_000_000_000n } });
+  await tick();
+  const r = await copy.sweepBalances({ now: Date.now() + 120_000 });
+  assert.equal(r.read, 1, 'one read, for the one mint a live copy is open on');
+  assert.deepEqual(h.calls.tokenReads, [MINT]);
+
+  // A copy with no tracked quantity has nothing to compare, so nothing is read.
+  const row = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  copy._load(copy.all(), [{ ...row, tokensRaw: undefined, tokensLeftRaw: undefined }]);
+  h.calls.tokenReads.length = 0;
+  assert.equal((await copy.sweepBalances({ now: Date.now() + 120_000 })).read, 0);
+  assert.deepEqual(h.calls.tokenReads, []);
+});
+
+test('the sweep flags a leftover on a chain that has no holdings read', async () => {
+  const h = await openLiveCopy({ chain: { bought: 160_000_000_000n }, fillShare: 0.52 });
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 2, priceSol: 0.002, soldFraction: 1, signature: 'lo' }));
+  await tick();
+  // Force the row closed the way the OLD book would have, leaving the
+  // remainder stranded — this is the state a user is in today.
+  const rows = copy.snapshot().recent;
+  const parent = rows.find((t) => t.kind !== 'exit');
+  copy._load(copy.all(), [
+    { ...parent, state: 'closed', closedAt: Date.now() - 300_000, remainingPct: 0, at: Date.now() - 600_000 },
+    ...rows.filter((t) => t.kind === 'exit'),
+  ]);
+
+  const r = await copy.sweepBalances();
+  assert.equal(r.flagged, 1, 'the wallet still holds tokens this copy called done');
+  const after = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.ok(after.leftoverRaw && BigInt(after.leftoverRaw) > 0n);
+  assert.match(after.reason, /marked closed/);
+});
+
+test('the sweep closes an open copy the wallet holds none of — the EVM rails have no other path to it', async () => {
+  const h = await openLiveCopy({ chain: { bought: 1_000_000_000n } });
+  await tick();
+  h.calls.chain.balance = 0n; // sold by hand, or by a stop-loss
+  await copy.sweepBalances({ now: Date.now() + 120_000 });
+  const after = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(after.state, 'closed');
+  assert.equal(after.tokensLeftRaw, '0');
+  assert.match(after.reason, /no longer in the wallet/);
+  assert.equal(h.calls.sells.length, 0, 'a sweep never trades');
+});
+
+test('a balance the host cannot read changes nothing — unreadable is not empty', async () => {
+  const h = await openLiveCopy({ chain: { bought: 1_000_000_000n }, unreadableBalance: true });
+  await tick();
+  const before = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  const r = await copy.sweepBalances({ now: Date.now() + 120_000 });
+  assert.equal(r.read, 0);
+  const after = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(after.state, 'open');
+  assert.equal(after.tokensLeftRaw, before.tokensLeftRaw);
+});
+
+test('a row that moved a moment ago is left alone — the chain has not caught up', async () => {
+  const h = await openLiveCopy({ chain: { bought: 1_000_000_000n } });
+  await tick();
+  h.calls.chain.balance = 0n;
+  assert.equal((await copy.sweepBalances()).read, 0, 'inside the grace window there is nothing to ask about');
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'open');
+});
+
+test('the sweep is bounded, and takes the least recently swept mints first', async () => {
+  const h = setup({ priceSol: 0.001, chain: { bought: 1_000n } });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 0.01, maxTradeSol: 1, delayMs: 0, dailyTradeLimit: 500, maxCopiesPerMinute: 120 });
+  const mints = [];
+  for (let i = 0; i < 5; i++) {
+    const mint = `Sweep${i}${'1'.repeat(35)}`;
+    mints.push(mint);
+    copy.onWalletTrade(trade({ mint, isBuy: true, signature: `sw${i}` }));
+    await tick();
+  }
+  const now = Date.now() + 120_000;
+  h.calls.tokenReads.length = 0;
+  assert.equal((await copy.sweepBalances({ max: 2, now })).read, 2);
+  assert.equal(h.calls.tokenReads.length, 2);
+  const first = [...h.calls.tokenReads];
+  assert.equal((await copy.sweepBalances({ max: 2, now })).read, 2);
+  const second = h.calls.tokenReads.slice(2);
+  assert.ok(
+    second.every((m) => !first.includes(m)),
+    `the next pass moves on: ${JSON.stringify({ first, second })}`,
+  );
+});
+
+test('a size the chain has moved under is re-planned once, not recorded as a failed exit', async () => {
+  const h = await openLiveCopy({ chain: { bought: 1_000_000_000n } });
+  await tick();
+  // A hand sell takes half the bag between the plan's read and the send.
+  const real = h.host.walletTokens;
+  let first = true;
+  h.host.walletTokens = async (mint) => {
+    const r = await real(mint);
+    if (first) {
+      first = false;
+      h.calls.chain.balance = 500_000_000n;
+    }
+    return r;
+  };
+  copy.onWalletTrade(trade({ isBuy: false, sol: 2, priceSol: 0.002, soldFraction: 1, signature: 'stale' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 2, 'the first size was stale; the second is planned from a fresh read');
+  assert.equal(h.calls.sellOpts[1].tokensRaw, '500000000');
+  const parent = copy.snapshot().recent.find((t) => t.kind !== 'exit');
+  assert.equal(parent.state, 'closed', 'and the copy really is out');
+  assert.equal(
+    copy.snapshot().recent.filter((t) => t.kind === 'exit' && t.state === 'skipped').length,
+    0,
+    'a race is not a refusal — nothing is recorded as a failed exit',
+  );
+});
+
+// ── How late is too late (2026-09-15) ─────────────────────────────────
+//
+// A leader trade now carries WHEN IT LANDED, not when we read it, so the
+// copier can finally tell a fresh instruction from one that reached it after
+// a socket gap. Without that, a sell recovered forty minutes later went out
+// as if it were new, and a buy from half an hour ago opened a position at a
+// price that had nothing to do with the trade being copied.
+
+test('a leader sell that only reaches us after the window is RECORDED, not mirrored', async () => {
+  const h = await openLiveCopy();
+  copy.onWalletTrade(
+    trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 1, signature: 'old1', tradeAt: Date.now() - 40 * 60_000 }),
+  );
+  await tick();
+  assert.equal(h.calls.sells.length, 0, 'nothing is sold on an instruction that old');
+  const exit = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.equal(exit.state, 'skipped');
+  assert.match(exit.reason, /40 minutes ago/);
+  assert.match(exit.reason, /You still hold it/);
+  assert.equal(copy.snapshot().recent.find((t) => t.kind !== 'exit').state, 'open', 'and the position stays open');
+  assert.ok(h.calls.toasts.some((x) => x.level === 'error' && /too late to mirror/.test(x.message)));
+});
+
+test('a sell inside the window is mirrored, and says how far behind it was', async () => {
+  const h = await openLiveCopy();
+  copy.onWalletTrade(
+    trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 1, signature: 'late1', tradeAt: Date.now() - 4 * 60_000 }),
+  );
+  await tick();
+  assert.equal(h.calls.sells.length, 1, 'four minutes late is still worth getting out on');
+  assert.ok(
+    h.calls.toasts.some((x) => x.level === 'success' && /after they did/.test(x.message)),
+    `the lateness is said, not hidden: ${JSON.stringify(h.calls.toasts.map((t) => t.message))}`,
+  );
+});
+
+test('a sell that is barely late says nothing extra', async () => {
+  const h = await openLiveCopy();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 1, signature: 'quick', tradeAt: Date.now() - 3_000 }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1);
+  assert.ok(h.calls.toasts.some((x) => x.level === 'success' && !/after they did/.test(x.message)));
+});
+
+test('a leader BUY that is already minutes old is refused', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'oldbuy', tradeAt: Date.now() - 5 * 60_000 }));
+  await tick();
+  assert.equal(h.calls.buys.length, 0, 'that is a different trade at a different price');
+  const row = copy.snapshot().recent[0];
+  assert.equal(row.state, 'skipped');
+  assert.match(row.reason, /too old to copy/);
+});
+
+test('a configured delay is the user own choice to be late, not a reason to refuse them', async () => {
+  // 45 s of delay plus a 30 s old trade is inside the limit; the same trade
+  // under a config with no delay would be too.
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 45_000 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'delayed', tradeAt: Date.now() - 80_000 }));
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(copy.snapshot().recent.filter((x) => /too old to copy/.test(x.reason ?? '')).length, 0, '80 s is inside 60 s + the 45 s they asked for');
+});
+
+test('PAPER refuses a stale entry too, or the scorecard measures a strategy live would not run', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'paper', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'paperold', tradeAt: Date.now() - 5 * 60_000 }));
+  await tick();
+  const row = copy.snapshot().recent[0];
+  assert.equal(row.state, 'skipped');
+  assert.match(row.reason, /too old to copy/);
+});
+
+test('a rail that cannot date a trade behaves exactly as it did before', async () => {
+  // Unknown age is NOT "old" — an EVM leader feed with no block time must
+  // keep copying, not stop.
+  const h = await openLiveCopy();
+  assert.equal(h.calls.buys.length, 1, 'the buy above carried no tradeAt and still went out');
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 0.4, signature: 'undated' }));
+  await tick();
+  assert.equal(h.calls.sells.length, 1);
+});
+
+// ── An EVM leader is only seen through its chain's scanner ────────────
+//
+// Solana watches a wallet directly, one subscription each. Robinhood and BNB
+// have no such thing: a followed wallet there is read out of that chain's
+// SCANNER poll, which the user starts. An armed config on a stopped scanner
+// watched nothing at all, and the panel rendered no line about it.
+
+const EVM_WALLET = '0x1234567890abcdef1234567890abcdef12345678';
+
+test('a config on an EVM chain reports the chain scanner as its watcher', async () => {
+  setup({ leaderFeed: { running: true, lastPollAt: 1_700_000_000_000 } });
+  copy.upsert({ ...defaultConfig(EVM_WALLET, 'BNB whale', 'bnb'), enabled: true });
+  const w = copy.snapshot().watch[EVM_WALLET];
+  assert.equal(w.state, 'watching');
+  assert.equal(w.lastSeenAt, 1_700_000_000_000, 'the poll IS the watch');
+});
+
+test('a config on a chain whose scanner is stopped says so, instead of rendering nothing', async () => {
+  setup({ leaderFeed: { running: false, lastPollAt: null } });
+  copy.upsert({ ...defaultConfig(EVM_WALLET, 'BNB whale', 'bnb'), enabled: true });
+  assert.equal(copy.snapshot().watch[EVM_WALLET].state, 'off');
+});
+
+test('a scanner that is running but has not polled yet reads as connecting', async () => {
+  setup({ leaderFeed: { running: true, lastPollAt: null } });
+  copy.upsert({ ...defaultConfig(EVM_WALLET, 'BNB whale', 'bnb'), enabled: true });
+  assert.equal(copy.snapshot().watch[EVM_WALLET].state, 'connecting');
+});
+
+test('a host that cannot describe the feed leaves the status absent, never invents one', async () => {
+  setup();
+  copy.upsert({ ...defaultConfig(EVM_WALLET, 'BNB whale', 'bnb'), enabled: true });
+  assert.equal(copy.snapshot().watch[EVM_WALLET], undefined);
+});
+
+test('activeChains names the chains whose leader feed has to be running', async () => {
+  setup();
+  copy.upsert({ ...defaultConfig(WALLET, 'Sharky'), enabled: true });
+  copy.upsert({ ...defaultConfig(EVM_WALLET, 'BNB whale', 'bnb'), enabled: true });
+  copy.upsert({ ...defaultConfig('0xabcdef1234567890abcdef1234567890abcdef12', 'Paused', 'robinhood'), enabled: false });
+  const chains = [...copy.activeChains()].sort();
+  assert.deepEqual(chains, ['bnb', 'solana'], 'a disabled config needs no feed');
+});
+
+test('a machine whose clock runs fast corrects itself rather than stopping', async () => {
+  // Every rail dates a trade from a CHAIN clock now. On a machine five
+  // minutes fast every trade looks five minutes old, and a hard staleness
+  // gate would refuse all of them forever for a reason that has nothing to
+  // do with trading. Ages are measured against the fastest delivery actually
+  // seen — but only once that has been seen enough times to be believed, so
+  // an uncalibrated session still refuses a genuinely stale trade.
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0, dailyTradeLimit: 100, maxCopiesPerMinute: 120 });
+  const FAST = 5 * 60_000;
+  for (let i = 0; i < 8; i++) {
+    copy.onWalletTrade(trade({ mint: `Skew${i}${'1'.repeat(36)}`, isBuy: true, signature: `sk${i}`, tradeAt: Date.now() - FAST }));
+    await tick();
+  }
+  assert.ok(copy._clockSkewMs() >= FAST - 10_000, `the offset was learned: ${copy._clockSkewMs()}`);
+  assert.ok(h.calls.buys.length >= 3, `copying resumes once the offset is known: ${h.calls.buys.length} of 8`);
+
+  // And a genuinely old trade ON TOP of that offset is still refused.
+  const before = h.calls.buys.length;
+  copy.onWalletTrade(trade({ mint: `Skew9${'1'.repeat(36)}`, isBuy: true, signature: 'sk9', tradeAt: Date.now() - FAST - 10 * 60_000 }));
+  await tick();
+  assert.equal(h.calls.buys.length, before, 'ten minutes late is ten minutes late, whatever the clock says');
+  assert.ok(copy.snapshot().recent.some((x) => /too old to copy/.test(x.reason ?? '')));
+});
+
+test('an offset is not believed on the strength of one sample', async () => {
+  // Otherwise the first trade of a session defines itself as normal, and a
+  // sell recovered forty minutes late would sail through the rule written
+  // to catch it.
+  const h = await openLiveCopy();
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.002, soldFraction: 1, signature: 'lone', tradeAt: Date.now() - 40 * 60_000 }));
+  await tick();
+  assert.equal(h.calls.sells.length, 0, 'it is still refused');
+  assert.equal(copy._clockSkewMs(), 0, 'and nothing was calibrated from it');
+});
+
+test('a clock running BEHIND the chain never makes a trade look late', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ mode: 'live', sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'behind', tradeAt: Date.now() + 5 * 60_000 }));
+  await tick();
+  assert.equal(h.calls.buys.length, 1);
+  assert.equal(copy._clockSkewMs(), 0, 'a negative sample is not an offset');
 });
 
 async function run() {

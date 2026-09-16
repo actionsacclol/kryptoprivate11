@@ -156,9 +156,31 @@ const lower = (a: string): Address => a.toLowerCase() as Address;
  * page, because the renderer only knows the ACTIVE wallet and this install
  * may hold several.
  */
+/**
+ * Is Krypt's fee waived right now? ($KRYPTO holders — shared/krypto.ts.)
+ *
+ * INJECTED rather than imported: $KRYPTO is a Solana mint and the holding is
+ * read by a Solana module, and this file must stay free of that half of the
+ * app (it is bundled on its own for the EVM tests, viem and all). Main wires
+ * it; unset means "not waived", so a build that forgets is a build that
+ * charges — the safe direction.
+ */
+let feeWaived: () => boolean = () => false;
+export function setFeeWaiver(fn: () => boolean): void {
+  feeWaived = fn;
+}
+
 function feePlanFor(basisWei: bigint, referrer: string, owner: Address | null): FeePlan {
   const treasury = activeEvmTreasury();
   if (!isEvmAddress(treasury)) return NO_FEE;
+  // The waiver covers every chain, because the promise is about the person
+  // and not about which rail they happen to be trading on. It is Krypt's own
+  // cut only — the venue's fee and the chain's gas are untouched.
+  try {
+    if (feeWaived()) return NO_FEE;
+  } catch {
+    /* a waiver that cannot be decided is not a waiver */
+  }
   const ref = usableReferrer(referrer, treasury, owner);
   const split = splitEvmFee(basisWei, ref !== null);
   if (split.totalWei <= 0n) return NO_FEE;

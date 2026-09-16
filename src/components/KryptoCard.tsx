@@ -6,9 +6,11 @@
 // screen would be the one place this app pressures instead of informs.
 
 import { useEffect, useState } from 'react';
-import { Coins, ExternalLink } from 'lucide-react';
-import { KRYPTO_TOKEN, kryptoDisclosure, kryptoPumpUrl, kryptoTokenLive } from '@shared/krypto';
+import { Check, Coins, ExternalLink } from 'lucide-react';
+import { KRYPTO_TOKEN, KRYPTO_FEE_WAIVER_TOKENS, kryptoDisclosure, kryptoPumpUrl, kryptoTokenLive } from '@shared/krypto';
 import type { TokenSummary } from '@shared/market';
+import { cls } from '../utils/format';
+import { useKryptoWaiver } from '../state/useKryptoWaiver';
 
 /** Unknown is an em dash. Never 0. */
 const usd = (v: number | null): string => (v === null ? '—' : `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
@@ -20,6 +22,11 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const mint = kryptoTokenLive() ? (KRYPTO_TOKEN.mint as string) : null;
   const [row, setRow] = useState<TokenSummary | null>(null);
   const [failed, setFailed] = useState(false);
+  // What this install holds, and whether that waives Krypt's fee. The SAME
+  // reading the signer uses, shared with every other screen that names the
+  // fee — the card, the Trade panel and Settings must never disagree about
+  // whether the next trade is free.
+  const held = useKryptoWaiver();
 
   useEffect(() => {
     if (!mint) return;
@@ -94,6 +101,48 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
       </div>
       {failed && <p className="mt-2 text-body text-amber-300/90">Could not read the market for it right now — the numbers above are the last known, or unknown.</p>}
       <p className="mt-3 text-label leading-relaxed text-krypt-muted/80">{kryptoDisclosure()}</p>
+
+      {/* The waiver, last and loud.
+
+          It is the one thing on this card that is about the READER rather
+          than about the token, so it sits under everything else and is the
+          note the eye lands on last. Clicking opens the token PAGE — never a
+          one-click order, the same rule the Buy button above follows: this
+          app does not turn a banner about its own coin into a trade.
+
+          Both states are gold. The difference is stated in words and in the
+          fill, not in the hue, because "is my fee waived" is a yes/no a
+          colour alone should not be carrying. */}
+      {held.at > 0 && (
+        <button
+          onClick={() => mint && onOpenToken(mint)}
+          className={cls(
+            'mt-3 block w-full rounded-lg border px-4 py-3 text-left transition',
+            held.waived
+              ? 'border-arc-gold/60 bg-arc-gold/15 hover:bg-arc-gold/20'
+              : 'border-arc-gold/40 bg-arc-gold/[0.07] hover:border-arc-gold/60 hover:bg-arc-gold/10',
+          )}
+        >
+          <span className="flex items-center gap-2">
+            {held.waived ? <Check className="h-4 w-4 flex-shrink-0 text-arc-gold" /> : <Coins className="h-4 w-4 flex-shrink-0 text-arc-gold" />}
+            <span className="text-value font-bold text-arc-gold">
+              {held.waived ? `No fee on Krypto Bot — active` : `Use Krypto Bot with no fee`}
+            </span>
+          </span>
+          <span className="mt-1 block text-body leading-relaxed text-arc-gold/85">
+            Hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in the app and Krypt&rsquo;s
+            0.5% trading fee is waived, on every chain.
+          </span>
+          <span className="mt-1 block text-label leading-relaxed text-krypt-muted/75">
+            {held.problem
+              ? `Your holding could not be read just now, so the fee is charged as usual — ${held.problem}.`
+              : held.waived
+                ? `You hold ${held.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}${held.usd !== null ? ` (~$${held.usd.toFixed(2)})` : ''} across ${held.wallets} wallet${held.wallets === 1 ? '' : 's'}.`
+                : `You hold ${held.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}${held.usd !== null ? ` (~$${held.usd.toFixed(2)})` : ''} — ${Math.max(0, KRYPTO_FEE_WAIVER_TOKENS - held.tokens).toLocaleString(undefined, { maximumFractionDigits: 0 })} more to go.`}
+            {' '}pump.fun&rsquo;s 1% and the network&rsquo;s own fees are not ours to waive. Tap to open the coin.
+          </span>
+        </button>
+      )}
     </section>
   );
 }

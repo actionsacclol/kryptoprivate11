@@ -150,14 +150,90 @@ export interface CopyTrade {
   kind?: 'exit';
   /** Exit: the copy it came out of. */
   parentId?: string;
-  /** Exit: share of what we HELD that was sold, 1–100 — the leader's own fraction. */
+  /** Exit: share of what we HELD that this slice actually sold, 1–100.
+   *  When the quantity is tracked this is measured from the fill; without a
+   *  tracked quantity it falls back to the leader's own fraction. */
   soldPct?: number;
+  /** Exit: what the LEADER sold, 1–100, when it differs from `soldPct`.
+   *  They are the same on an exact mirror; they diverge when our sell came
+   *  back short, and the difference is the thing worth seeing. */
+  leaderPct?: number;
   /** Copy: how much of it is still held, 0–100. Absent = all of it. */
   remainingPct?: number;
   /** Copy: realised across its exits so far, SOL. */
   realizedSol?: number;
   /** Transaction of a live fill, when there was one. */
   signature?: string | null;
+
+  // ── Quantities (2026-09-15) ────────────────────────────────────────
+  //
+  // Everything above sizes a copy in SOL, and until now a mirrored sell was
+  // sized in SOL too: the leader's fraction scaled by this config's share of
+  // what the wallet PAID for the bag. Two positions bought at different
+  // prices do not hold tokens in proportion to what they cost, so that ratio
+  // is not the token share — and when it came out low the sell went out
+  // small while the book still wrote the leader's fraction down as done.
+  // A user's NON copy exited at "100 %", sold 52 % of the remaining tokens,
+  // and was marked closed over 83,236 tokens that never left the wallet.
+  //
+  // So a live copy now carries the only number that settles it: base units,
+  // from the confirmed fill. Decimal strings, because a u64 of a 6-decimal
+  // memecoin runs past what a double holds exactly.
+  //
+  // All optional: a row opened before this, a paper row, and a rail whose
+  // host cannot read balances all leave them absent, and absent means
+  // "unknown" — the old percentage path, honestly labelled.
+
+  /** Copy: base units the confirmed buy actually delivered. */
+  tokensRaw?: string | null;
+  /** Copy: base units of `tokensRaw` this copy still holds. */
+  tokensLeftRaw?: string | null;
+  /** Decimals for every raw amount on this row. */
+  tokenDecimals?: number | null;
+  /** Exit: base units this slice actually removed from the wallet. */
+  soldRaw?: string | null;
+  /** Exit: base units the sell was ASKED for, when it came back short. */
+  wantedRaw?: string | null;
+  /**
+   * Copy: base units still in the wallet after this copy was marked closed.
+   *
+   * The balance sweep sets it. Non-null is a flag, not bookkeeping: the app
+   * is saying "our record says done, the chain says these are still here".
+   */
+  leftoverRaw?: string | null;
+}
+
+/** A raw base-unit string as a bigint, or null when it is absent or junk. */
+export function rawOf(s: string | null | undefined): bigint | null {
+  if (typeof s !== 'string' || !/^\d+$/.test(s)) return null;
+  try {
+    return BigInt(s);
+  } catch {
+    return null;
+  }
+}
+
+/** Whole tokens for a raw amount, for display only — never for sizing. */
+export function uiTokens(raw: bigint, decimals: number | null | undefined): number {
+  const d = typeof decimals === 'number' && decimals >= 0 && decimals <= 18 ? decimals : 0;
+  return Number(raw) / 10 ** d;
+}
+
+/**
+ * Below this share of the copy's original quantity, a remainder is dust.
+ *
+ * A sell is a share of a balance that moves under it, so the last few base
+ * units routinely do not leave — and a copy held open over 40 base units of
+ * a 1e15 position is noise dressed as a finding. 0.5 % matches the
+ * `remainingPct` threshold the percentage path has always closed on.
+ */
+export const EXIT_DUST_PCT = 0.5;
+
+/** Is `left` dust against an original quantity of `total`? */
+export function isDustRemainder(left: bigint, total: bigint): boolean {
+  if (left <= 0n) return true;
+  if (total <= 0n) return false;
+  return left * 1_000n <= total * BigInt(Math.round(EXIT_DUST_PCT * 10));
 }
 
 /**
@@ -406,36 +482,10 @@ export function validateConfig(c: Omit<CopyConfig, 'id' | 'createdAt'>): { ok: b
   // it properly while the save path did not.
   const chain = chainOf(c);
   if (chain === 'solana') {
-    const chain = chainOf(c);
-  if (chain === 'solana') {
-    const chain = chainOf(c);
-  if (chain === 'solana') {
-    const chain = chainOf(c);
-  if (chain === 'solana') {
-    const chain = chainOf(c);
-  if (chain === 'solana') {
-    const chain = chainOf(c);
-  if (chain === 'solana') {
     if (!c.wallet || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.wallet)) return { ok: false, message: 'Enter a valid wallet address' };
   } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
     return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
   }
-  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
-    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
-  }
-  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
-    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
-  }
-  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
-    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
-  }
-  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
-    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
-  }
-  } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
-    return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
-  }
-  if (c.walletId !== undefined && c.walletId !== null && (typeof c.walletId !== 'string' || !c.walletId)) return { ok: false, message: 'Pick a wallet to copy with, or leave it on the active one' };
   if (c.walletId !== undefined && c.walletId !== null && (typeof c.walletId !== 'string' || !c.walletId)) return { ok: false, message: 'Pick a wallet to copy with, or leave it on the active one' };
   if (!(c.sizeValue > 0)) return { ok: false, message: 'Size must be greater than zero' };
   if (c.sizing === 'proportional' && c.sizeValue > 500) {

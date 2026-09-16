@@ -867,11 +867,29 @@ export function WalletsPage() {
                         </p>
                       );
                     }
+                    // An EVM leader has no subscription of its own — it is
+                    // seen through that chain's scanner poll — so it gets its
+                    // own wording rather than a line about a socket it is not on.
+                    const evm = (c.chain ?? 'solana') !== 'solana';
                     if (w.state === 'off') {
-                      return <p className="text-label text-rose-300/80">Not watched — no websocket endpoint is configured.</p>;
+                      return (
+                        <p className="text-label text-rose-300/80">
+                          {evm
+                            ? `Not watched — the ${nativeSymbolOf(c.chain ?? 'solana')} chain scanner is not running, and this wallet is only seen through it.`
+                            : 'Not watched — no websocket endpoint is configured.'}
+                        </p>
+                      );
                     }
                     if (w.state === 'connecting') {
-                      return <p className="text-label text-krypt-muted/60">Connecting to the live socket…</p>;
+                      return <p className="text-label text-krypt-muted/60">{evm ? 'Starting the chain scanner…' : 'Connecting to the live socket…'}</p>;
+                    }
+                    if (evm) {
+                      return (
+                        <p className="text-label text-krypt-muted/60">
+                          Watching through the chain scanner{w.lastSeenAt ? `, last polled ${fmtAgo(w.lastSeenAt)} ago` : ''} · {w.swaps} trade
+                          {w.swaps === 1 ? '' : 's'} seen{w.lastSwapAt ? ` (last ${fmtAgo(w.lastSwapAt)} ago)` : ''}
+                        </p>
+                      );
                     }
                     return (
                       <p className="text-label text-krypt-muted/60">
@@ -918,8 +936,13 @@ export function WalletsPage() {
                 className="flex items-center gap-3 rounded-md px-3 py-1.5 text-body font-mono hover:bg-white/[0.04] transition"
               >
                 <span className="text-krypt-muted/60 w-14">{fmtAgo(t.at)}</span>
-                <span className={cls('w-16 font-bold', t.state === 'skipped' ? 'text-krypt-muted/50' : t.state === 'open' ? 'text-krypt-pink' : 'text-white/80')}>
-                  {t.kind === 'exit' ? (t.state === 'skipped' ? 'no sell' : 'sold') : t.state}
+                <span
+                  className={cls(
+                    'w-16 font-bold',
+                    t.leftoverRaw ? 'text-arc-gold' : t.state === 'skipped' ? 'text-krypt-muted/50' : t.state === 'open' ? 'text-krypt-pink' : 'text-white/80',
+                  )}
+                >
+                  {t.kind === 'exit' ? (t.state === 'skipped' ? 'no sell' : 'sold') : t.leftoverRaw ? 'leftover' : t.state}
                 </span>
                 <span className="w-24 truncate text-white/85">{t.symbol || shortAddr(t.mint, 4)}</span>
                 <span className="w-24 text-krypt-muted">they {t.theirSol.toFixed(2)}</span>
@@ -933,7 +956,9 @@ export function WalletsPage() {
                 <span className="flex-1 text-krypt-muted/55 truncate text-right">
                   {t.reason ??
                     (t.kind === 'exit'
-                      ? `sold ${t.soldPct ?? 100}% with them${t.signature ? '' : t.mode === 'live' ? '' : ' (paper)'}`
+                      ? // `soldPct` is OUR share; `leaderPct` only exists when the two
+                        // differ, and that gap is the thing worth reading.
+                        `sold ${t.soldPct ?? 100}%${t.leaderPct !== undefined ? ` — they sold ${t.leaderPct}%` : ' with them'}${t.signature ? '' : t.mode === 'live' ? '' : ' (paper)'}`
                       : t.state === 'open' && t.remainingPct !== undefined && t.remainingPct < 100
                         ? `${Math.round(t.remainingPct)}% still held`
                         : '')}

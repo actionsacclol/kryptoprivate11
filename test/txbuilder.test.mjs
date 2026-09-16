@@ -480,7 +480,7 @@ test('a mayhem coin fills slot 1 with the reserved recipient and nothing else mo
   }
 });
 
-test('a partial sell moves exactly floor(balance × pct / 100); 100% and "absent" move everything', () => {
+test('a partial sell moves exactly floor(balance × pct / 100) to two decimals; 100% and "absent" move everything', () => {
   // Before 2026-09-07 the local builder hardcoded the full balance, so a
   // partial request had to be withheld from it or it would have emptied the
   // bag under a "sold 25%" toast. Now it sizes like the Jupiter route does.
@@ -491,8 +491,15 @@ test('a partial sell moves exactly floor(balance × pct / 100); 100% and "absent
   assert.equal(sellAmountFor(bal, 50), bal / 2n);
   assert.equal(sellAmountFor(bal, 25), (bal * 25n) / 100n);
   assert.equal(sellAmountFor(bal, 1), bal / 100n);
-  assert.equal(sellAmountFor(bal, 0), bal / 100n, 'never zero: the floor is 1%');
-  assert.equal(sellAmountFor(bal, 33.4), (bal * 33n) / 100n, 'whole percent');
+  // Two decimals since 2026-09-15: a mirrored copy sell is sized from the
+  // base units the copy holds, converted to the share of the balance that
+  // really is. Rounding that back to a whole percent left up to 1 % of the
+  // position in the wallet under a "sold 100 %" record — the reported bug.
+  assert.equal(sellAmountFor(bal, 52.37), (bal * 5237n) / 10_000n, 'a fractional share survives');
+  assert.equal(sellAmountFor(bal, 0.01), bal / 10_000n);
+  assert.equal(sellAmountFor(bal, 0), bal / 10_000n, 'never zero: the floor is one basis point');
+  assert.equal(sellAmountFor(bal, 33.4), (bal * 3340n) / 10_000n, 'kept to two decimals, not rounded to a whole percent');
+  assert.equal(sellAmountFor(bal, 33.456), (bal * 3346n) / 10_000n, 'past two decimals it rounds');
   assert.equal(sellAmountFor(3n, 50), 1n, 'floors, never rounds up past what is held');
   assert.equal(sellPctOf(NaN), 100);
 });

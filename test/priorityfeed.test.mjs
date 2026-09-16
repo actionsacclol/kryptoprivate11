@@ -62,7 +62,7 @@ const UPSELL = /helius|api key|lifts this|allows \d+ subscription/i;
   feed._reset();
   feed.attach({
     wssUrl: () => s.url,
-    heliusHttpUrl: () => '',
+    execHttpUrl: () => '',
     commitment: () => 'confirmed',
     onLogs: () => {},
     billHttp: () => {},
@@ -100,7 +100,7 @@ const UPSELL = /helius|api key|lifts this|allows \d+ subscription/i;
   feed._reset();
   feed.attach({
     wssUrl: () => s.url,
-    heliusHttpUrl: () => '',
+    execHttpUrl: () => '',
     commitment: () => 'confirmed',
     onLogs: () => {},
     billHttp: () => {},

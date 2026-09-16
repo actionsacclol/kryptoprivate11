@@ -20,7 +20,7 @@
 import type { LaunchRow } from './types';
 import type { RunnerFlag } from './runners';
 import type { AlertKind } from './alerts';
-import type { ChainKind } from './evm';
+import { nativeSymbolOf, type ChainKind } from './evm';
 import type { EvmLaunchWindow, EvmScanLaunch } from './evmScan';
 
 // ── Chains ────────────────────────────────────────────────────────────
@@ -120,6 +120,19 @@ export function actionAvailableOn(type: RuleActionType, chain: ChainKind): boole
  *  every saved script; the LABELS follow the chain. */
 export function nativeFieldLabel(label: string, chain: ChainKind, symbol: string): string {
   return chain === 'solana' ? label : label.replace(/\bSOL\b/g, symbol);
+}
+
+/**
+ * Rewrite a line of prose so its money reads in the chain's own coin.
+ *
+ * The same rule as `nativeFieldLabel`, applied to sentences rather than
+ * labels. A user on Robinhood Chain reading "spends real SOL" about a script
+ * that spends ETH has been told something false about their own money — and
+ * until 2026-09-15 that was every money string on the Scripts page, which is
+ * how a user came to believe their EVM script was trading SOL.
+ */
+export function nativeText(text: string, chain: ChainKind): string {
+  return chain === 'solana' ? text : nativeFieldLabel(text, chain, nativeSymbolOf(chain));
 }
 
 export type ScriptKind = 'rules' | 'code';
@@ -804,7 +817,7 @@ export function validateBudget(b: ScriptBudget): { ok: boolean; message: string 
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-export function validateAction(a: RuleAction, trigger: RuleTrigger): { ok: boolean; message: string } {
+export function validateAction(a: RuleAction, trigger: RuleTrigger, chain: ChainKind = 'solana'): { ok: boolean; message: string } {
   const spec = RULE_ACTIONS.find((x) => x.id === a.type);
   if (!spec) return { ok: false, message: 'Unknown action' };
   if (spec.needsMint && trigger === 'schedule') return { ok: false, message: `${spec.label}: a daily schedule has no token — use "Sell everything", notify or log` };
@@ -812,7 +825,7 @@ export function validateAction(a: RuleAction, trigger: RuleTrigger): { ok: boole
     case 'buy':
     case 'limit_buy':
       if (trigger === 'position') return { ok: false, message: 'A position rule cannot buy — it acts on what is already held' };
-      if (!Number.isFinite(a.sol) || a.sol <= 0) return { ok: false, message: `${spec.label}: enter a SOL amount` };
+      if (!Number.isFinite(a.sol) || a.sol <= 0) return { ok: false, message: nativeText(`${spec.label}: enter a SOL amount`, chain) };
       if (a.type === 'limit_buy' && !(Number.isFinite(a.value) && a.value > 0)) return { ok: false, message: 'Limit buy: enter the level' };
       return { ok: true, message: 'ok' };
     case 'sell':
@@ -846,7 +859,7 @@ export function validateAction(a: RuleAction, trigger: RuleTrigger): { ok: boole
   }
 }
 
-export function validateRules(r: RuleSet): { ok: boolean; message: string } {
+export function validateRules(r: RuleSet, chain: ChainKind = 'solana'): { ok: boolean; message: string } {
   if (!RULE_TRIGGERS.some((t) => t.id === r.trigger)) return { ok: false, message: 'Pick a trigger' };
   if (!Array.isArray(r.conditions) || r.conditions.length > MAX_CONDITIONS) return { ok: false, message: `At most ${MAX_CONDITIONS} conditions` };
   if (!Array.isArray(r.actions) || r.actions.length === 0) return { ok: false, message: 'Add at least one action' };
@@ -862,7 +875,7 @@ export function validateRules(r: RuleSet): { ok: boolean; message: string } {
     if (!scopes.includes(f.scope)) return { ok: false, message: `${f.label} is not known on the "${RULE_TRIGGERS.find((t) => t.id === r.trigger)?.label}" trigger` };
   }
   for (const a of r.actions) {
-    const v = validateAction(a, r.trigger);
+    const v = validateAction(a, r.trigger, chain);
     if (!v.ok) return v;
   }
   if (!Number.isFinite(r.cooldownSec) || r.cooldownSec < 0 || r.cooldownSec > 86_400) return { ok: false, message: 'Cooldown: 0–86400 s' };
@@ -890,7 +903,7 @@ export function validateScript(
   if (s.kind === 'code') {
     if (typeof s.code !== 'string' || !s.code.trim()) return { ok: false, message: 'The script is empty' };
   } else {
-    const r = validateRules(s.rules);
+    const r = validateRules(s.rules, scriptChain(s));
     if (!r.ok) return r;
     // A condition its chain cannot answer is refused HERE rather than left to
     // fail quietly at runtime. An unknown fact never satisfies a rule, so such
@@ -922,16 +935,25 @@ export function validateScript(
     }
     for (const a of s.rules.actions) {
       if (a.type !== 'buy' && a.type !== 'limit_buy') continue;
-      if (a.sol > s.budget.maxSolPerTrade) return { ok: false, message: `Buy ${a.sol} SOL is above this script's max per trade (${s.budget.maxSolPerTrade})` };
+      if (a.sol > s.budget.maxSolPerTrade) {
+        return { ok: false, message: nativeText(`Buy ${a.sol} SOL is above this script's max per trade (${s.budget.maxSolPerTrade})`, chain) };
+      }
       if (opts.maxLiveSol !== undefined && a.sol > opts.maxLiveSol) {
-        return { ok: false, message: `Buy ${a.sol} SOL is above your per-trade cap (${opts.maxLiveSol} SOL, Wallet page) — every placement would be refused` };
+        return {
+          ok: false,
+          message: nativeText(`Buy ${a.sol} SOL is above your per-trade cap (${opts.maxLiveSol} SOL, Wallet page) — every placement would be refused`, chain),
+        };
       }
     }
   }
   return { ok: true, message: 'ok' };
 }
 
-export function describeAction(a: RuleAction): string {
+export function describeAction(a: RuleAction, chain: ChainKind = 'solana'): string {
+  return nativeText(describeActionSol(a), chain);
+}
+
+function describeActionSol(a: RuleAction): string {
   switch (a.type) {
     case 'buy':
       return `buy ${a.sol} SOL`;
@@ -968,15 +990,16 @@ export function describeAction(a: RuleAction): string {
   }
 }
 
-export function describeRules(r: RuleSet): string {
+export function describeRules(r: RuleSet, chain: ChainKind = 'solana'): string {
   const trig = RULE_TRIGGERS.find((t) => t.id === r.trigger)?.label ?? r.trigger;
   const when = r.trigger === 'schedule' && r.atHHMM ? `${trig} ${r.atHHMM}` : trig;
+  const symbol = nativeSymbolOf(chain);
   const conds = r.conditions.map((c) => {
     const f = RULE_FIELDS.find((x) => x.id === c.field);
-    const label = f?.label ?? c.field;
+    const label = nativeFieldLabel(f?.label ?? c.field, chain, symbol);
     return f?.kind === 'boolean' ? `${label} ${OP_LABELS[c.op]}` : `${label} ${OP_LABELS[c.op]} ${c.value}`;
   });
-  return `On ${when}${conds.length ? ` when ${conds.join(' and ')}` : ''}: ${r.actions.map(describeAction).join(', ')}`;
+  return `On ${when}${conds.length ? ` when ${conds.join(' and ')}` : ''}: ${r.actions.map((a) => describeAction(a, chain)).join(', ')}`;
 }
 
 // ── Runtime views ─────────────────────────────────────────────────────
@@ -1007,7 +1030,18 @@ export interface ScriptSnapshot {
   scripts: UserScript[];
   stats: Record<string, ScriptStats>;
   logs: Record<string, ScriptLogLine[]>;
+  /** Solana's, kept for callers written before scripts had chains. */
   liveBlockedReason: string | null;
+  /**
+   * Why a LIVE script on each chain cannot execute right now, or null.
+   *
+   * Per chain since 2026-09-15. The single reason above was always Solana's,
+   * so a live script on Robinhood Chain whose rail was not armed showed a
+   * page with nothing wrong on it and did nothing — which is how a user came
+   * to ask whether EVM scripting worked at all. Optional so a snapshot built
+   * before the field still satisfies the type.
+   */
+  blockedByChain?: Partial<Record<ChainKind, string | null>>;
   /** Everything disabled at once, by the user or by a breaker. */
   killSwitch: boolean;
   /** Saved order templates, for the apply-template action. */

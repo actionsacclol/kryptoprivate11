@@ -3,6 +3,8 @@ import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { TokenSummary } from '@shared/market';
 import type { AppSettings, LiveState, WalletInfo } from '@shared/types';
 import { FEE_BPS, splitFee } from '@shared/fees';
+import { KRYPTO_FEE_WAIVER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
+import { useKryptoWaiver } from '../../state/useKryptoWaiver';
 import { cls, fmtUsd, shortAddr } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
 
@@ -51,6 +53,11 @@ export function TradePanel({
   const balanceKnown = typeof wallet?.balanceSol === 'number';
   const funded = balanceKnown && (wallet?.balanceSol ?? 0) > 0;
 
+  // Krypt's fee is waived for $KRYPTO holders. Read from the same answer the
+  // signer uses, so the number on the screen where the money is committed is
+  // the number that will actually be taken. Unknown reads as charged, which
+  // is the direction main errs in too.
+  const waiver = useKryptoWaiver();
   const cost = useMemo(() => {
     const usd = solUsd ? amountSol * solUsd : null;
     const protocol = amountSol * (PROTOCOL_FEE_PCT / 100);
@@ -58,7 +65,7 @@ export function TradePanel({
     // Krypt's own cut. Leaving it out of a block headed "estimated total
     // fees" understated what the same transaction charges, on the screen
     // where the user decides the size.
-    const krypt = splitFee(Math.round(amountSol * 1e9), false).totalLamports / 1e9;
+    const krypt = waiver.waived ? 0 : splitFee(Math.round(amountSol * 1e9), false).totalLamports / 1e9;
     const priority = 0.002; // modeled; the real figure comes from the fee estimator
     // Landing tips are paid on the same transaction whenever a fast lane is on.
     const tips = settings.execution.useJito || settings.execution.useHeliusSender ? 0.0005 : 0;
@@ -66,7 +73,7 @@ export function TradePanel({
     const rent = 0.00204; // ATA creation, refundable via rent sweep
     const total = protocol + relayer + krypt + priority + tips + network + rent;
     return { usd, protocol, relayer, krypt, priority, tips, network, rent, total };
-  }, [amountSol, solUsd, settings.execution.localTxBuild, settings.execution.useJito, settings.execution.useHeliusSender]);
+  }, [amountSol, solUsd, waiver.waived, settings.execution.localTxBuild, settings.execution.useJito, settings.execution.useHeliusSender]);
 
   const toUsd = (sol: number): string => (solUsd ? fmtUsd(sol * solUsd) : `${sol.toFixed(5)} SOL`);
 
@@ -214,7 +221,9 @@ export function TradePanel({
             title={[
               `pump.fun protocol ${PROTOCOL_FEE_PCT}%: ${toUsd(cost.protocol)}`,
               cost.relayer > 0 ? `Relayer ${RELAYER_FEE_PCT}%: ${toUsd(cost.relayer)}` : null,
-              `Krypt ${(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side: ${toUsd(cost.krypt)}`,
+              waiver.waived
+                ? `Krypt ${(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side: WAIVED — you hold ${waiver.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}`
+                : `Krypt ${(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side: ${toUsd(cost.krypt)}`,
               `Priority fee (est.): ${toUsd(cost.priority)}`,
               cost.tips > 0 ? `Landing tips (est.): ${toUsd(cost.tips)}` : null,
               `Network: ${toUsd(cost.network)}`,
@@ -224,7 +233,19 @@ export function TradePanel({
               .join('\n')}
           >
             Est. fees <span className="font-mono text-white/80">{toUsd(cost.total)}</span>
-            <span className="text-krypt-muted/60"> · incl. Krypt {(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side</span>
+            {waiver.waived ? (
+              <span className="text-emerald-300/80"> · Krypt fee waived (${KRYPTO_TOKEN.symbol} holder)</span>
+            ) : (
+              <>
+                <span className="text-krypt-muted/60"> · incl. Krypt {(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side</span>
+                {/* The way out of that line, where the line is. Someone told
+                    the fee is charged should be told what removes it in the
+                    same breath, not on another page. */}
+                <span className="text-krypt-muted/45">
+                  {' '}· hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} to waive it
+                </span>
+              </>
+            )}
           </span>
           <span className="text-label text-krypt-muted/50">
             slippage capped at {settings.execution.liveSlippagePct}%

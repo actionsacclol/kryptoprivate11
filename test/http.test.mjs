@@ -320,4 +320,79 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('ok  the Jupiter key travels as a header, never in the URL');
 }
 
+
+// ── A spent ALLOWANCE is not a rate limit (2026-09-16) ──────────────────
+//
+// MEASURED on a user's session: Birdeye answered
+// `HTTP 400 — Compute units usage limit exceeded` and the app made 1,743
+// calls collecting 1,743 errors. Only a 429 parked, and this is a 400, so
+// every doomed call fired. A monthly allowance does not come back in twenty
+// seconds and must not be retried as though it might.
+{
+  stubFetch(() => res(400, JSON.stringify({ message: 'Compute units usage limit exceeded' })));
+  // `merkl` rather than `birdeye`: the tests above already parked birdeye,
+  // and a call that never leaves the queue would measure nothing here.
+  const r = await getJson('merkl', '/quota-one');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /allowance spent/, r.message);
+  assert.match(r.message, /Compute units/, 'and it quotes the provider');
+  const cooling = cooldownRemainingMs('merkl');
+  assert.ok(cooling > 60 * 60_000, `parked for HOURS, not seconds — got ${Math.round(cooling / 1000)}s`);
+
+  // And the next call does not reach the host at all. That is the whole
+  // point: 1,743 became 1.
+  const before = hits.length;
+  const again = await getJson('merkl', '/quota-two');
+  assert.equal(hits.length, before, 'no second request was made');
+  assert.equal(again.ok, false);
+  console.log('ok  a spent allowance parks for hours and stops the retries');
+}
+
+// A plain 4xx that is NOT about allowance keeps its old behaviour — a park
+// of hours on an ordinary "not tradable" would silence a working provider.
+{
+  stubFetch(() => res(400, JSON.stringify({ message: 'Could not find any route' })));
+  const r = await getJson('lifi', '/ordinary-400');
+  assert.equal(r.ok, false);
+  assert.ok(!/allowance spent/.test(r.message), r.message);
+  assert.equal(cooldownRemainingMs('lifi'), 0, 'an ordinary refusal parks nothing, as before');
+  console.log('ok  an ordinary 4xx is not mistaken for a spent plan');
+}
+
+// ── The net under everything: a provider that just keeps failing ────────
+//
+// The classifier above has to RECOGNISE a phrase. This does not have to
+// understand anything — it counts. It is the general form of the Birdeye
+// case and would have stopped it at ten instead of seventeen hundred.
+{
+  stubFetch(() => {
+    throw new Error('fetch failed');
+  });
+  let made = 0;
+  for (let i = 0; i < 14; i += 1) {
+    const before = hits.length;
+    await getJson('lifi-status', `/dead-${i}`);
+    if (hits.length > before) made += 1;
+  }
+  assert.ok(made <= 10, `stopped calling after a streak — ${made} of 14 reached the host`);
+  assert.ok(cooldownRemainingMs('lifi-status') > 0, 'and the provider is parked');
+  console.log('ok  a provider failing in an unbroken streak is stood down, whatever the reason');
+}
+
+// One good answer ends it. The streak is about a provider that is not
+// working now, never about its lifetime record.
+{
+  let fail = true;
+  stubFetch(() => (fail ? res(500) : res(200, '{"a":1}')));
+  for (let i = 0; i < 9; i += 1) await getJson('rugcheck', `/flap-${i}`);
+  fail = false;
+  const good = await getJson('rugcheck', '/recovered');
+  assert.equal(good.ok, true, 'the ninth failure did not park it');
+  fail = true;
+  const before = hits.length;
+  await getJson('rugcheck', '/after');
+  assert.equal(hits.length, before + 1, 'and the counter restarted from the success');
+  console.log('ok  one success clears the streak');
+}
+
 console.log('\nhttp layer: all rate-limit rules hold');

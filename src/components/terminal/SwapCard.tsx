@@ -5,6 +5,8 @@
 // inputs settle, and the Swap button stays disabled until a quote exists —
 // you never send something the chain has not already priced.
 
+import { KRYPTO_TOKEN } from '@shared/krypto';
+import { useKryptoWaiver } from '../../state/useKryptoWaiver';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownUp, Loader2, Repeat } from 'lucide-react';
 import {
@@ -86,6 +88,7 @@ function MintField({
 }
 
 export function SwapCard() {
+  const waiver = useKryptoWaiver();
   const toast = useToast();
   const [draft, setDraft] = useState<SwapDraft>(() => emptyDraft());
   const [held, setHeld] = useState<{ amount: number | null; decimals: number | null }>({ amount: null, decimals: null });
@@ -354,6 +357,10 @@ export function SwapCard() {
                 so, and an unpriceable one is charged nothing at all. */}
             Platform fee:{' '}
             <span className="text-white/70">
+              {/* The quote is priced main-side and already has the waiver in
+                  it, so this reports the quote rather than deciding again —
+                  two places computing the same fee is how they come to
+                  disagree. The badge below just names why it is zero. */}
               {quote.feeBasis === 'on-top' || quote.feeBasis === 'follows' || quote.feeBasis === 'inside'
                 ? quote.feeNative !== null
                   ? `${quote.feeNative.toFixed(6)} ${nativeSymbol(draft.chain)}`
@@ -362,6 +369,7 @@ export function SwapCard() {
                   ? 'none'
                   : `${feeSol.toFixed(6)} SOL`}
             </span>
+            {waiver.waived ? <span className="text-emerald-300/80"> — waived (${KRYPTO_TOKEN.symbol} holder)</span> : null}
             {quote.feeBasis === 'on-top' ? ` — added on top of the ${nativeSymbol(draft.chain)} you send` : ''}
             {quote.feeBasis === 'follows' ? ' — sent as a second transaction right after the buy lands' : ''}
             {quote.feeBasis === 'inside' ? ' — taken out of the proceeds; the amount above is what you get' : ''}

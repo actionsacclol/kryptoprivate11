@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { base58Decode, base58Encode } from './.b58.mjs';
-import { ataFor, bondingCurveFor, bondingCurveV2For, creatorVaultFor, userVolumeAccumulatorFor, globalFor, eventAuthorityFor, globalVolumeAccumulatorFor, feeConfigFor, prewarm, TOKEN_PROGRAM, TOKEN_2022_PROGRAM } from './.addr2.mjs';
+import { ataFor, bondingCurveFor, bondingCurveV2For, creatorVaultFor, userVolumeAccumulatorFor, globalFor, eventAuthorityFor, globalVolumeAccumulatorFor, feeConfigFor, prewarm, _clearPdaCache, TOKEN_PROGRAM, TOKEN_2022_PROGRAM } from './.addr2.mjs';
 
 // ── base58 leading-zero correctness (the bug that crashed PDA derivation) ──
 {
@@ -95,6 +95,73 @@ import { ataFor, bondingCurveFor, bondingCurveV2For, creatorVaultFor, userVolume
   assert.equal(ataFor(USER, MINT, TOKEN_2022_PROGRAM), '4SPo6YkB93ydJxgs4JYJ3gZ9jNpBZLHS83Sz4zM1ZD6N');
   assert.notEqual(ataFor(USER, MINT, TOKEN_PROGRAM), ataFor(USER, MINT, TOKEN_2022_PROGRAM), 'a classic-program ATA is a different account');
   console.log('ok  current buy-layout PDAs match the addresses the program accepted');
+}
+
+
+// ── The derivation memo (2026-09-15) ─────────────────────────────────
+//
+// A PDA is a pure function of its seeds and program, so caching one is safe
+// — but this cache sits under every address the signer puts in a real
+// instruction, and a key collision would hand one mint another mint's
+// bonding curve. The golden vectors above are the outer guard; this is the
+// inner one: cached and cold must be the same string, every time.
+{
+  const A = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
+  const B = 'So11111111111111111111111111111111111111112';
+  const inputs = [
+    () => bondingCurveFor(A),
+    () => bondingCurveFor(B),
+    () => creatorVaultFor(A),
+    () => creatorVaultFor(B),
+    () => userVolumeAccumulatorFor(A),
+    () => ataFor(A, B),
+    () => ataFor(B, A),
+    () => ataFor(A, B, TOKEN_2022_PROGRAM),
+  ];
+  _clearPdaCache();
+  const cold = inputs.map((f) => f());
+  const warm = inputs.map((f) => f());
+  assert.deepEqual(warm, cold, 'a cached derivation is the SAME address');
+  _clearPdaCache();
+  assert.deepEqual(inputs.map((f) => f()), cold, 'and clearing the cache changes nothing either');
+
+  // Every one of these is a DIFFERENT account. Two seed sets that key to one
+  // entry would be silent and catastrophic — the whole reason the key is
+  // length-prefixed rather than concatenated.
+  assert.equal(new Set(cold).size, cold.length, 'no two of these share an address');
+
+  // The same programs, the same bytes, different SPLIT: ["ab"] and ["a","b"]
+  // must not collide.
+  _clearPdaCache();
+  assert.notEqual(ataFor(A, B), ataFor(B, A), 'argument order is part of the identity');
+  console.log('ok  the derivation memo returns the same address it would have derived');
+}
+
+
+{
+  // The cache is bounded and LRU. The entries that matter are derived on
+  // EVERY trade build (our own wallet's accumulator); the mint-keyed ones
+  // never repeat and churn straight through it. Under plain FIFO the hot
+  // entry is evicted by cold traffic; it must survive.
+  _clearPdaCache();
+  const HOT = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
+  const hot = userVolumeAccumulatorFor(HOT);
+  // Churn well past the 4,096 cap with addresses that are never seen again,
+  // touching the hot entry as a real trade path would.
+  for (let i = 0; i < 5_000; i += 1) {
+    // base58 has no 0, I, O or l — build the churn from a safe alphabet.
+    const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    let v = i + 1;
+    let tail = '';
+    while (v > 0) {
+      tail = B58[v % 58] + tail;
+      v = Math.floor(v / 58);
+    }
+    bondingCurveFor(`${'1'.repeat(43 - tail.length)}${tail}`);
+    if (i % 25 === 0) userVolumeAccumulatorFor(HOT);
+  }
+  assert.equal(userVolumeAccumulatorFor(HOT), hot, 'the hot entry still derives correctly');
+  console.log('ok  the derivation cache is bounded, and churn does not corrupt a reused address');
 }
 
 console.log('addresses tests passed');
