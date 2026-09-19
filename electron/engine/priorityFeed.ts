@@ -50,6 +50,13 @@ export interface PriorityFeedHost {
   commitment(): 'processed' | 'confirmed';
   /** Delivered straight into the engine's normal log path. */
   onLogs(n: LogNotification): void;
+  /**
+   * An ACCOUNT this feed is following has changed, with its new bytes.
+   *
+   * Undecoded on purpose: this module owns sockets, not layouts. The engine
+   * knows what a bonding curve looks like and this does not need to.
+   */
+  onAccount(a: { mint: string; key: string; data: Buffer; slot: number; at: number }): void;
   /** Fill batches are HTTP calls against the key — bill them. */
   billHttp(calls: number): void;
   log(level: 'info' | 'warn' | 'error', line: string): void;
@@ -66,6 +73,34 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 const wanted = new Map<string, number | null>();
 /** Pending request id → mint, so a subscribe reply can be matched up. */
 const pending = new Map<number, string>();
+
+/**
+ * Accounts followed on the same socket, by mint.
+ *
+ * WHY AN ACCOUNT AND NOT JUST LOGS. A log subscription tells us about a
+ * trade only if the program emitted an event AND we can decode it. The
+ * bonding-curve ACCOUNT is the price itself: its virtual reserves change on
+ * every trade, whatever the program chose to log, and a notification carries
+ * the new bytes. So this is both a second independent copy of the price (a
+ * notification the log socket silently dropped is not lost) and the standing
+ * answer to the day pump stops emitting `emit!` — the chart keeps moving with
+ * no decoder involved at all.
+ *
+ * It is PRICE ONLY. An account notification does not say who traded or how
+ * much, so nothing here reaches the tape, the trades list or volume; the log
+ * path stays the sole source for those. Mixing them would double-count every
+ * trade that both feeds saw.
+ */
+interface AccountSub {
+  key: string;
+  id: number | null;
+}
+const accounts = new Map<string, AccountSub>();
+/** Live subscription id → the mint it belongs to. Account notifications name
+ *  only the subscription, so this is the only way back to the token. */
+const accountBySub = new Map<number, string>();
+/** Pending request id → mint, for account subscribes. */
+const accountPending = new Map<number, string>();
 /** Events delivered. */
 let events = 0;
 /** Uncompressed bytes received — billed against the Helius budget by the
@@ -100,6 +135,61 @@ export function watch(mint: string): void {
   else subscribe(mint);
 }
 
+/**
+ * Also follow this mint's bonding-curve ACCOUNT, for a price that does not
+ * depend on a log being emitted or decoded. Idempotent; a mint may be
+ * watched for logs without this, and this without logs.
+ */
+export function watchAccount(mint: string, key: string): void {
+  if (!host || !mint || !key || accounts.has(mint)) return;
+  accounts.set(mint, { key, id: null });
+  if (!running) start();
+  else subscribeAccount(mint);
+}
+
+export function unwatchAccount(mint: string): void {
+  const sub = accounts.get(mint);
+  accounts.delete(mint);
+  if (sub?.id != null) {
+    accountBySub.delete(sub.id);
+    if (ws?.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: nextId++, method: 'accountUnsubscribe', params: [sub.id] }));
+      } catch {
+        /* the socket is going away anyway */
+      }
+    }
+  }
+  if (!wanted.size && !accounts.size) stop();
+}
+
+export function watchedAccounts(): string[] {
+  return [...accounts.keys()];
+}
+
+function subscribeAccount(mint: string): void {
+  const sub = accounts.get(mint);
+  if (!sub || sub.id !== null || !host || ws?.readyState !== WebSocket.OPEN) return;
+  if (subCount() >= subCap()) return;
+  const id = nextId++;
+  accountPending.set(id, mint);
+  try {
+    ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        method: 'accountSubscribe',
+        // base64 rather than jsonParsed: a bonding curve is program data, and
+        // asking the node to parse something it has no parser for costs a
+        // round trip to learn nothing.
+        params: [sub.key, { encoding: 'base64', commitment: host.commitment() }],
+      }),
+    );
+  } catch {
+    accountPending.delete(id);
+  }
+}
+
 export function unwatch(mint: string): void {
   const id = wanted.get(mint);
   wanted.delete(mint);
@@ -111,7 +201,7 @@ export function unwatch(mint: string): void {
     }
   }
   // Nothing left worth paying for.
-  if (!wanted.size) stop();
+  if (!wanted.size && !accounts.size) stop();
 }
 
 export function stop(): void {
@@ -121,7 +211,10 @@ export function stop(): void {
   // Re-learned on the next socket: the ceiling belonged to that connection.
   observedSubCap = null;
   pending.clear();
+  accountPending.clear();
+  accountBySub.clear();
   for (const mint of wanted.keys()) wanted.set(mint, null);
+  for (const sub of accounts.values()) sub.id = null;
   try {
     ws?.close();
   } catch {
@@ -205,8 +298,12 @@ function connect(): void {
         /* surfaces as close/error */
       }
     }, 15_000);
-    host?.log('info', `priority feed connected (${wanted.size} mint(s) on the fast socket)`);
+    host?.log(
+      'info',
+      `priority feed connected (${wanted.size} mint(s) on the fast socket${accounts.size ? `, ${accounts.size} curve account(s)` : ''})`,
+    );
     for (const mint of wanted.keys()) subscribe(mint);
+    for (const mint of accounts.keys()) subscribeAccount(mint);
   });
 
   sock.on('message', (raw) => {
@@ -217,7 +314,13 @@ function connect(): void {
       result?: number;
       error?: { code?: number; message?: string };
       method?: string;
-      params?: { subscription?: number; result?: { value?: { signature?: string; logs?: string[]; err?: unknown }; context?: { slot?: number } } };
+      params?: {
+        subscription?: number;
+        result?: {
+          value?: { signature?: string; logs?: string[]; err?: unknown; data?: unknown };
+          context?: { slot?: number };
+        };
+      };
     };
     try {
       msg = JSON.parse(String(raw));
@@ -229,6 +332,16 @@ function connect(): void {
     // used to vanish: the mint sat in `wanted` with no id, no retry and no
     // line in the log. Say so; the mint stays on the slower public pool.
     if (typeof msg.id === 'number' && msg.error) {
+      if (accountPending.has(msg.id)) {
+        const m = accountPending.get(msg.id) as string;
+        accountPending.delete(msg.id);
+        accounts.delete(m);
+        host?.log(
+          'warn',
+          `priority feed: curve subscribe rejected for ${m.slice(0, 8)}… — ${msg.error.message ?? 'no reason given'}; the chart still follows the log feed`,
+        );
+        return;
+      }
       const mint = pending.get(msg.id);
       pending.delete(msg.id);
       const text = msg.error.message ?? 'no reason given';
@@ -242,12 +355,37 @@ function connect(): void {
     // Subscription confirmation: remember the id so we can unsubscribe later.
     if (typeof msg.id === 'number' && typeof msg.result === 'number') {
       attempts = 0;
+      const accountMint = accountPending.get(msg.id);
+      if (accountMint !== undefined) {
+        accountPending.delete(msg.id);
+        const sub = accounts.get(accountMint);
+        if (sub) {
+          sub.id = msg.result;
+          accountBySub.set(msg.result, accountMint);
+        }
+        return;
+      }
       const mint = pending.get(msg.id);
       pending.delete(msg.id);
       if (mint && wanted.has(mint)) wanted.set(mint, msg.result);
       return;
     }
 
+    if (msg.method === 'accountNotification') {
+      const sub = msg.params?.subscription;
+      const mint = typeof sub === 'number' ? accountBySub.get(sub) : undefined;
+      const raw = msg.params?.result?.value?.data;
+      if (!mint || !Array.isArray(raw) || typeof raw[0] !== 'string') return;
+      attempts = 0;
+      host?.onAccount({
+        mint,
+        key: accounts.get(mint)?.key ?? '',
+        data: Buffer.from(raw[0], 'base64'),
+        slot: msg.params?.result?.context?.slot ?? 0,
+        at: Date.now(),
+      });
+      return;
+    }
     if (msg.method !== 'logsNotification') return;
     const value = msg.params?.result?.value;
     if (!value?.signature || !Array.isArray(value.logs)) return;
@@ -315,7 +453,19 @@ const keyed = (u: string): boolean => /api-key=|[?&]token=/i.test(u);
 
 /** Live + in-flight subscriptions on the current socket. */
 function subCount(): number {
-  return [...wanted.values()].filter((v) => v !== null).length + pending.size;
+  // Account subscriptions share this socket, so they share its ceiling.
+  return (
+    [...wanted.values()].filter((v) => v !== null).length +
+    pending.size +
+    [...accounts.values()].filter((a) => a.id !== null).length +
+    accountPending.size
+  );
+}
+
+/** The live ceiling for this socket: what it refused at, or the guard. A
+ *  keyed host has no observed ceiling, so it gets the guard too. */
+function subCap(): number {
+  return observedSubCap ?? SUB_GUARD;
 }
 
 /** Test seam / diagnostics: mints with a confirmed subscription id. */
@@ -480,6 +630,9 @@ async function runFillBatch(): Promise<void> {
 export function _reset(): void {
   stop();
   wanted.clear();
+  accounts.clear();
+  accountBySub.clear();
+  accountPending.clear();
   events = 0;
   bytes = 0;
   attempts = 0;

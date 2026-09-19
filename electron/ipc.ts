@@ -2137,6 +2137,22 @@ export function registerIpc(): void {
     return ok('stopped');
   });
 
+  /**
+   * SOL/USD, the one number the live chart cannot work without.
+   *
+   * The token page used to DERIVE it, by dividing a token's own USD price by
+   * its SOL price - so a token no provider had priced yet, or any token at
+   * all while the provider was throttled, left the page with no rate. And
+   * with no rate a USD chart DROPS every live tick (it will not mix units)
+   * and the header market cap freezes, while the tape underneath is running
+   * perfectly. The rate was in main the whole time, memoised for 20 s by the
+   * route Discover already calls.
+   */
+  ipcMain.handle('market:solUsd', async () => {
+    const v = await market.solUsd();
+    return v === null ? fail('No SOL price available') : ok('ok', v);
+  });
+
   ipcMain.handle('market:presets', () => ok('ok', market.presets()));
 
   ipcMain.handle('market:clearCache', () => {
@@ -2734,12 +2750,12 @@ export function registerIpc(): void {
   // already reads, so nothing new is polled to draw it.
   ipcMain.handle('wire:boosts', async () => {
     const rows = await dexMeta.boostedTokens();
-    return rows ? ok('ok', rows) : fail('DexScreener is not answering right now');
+    return rows ? ok('ok', rows) : fail(dexMeta.lastWireError() ?? 'DexScreener is not answering right now');
   });
 
   ipcMain.handle('wire:profiles', async () => {
     const rows = await dexMeta.tokenProfiles();
-    return rows ? ok('ok', rows) : fail('DexScreener is not answering right now');
+    return rows ? ok('ok', rows) : fail(dexMeta.lastWireError() ?? 'DexScreener is not answering right now');
   });
 
   // ── pump.fun callouts (read-only intel) ──────────────────
@@ -2751,7 +2767,7 @@ export function registerIpc(): void {
   // would read as "nobody is calling anything".
   ipcMain.handle('callouts:feed', async () => {
     const rows = await callouts.calloutFeed();
-    return rows ? ok('ok', rows) : fail('pump.fun callouts are not answering right now');
+    return rows ? ok('ok', rows) : fail(callouts.lastCalloutError() ?? 'pump.fun callouts are not answering right now');
   });
 
   ipcMain.handle('callouts:forMint', async (_e, mint: unknown, chain: unknown) => {
@@ -2761,7 +2777,7 @@ export function registerIpc(): void {
     // Checked here so a malformed string never becomes a path segment.
     if (c === 'solana' ? !isAddress(m) : !isEvmAddress(m)) return fail('Invalid token address');
     const rows = await callouts.calloutsForMint(m, c);
-    return rows ? ok('ok', rows) : fail('pump.fun callouts are not answering right now');
+    return rows ? ok('ok', rows) : fail(callouts.lastCalloutError() ?? 'pump.fun callouts are not answering right now');
   });
   // ── log ──────────────────────────────────────────────────────────
   ipcMain.handle('log:recent', () => ok('ok', logger.recent()));

@@ -35,7 +35,7 @@ import { runnerVerdict, runnerNotification, pruneRunners, markCreatorSold, Runne
 import type { NotifyTarget } from '@shared/types';
 import type { ChainKind } from '@shared/evm';
 import { PositionManager, type TokenMarket } from './positions';
-import { noteActiveMint } from './txBuilder';
+import { noteActiveMint, parseCurve } from './txBuilder';
 import { getTokenBalanceForMint, getTokenBalanceRawForMint, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from '../chain/rpcClient';
 import { solToLamports } from './curve';
 import * as wallet from '../system/wallet';
@@ -51,7 +51,7 @@ import * as feeEstimator from './feeEstimator';
 import * as jitoTips from './jitoTips';
 import * as tradePrewarm from './prewarm';
 import { quoteSellLamports, liquidationQuotes } from './jupiterRoute';
-import { prewarm, TOKEN_2022_PROGRAM, type PrewarmedAddresses } from '../chain/addresses';
+import { prewarm, bondingCurveFor, TOKEN_2022_PROGRAM, type PrewarmedAddresses } from '../chain/addresses';
 import { parseMintExtensions, mintWarning } from './mintExtensions';
 import * as tape from '../data/tape';
 import { createChartTicks } from './chartTicks';
@@ -438,6 +438,7 @@ export class SniperEngine {
         // stopped this is the only copy, so route it.
         if (!this.running && n.logs.some((l) => l.includes(PUMP_AMM_PROGRAM_ID))) this.onAmmLogs(n);
       },
+      onAccount: (a) => this.onCurveAccount(a),
       billHttp: (calls) => heliusBudget.billHttp(calls),
       log: (level, line) => this.log(level, line),
     });
@@ -519,6 +520,18 @@ export class SniperEngine {
       },
       walletLabel: (address) => watchlist.labelFor(address),
       isLiveTracked: (mint) => this.tokens.has(mint),
+      // Newest first, and only as many as the column asked for. `launchOrder`
+      // is append-order, so the tail is the newest; building the whole list
+      // to throw most of it away is the sort of thing Discover does fifteen
+      // times a minute.
+      liveLaunches: (limit) => {
+        const out: LaunchRow[] = [];
+        for (let i = this.launchOrder.length - 1; i >= 0 && out.length < limit; i--) {
+          const row = this.tokens.get(this.launchOrder[i])?.row;
+          if (row) out.push(row);
+        }
+        return out;
+      },
       registerPool: (pool, mint) => this.rememberAmmPool(pool, mint),
       watchPumpMint: (mint) => this.watchPumpMint(mint),
       unwatchPumpMint: (mint) => this.unwatchPumpMint(mint),
@@ -1981,8 +1994,11 @@ export class SniperEngine {
     const own = this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null;
     if (own !== null && own > 0) return own;
     try {
-      const sum = await market.summary(mint);
-      if (sum.priceSol !== null && sum.priceSol > 0) {
+      // A paper fill measures the strategy, so it is held to the same
+      // freshness as a real one: a fill priced from a held-over number would
+      // flatter or punish a strategy for a provider's outage.
+      const sum = await market.freshSummary(mint);
+      if (sum && sum.priceSol !== null && sum.priceSol > 0) {
         this.rememberPrice(mint, sum.priceSol);
         return sum.priceSol;
       }
@@ -2393,13 +2409,79 @@ export class SniperEngine {
   /** Tape a pump mint for the token page — scanner running or not. */
   watchPumpMint(mint: string): void {
     priorityFeed.watch(mint);
+    // …and the curve account itself. `bonding-curve` is a PDA of the mint, so
+    // this costs one derivation and no lookup, and it is right even for a
+    // token no provider has ever heard of. A mint that turns out not to be a
+    // pump coin simply never notifies: an account that does not exist yet is
+    // a valid subscription, which is also what makes this safe to fire before
+    // anything has identified the token.
+    try {
+      priorityFeed.watchAccount(mint, bondingCurveFor(mint));
+    } catch {
+      /* an address we cannot derive is one we do not follow */
+    }
   }
 
   /** The page closed. A mint still held as a position stays on the socket. */
   unwatchPumpMint(mint: string): void {
     const held = this.positions.all().some((p) => p.state !== 'closed' && p.mint === mint);
-    if (!held) priorityFeed.unwatch(mint);
+    if (!held) {
+      priorityFeed.unwatch(mint);
+      priorityFeed.unwatchAccount(mint);
+      this.lastCurveVSol.delete(mint);
+    }
   }
+
+  /**
+   * The bonding curve moved. This is the price, stated by the chain.
+   *
+   * PRICE ONLY, deliberately. An account notification says what the reserves
+   * are now; it does not say who traded, which side, or how much, and more
+   * than one trade can land in a slot. So this moves the chart's last price
+   * and the engine's last-known price, and touches nothing that counts:
+   * not the tape, not the trades list, not volume. Those stay with the log
+   * feed, which sees each trade individually. Feeding both into the tape
+   * would double-count every trade that both feeds saw.
+   *
+   * What it buys: the price line keeps moving when a log notification is
+   * dropped by the socket (measured at ~20 % under firehose load on a single
+   * public endpoint), and it keeps moving on the day pump stops emitting
+   * `emit!` altogether, because nothing here decodes an event.
+   */
+  private onCurveAccount(a: { mint: string; data: Buffer; slot: number; at: number }): void {
+    const st = parseCurve(a.data);
+    if (!st) return;
+    // A completed curve stops moving; the token trades on PumpSwap from then
+    // on and the AMM feed carries it. Holding the subscription open would be
+    // paying for an account that will never change again.
+    if (st.complete) {
+      priorityFeed.unwatchAccount(a.mint);
+      this.lastCurveVSol.delete(a.mint);
+      return;
+    }
+    const priceSol = spotPriceSol(st.vSol, st.vTok);
+    if (!Number.isFinite(priceSol) || priceSol <= 0) return;
+    this.rememberPrice(a.mint, priceSol);
+    // The side comes from the reserves MOVING, not from a guess: SOL going
+    // into the curve is a buy. The first notification has nothing to compare
+    // against, so it seeds and emits nothing - the page has just loaded a
+    // full summary and chart, and inventing a direction to fill one tick is
+    // exactly the kind of small lie this codebase does not tell.
+    const prev = this.lastCurveVSol.get(a.mint);
+    this.lastCurveVSol.set(a.mint, st.vSol);
+    if (prev === undefined || st.vSol === prev) return;
+    if (this.lastCurveVSol.size > 32) {
+      const oldest = this.lastCurveVSol.keys().next().value;
+      if (oldest !== undefined && oldest !== a.mint) this.lastCurveVSol.delete(oldest);
+    }
+    // Zero volume: this tick carries a price and makes no claim about size.
+    this.chartTicks.push(a.mint, a.at, priceSol, 0, st.vSol > prev);
+  }
+
+  /** Virtual SOL reserves as of the last curve notification, per mint. The
+   *  only state the account feed keeps: it is what turns two snapshots into
+   *  a direction. Bounded with the tape's own subscription budget in mind. */
+  private readonly lastCurveVSol = new Map<string, bigint>();
 
   dbcWatchedMints(): string[] {
     return dbcWatcher.watchedMints();
@@ -3175,8 +3257,12 @@ export class SniperEngine {
     let referencePriceSol = tracked?.row.priceSol ?? this.lastKnownPriceSol.get(req.mint) ?? null;
     if (!(referencePriceSol !== null && referencePriceSol > 0)) {
       try {
-        const sum = await market.summary(req.mint);
-        if (sum.priceSol !== null && sum.priceSol > 0) {
+        // freshSummary, not summary: an order's trigger is measured against
+        // this number, and a price held over from a throttled provider would
+        // set the trigger in the wrong place. No price is a refusal the user
+        // can act on; a stale one is a fill they did not ask for.
+        const sum = await market.freshSummary(req.mint);
+        if (sum && sum.priceSol !== null && sum.priceSol > 0) {
           referencePriceSol = sum.priceSol;
           this.rememberPrice(req.mint, sum.priceSol);
         }
@@ -3358,7 +3444,7 @@ export class SniperEngine {
         this.tokens.get(mint)?.row.priceSol ?? this.freshPriceSol(mint) ?? tape.lastPriceSol(mint) ?? null;
       if (priceSol === null || priceSol <= 0) {
         priceSol = await Promise.race([
-          market.summary(mint).then((sum) => sum.priceSol).catch(() => null),
+          market.freshSummary(mint).then((sum) => sum?.priceSol ?? null).catch(() => null),
           new Promise<null>((r) => setTimeout(() => r(null), 250)),
         ]);
       }

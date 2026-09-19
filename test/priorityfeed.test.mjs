@@ -29,8 +29,11 @@ function server(onMessage) {
   return new Promise((resolve) => {
     const wss = new WebSocketServer({ port: 0 });
     let conns = 0;
+    const live = new Set();
     wss.on('connection', (ws) => {
       conns += 1;
+      live.add(ws);
+      ws.on('close', () => live.delete(ws));
       ws.on('message', (raw) => onMessage(ws, JSON.parse(String(raw))));
     });
     wss.on('listening', () => {
@@ -39,6 +42,11 @@ function server(onMessage) {
         // applied to (a keyed url was exempt from it).
         url: `ws://127.0.0.1:${wss.address().port}`,
         connections: () => conns,
+        /** Push a notification the client did not ask for, the way a node
+         *  sends a subscription update. */
+        broadcast: (text) => {
+          for (const ws of live) ws.send(text);
+        },
         close: () => new Promise((r) => wss.close(() => r())),
       });
     });
@@ -65,6 +73,7 @@ const UPSELL = /helius|api key|lifts this|allows \d+ subscription/i;
     execHttpUrl: () => '',
     commitment: () => 'confirmed',
     onLogs: () => {},
+    onAccount: () => {},
     billHttp: () => {},
     log: (level, line) => logs.push(line),
   });
@@ -103,6 +112,7 @@ const UPSELL = /helius|api key|lifts this|allows \d+ subscription/i;
     execHttpUrl: () => '',
     commitment: () => 'confirmed',
     onLogs: () => {},
+    onAccount: () => {},
     billHttp: () => {},
     log: (level, line) => logs.push(line),
   });
@@ -143,6 +153,107 @@ const UPSELL = /helius|api key|lifts this|allows \d+ subscription/i;
     assert.ok(samples.filter((v) => v === base).length < samples.length, `attempt ${attempt}: not every redial lands on ${base} ms`);
   }
   console.log('ok  reconnect backoff is jittered ±25%, so sockets do not redial in lockstep');
+}
+
+// ── the curve account, on the same socket ─────────────────────────
+//
+// A log subscription reports a trade only if the program emitted an event AND
+// we could decode it. The bonding-curve ACCOUNT is the price itself: it moves
+// on every trade whatever was logged, and the notification carries the new
+// bytes. So the token page follows both, on one connection.
+{
+  const asked = [];
+  const unsubscribed = [];
+  let subId = 900;
+  const s = await server((ws, req) => {
+    if (req.method === 'accountSubscribe') {
+      asked.push({ key: req.params[0], opts: req.params[1] });
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: ++subId }));
+      return;
+    }
+    if (req.method === 'accountUnsubscribe') {
+      unsubscribed.push(req.params[0]);
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: true }));
+      return;
+    }
+    if (req.method === 'logsSubscribe') ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: ++subId }));
+  });
+  const seen = [];
+  const logsSeen = [];
+  feed._reset();
+  feed.attach({
+    wssUrl: () => s.url,
+    execHttpUrl: () => '',
+    commitment: () => 'processed',
+    onLogs: (n) => logsSeen.push(n),
+    onAccount: (a) => seen.push(a),
+    billHttp: () => {},
+    log: () => {},
+  });
+
+  const m = mint(1);
+  feed.watchAccount(m, 'Curve11111111111111111111111111111111111111');
+  assert.ok(await waitFor(() => asked.length === 1), 'the curve was subscribed');
+  assert.equal(asked[0].key, 'Curve11111111111111111111111111111111111111');
+  assert.equal(asked[0].opts.encoding, 'base64', 'raw bytes - the node has no parser for a bonding curve');
+  assert.equal(asked[0].opts.commitment, 'processed', "and it follows the engine's commitment");
+
+  // The notification the node would send: base64 account data plus the slot.
+  const payload = Buffer.from('a bonding curve', 'utf8').toString('base64');
+  s.broadcast(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'accountNotification',
+      params: { subscription: subId, result: { context: { slot: 4242 }, value: { data: [payload, 'base64'] } } },
+    }),
+  );
+  assert.ok(await waitFor(() => seen.length === 1), 'the account change reached the host');
+  assert.equal(seen[0].mint, m, 'and it is attributed to the right token');
+  assert.equal(seen[0].slot, 4242);
+  assert.equal(seen[0].data.toString('utf8'), 'a bonding curve', 'as decoded bytes, not base64');
+  assert.equal(logsSeen.length, 0, 'an account change is never mistaken for a trade log');
+  assert.deepEqual(feed.watchedAccounts(), [m]);
+
+  feed.unwatchAccount(m);
+  assert.ok(await waitFor(() => unsubscribed.length === 1), 'closing the page releases the subscription');
+  assert.deepEqual(feed.watchedAccounts(), []);
+  feed.stop();
+  await s.close();
+  console.log('ok  the curve account is followed on the same socket, price only');
+}
+
+{
+  // A host that refuses the account subscribe must not cost the mint its log
+  // subscription - the chart is slower without the curve, not broken.
+  let subId = 700;
+  const s = await server((ws, req) => {
+    if (req.method === 'accountSubscribe') {
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'Method not found' } }));
+      return;
+    }
+    if (req.method === 'logsSubscribe') ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: ++subId }));
+  });
+  const lines = [];
+  feed._reset();
+  feed.attach({
+    wssUrl: () => s.url,
+    execHttpUrl: () => '',
+    commitment: () => 'confirmed',
+    onLogs: () => {},
+    onAccount: () => {},
+    billHttp: () => {},
+    log: (_l, line) => lines.push(line),
+  });
+  const m = mint(2);
+  feed.watch(m);
+  feed.watchAccount(m, 'Curve22222222222222222222222222222222222222');
+  assert.ok(await waitFor(() => feed.subscribedMints().length === 1), 'the log subscription still landed');
+  assert.ok(await waitFor(() => feed.watchedAccounts().length === 0), 'the refused curve was dropped rather than retried forever');
+  assert.ok(lines.some((l) => /curve subscribe rejected/i.test(l)), 'and it said so');
+  assert.ok(!lines.some((l) => UPSELL.test(l)), 'without turning a missing method into a sales pitch');
+  feed.stop();
+  await s.close();
+  console.log('ok  a node with no accountSubscribe costs nothing but the curve feed');
 }
 
 console.log('\npriorityfeed: all tests passed');

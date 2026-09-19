@@ -19,6 +19,10 @@ import {
   parseRetryAfterMs,
   classifyBody,
   providerLimits,
+  windowBudget,
+  windowKeysFor,
+  memo,
+  clearCache,
   setJupiterApiKey,
   jupiterKeyed,
 } from './.http.mjs';
@@ -419,6 +423,126 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   assert.equal(humanWait(90_000), '2 min');
   assert.equal(humanWait(21_596_000), '6 h');
   console.log('ok  a wait is rendered in units a person reads');
+}
+
+// The polling lanes on a host never promise more than the host allows.
+//
+// MEASURED 2026-09-19: every pump route advertises the same 60/60 s, and its
+// `remaining` counter does not move with our calls (twelve in three seconds
+// read 59 nine times), so the app has to plan against one host allowance it
+// cannot observe. A lane budget CARVES that allowance - it cannot create
+// more of it. 55 for the list lane plus 20 for callouts is two promises
+// adding to 75 against a ceiling of 60, and when the host refused, the
+// smallest lane was the one that lost: "pump.fun not answering" in the
+// callouts rail while Discover carried on working.
+//
+// The group is what holds them together. It covers POLLERS only - a lookup
+// the user's own click made is not background traffic and is bounded by the
+// gap, as it was, so a 60-token portfolio build is not throttled into a
+// minute of waiting.
+{
+  const HOST_CEILING = 60;
+  const lanes = ['pumpfun:list', 'pumpfun:callout'];
+  const group = windowBudget('pumpfun:poll');
+  assert.ok(group, 'the pump polling lanes share a group budget');
+  assert.ok(
+    group.n <= HOST_CEILING,
+    `the group budgets ${group.n} against a host that advertises ${HOST_CEILING}`,
+  );
+  for (const key of lanes) {
+    const w = windowBudget(key);
+    assert.ok(w, `${key} is budgeted`);
+    assert.ok(w.n <= group.n, `${key} budgets ${w.n}, more than the ${group.n} its group allows`);
+    assert.equal(w.ms, group.ms, `${key} and its group must measure the same window`);
+  }
+  // And the gate must actually count a laned call against the group, not
+  // just against its own lane. This is the line that was the bug.
+  assert.deepEqual(
+    windowKeysFor('pumpfun', 'callout'),
+    ['pumpfun', 'pumpfun:callout', 'pumpfun:poll'],
+    'a callout spends from its lane AND from the shared poll budget',
+  );
+  assert.deepEqual(windowKeysFor('pumpfun', undefined), ['pumpfun'], 'an un-laned call is the host only');
+  console.log('ok  pump polling lanes carve one host allowance instead of inventing more');
+}
+
+// ── Stale grace: a throttled provider must not blank the app ──────────
+//
+// A park used to empty every panel it fed. `cached` deletes at TTL, so the
+// reload had nothing to fall back on, and the token page, the holders list
+// and the intel fields all went to em dashes at once - which a user reads as
+// "the app is broken", not "pump.fun is throttling me".
+//
+// The grace tier keeps the last good value past its TTL, to be served ONLY
+// when the reload failed for a reason that is not an answer. The difference
+// is the whole point: "the network did not reach the provider" is a good
+// reason to show what we last knew; "the provider says this token has no
+// pair" is a fact, and resurrecting a four-minute-old value over it is the
+// polite-refusal bug wearing a different hat.
+{
+  const TTL = 60;
+  clearCache();
+  stubFetch(() => res(200, JSON.stringify({ v: 1 })));
+  const first = await memo('grace:key', TTL, async () => {
+    const r = await getJson('dexscreener', '/ok');
+    return r.ok ? r.data : null;
+  });
+  assert.deepEqual(first, { v: 1 }, 'the good value is cached');
+
+  await sleep(TTL + 20);
+  // Now the provider is unreachable. The loader returns null, but a
+  // transport failure was recorded on the way.
+  stubFetch(() => {
+    throw new Error('fetch failed');
+  });
+  const served = await memo('grace:key', TTL, async () => {
+    const r = await getJson('dexscreener', '/down');
+    return r.ok ? r.data : null;
+  });
+  assert.deepEqual(served, { v: 1 }, 'a failed reload serves the last good value, not a blank');
+  console.log('ok  an unreachable provider shows what we last knew, not an em dash');
+}
+
+{
+  const TTL = 60;
+  clearCache();
+  stubFetch(() => res(200, JSON.stringify({ v: 1 })));
+  await memo('grace:answered', TTL, async () => {
+    const r = await getJson('dexscreener', '/ok');
+    return r.ok ? r.data : null;
+  });
+  await sleep(TTL + 20);
+  // The provider ANSWERS, and the answer is "nothing". No transport failure.
+  stubFetch(() => res(200, JSON.stringify({ data: [] })));
+  const answered = await memo('grace:answered', TTL, async () => {
+    const r = await getJson('dexscreener', '/empty');
+    assert.ok(r.ok, 'the call itself succeeded');
+    return null; // the parser found nothing in a perfectly good answer
+  });
+  assert.equal(answered, null, 'a provider that answers "nothing" is believed');
+  console.log('ok  a real "there is nothing here" is never overruled by a stale value');
+}
+
+{
+  const TTL = 40;
+  clearCache();
+  stubFetch(() => res(200, JSON.stringify({ v: 1 })));
+  await memo('grace:expired', TTL, async () => {
+    const r = await getJson('dexscreener', '/ok');
+    return r.ok ? r.data : null;
+  });
+  // Ten TTLs is the grace; past it the value is gone for good. A price from
+  // that long ago is not worth showing at any age label.
+  await sleep(TTL * 11 + 40);
+  stubFetch(() => {
+    throw new Error('fetch failed');
+  });
+  const gone = await memo('grace:expired', TTL, async () => {
+    const r = await getJson('dexscreener', '/down');
+    return r.ok ? r.data : null;
+  });
+  assert.equal(gone, null, 'past grace there is nothing to serve');
+  console.log('ok  grace expires — a stale value is a bridge, not a memory');
 }
 
 console.log('\nhttp layer: all rate-limit rules hold');

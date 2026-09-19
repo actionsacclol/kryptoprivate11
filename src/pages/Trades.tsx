@@ -1,9 +1,15 @@
 // Trades — every round trip you have actually made, in and out (2026-09-03).
 //
 // The Portfolio page answers "what am I holding and how am I doing overall".
-// This one answers a different question: what did each trade DO. One row per
-// mint you bought and fully sold, with what went in, what came out, how long
+// This one answers a different question: what did each trade DO. ONE ROW PER
+// ROUND TRIP - buy, sell, buy the same token back, sell again is two rows,
+// each priced on its own fills - with what went in, what came out, how long
 // it was held, and a card you can share.
+//
+// Until 2026-09-19 it was one row per MINT, netting every trade on a token
+// into a single line: a winner and a loser on the same coin came out as one
+// ambiguous number and the later trade looked like it had overwritten the
+// earlier one (user report).
 //
 // Everything here is read back from the chain: the cost is the lamports that
 // actually left the wallet, the proceeds are what actually arrived. Nothing
@@ -106,7 +112,7 @@ function EvmTradesPage({ chain, onOpenToken }: { chain: EvmChainKind; onOpenToke
             <div className="divide-y divide-white/5">
               {trips.map((t) => (
                 <ClosedRow
-                  key={`${t.mint}-${t.closedAt}`}
+                  key={`${t.mint}-${t.closedAt}-${t.tripIndex ?? 1}`}
                   t={t}
                   paper={false}
                   solUsd={nativeUsd}
@@ -185,6 +191,16 @@ function ClosedRow({
           {paper && (
             <span className="rounded border border-amber-400/50 bg-amber-500/15 px-1 py-px text-nano font-bold uppercase tracking-label text-amber-300">
               Paper
+            </span>
+          )}
+          {(t.tripsOnMint ?? 1) > 1 && (
+            // Traded more than once: each round trip is its own row, and
+            // without this the second reads as a duplicate of the first.
+            <span
+              className="rounded border border-white/15 bg-white/5 px-1 py-px text-nano font-bold uppercase tracking-label text-krypt-muted"
+              title={`Round trip ${t.tripIndex} of ${t.tripsOnMint} on this token — each one is priced on its own, from the fills that made it up.`}
+            >
+              #{t.tripIndex}
             </span>
           )}
           <span className="whitespace-nowrap font-mono text-label text-krypt-muted/60">
@@ -365,7 +381,7 @@ function SolanaTradesPage({ onOpenToken }: { onOpenToken: (mint: string) => void
           <Card padded={false} className="overflow-hidden">
             {rows.map(({ t, paper }) => (
               <ClosedRow
-                key={`${paper ? 'paper-' : ''}${t.mint}-${t.closedAt}`}
+                key={`${paper ? 'paper-' : ''}${t.mint}-${t.closedAt}-${t.tripIndex ?? 1}`}
                 t={t}
                 paper={paper}
                 solUsd={data?.solUsd ?? null}

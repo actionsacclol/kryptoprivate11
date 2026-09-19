@@ -179,6 +179,8 @@
  "node test/exitbudget.test.mjs",
  "esbuild shared/orderTemplates.ts --bundle --format=esm --platform=node --outfile=test/.ordertemplates.mjs",
  "node test/ordertemplates.test.mjs",
+ "esbuild shared/liveRows.ts --bundle --format=esm --platform=node --alias:@shared=./shared --outfile=test/.liverows.mjs",
+ "node test/liverows.test.mjs",
  "esbuild shared/callouts.ts --bundle --format=esm --platform=node --outfile=test/.callouts.mjs",
  "node test/callouts.test.mjs",
  "esbuild shared/i18n/index.ts --bundle --format=esm --platform=node --outfile=test/.i18n.mjs",

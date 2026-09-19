@@ -320,6 +320,9 @@ market.attach({
   creatorIntel: () => null,
   walletLabel: () => null,
   isLiveTracked: () => false,
+  // No scanner in a call-count harness: the New column is provider-fed here
+  // exactly as it was before the tape became a second source.
+  liveLaunches: () => [],
   registerPool: () => {},
   watchPumpMint: () => {},
   unwatchPumpMint: () => {},

@@ -74,6 +74,16 @@ export interface ProviderStatus {
   cooldownIsQuota?: boolean;
   /** Calls waiting in its queue right now. */
   queued: number;
+  /**
+   * How much of this provider's per-minute budget is spent, and the budget.
+   *
+   * Absent when the provider has no window (a gap alone holds it) and on
+   * telemetry built before 2026-09-19. This is the app's OWN accounting, not
+   * the provider's: it is what the gate will enforce, which is the number
+   * that decides whether the next call waits.
+   */
+  minuteUsed?: number;
+  minuteCap?: number;
 }
 
 // ── Discovery ─────────────────────────────────────────────────────────

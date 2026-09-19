@@ -291,14 +291,30 @@ const MIN_GAP_MS: Record<HttpProviderId, number> = {
  * queue behind Discover).
  */
 const WINDOW_LIMIT: Record<string, { n: number; ms: number }> = {
-  'pumpfun:list': { n: 55, ms: 60_000 },
+  // MEASURED 2026-09-19: pump answers `x-ratelimit-limit: 60` on BOTH
+  // /home-feed and /coins, and its `x-ratelimit-remaining` is NOT usable as
+  // a budget - twelve calls in three seconds read 59, 59, 59, 59, 59, 58,
+  // 59 ... , which is several edge nodes each counting their own share. So
+  // the app cannot see how much of the host's allowance it has spent, and
+  // the safe reading is the pessimistic one: 60/60 s for the whole host,
+  // whichever route asks.
+  //
+  // That allowance is carved between the two things that POLL. They also
+  // share `pumpfun:poll` below, which is the ceiling for background traffic
+  // as a whole and leaves the rest of the host's minute for the lookups a
+  // user's own click makes.
+  'pumpfun:list': { n: 30, ms: 60_000 },
   // Callouts ride the pump.fun host the app already uses, but they are
-  // intel a user reads, never anything the trade path waits on. pump meters
-  // this route at 60/60 s (`x-ratelimit-limit`, measured 2026-09-18); a
-  // third of it is more than a 30 s feed poll needs, and the rest stays for
-  // the coin lookups a buy depends on. A callouts burst must never be the
-  // reason a trade cannot price its token.
-  'pumpfun:callout': { n: 20, ms: 60_000 },
+  // intel a user reads, never anything the trade path waits on. Twelve a
+  // minute is six times what the 30 s feed poll actually spends, and the
+  // rest stays for the coin lookups a buy depends on. A callouts burst must
+  // never be the reason a trade cannot price its token.
+  'pumpfun:callout': { n: 12, ms: 60_000 },
+  // Both polls together. 40 of an advertised 60 leaves 20 a minute for
+  // whatever the user is doing, which is the number that matters: the
+  // callouts rail refusing is annoying, a pasted mint that cannot be priced
+  // is a trade that does not happen.
+  'pumpfun:poll': { n: 40, ms: 60_000 },
   geckoterminal: { n: 28, ms: 60_000 },
   rugcheck: { n: 50, ms: 60_000 },
   // LI.FI's real ceiling is a TWO-HOUR window, not a minute — 75 quotes per
@@ -316,6 +332,25 @@ const WINDOW_LIMIT: Record<string, { n: number; ms: number }> = {
   // ceiling: ~54 calls a minute against a published 4,200 per 60 s. Adding a
   // number here would be inventing a limit no header states, and the cost of
   // guessing low is a refused refresh the user asked for.
+};
+
+/**
+ * Lanes that spend from a budget bigger than their own.
+ *
+ * A lane budget carves an allowance between features; it cannot create more
+ * of it. Without this, `pumpfun:list` at 30 and `pumpfun:callout` at 12 are
+ * two promises adding up to 42 that nothing holds together - and when the
+ * host refuses, the smallest lane is the one that loses (user report,
+ * 2026-09-19: "pump.fun not answering" in the callouts rail while Discover
+ * carried on working).
+ *
+ * Only POLLERS are grouped, deliberately. A call the user made by opening a
+ * token is not background traffic and must not queue behind a rail that
+ * refreshes itself.
+ */
+const LANE_GROUP: Record<string, string> = {
+  'pumpfun:list': 'pumpfun:poll',
+  'pumpfun:callout': 'pumpfun:poll',
 };
 
 /** Keyless: today's lite-api pace, unchanged — it is measurably un-throttled
@@ -355,6 +390,14 @@ export function providerLimits(id: HttpProviderId): {
   window: { n: number; ms: number } | null;
 } {
   return { host: providerHost(id), gapMs: baseGap(id), window: windowLimitFor(id) ?? null };
+}
+
+/** The window for a provider OR one of its `provider:lane` keys. Separate
+ *  from `providerLimits` because a lane has no host and no gap of its own —
+ *  it only carves the provider's allowance, and the test that pins the sum
+ *  needs to read the carve without pretending a lane is a provider. */
+export function windowBudget(key: string): { n: number; ms: number } | null {
+  return windowLimitFor(key) ?? null;
 }
 
 /** Route classes with their own window. Callers tag list routes; everything
@@ -626,6 +669,7 @@ function softParkFromHeaders(id: HttpProviderId, headers: { get(name: string): s
 }
 
 function parkedResult<T>(id: HttpProviderId): FetchResult<T> {
+  transportFailures += 1;
   const cooling = cooldownRemainingMs(id);
   return {
     ok: false,
@@ -637,12 +681,60 @@ function parkedResult<T>(id: HttpProviderId): FetchResult<T> {
   };
 }
 
-function windowKey(id: HttpProviderId, lane: FetchLane | undefined): string {
-  return lane ? `${id}:${lane}` : id;
+/**
+ * How many times a call has failed WITHOUT the provider having answered.
+ *
+ * A park, a 429, a timeout, a dropped queue wait, a 5xx: the provider did
+ * not tell us anything about the thing we asked for. That is a different
+ * event from a 404 or an error body, which ARE answers - "this token has no
+ * pair" is a fact, and a fact must not be overruled by a value from four
+ * minutes ago.
+ *
+ * `memo` reads this counter either side of a load. If it moved and the load
+ * came back empty, the emptiness is the network's, not the provider's, and
+ * the last good value is served instead of a blank panel. The reading is a
+ * heuristic - a concurrent call on another provider can move the counter
+ * too - and the cost of being wrong is bounded: a real past value for that
+ * exact key, carrying its own timestamp, where the alternative was an em
+ * dash.
+ */
+let transportFailures = 0;
+
+export function transportFailureCount(): number {
+  return transportFailures;
 }
 
-/** How long until the window has room, or 0. */
-function windowWaitMs(key: string): number {
+/**
+ * Every window a call has to fit inside.
+ *
+ * A lane is bounded by its OWN budget AND by the provider's, because a
+ * provider's limit is usually one allowance for the whole host and the app
+ * has no way to see it move. pump.fun is the case that proved it: both
+ * routes advertise 60/60 s, so budgeting 55/min for the list lane and 20/min
+ * for callouts let the app plan 75 against a ceiling of 60 - and the
+ * smallest lane is the one that gets refused (user report, 2026-09-19:
+ * "pump.fun not answering" in the callouts rail while Discover kept
+ * working).
+ *
+ * Checking only the lane was the bug. A lane budget can carve the host's
+ * allowance between features; it cannot create more of it.
+ */
+function windowKeys(id: HttpProviderId, lane: FetchLane | undefined): string[] {
+  if (!lane) return [id];
+  const key = `${id}:${lane}`;
+  const group = LANE_GROUP[key];
+  return group ? [id, key, group] : [id, key];
+}
+
+/** The keys a call is counted against, for diagnostics and the test that
+ *  pins the grouping. Exported rather than re-derived in the test: a pin
+ *  that reimplements the rule cannot catch the rule changing. */
+export function windowKeysFor(id: HttpProviderId, lane: FetchLane | undefined): string[] {
+  return windowKeys(id, lane);
+}
+
+/** How long until ONE window has room, or 0. */
+function windowWaitForKey(key: string): number {
   const lim = windowLimitFor(key);
   if (!lim) return 0;
   const now = Date.now();
@@ -652,11 +744,39 @@ function windowWaitMs(key: string): number {
   return Math.max(0, stamps[0] + lim.ms - now);
 }
 
-function noteWindow(key: string): void {
-  if (!windowLimitFor(key)) return;
-  const stamps = windowStamps.get(key) ?? [];
-  stamps.push(Date.now());
-  windowStamps.set(key, stamps);
+/** The tightest of every window this call sits inside. */
+function windowWaitMs(keys: string[]): number {
+  let worst = 0;
+  for (const k of keys) worst = Math.max(worst, windowWaitForKey(k));
+  return worst;
+}
+
+/**
+ * How much of a provider's window is spent right now.
+ *
+ * Read-only, and it prunes nothing: the stamps are pruned by the gate on the
+ * next call, and a diagnostics read must not change what the next request is
+ * allowed to do. Null when the key has no window - Merkl and LI.FI are held
+ * by their gap alone, and inventing a number for them would be a claim no
+ * header supports.
+ */
+export function windowUsage(key: string): { used: number; n: number; ms: number } | null {
+  const lim = windowLimitFor(key);
+  if (!lim) return null;
+  const now = Date.now();
+  const used = (windowStamps.get(key) ?? []).filter((t) => now - t < lim.ms).length;
+  return { used, n: lim.n, ms: lim.ms };
+}
+
+/** A call spends from every budget it was counted against - including the
+ *  provider's, which is what stops the lanes from outspending the host. */
+function noteWindow(keys: string[]): void {
+  for (const key of keys) {
+    if (!windowLimitFor(key)) continue;
+    const stamps = windowStamps.get(key) ?? [];
+    stamps.push(Date.now());
+    windowStamps.set(key, stamps);
+  }
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -671,7 +791,7 @@ function gate<T>(
   opts: { priority: boolean; lane?: FetchLane; skip: () => T | null },
   run: () => Promise<T>,
 ): Promise<T> {
-  const wkey = windowKey(id, opts.lane);
+  const wkeys = windowKeys(id, opts.lane);
   const waitGap = async (): Promise<void> => {
     const gap = effectiveGap(id);
     const since = Date.now() - (lastCallAt.get(id) ?? 0);
@@ -685,7 +805,7 @@ function gate<T>(
     const next = prev.then(async () => {
       await waitGap();
       lastCallAt.set(id, Date.now());
-      noteWindow(wkey);
+      noteWindow(wkeys);
       return run();
     });
     queues.set(key, next.catch(() => undefined));
@@ -701,14 +821,14 @@ function gate<T>(
     if (Date.now() - enqueuedAt > MAX_QUEUE_WAIT_MS) {
       throw new QueueWaitError(Math.round((Date.now() - enqueuedAt) / 1000));
     }
-    const w = windowWaitMs(wkey);
+    const w = windowWaitMs(wkeys);
     if (w > 0) await sleep(w);
     await waitGap();
     // The park may have been set while this call waited for the window.
     const late = opts.skip();
     if (late !== null) return late;
     lastCallAt.set(id, Date.now());
-    noteWindow(wkey);
+    noteWindow(wkeys);
     return run();
   });
   // Keep the chain alive on rejection so one failure never wedges the host.
@@ -826,15 +946,19 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         // park for nothing at all — measured on a user's session, 1,743
         // calls and 1,743 errors, every one of them certain to fail.
         if (isQuotaExhausted(res.status, detail)) {
+          transportFailures += 1;
           const parkedMs = park(id, null, true);
           msg = `${id}: allowance spent — ${detail || `HTTP ${res.status}`}. Paused ${Math.round(parkedMs / 3_600_000)}h; top up the plan or switch it off in Settings.`;
           void res.body?.cancel().catch(() => undefined);
         } else if (res.status === 429) {
+          transportFailures += 1;
           const parkedMs = park(id, res.headers.get('retry-after'));
           msg = `${id}: rate limited (429) — pausing ${Math.ceil(parkedMs / 1000)}s`;
           // An unread body pins a keep-alive socket until GC.
           void res.body?.cancel().catch(() => undefined);
         } else {
+          // A 5xx is the provider being broken, not the provider answering.
+          if (res.status >= 500) transportFailures += 1;
           msg = `${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`;
         }
         s.errors += 1;
@@ -853,6 +977,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         // Exactly the 429 path: same park(), same Retry-After clamp, same
         // escalation, same strike decay. Nothing is un-parked. Unless the
         // refusal names a spent ALLOWANCE, which no cool-down fixes.
+        transportFailures += 1;
         const spent = isQuotaExhausted(res.status, verdict.detail ?? '');
         const parkedMs = park(id, spent ? null : res.headers.get('retry-after'), spent);
         const msg = spent
@@ -886,6 +1011,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
       if (!text.trim()) return { ok: true, message: 'empty', data: undefined, ms, status };
       return { ok: true, message: 'ok', data: JSON.parse(text) as T, ms, status };
     } catch (err) {
+      transportFailures += 1;
       const raw = (err as Error)?.message ?? 'request failed';
       const msg =
         raw.includes('timed out') || raw.includes('aborted')
@@ -907,6 +1033,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
     return await gate<FetchResult<T>>(id, { priority, lane: opts.lane, skip }, attempt);
   } catch (err) {
     if (err instanceof QueueWaitError) {
+      transportFailures += 1;
       const s = statsFor(id);
       s.errors += 1;
       s.lastError = `${id}: busy — ${err.message}`;
@@ -931,14 +1058,56 @@ interface Entry {
 const cache = new Map<string, Entry>();
 const CACHE_CAP = 600;
 
+/**
+ * How long an expired entry is kept around after its TTL.
+ *
+ * Not to be served as current - `cached` still refuses it the millisecond it
+ * goes stale, and every caller of that keeps the semantics it had. It is
+ * kept so that when the network fails, the panel can show what it last knew
+ * with its own timestamp on it, instead of going blank. A parked provider
+ * used to empty the token page, the holders list and the intel fields into
+ * em dashes, and the user reads that as "the app is broken", not "pump.fun
+ * is throttling me".
+ *
+ * Ten TTLs, capped at five minutes. The cap is what keeps it honest: a
+ * 20-second price is worth showing at 90 seconds with "90s ago" beside it,
+ * and is worth nothing at all at half an hour.
+ */
+const STALE_GRACE_MULTIPLE = 10;
+const STALE_GRACE_MAX_MS = 5 * 60_000;
+
+function graceFor(ttl: number): number {
+  return Math.min(ttl * STALE_GRACE_MULTIPLE, STALE_GRACE_MAX_MS);
+}
+
 export function cached<T>(key: string): T | null {
   const e = cache.get(key);
   if (!e) return null;
-  if (Date.now() - e.at > e.ttl) {
-    cache.delete(key);
+  const age = Date.now() - e.at;
+  if (age > e.ttl) {
+    // Expired, but keep it within grace: it is the fallback for a failed
+    // reload. Past grace it is deleted exactly as before.
+    if (age > e.ttl + graceFor(e.ttl)) cache.delete(key);
     return null;
   }
   return e.value as T;
+}
+
+/**
+ * The last good value for a key, past its TTL but inside grace, with its
+ * age. Null when there is none. Callers that show it MUST show the age with
+ * it - a stale number presented as current is worse than no number.
+ */
+export function staleValue<T>(key: string): { value: T; ageMs: number } | null {
+  const e = cache.get(key);
+  if (!e) return null;
+  const age = Date.now() - e.at;
+  if (age <= e.ttl) return null;
+  if (age > e.ttl + graceFor(e.ttl)) {
+    cache.delete(key);
+    return null;
+  }
+  return { value: e.value as T, ageMs: age };
 }
 
 export function putCache(key: string, value: unknown, ttlMs: number): void {
@@ -959,18 +1128,36 @@ export function clearCache(): void {
  *  and each ran the full five-provider assembly. */
 const inflight = new Map<string, Promise<unknown>>();
 
-/** Run `load` unless a fresh cached value exists. Failures are NOT cached.
- *  Concurrent callers of the same key await the same in-flight load. */
+/**
+ * Run `load` unless a fresh cached value exists. Failures are NOT cached.
+ * Concurrent callers of the same key await the same in-flight load.
+ *
+ * And when the load comes back empty because the NETWORK failed - a park, a
+ * 429, a timeout - the last good value is served instead, for as long as
+ * `graceFor` allows. That is the whole difference between a throttled
+ * provider looking like a slow app and looking like a broken one.
+ *
+ * A load that came back empty because the provider ANSWERED and said there
+ * is nothing is left alone: no transport failure was recorded, so the empty
+ * answer stands. Deleting a token's pair and then re-serving it from four
+ * minutes ago is the "polite refusal" bug wearing a different hat.
+ */
 export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T | null>): Promise<T | null> {
   const hit = cached<T>(key);
   if (hit !== null) return hit;
   const running = inflight.get(key) as Promise<T | null> | undefined;
   if (running) return running;
   const p = (async (): Promise<T | null> => {
+    const failuresBefore = transportFailures;
     try {
       const value = await load();
-      if (value !== null) putCache(key, value, ttlMs);
-      return value;
+      if (value !== null) {
+        putCache(key, value, ttlMs);
+        return value;
+      }
+      if (transportFailures === failuresBefore) return null;
+      const stale = staleValue<T>(key);
+      return stale ? stale.value : null;
     } finally {
       inflight.delete(key);
     }
@@ -978,3 +1165,4 @@ export async function memo<T>(key: string, ttlMs: number, load: () => Promise<T 
   inflight.set(key, p);
   return p;
 }
+

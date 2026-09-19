@@ -24,6 +24,9 @@ import {
 import type { OddsBucket } from '@shared/odds';
 import { isEvmAddress, isEvmChain, type ChainKind } from '@shared/evm';
 import { useToast } from './ToastProvider';
+import { useAppState } from './AppStateProvider';
+import { newLiveRows, impliedSolUsd } from '@shared/liveRows';
+import type { LaunchRow } from '@shared/types';
 import { ODDS_BUCKET_ORDER, oddsBucketRank } from '../utils/odds';
 
 // Terminal state, kept separate from AppStateProvider on purpose.
@@ -35,6 +38,17 @@ import { ODDS_BUCKET_ORDER, oddsBucketRank } from '../utils/odds';
 // Mixing the two would make an engine bug and a rate limit look identical.
 
 const REFRESH_MIN_MS = 2_000;
+
+/** How often the launch feed is sampled into the New column, and how many
+ *  of its newest rows are considered. One second is under the eye's patience
+ *  for "did that just appear?" and far above the render budget. */
+const LIVE_SAMPLE_MS = 1_000;
+const LIVE_SAMPLE_MAX = 40;
+
+/** A launch the tape still remembers from an hour ago is not new. Main uses
+ *  the column's own 24 h window for the rails that launch rarely; pump is
+ *  not one of them, and a row that old would only push a real one out. */
+const LIVE_MAX_AGE_MS = 60 * 60_000;
 
 export interface ColumnState {
   rows: TokenSummary[];
@@ -476,6 +490,63 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     };
   }, [openMint]);
 
+  // ── The New column between polls ─────────────────────────────────────
+  //
+  // Main already merges the scanner's launches into this column, but only
+  // when a poll asks for it - up to four seconds after the token exists, and
+  // not at all while pump.fun is parked. The launch feed is in this process
+  // too, so the row can be on screen the moment the create is decoded.
+  //
+  // SAMPLED on a one-second timer rather than driven by the feed. The engine
+  // pushes a launch update up to four times a second PER token, and a grid
+  // that re-renders on every one of those is not smoother than one that
+  // waits for the poll; it is the same screen drawn forty times as often.
+  // Sampling also stops a burst of launches from turning into a burst of
+  // renders.
+  //
+  // Solana only, and only while Discover is on screen: the scanner watches
+  // pump.fun, and an EVM chain's column has nothing to gain from it.
+  const { launches } = useAppState();
+  const launchesRef = useRef<LaunchRow[]>(launches);
+  launchesRef.current = launches;
+  const [liveSample, setLiveSample] = useState<LaunchRow[]>([]);
+
+  useEffect(() => {
+    if (discoverMounts === 0 || isEvmChain(chain)) {
+      setLiveSample((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    const sample = (): void => {
+      if (document.hidden) return;
+      const next = launchesRef.current.slice(0, LIVE_SAMPLE_MAX);
+      // Same first mint and same length means nothing has been created since
+      // the last sample. Returning `prev` keeps the memo below from running
+      // and every card from re-rendering.
+      setLiveSample((prev) =>
+        prev.length === next.length && prev[0]?.mint === next[0]?.mint ? prev : next,
+      );
+    };
+    sample();
+    const id = setInterval(sample, LIVE_SAMPLE_MS);
+    return () => clearInterval(id);
+  }, [discoverMounts, chain]);
+
+  const livened = useMemo(() => {
+    if (liveSample.length === 0) return columns;
+    const rows = columns.new.rows;
+    const added = newLiveRows(
+      rows.map((r) => r.mint),
+      liveSample,
+      impliedSolUsd(rows),
+      LIVE_MAX_AGE_MS,
+    );
+    if (added.length === 0) return columns;
+    // Provider rows keep their identity - only the array is new - so the
+    // memoised cards that were already drawn skip the render.
+    const merged = [...added, ...rows].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    return { ...columns, new: { ...columns.new, rows: merged } };
+  }, [columns, liveSample]);
+
   // Filter ONCE per change, not once per render per column. `visible()` used
   // to run passesFilters over every row each time it was called, and Discover
   // calls it four times per render.
@@ -495,7 +566,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
     let hiddenOdds = 0;
     const minRank = minOddsBucket === null ? null : oddsBucketRank(minOddsBucket);
     for (const col of DISCOVER_COLUMNS) {
-      const passing = columns[col].rows.filter((r) => passesFilters(r, filters, now));
+      const passing = livened[col].rows.filter((r) => passesFilters(r, filters, now));
       let rows = passing;
       if (hideFlagged) {
         rows = rows.filter((r) => r.rug?.hide !== true);
@@ -517,7 +588,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       out[col] = rows;
     }
     return { visibleByColumn: out, hiddenFlaggedCount: hidden, hiddenByOddsCount: hiddenOdds };
-  }, [columns, filters, hideFlagged, minOddsBucket, sortBy]);
+  }, [livened, filters, hideFlagged, minOddsBucket, sortBy]);
 
   const visible = useCallback((column: DiscoverColumn) => visibleByColumn[column], [visibleByColumn]);
 
@@ -602,7 +673,8 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<TerminalState>(
     () => ({
-      columns,
+      // The livened set, so a column's own row count matches what it draws.
+      columns: livened,
       filters,
       setFilters,
       presets,
@@ -635,7 +707,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       isWatched,
     }),
     [
-      columns, filters, setFilters, presets, activePresetId, applyPreset, visible,
+      livened, filters, setFilters, presets, activePresetId, applyPreset, visible,
       hideFlagged, setHideFlagged, hiddenFlaggedCount,
       sortBy, setSortBy, minOddsBucket, setMinOddsBucket, hiddenByOddsCount,
       providers, refreshProviders, refreshSec, paused, setDiscoverActive, refreshNow, openMint,

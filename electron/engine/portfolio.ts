@@ -149,33 +149,54 @@ export function build(inputs: PortfolioInputs): PortfolioSummary {
   }
   out.feesPaidSol = hasFees ? feesPaid : null;
 
-  // Closed rows are LIFETIME, deliberately: `basisByMint` scopes the plain
-  // fields to the position currently open (so a re-entry is priced at the
-  // re-entry), and after the last sell that scope is empty by construction.
-  // What "I traded this token and came out +2 SOL" means is every round trip
-  // on it, which is what the lifetime fields hold.
+  // ONE ROW PER ROUND TRIP, not per mint.
+  //
+  // These used to be lifetime totals for the mint, which netted every trade
+  // on it into a single row: buy, sell at a profit, buy back, sell at a loss
+  // came out as one ambiguous number and the second trade read as having
+  // overwritten the first (user report, 2026-09-19). They are two trades.
+  // They are also one win and one loss, which is what the win rate, the best
+  // and worst trade and the equity curve below all now count.
+  //
+  // `basisByMint` marks the boundaries during its walk - the only point that
+  // knows where one trade ended and the next began - and each `trip` is an
+  // episode as it stood when the position went flat.
   for (const [mint, b] of basis) {
-    if (held.has(mint)) continue;
-    if (b.lifetimeSells === 0 || b.lifetimeSpentSol <= 0) continue;
-    const pnlSol = b.lifetimeReceivedSol - b.lifetimeSpentSol;
-    closed.push({
-      mint,
-      symbol: b.symbol || mint.slice(0, 6),
-      openedAt: b.firstEverAt ?? 0,
-      closedAt: b.lastAt ?? 0,
-      costSol: b.lifetimeSpentSol,
-      proceedsSol: b.lifetimeReceivedSol,
-      pnlSol,
-      pnlPct: (pnlSol / b.lifetimeSpentSol) * 100,
-      holdMs: (b.lastAt ?? 0) - (b.firstEverAt ?? 0),
-      tokensBought: b.lifetimeTokensBought,
-      tokensSold: b.lifetimeTokensSold,
-      // Average in and average out. Both come from amounts read off the
-      // chain; when one is missing the price is null rather than a guess.
-      entryPriceSol: b.lifetimeTokensBought > 0 ? b.lifetimeSpentSol / b.lifetimeTokensBought : null,
-      exitPriceSol: b.lifetimeTokensSold > 0 ? b.lifetimeReceivedSol / b.lifetimeTokensSold : null,
-      buys: b.lifetimeBuys,
-      sells: b.lifetimeSells,
+    // The chain says this wallet still holds the token while the ledger
+    // thinks the last episode closed. Something happened that the fills do
+    // not describe - a buy from another client, a sell that never landed -
+    // so the newest trip's claim to be CLOSED is the one the chain
+    // contradicts. Drop that one; the trips before it are untouched by it
+    // and stay. (`b.buys === 0` is what "the ledger has no open episode"
+    // looks like after a reset.)
+    const suspect = held.has(mint) && b.buys === 0 && b.trips.length > 0;
+    const trips = suspect ? b.trips.slice(0, -1) : b.trips;
+    trips.forEach((t, i) => {
+      if (t.sells === 0 || t.spentSol <= 0) return;
+      const pnlSol = t.receivedSol - t.spentSol;
+      closed.push({
+        mint,
+        symbol: b.symbol || mint.slice(0, 6),
+        openedAt: t.openedAt,
+        closedAt: t.closedAt,
+        costSol: t.spentSol,
+        proceedsSol: t.receivedSol,
+        pnlSol,
+        pnlPct: (pnlSol / t.spentSol) * 100,
+        holdMs: Math.max(0, t.closedAt - t.openedAt),
+        tokensBought: t.tokensBought,
+        tokensSold: t.tokensSold,
+        // Average in and average out. Both come from amounts read off the
+        // chain; when one is missing the price is null rather than a guess.
+        entryPriceSol: t.tokensBought > 0 ? t.spentSol / t.tokensBought : null,
+        exitPriceSol: t.tokensSold > 0 ? t.receivedSol / t.tokensSold : null,
+        buys: t.buys,
+        sells: t.sells,
+        // 1-based, so a re-entry can say which time round it was rather than
+        // looking like a duplicate of the row above it.
+        tripIndex: i + 1,
+        tripsOnMint: trips.length,
+      });
     });
   }
   closed.sort((a, b2) => b2.closedAt - a.closedAt);

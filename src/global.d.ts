@@ -441,6 +441,10 @@ declare global {
         search: (query: string) => Promise<IpcResult<TokenSummary[]>>;
         watch: (mint: string) => Promise<IpcResult>;
         unwatch: (mint: string) => Promise<IpcResult>;
+        /** SOL/USD from the rate main already holds. The live chart and the
+         *  header market cap both need it, and deriving it from a token's
+         *  own price fails for exactly the tokens that move fastest. */
+        solUsd: () => Promise<IpcResult<number>>;
         presets: () => Promise<IpcResult<FilterPreset[]>>;
         clearCache: () => Promise<IpcResult>;
       };

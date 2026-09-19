@@ -461,7 +461,7 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
           <div className="space-y-1">
             {data.closed.slice(0, 25).map((c) => (
               <div
-                key={`${c.mint}-${c.closedAt}`}
+                key={`${c.mint}-${c.closedAt}-${c.tripIndex ?? 1}`}
                 className="flex items-center gap-3 rounded-md px-3 py-1.5 text-body font-mono hover:bg-white/[0.04] transition"
               >
                 <button onClick={() => onOpenToken(c.mint)} className="w-28 text-left text-white/85 hover:text-krypt-purple truncate">

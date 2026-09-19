@@ -398,6 +398,35 @@ export interface MintBasis {
   firstEverAt: number | null;
   /** Completed round trips: how many times the position went flat. */
   roundTrips: number;
+  /**
+   * Every completed round trip, in the order they happened.
+   *
+   * The episode fields above describe the position open RIGHT NOW and are
+   * wiped each time it goes flat; these are what those episodes were. Buy,
+   * sell at a profit, buy back, sell at a loss is two trades and has to read
+   * as two trades - reporting the pair as one netted row is how a winner and
+   * a loser on the same token became a single ambiguous number (user report,
+   * 2026-09-19).
+   */
+  trips: ClosedTrip[];
+}
+
+/**
+ * One completed round trip on a mint: opened when the wallet first held none
+ * of it and bought, closed when the last of it was sold.
+ *
+ * Money only from reconciled fills, like everything else here. Token amounts
+ * are whole units.
+ */
+export interface ClosedTrip {
+  openedAt: number;
+  closedAt: number;
+  spentSol: number;
+  receivedSol: number;
+  tokensBought: number;
+  tokensSold: number;
+  buys: number;
+  sells: number;
 }
 
 /** A sell that leaves no more than this share of the episode's tokens behind
@@ -446,7 +475,7 @@ export function basisByMint(
         lifetimeSpentSol: 0, lifetimeReceivedSol: 0,
         lifetimeTokensBought: 0, lifetimeTokensSold: 0,
         lifetimeBuys: 0, lifetimeSells: 0,
-        firstEverAt: null, roundTrips: 0,
+        firstEverAt: null, roundTrips: 0, trips: [],
       };
       out.set(f.mint, b);
     }
@@ -493,6 +522,19 @@ export function basisByMint(
       // the episode alive — see FLAT_DUST_FRACTION.
       if (b.tokensBought > 0 && left <= b.tokensBought * FLAT_DUST_FRACTION) {
         b.roundTrips += 1;
+        // Keep what this episode WAS before the reset wipes it. Captured
+        // here rather than rebuilt later because this is the only point in
+        // the walk that knows where one trade ended and the next began.
+        b.trips.push({
+          openedAt: b.firstAt ?? f.at,
+          closedAt: f.at,
+          spentSol: b.spentSol,
+          receivedSol: b.receivedSol,
+          tokensBought: b.tokensBought,
+          tokensSold: b.tokensSold,
+          buys: b.buys,
+          sells: b.sells,
+        });
         running.set(f.mint, 0);
         b.spentSol = 0;
         b.receivedSol = 0;

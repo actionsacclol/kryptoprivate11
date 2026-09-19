@@ -206,6 +206,87 @@ test('win rate, profit factor and extremes come from closed trips only', () => {
   assert.equal(out.realizedPnlSol, 0.5);
 });
 
+test('a token traded twice is TWO trades, not one netted row', () => {
+  // The exact sequence a user reported on 2026-09-19: bought, sold at a
+  // profit, bought the same coin back, sold at a loss. It came out as one
+  // row - the second trade looked like it had overwritten the first - and
+  // one ambiguous number in place of a winner and a loser.
+  ledger._reset();
+  ledger._load([
+    fill({ side: 'buy', at: 1_000, solDeltaLamports: -1 * LAM, tokenDeltaRaw: '1000000' }),
+    fill({ side: 'sell', at: 2_000, solDeltaLamports: 1.5 * LAM, tokenDeltaRaw: '-1000000' }),
+    fill({ side: 'buy', at: 9_000, solDeltaLamports: -2 * LAM, tokenDeltaRaw: '2000000' }),
+    fill({ side: 'sell', at: 12_000, solDeltaLamports: 1 * LAM, tokenDeltaRaw: '-2000000' }),
+  ]);
+  const out = portfolio.build({ holdings: [], solBalance: 0, solUsd: 100, prices: new Map() });
+  assert.equal(out.closed.length, 2, 'two round trips, two rows');
+
+  // Newest first, the way the page lists them.
+  const [second, first] = out.closed;
+  assert.equal(first.costSol, 1);
+  assert.equal(first.proceedsSol, 1.5);
+  assert.equal(first.pnlSol, 0.5);
+  assert.equal(first.holdMs, 1_000, 'held for its OWN duration, not since the first ever buy');
+  assert.equal(first.tripIndex, 1);
+  assert.equal(first.tripsOnMint, 2);
+
+  assert.equal(second.costSol, 2, 'the re-entry is priced at the re-entry');
+  assert.equal(second.proceedsSol, 1);
+  assert.equal(second.pnlSol, -1);
+  assert.equal(second.pnlPct, -50);
+  assert.equal(second.holdMs, 3_000);
+  assert.equal(second.tripIndex, 2);
+
+  // One win and one loss - not a single net loser, and not a single winner.
+  assert.equal(out.wins, 1);
+  assert.equal(out.losses, 1);
+  assert.equal(out.winRatePct, 50);
+  assert.equal(out.bestTradeSol, 0.5);
+  assert.equal(out.worstTradeSol, -1);
+  // The total is unchanged by the split: it was always the sum of both.
+  assert.equal(out.realizedPnlSol, -0.5);
+  assert.equal(out.equity.length, 2, 'and the equity curve steps once per trade');
+});
+
+test('a closed trip survives buying the same token back', () => {
+  // Buy, sell, buy again and still be holding. The finished trade is a fact
+  // and must still be listed; only the open position is open.
+  ledger._reset();
+  ledger._load([
+    fill({ side: 'buy', at: 1_000, solDeltaLamports: -1 * LAM, tokenDeltaRaw: '1000000' }),
+    fill({ side: 'sell', at: 2_000, solDeltaLamports: 1.5 * LAM, tokenDeltaRaw: '-1000000' }),
+    fill({ side: 'buy', at: 9_000, solDeltaLamports: -2 * LAM, tokenDeltaRaw: '2000000' }),
+  ]);
+  const out = portfolio.build({
+    holdings: [holding(MINT, 2)],
+    solBalance: 0, solUsd: 100, prices: priceMap(MINT, 0.001, 0.1),
+  });
+  assert.equal(out.closed.length, 1, 'the finished round trip is still a finished round trip');
+  assert.equal(out.closed[0].pnlSol, 0.5);
+  assert.equal(out.positions.length, 1, 'and the re-entry is an open position beside it');
+  assert.equal(out.positions[0].costSol, 2, 'priced at the re-entry, not averaged with the first round');
+});
+
+test('the chain contradicting a flat ledger drops only the newest trip', () => {
+  // The ledger thinks the position closed; the wallet still holds tokens. So
+  // something happened the fills do not describe, and the claim that the LAST
+  // trade finished is the one the chain contradicts. Earlier trades stand.
+  ledger._reset();
+  ledger._load([
+    fill({ side: 'buy', at: 1_000, solDeltaLamports: -1 * LAM, tokenDeltaRaw: '1000000' }),
+    fill({ side: 'sell', at: 2_000, solDeltaLamports: 1.5 * LAM, tokenDeltaRaw: '-1000000' }),
+    fill({ side: 'buy', at: 3_000, solDeltaLamports: -1 * LAM, tokenDeltaRaw: '1000000' }),
+    fill({ side: 'sell', at: 4_000, solDeltaLamports: 0.5 * LAM, tokenDeltaRaw: '-1000000' }),
+  ]);
+  const out = portfolio.build({
+    holdings: [holding(MINT, 900)],
+    solBalance: 0, solUsd: 100, prices: priceMap(MINT, 0.001, 0.1),
+  });
+  assert.equal(out.closed.length, 1, 'the first trade stands, the last one is in doubt');
+  assert.equal(out.closed[0].pnlSol, 0.5);
+  assert.equal(out.losses, 0, 'and a trip the chain disputes is not counted as a loss');
+});
+
 test('no closed trips means null stats, not zeroes', () => {
   ledger._reset();
   ledger._load([]);
@@ -405,20 +486,29 @@ test('dust left behind still closes the position', () => {
   assert.equal(b.spentSol, 4, 'the re-entry alone');
 });
 
-test('the closed round trip covers BOTH rounds once the mint is gone', () => {
+test('each round on a mint is its OWN closed row, priced on its own fills', () => {
+  // REVERSED 2026-09-19. This used to assert one netted row per mint, on the
+  // argument that "I traded this token and came out +4 SOL" is the useful
+  // statement. It is not the one the page is for: a user who won on the
+  // first round and lost on the second saw a single row and read the second
+  // trade as having overwritten the first. Two trades, two rows; the netted
+  // figure is still available, as the sum, in realizedPnlSol.
   ledger._load([
     buyAt(1, 1000, 1_000), sellAt(3, 1000, 2_000),
     buyAt(4, 1000, 3_000), sellAt(6, 1000, 4_000),
   ]);
   const out = portfolio.build({ holdings: [], solBalance: 0, solUsd: null, prices: new Map(), wallet: W1 });
-  assert.equal(out.closed.length, 1);
-  const c = out.closed[0];
-  assert.equal(c.costSol, 5, 'both entries');
-  assert.equal(c.proceedsSol, 9, 'both exits');
-  assert.equal(c.pnlSol, 4);
-  assert.equal(c.buys, 2);
-  assert.equal(c.sells, 2);
-  assert.equal(c.openedAt, 1_000, 'the first time the mint was ever bought');
+  assert.equal(out.closed.length, 2);
+  const [second, first] = out.closed; // newest first
+  assert.equal(first.costSol, 1);
+  assert.equal(first.proceedsSol, 3);
+  assert.equal(first.buys, 1);
+  assert.equal(first.sells, 1);
+  assert.equal(first.openedAt, 1_000, 'when THIS round was opened');
+  assert.equal(second.costSol, 4);
+  assert.equal(second.proceedsSol, 6);
+  assert.equal(second.openedAt, 3_000, 'the re-entry, not the first buy ever');
+  assert.equal(out.realizedPnlSol, 4, 'and the lifetime total is unchanged: it is the sum');
 });
 
 test('the open position after a re-entry reports the re-entry cost and ONLY its own realised', () => {

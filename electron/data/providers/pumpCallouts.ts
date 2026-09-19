@@ -40,6 +40,21 @@ const FEED_TTL_MS = 30_000;
 const COIN_TTL_MS = 120_000;
 
 /**
+ * Why the last read failed, in the HTTP layer's own words.
+ *
+ * `memo` caches a VALUE, so a failure has to come back as null - which
+ * threw away a precise message ("pumpfun: rate limited, retrying in 20s")
+ * and left the panel saying "not answering", which is the difference
+ * between a user waiting twenty seconds and a user filing a bug. Kept here
+ * and read by the IPC handler right after the call.
+ */
+let lastError: string | null = null;
+
+export function lastCalloutError(): string | null {
+  return lastError;
+}
+
+/**
  * The global callouts feed.
  *
  * Returns null when the call failed — distinct from `[]`, which means pump
@@ -50,7 +65,11 @@ const COIN_TTL_MS = 120_000;
 export async function calloutFeed(): Promise<Callout[] | null> {
   return memo<Callout[]>('callouts:feed', FEED_TTL_MS, async () => {
     const r = await getJson<unknown>('pumpfun', '/home-feed', { lane: 'callout' });
-    if (!r.ok || r.data === undefined) return null;
+    if (!r.ok || r.data === undefined) {
+      lastError = r.message || null;
+      return null;
+    }
+    lastError = null;
     return parseHomeFeed(r.data);
   });
 }
@@ -60,7 +79,11 @@ export async function calloutsForMint(mint: string, chain: ChainKind): Promise<C
   const key = `callouts:mint:${chain}:${mint}`;
   return memo<Callout[]>(key, COIN_TTL_MS, async () => {
     const r = await getJson<unknown>('pumpfun', `/callout/top/${encodeURIComponent(mint)}`, { lane: 'callout' });
-    if (!r.ok || r.data === undefined) return null;
+    if (!r.ok || r.data === undefined) {
+      lastError = r.message || null;
+      return null;
+    }
+    lastError = null;
     return parseCoinCallouts(r.data, mint, chain);
   });
 }

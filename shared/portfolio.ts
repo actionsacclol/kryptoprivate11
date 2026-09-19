@@ -151,6 +151,15 @@ export interface ClosedTrade {
   /** Buy and sell fills that made it up. */
   buys: number;
   sells: number;
+  /**
+   * Which round trip on this mint this row is, 1-based, and how many there
+   * are. A token traded twice produces two rows, and without these the
+   * second reads as a duplicate of the first.
+   *
+   * Optional because a portfolio cached by an older build has neither.
+   */
+  tripIndex?: number;
+  tripsOnMint?: number;
 }
 
 /** One row of the trade-history export (term.txt section 14). */

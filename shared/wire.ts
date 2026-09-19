@@ -136,7 +136,19 @@ export function providerRails(providers: ProviderStatus[], at: number | null): R
         return { ...base, state: 'unknown' as RailState, detail: 'Enabled, not called yet this session.' };
       }
       const lat = p.latencyMs === null ? '—' : `${Math.round(p.latencyMs)} ms`;
-      return { ...base, state: 'ok' as RailState, detail: `${p.calls} call(s), ${lat} median${p.queued > 0 ? `, ${p.queued} queued` : ''}.` };
+      // Headroom, when the app keeps a budget for this host. Shown as spent
+      // over cap rather than a percentage: "44/50 this minute" tells you both
+      // how close you are and what the ceiling actually is, and a provider
+      // held by its gap alone simply has no such number to show.
+      const budget =
+        typeof p.minuteUsed === 'number' && typeof p.minuteCap === 'number'
+          ? `, ${p.minuteUsed}/${p.minuteCap} this minute`
+          : '';
+      return {
+        ...base,
+        state: 'ok' as RailState,
+        detail: `${p.calls} call(s), ${lat} median${budget}${p.queued > 0 ? `, ${p.queued} queued` : ''}.`,
+      };
     })
     .sort((a, b) => severity(b.state) - severity(a.state) || a.label.localeCompare(b.label));
 }

@@ -41,6 +41,24 @@ function emit(next: Partial<CalloutsState>): void {
   for (const fn of listeners) fn();
 }
 
+/**
+ * Is anyone actually looking?
+ *
+ * A rail left open on a minimised window polled pump every 30 s forever -
+ * 2,880 calls a day against a host that meters 60 a minute for the whole
+ * app, spent on rows nobody could see. A tick is skipped while the document
+ * is hidden; coming back refreshes immediately if the rows went stale, so
+ * the panel is current by the time the user has read the first line.
+ *
+ * Deliberately only the TIMER checks this. A refresh the user asked for, or
+ * the first one after mounting, runs whatever the document says it is -
+ * `document.hidden` is true during some window transitions, and a panel that
+ * opened empty because of one would be a worse bug than the one this fixes.
+ */
+function hidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
 async function refresh(): Promise<void> {
   // A slow answer must not stack up behind itself on a 30 s timer.
   if (inFlight) return;
@@ -59,6 +77,14 @@ async function refresh(): Promise<void> {
   } finally {
     inFlight = false;
   }
+}
+
+/** Back in view: if the rows aged out while the window was hidden, catch up
+ *  now rather than at the next tick. */
+function onVisible(): void {
+  if (hidden()) return;
+  const at = state.lastCheckedAt;
+  if (at === null || Date.now() - at >= POLL_MS) void refresh();
 }
 
 /** Force a re-read now — the panel's refresh button. */
@@ -81,7 +107,11 @@ export function useCallouts(active = true): CalloutsState {
     const fn = (): void => bump((n) => n + 1);
     listeners.add(fn);
     if (timer === null) {
-      timer = setInterval(() => void refresh(), POLL_MS);
+      timer = setInterval(() => {
+        if (hidden()) return;
+        void refresh();
+      }, POLL_MS);
+      document.addEventListener('visibilitychange', onVisible);
       void refresh();
     } else if (state.lastCheckedAt === null) {
       void refresh();
@@ -91,6 +121,7 @@ export function useCallouts(active = true): CalloutsState {
       if (listeners.size === 0 && timer !== null) {
         clearInterval(timer);
         timer = null;
+        document.removeEventListener('visibilitychange', onVisible);
       }
     };
   }, [active]);

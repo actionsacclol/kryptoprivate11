@@ -33,7 +33,7 @@ import { AiPanel } from '../components/terminal/AiPanel';
 import { useTerminal } from '../state/TerminalProvider';
 import { lastRows } from '../state/routeCache';
 import { useToast } from '../state/ToastProvider';
-import { cls, fmtAge, fmtChange, fmtNum, fmtPriceUsd, fmtUsd, scoreTone, shortAddr, toneFor } from '../utils/format';
+import { cls, fmtAge, fmtAgo, fmtChange, fmtNum, fmtPriceUsd, fmtUsd, scoreTone, shortAddr, toneFor } from '../utils/format';
 import { Stat } from '../components/common';
 
 // The token page — chart, security, holders, trades and the trade panel on
@@ -57,6 +57,16 @@ const BUCKET_SEC: Record<CandleInterval, number> = {
   '1h': 3_600,
   '4h': 14_400,
 };
+
+/** How stale a summary has to be before the page says so. Three poll cycles:
+ *  long enough that a slow answer is not announced as a fault, short enough
+ *  that a parked provider is named while the user is still looking at it. */
+const HELD_OVER_NOTE_MS = 45_000;
+
+/** How often the SOL/USD rate is re-read. Main memoises it for 20 s and
+ *  Discover keeps it warm, so this is a read of a number already in memory;
+ *  a minute is far inside what SOL moves in a session. */
+const SOL_RATE_POLL_MS = 60_000;
 
 export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }) {
   const term = useTerminal();
@@ -126,6 +136,44 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   // Bumped after every trade so the position panel re-reads the chain.
   const [posKey, setPosKey] = useState(0);
 
+  // ── The SOL/USD rate, from main rather than from this token ──────────
+  //
+  // Everything live on this page runs through this number. The chart is
+  // drawn in USD, and a tick priced in SOL with no rate to convert it is
+  // DROPPED rather than mixed - so with no rate the chart simply stops
+  // moving, while the tape underneath is running perfectly. The header
+  // market cap goes with it.
+  //
+  // It used to be derived: this token's USD price divided by its SOL price.
+  // That fails for precisely the tokens worth watching - one minted a
+  // minute ago that no provider has priced yet - and for every token at
+  // once whenever the provider serving those prices is throttled. Main has
+  // held the real rate all along, memoised for 20 s by the route Discover
+  // already calls, so this asks for it and keeps the derivation as a
+  // fallback for when even that is unavailable.
+  // True once main has answered: after that the derived rate below is
+  // ignored, because a token's own USD price can be stale or simply wrong
+  // and the real rate never is.
+  const rateFromMainRef = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    const read = (): void => {
+      void window.krypt.market.solUsd().then((r) => {
+        if (!alive || !r.ok || typeof r.data !== 'number' || r.data <= 0) return;
+        rateFromMainRef.current = true;
+        setSolUsd(r.data);
+      });
+    };
+    read();
+    const id = window.setInterval(() => {
+      if (!document.hidden) read();
+    }, SOL_RATE_POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, []);
+
   // Tell the engine to tape this mint for as long as the page is open.
   //
   // Depends on the STABLE callback, never on `term` itself. The terminal
@@ -162,7 +210,9 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
     const quickPromise = window.krypt.market.summary(mint).then((r) => {
       if (r.ok && r.data) {
         setQuick(r.data);
-        if (r.data.priceUsd && r.data.priceSol) setSolUsd(r.data.priceUsd / r.data.priceSol);
+        if (!rateFromMainRef.current && r.data.priceUsd && r.data.priceSol) {
+          setSolUsd(r.data.priceUsd / r.data.priceSol);
+        }
       }
       return r;
     });
@@ -170,7 +220,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
     const full = await window.krypt.market.token(mint);
     if (full.ok && full.data) {
       setDetail(full.data);
-      if (full.data.summary.priceUsd && full.data.summary.priceSol) {
+      if (!rateFromMainRef.current && full.data.summary.priceUsd && full.data.summary.priceSol) {
         setSolUsd(full.data.summary.priceUsd / full.data.summary.priceSol);
       }
     } else {
@@ -498,6 +548,17 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   // multiplier first (same number the MC toggle uses), the summary's second.
   supplyRef.current = series?.supplyForMcap ?? s?.circSupply ?? null;
   const change24 = s?.stats['24h']?.priceChangePct ?? null;
+  /**
+   * When these numbers were actually fetched, if that was a while ago.
+   *
+   * `fetchedAt` is stamped when a provider answered, and a summary held over
+   * by the grace tier in data/http.ts keeps its original stamp - which is
+   * exactly what makes it safe to show. Under the threshold there is nothing
+   * to say: every page is a few seconds behind the chain, and labelling that
+   * would be noise.
+   */
+  const heldOverAt =
+    s && s.fetchedAt > 0 && Date.now() - s.fetchedAt > HELD_OVER_NOTE_MS ? s.fetchedAt : null;
   // The +120 s re-judgement arrives with the next detail reload (the page
   // polls via loadDetail), so this is read fresh on every render rather than
   // memoised. The security report is the authoritative copy; the summary's
@@ -627,6 +688,19 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                   title="Krypt is not receiving this token’s trades. Press Start scanning to tape it — that is what enables 1s candles, live trades and Trader Scan."
                 >
                   Not taped
+                </span>
+              )}
+              {heldOverAt !== null && (
+                // A throttled provider no longer blanks this page: the last
+                // good numbers are held over instead (see the grace tier in
+                // data/http.ts). That is only honest if the page says so -
+                // numbers from a minute ago presented as current are worse
+                // than no numbers at all.
+                <span
+                  className="rounded-full border border-arc-gold/30 bg-arc-gold/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-arc-gold/90"
+                  title="A data provider is rate limited, so these figures are the last ones it answered with. They will refresh as soon as it does."
+                >
+                  As of {fmtAgo(heldOverAt as number)} ago
                 </span>
               )}
             </div>

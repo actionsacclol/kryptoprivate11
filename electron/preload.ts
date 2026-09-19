@@ -334,6 +334,7 @@ const api = {
     search: (query: string) => ipcRenderer.invoke('market:search', query),
     watch: (mint: string) => ipcRenderer.invoke('market:watch', mint),
     unwatch: (mint: string) => ipcRenderer.invoke('market:unwatch', mint),
+    solUsd: () => ipcRenderer.invoke('market:solUsd'),
     presets: () => ipcRenderer.invoke('market:presets'),
     clearCache: () => ipcRenderer.invoke('market:clearCache'),
   },

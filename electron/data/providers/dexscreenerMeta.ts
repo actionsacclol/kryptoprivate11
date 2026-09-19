@@ -27,12 +27,24 @@ import { parseBoosts, parseProfiles, HUB_CHAINS, type BoostedToken, type TokenPr
  */
 const TTL_MS = 120_000;
 
+/** The HTTP layer's own words for the last failure - a park says how long
+ *  it has left, and that is what the panel should show. */
+let lastError: string | null = null;
+
+export function lastWireError(): string | null {
+  return lastError;
+}
+
 /** Null = the call failed. `[]` = it answered and there are none. The panel
  *  says different things about those two and has to be able to tell. */
 export async function boostedTokens(): Promise<BoostedToken[] | null> {
   return memo<BoostedToken[]>('wire:boosts', TTL_MS, async () => {
     const r = await getJson<unknown>('dexscreener', '/token-boosts/latest/v1');
-    if (!r.ok || r.data === undefined) return null;
+    if (!r.ok || r.data === undefined) {
+      lastError = r.message || null;
+      return null;
+    }
+    lastError = null;
     return parseBoosts(r.data, [...HUB_CHAINS]);
   });
 }
@@ -40,7 +52,11 @@ export async function boostedTokens(): Promise<BoostedToken[] | null> {
 export async function tokenProfiles(): Promise<TokenProfile[] | null> {
   return memo<TokenProfile[]>('wire:profiles', TTL_MS, async () => {
     const r = await getJson<unknown>('dexscreener', '/token-profiles/latest/v1');
-    if (!r.ok || r.data === undefined) return null;
+    if (!r.ok || r.data === undefined) {
+      lastError = r.message || null;
+      return null;
+    }
+    lastError = null;
     return parseProfiles(r.data, [...HUB_CHAINS]);
   });
 }

@@ -62,6 +62,7 @@ import {
   queueDepth,
   setJupiterKeySource,
   telemetry,
+  windowUsage,
 } from './http';
 import * as jup from './providers/jupiter';
 import * as ds from './providers/dexscreener';
@@ -85,6 +86,8 @@ import * as holderGraph from './holderGraph';
 import * as be from './providers/birdeye';
 import * as onchain from './onchain';
 import * as tape from './tape';
+import { mergeLiveLaunches, PUMP_TOTAL_SUPPLY } from '@shared/liveRows';
+import type { LaunchRow } from '@shared/types';
 
 // ── Host context ──────────────────────────────────────────────────────
 //
@@ -103,6 +106,15 @@ export interface TerminalContext {
   walletLabel(address: string): string | null;
   /** Mints the engine currently has live state for. */
   isLiveTracked(mint: string): boolean;
+  /**
+   * Launches the scanner has decoded off the websocket, newest first.
+   *
+   * A second source for the New column, alongside the providers: free,
+   * sub-second, and unaffected by a park - see shared/liveRows.ts. Empty
+   * when the scanner is not running, which is the honest answer, because
+   * then the app is not watching the feed and knows of no launches.
+   */
+  liveLaunches(limit: number): LaunchRow[];
   /** Register a PumpSwap pool so AMM swaps for it reach the tape. */
   registerPool(pool: string, mint: string): void;
   /**
@@ -255,6 +267,10 @@ export function providerStatuses(): ProviderStatus[] {
       // other needs the user to do something.
       cooldownIsQuota: parkIsQuota(id),
       queued: queueDepth(id),
+      ...(() => {
+        const w = windowUsage(id);
+        return w ? { minuteUsed: w.used, minuteCap: w.n } : {};
+      })(),
     };
   });
 }
@@ -376,6 +392,18 @@ function localise(s: TokenSummary): TokenSummary {
   const c = need();
   s.liveTracked = c.isLiveTracked(s.mint) || tape.hasTicks(s.mint);
   if (s.liveTracked) s.sources.price = 'engine';
+  // A pump.fun token's supply is a property of the LAUNCHPAD: 1,000,000,000
+  // with no mint authority, before and after graduation. Without it the live
+  // market cap cannot be computed at all - the header freezes on whatever
+  // number the provider last sent while the price beside it moves on every
+  // tick - and the provider that serves the supply is the same one most
+  // likely to be throttled. This is not a guess standing in for a fact; the
+  // fact is the same for every coin on the rail, and an API figure always
+  // wins when there is one.
+  if (s.launchpad === 'pumpfun') {
+    if (s.totalSupply === null) s.totalSupply = PUMP_TOTAL_SUPPLY;
+    if (s.circSupply === null) s.circSupply = PUMP_TOTAL_SUPPLY;
+  }
   return s;
 }
 
@@ -887,6 +915,16 @@ export async function discover(
       for (const co of pump) {
         if (!byMint.has(co.mint)) byMint.set(co.mint, pf.toSummary(co, solUsd));
       }
+
+      // Our own tape, last. It costs no request, it is seconds ahead of any
+      // list route, and it is the reason this column keeps filling while
+      // pump.fun is throttling us. A mint the providers already returned
+      // keeps their row and takes the tape's price and curve percentage;
+      // one they have not listed yet becomes a row of its own.
+      //
+      // The age limit is the column's own: a launch the scanner saw six
+      // hours ago is not new, whatever the tape still remembers about it.
+      mergeLiveLaunches(byMint, c.liveLaunches(n * 2), solUsd, NEW_MAX_AGE_MS);
       for (const t of recent) {
         const s = jup.toSummary(t);
         byMint.set(t.id, byMint.has(t.id) ? merge(byMint.get(t.id) as TokenSummary, s) : s);
@@ -1144,6 +1182,25 @@ const SUMMARY_TTL_MS = 5_000;
  *  must not wait on a provider for a fact it may already hold. */
 export function summaryIfCached(mint: string): TokenSummary | null {
   return cached<TokenSummary>(`market:summary:${mint}`);
+}
+
+/**
+ * A summary a MONEY path may act on, or null.
+ *
+ * The grace tier in http.ts holds the last good value over a failed reload
+ * so a throttled provider does not blank the screen. That is right for a
+ * panel and wrong for a price something is about to be sized against: an
+ * order placed at a reference price from fifty seconds ago is not a smoother
+ * experience, it is a worse fill.
+ *
+ * So the paths that spend or simulate money ask for the price through here,
+ * and take a refusal over an old number. Three TTLs of slack, which covers a
+ * slow build without reaching into what grace serves.
+ */
+export async function freshSummary(mint: string, maxAgeMs = SUMMARY_TTL_MS * 3): Promise<TokenSummary | null> {
+  const s = await summary(mint);
+  if (s.fetchedAt <= 0) return null;
+  return Date.now() - s.fetchedAt <= maxAgeMs ? s : null;
 }
 
 export async function summary(mint: string): Promise<TokenSummary> {
