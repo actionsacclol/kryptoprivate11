@@ -25,7 +25,7 @@
 
 import WebSocket from 'ws';
 import type { CopyWatchStatus } from '@shared/copytrade';
-import { getSignaturesForAddress, getTransaction, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from './rpcClient';
+import { getSignaturesForAddress, getTransaction, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from '../chain/rpcClient';
 import { decodeWalletSwap, type WalletSwap } from './walletSwap';
 
 export interface WalletWatcherHost {

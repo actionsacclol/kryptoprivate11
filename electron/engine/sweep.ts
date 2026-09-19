@@ -4,7 +4,7 @@
 // one signature, key decrypted transiently and scrubbed.
 
 import { PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
-import { getLatestBlockhash, sendRawTransaction, getSignatureStatuses } from './rpcClient';
+import { getLatestBlockhash, sendRawTransaction, getSignatureStatuses } from '../chain/rpcClient';
 import * as wallet from '../system/wallet';
 
 export interface SweepResult {

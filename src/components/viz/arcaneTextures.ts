@@ -3,6 +3,7 @@
 // dispose.
 
 import * as THREE from 'three';
+import { accentHex } from '../../state/theme';
 
 /** Soft radial glow sprite texture (halos, comets, sparkles). */
 export function makeGlowTexture(): THREE.CanvasTexture {
@@ -20,7 +21,10 @@ export function makeGlowTexture(): THREE.CanvasTexture {
 
 /** A single rune drawn to a sprite texture. Segoe UI Symbol covers the
  *  Runic block on Windows 10+. */
-export function makeRuneTexture(rune: string, color = '#cfc7ff', shadow = '#8B7CE8'): THREE.CanvasTexture {
+// `shadow` defaults to the theme's accent. Baked into a canvas texture at
+// creation, so like the scene it belongs to it follows a theme change on the
+// next mount rather than instantly.
+export function makeRuneTexture(rune: string, color = '#cfc7ff', shadow = accentHex()): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   c.width = c.height = 64;
   const ctx = c.getContext('2d')!;

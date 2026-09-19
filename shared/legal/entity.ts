@@ -63,10 +63,14 @@ export const LIABILITY_CAP_USD = 100;
  * for a comma trains people to click through, which is the opposite of what
  * clickwrap is for.
  */
-export const TERMS_VERSION = '2026-09-14.1';
+// 2026-09-18: a governing-language clause (Terms 15) and two new flagged
+// clickwrap points - the sanctions/eligibility representation, and that the
+// documents are English-only. Material, so it re-prompts everyone, which is
+// the point: the old acceptance hashed text that did not contain them.
+export const TERMS_VERSION = '2026-09-18.1';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '14 September 2026';
+export const TERMS_EFFECTIVE_DATE = '18 September 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

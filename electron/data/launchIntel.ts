@@ -17,8 +17,8 @@
 // rate budget is not the tight one (GeckoTerminal's is). Nothing here runs for
 // Discover rows.
 
-import { ataFor, TOKEN_2022_PROGRAM, TOKEN_PROGRAM } from '../engine/addresses';
-import { getMultipleAccountsRaw } from '../engine/rpcClient';
+import { ataFor, TOKEN_2022_PROGRAM, TOKEN_PROGRAM } from '../chain/addresses';
+import { getMultipleAccountsRaw } from '../chain/rpcClient';
 import * as pf from './providers/pumpfun';
 import * as ps from './providers/pumpswap';
 import { cached, memo } from './http';

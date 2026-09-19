@@ -1,0 +1,87 @@
+[
+ {
+  "url": "https://dexscreener.com/solana/cjmk2cgkuzt2sjtnkhs7bvywtb6ddxvefpsfyrivpump",
+  "chainId": "solana",
+  "tokenAddress": "CJmk2CGKuzT2sJtnkhs7BVYwTb6dDXveFPSfYriVpump",
+  "icon": "DqhztY8mSutH1LV1",
+  "header": "https://cdn.dexscreener.com/cms/images/tqZz327ijqvzgeaJ?width=900&height=300&fit=crop&quality=95&format=auto",
+  "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/CJmk2CGKuzT2sJtnkhs7BVYwTb6dDXveFPSfYriVpump?timestamp=1789797600000",
+  "links": [
+   {
+    "type": "twitter",
+    "url": "https://x.com/upcoinpumpfun"
+   }
+  ],
+  "totalAmount": 110,
+  "amount": 100
+ },
+ {
+  "url": "https://dexscreener.com/solana/27mr5eybig1ihc4boyursrqebwdfp9oya3v7f5lmduwu",
+  "chainId": "solana",
+  "tokenAddress": "27MR5EYbig1ihc4BoYURSRqEbWdfP9oyA3V7F5LmdUwu",
+  "description": "The Official Wynn Meme token.\n \nWYNN WYNN WYNN\n \n$WYNN",
+  "icon": "JQpCrAkcuC8MaHYf",
+  "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/27MR5EYbig1ihc4BoYURSRqEbWdfP9oyA3V7F5LmdUwu?timestamp=1789797600000",
+  "links": [
+   {
+    "type": "twitter",
+    "url": "https://x.com/JamesWynnReal"
+   }
+  ],
+  "totalAmount": 500,
+  "amount": 500
+ },
+ {
+  "url": "https://dexscreener.com/solana/ewgq2xub6evcapeqombkpxd6ufjm8j9zruxfs9mjktiv",
+  "chainId": "solana",
+  "tokenAddress": "EWgq2xUb6eVCApeQombkPxd6uFjM8j9zRUXFS9MjKTiv",
+  "description": "$CTO - Community Take Over\n\nThe golden $CTO desk pays holders $OTC dividends  \ud83d\udd11\n\nStonk has  $KNOTS - OTC has $CTO  \n\nCompound the winning  \n\nOwn the casino",
+  "icon": "aWOehWwacmK24Dft",
+  "header": "https://cdn.dexscreener.com/cms/images/LhNktvg-Ztdij2TQ?width=900&height=300&fit=crop&quality=95&format=auto",
+  "openGraph": "https://cdn.dexscreener.com/token-images/og/solana/EWgq2xUb6eVCApeQombkPxd6uFjM8j9zRUXFS9MjKTiv?timestamp=1789797600000",
+  "links": [
+   {
+    "url": "https://otcdesks.cash/coin/EWgq2xUb6eVCApeQombkPxd6uFjM8j9zRUXFS9MjKTiv"
+   },
+   {
+    "url": "https://x.com/i/chat/group_join/g2097619342053798287/jaYehMTIV0"
+   },
+   {
+    "type": "twitter",
+    "url": "https://x.com/ctolabs"
+   }
+  ],
+  "totalAmount": 10,
+  "amount": 10
+ },
+ {
+  "url": "https://dexscreener.com/bsc/0xb077ada375b5e416f15e8b8f6827dadfa53a7777",
+  "chainId": "bsc",
+  "tokenAddress": "0xB077ADa375B5e416F15E8B8f6827DadFa53a7777",
+  "description": "\u4e70\u725b\u9a6c\uff0c\u4e0d\u518d\u71ac\u591c\u52a0\u73ed\u3002\u8fd9\u4e00\u6b21\uff0c\u8ba9\u81ea\u5df1\u7684\u68a6\u60f3\u6210\u771f\u3002\u8d85\u8d8a BABA\u3002",
+  "icon": "dY8rLxmuB1tnt8zB",
+  "header": "https://cdn.dexscreener.com/cms/images/uyCjTwLYBP3vvVvd?width=900&height=300&fit=crop&quality=95&format=auto",
+  "openGraph": "https://cdn.dexscreener.com/token-images/og/bsc/0xb077ada375b5e416f15e8b8f6827dadfa53a7777?timestamp=1789797600000",
+  "links": [
+   {
+    "url": "https://www.niuma.money/"
+   },
+   {
+    "type": "twitter",
+    "url": "https://x.com/niumabsc"
+   }
+  ],
+  "totalAmount": 100,
+  "amount": 100
+ },
+ {
+  "chainId": "ethereum",
+  "tokenAddress": "0xdead",
+  "amount": 500,
+  "totalAmount": 500
+ },
+ {
+  "chainId": "solana",
+  "tokenAddress": null
+ }
+]

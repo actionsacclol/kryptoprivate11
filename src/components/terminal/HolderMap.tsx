@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { accent } from '../../state/theme';
 import { Loader2, Network, TriangleAlert } from 'lucide-react';
 import type { HolderGraph, GraphNode } from '@shared/market';
 import { MAP_H, MAP_W, packCircles, type PlacedCircle } from './holderLayout';
@@ -25,7 +26,8 @@ const TAG_COLOR: Record<string, { fill: string; stroke: string; label: string }>
   insider: { fill: 'rgba(249,115,22,0.28)', stroke: '#f97316', label: 'Insider' },
   smart: { fill: 'rgba(52,211,153,0.28)', stroke: '#34d399', label: 'Smart money' },
   fresh: { fill: 'rgba(56,189,248,0.26)', stroke: '#38bdf8', label: 'Fresh wallet' },
-  whale: { fill: 'rgba(139,124,232,0.30)', stroke: '#8B7CE8', label: 'Whale' },
+  // Smart/fresh/lp are category colours and stay put; whale is the accent.
+  whale: { fill: accent(0.3), stroke: accent(), label: 'Whale' },
   lp: { fill: 'rgba(240,237,226,0.10)', stroke: 'rgba(240,237,226,0.35)', label: 'Liquidity pool' },
 };
 

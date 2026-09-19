@@ -20,7 +20,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getTransaction, resolveAccountKeys } from './rpcClient';
+import { getTransaction, resolveAccountKeys } from '../chain/rpcClient';
 
 const FILE = 'fills.json';
 const MAX_FILLS = 5_000;

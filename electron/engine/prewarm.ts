@@ -15,7 +15,7 @@
 import * as netAgent from '../system/netAgent';
 import * as jitoTips from './jitoTips';
 import * as confirmSocket from './confirmSocket';
-import { primeBlockhash, primeGlobal } from './txBuilder';
+import { primeBlockhash, primeGlobal, BLOCKHASH_TTL_MS } from './txBuilder';
 import { prewarmAlts, HELIUS_SENDER_URL, JITO_SEND_URL } from './broadcast';
 import { prewarmFeeRecipients } from './liveSigner';
 
@@ -32,10 +32,28 @@ export interface PrewarmTargets {
 }
 
 const HEARTBEAT_MS = 30_000;
+
+/**
+ * The blockhash gets its OWN, faster beat.
+ *
+ * The cached blockhash expires after BLOCKHASH_TTL_MS (20 s) but the
+ * heartbeat only ran every 30 s, so between t=20 s and t=30 s the cache was
+ * expired and the build paid an inline getLatestBlockhash - roughly one
+ * order in three, for ~60-105 ms it did not need to spend (measured
+ * 2026-09-18).
+ *
+ * It is a separate timer rather than a faster heartbeat because the
+ * heartbeat also warms four sockets, refreshes Jito tips and re-reads the
+ * wallet balance; tripling all of that to fix one cheap call would spend
+ * credits to save milliseconds. Derived from the TTL so raising one cannot
+ * silently reopen the gap, and floored so a small TTL cannot spin.
+ */
+export const BLOCKHASH_BEAT_MS = Math.max(5_000, Math.floor(BLOCKHASH_TTL_MS / 2));
 const RELAYER_ORIGIN = 'https://pumpportal.fun/api/trade-local';
 const HEALTH = JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'getHealth' });
 
 let timer: NodeJS.Timeout | null = null;
+let blockhashTimer: NodeJS.Timeout | null = null;
 let getTargets: (() => PrewarmTargets | null) | null = null;
 let inFlight = false;
 
@@ -73,11 +91,18 @@ export function start(targets: () => PrewarmTargets | null): void {
   void once();
   if (timer) clearInterval(timer);
   timer = setInterval(() => void once(), HEARTBEAT_MS);
+  if (blockhashTimer) clearInterval(blockhashTimer);
+  blockhashTimer = setInterval(() => {
+    const t = getTargets?.();
+    if (t) void primeBlockhash(t.httpUrl);
+  }, BLOCKHASH_BEAT_MS);
 }
 
 export function stop(): void {
   if (timer) clearInterval(timer);
   timer = null;
+  if (blockhashTimer) clearInterval(blockhashTimer);
+  blockhashTimer = null;
   getTargets = null;
   confirmSocket.close();
 }

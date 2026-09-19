@@ -6,6 +6,8 @@ import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_SETTINGS, SETTINGS_REVISION, type AppSettings } from '@shared/types';
+import { isLocaleId } from '@shared/i18n';
+import { isThemeId } from '@shared/theme';
 import { logger } from './logger';
 
 let cached: AppSettings | null = null;
@@ -150,6 +152,14 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
   };
   return {
     settingsRevision: loaded.settingsRevision ?? 0,
+    // A save written before languages existed has no locale; 'system' is the
+    // default and asks the OS, so an upgrading user gets their own language
+    // rather than being pinned to English by the absence of a field.
+    locale: isLocaleId(loaded.locale) ? loaded.locale : d.locale,
+    // Same shape as the locale: a save from before themes existed, or one
+    // carrying a theme this build does not ship, falls back to the default
+    // rather than leaving <html> with an attribute no CSS block matches.
+    theme: isThemeId(loaded.theme) ? loaded.theme : d.theme,
     alerts: { ...d.alerts, ...(loaded.alerts ?? {}) },
     hotkeys,
     // Merged per bot so a saved token and owner survive, while a newly added

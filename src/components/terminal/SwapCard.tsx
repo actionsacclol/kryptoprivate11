@@ -7,6 +7,7 @@
 
 import { KRYPTO_TOKEN } from '@shared/krypto';
 import { useKryptoWaiver } from '../../state/useKryptoWaiver';
+import { WaiverHint } from './WaiverHint';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownUp, Loader2, Repeat } from 'lucide-react';
 import {
@@ -375,6 +376,13 @@ export function SwapCard() {
             {quote.feeBasis === 'inside' ? ' — taken out of the proceeds; the amount above is what you get' : ''}
             {quote.feeBasis === 'quoted' && feeSol ? ' (0.5% of the input priced in SOL)' : ''}
             {quote.feeBasis === 'unpriced' ? ' — this pair could not be priced in SOL, so nothing is charged' : ''}
+            {/* Not offered on a pair that is charged nothing anyway — there
+                would be no fee for the holding to remove. */}
+            {quote.feeBasis !== 'unpriced' && (
+              <>
+                {' '}· <WaiverHint waived={waiver.waived} />
+              </>
+            )}
           </div>
           {quote.appliedSlippagePct !== draft.slippagePct && (
             <div className="text-amber-200/80">

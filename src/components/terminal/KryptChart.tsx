@@ -1,4 +1,5 @@
 import { forwardRef, memo, useEffect, useImperativeHandle, useRef } from 'react';
+import { accent } from '../../state/theme';
 import {
   ColorType,
   CrosshairMode,
@@ -118,8 +119,8 @@ const KryptChartInner = forwardRef<KryptChartHandle, KryptChartProps>(function K
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: 'rgba(139,124,232,0.5)', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#46418F' },
-        horzLine: { color: 'rgba(139,124,232,0.5)', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#46418F' },
+        vertLine: { color: accent(0.5), width: 1, style: LineStyle.Dashed, labelBackgroundColor: accent(0.85) },
+        horzLine: { color: accent(0.5), width: 1, style: LineStyle.Dashed, labelBackgroundColor: accent(0.85) },
       },
       rightPriceScale: {
         borderColor: 'rgba(240,237,226,0.08)',
@@ -147,7 +148,7 @@ const KryptChartInner = forwardRef<KryptChartHandle, KryptChartProps>(function K
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: 'volume' },
       priceScaleId: 'vol',
-      color: 'rgba(139,124,232,0.35)',
+      color: accent(0.35),
     });
     // Pin volume to the bottom quarter so it reads as a sub-panel rather
     // than fighting the candles for vertical space.

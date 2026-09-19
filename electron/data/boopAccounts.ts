@@ -26,9 +26,9 @@
 // migration threshold is the trap that has already cost this codebase a
 // feature: measured DBC thresholds spanned five orders of magnitude.
 
-import { base58Encode } from '../engine/base58';
-import { getMultipleAccountsRaw } from '../engine/rpcClient';
-import { boopPoolFor } from '../engine/addresses';
+import { base58Encode } from '../chain/base58';
+import { getMultipleAccountsRaw } from '../chain/rpcClient';
+import { boopPoolFor } from '../chain/addresses';
 import { BOOP_PROGRAM } from '../engine/boopDecoder';
 
 export { BOOP_PROGRAM };

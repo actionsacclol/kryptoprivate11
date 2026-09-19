@@ -231,7 +231,7 @@ export function HotkeySettings({
                 className={cls(
                   'relative h-5 w-9 rounded-full transition flex-shrink-0',
                   !hk.enabled && 'opacity-40 cursor-not-allowed',
-                  b.enabled ? 'bg-krypt-gradient shadow-[0_0_8px_rgba(139,124,232,0.45)]' : 'bg-white/10',
+                  b.enabled ? 'bg-krypt-gradient shadow-[0_0_8px_rgb(var(--krypt-accent)/0.45)]' : 'bg-white/10',
                 )}
               >
                 <span

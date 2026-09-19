@@ -5,8 +5,10 @@
 // well-formed Solana address.
 
 import assert from 'node:assert';
+import fs from 'node:fs';
 import { KRYPTO_FEE_WAIVER_TOKENS, KRYPTO_TOKEN, isValidMint, kryptoDisclosure, kryptoPumpUrl, kryptoTokenLive, waivesFee } from './.krypto.mjs';
 
+const nl0 = '\n';
 let passed = 0;
 const ok = (label) => {
   console.log(`  ok   ${label}`);
@@ -87,6 +89,50 @@ const ok = (label) => {
   assert.equal(waivesFee(600_000 + 400_000), true, '600k in one wallet and 400k in another is a million');
   assert.equal(waivesFee(600_000 + 399_999), false);
   ok('the threshold is on the total across wallets, not on any one of them');
+}
+
+{
+  // Every surface that CHARGES the fee must also say what removes it, and
+  // say it legibly. The Solana panel's hint shipped in text-krypt-muted/45
+  // - 45% of a muted grey on a dark panel - and the EVM panel and the swap
+  // card did not carry it at all, so two of the three places a user is
+  // charged never mentioned the waiver (user report, 2026-09-18).
+  //
+  // Source-read on purpose: the rendering is JSX and this is about whether
+  // the component is THERE, which a regex answers in a millisecond.
+  const SURFACES = [
+    'src/components/terminal/TradePanel.tsx',
+    'src/components/terminal/EvmTradePanel.tsx',
+    'src/components/terminal/SwapCard.tsx',
+  ];
+  for (const f of SURFACES) {
+    const src = fs.readFileSync(new URL('../' + f, import.meta.url), 'utf8');
+    assert.ok(src.includes('<WaiverHint'), f + ' offers the waiver where it charges the fee');
+  }
+  const hint = fs.readFileSync(new URL('../src/components/terminal/WaiverHint.tsx', import.meta.url), 'utf8');
+  // A bright yellow, not a specific one: the exact token has already moved
+  // once (arc-gold -> amber-300, when the muted gold still did not stand out
+  // on a dense fee line). What must not come back is a grey, or a colour at
+  // reduced opacity.
+  assert.match(hint, /text-(amber|yellow)-(200|300|400)\b|text-arc-gold\b/, 'the hint is a bright yellow, not a muted grey');
+  // Code only: the comment at the top of that file quotes the class the bug
+  // shipped in, and a test that reads prose would fail on its own history.
+  const hintCode = hint.split(nl0).filter((l) => !l.trim().startsWith('//')).join(nl0);
+  assert.ok(!/text-[a-z-]+\/(?:[0-5]?[0-9])\b/.test(hintCode), 'the hint never renders at reduced opacity');
+  assert.ok(hint.includes('kryptoTokenLive'), 'and never advertises a token that does not exist yet');
+  ok('every fee-charging surface offers the waiver, in bright yellow, at full opacity');
+
+  // The Hub card is where someone who does not yet hold any finds out the
+  // waiver exists. It used to be wrapped in `held.at > 0` - a completed
+  // balance read - so a fresh install, or anyone whose read had not landed,
+  // saw nothing at all (user report, 2026-09-18). The OFFER is a fact about
+  // the product and does not depend on reading anybody's wallet; only the
+  // line about their own holding does.
+  const card = fs.readFileSync(new URL('../src/components/KryptoCard.tsx', import.meta.url), 'utf8');
+  assert.ok(!/\{held\.at > 0 && \(/.test(card), 'the Hub card never hides the waiver behind a completed balance read');
+  assert.match(card, /text-(amber|yellow)-(200|300|400)\b|text-arc-gold\b/, 'and states it in the same bright yellow');
+  assert.ok(card.includes('KRYPTO_FEE_WAIVER_TOKENS'), 'naming the actual holding it takes');
+  ok('the Hub card states the offer whether or not a balance has been read');
 }
 
 console.log(`\nkrypto: ${passed}/${passed} passed`);

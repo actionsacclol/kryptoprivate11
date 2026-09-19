@@ -34,7 +34,7 @@ import { ComputeBudgetProgram, PublicKey, TransactionInstruction, TransactionMes
 import * as wallet from '../system/wallet';
 import { logger } from '../system/logger';
 import { PUMP_PROGRAM } from './pumpLaunch';
-import { getBalance, getBlockHeight, getLatestBlockhashInfo, getSignatureStatuses, sendRawTransaction, simulateTransaction } from './rpcClient';
+import { getBalance, getBlockHeight, getLatestBlockhashInfo, getSignatureStatuses, sendRawTransaction, simulateTransaction } from '../chain/rpcClient';
 import { anchorReason } from './liveSigner';
 import { RENT_EXEMPT_LAMPORTS } from '@shared/lab';
 

@@ -24,7 +24,7 @@ import {
   TransactionInstruction,
   VersionedTransaction,
 } from '@solana/web3.js';
-import { base58Decode, base58Encode } from './base58';
+import { base58Decode, base58Encode } from '../chain/base58';
 import {
   PUMP_PROGRAM,
   PUMP_FEES_PROGRAM,
@@ -45,7 +45,7 @@ import {
   PUMP_FEE_VAULT_FALLBACK,
   PUMP_RESERVED_FEE_RECIPIENT_FALLBACK,
   isOnCurve,
-} from './addresses';
+} from '../chain/addresses';
 import { buyQuote, sellQuote } from './curve';
 import {
   getSignaturesForAddress,
@@ -55,13 +55,15 @@ import {
   getTokenBalanceRaw,
   type RawTransaction,
   getMultipleAccountInfo,
-} from './rpcClient';
+} from '../chain/rpcClient';
 import { decodeLogsEx, decodeCpiEventData } from './pumpDecoder';
 
 const WSOL = 'So11111111111111111111111111111111111111112';
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
 const TEMPLATE_TTL_MS = 6 * 60 * 60_000;
-const BLOCKHASH_TTL_MS = 20_000;
+/** How long a cached blockhash is reused. `prewarm.ts` derives its refresh
+ *  beat from this so the two can never drift apart again - see PREWARM. */
+export const BLOCKHASH_TTL_MS = 20_000;
 const SAMPLE_SIGNATURES = 140;
 
 // Pump ships multiple concurrent trade-instruction variants (legacy 16-account
@@ -542,6 +544,26 @@ function acceptGlobal(data: Uint8Array | null): GlobalConfig {
   // constants for a full minute.
   globalCache = { value, at: value.fromChain ? Date.now() : Date.now() - GLOBAL_TTL_MS + 5_000 };
   return value;
+}
+
+/**
+ * An SPL token account's `amount` - a little-endian u64 at byte 64.
+ *
+ * Token-2022 shares the same first 165 bytes, so the offset holds for both;
+ * extensions live past them. The address this is read from is DERIVED, so it
+ * is our ATA by construction - but the owner and length are checked anyway,
+ * because a number that sizes a sell should not come from bytes nobody
+ * looked at. Anything unexpected reads 0, and 0 refuses the sell.
+ */
+export function tokenAccountAmount(data: Buffer | Uint8Array, owner: string): bigint {
+  if (owner !== TOKEN_PROGRAM && owner !== TOKEN_2022_PROGRAM) return 0n;
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  if (buf.length < 72) return 0n;
+  try {
+    return buf.readBigUInt64LE(64);
+  } catch {
+    return 0n;
+  }
 }
 
 async function readGlobal(httpUrl: string): Promise<GlobalConfig> {
@@ -1388,7 +1410,18 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
   const addrs = [bc];
   if (!knownOwner) addrs.push(p.mint);
   if (wantGlobal) addrs.push(globalFor());
-  let multi = await getMultipleAccountInfo(p.httpUrl, addrs);
+  //  - and, on a SELL, our own token account. Its address depends on the
+  //    mint's token program, so it can only ride along once that program is
+  //    cached - which it is for anything this process has traded before,
+  //    including every sell of a bag it just bought. Otherwise the balance
+  //    is read on its own below, exactly as it always was. Measured
+  //    2026-09-18: that separate read cost ~100 ms on the exit path.
+  const prefetchAta = p.action === 'sell' && knownOwner ? ataFor(p.owner, p.mint, knownOwner) : null;
+  if (prefetchAta) addrs.push(prefetchAta);
+  // `processed`, not the default `confirmed`: this batch quotes against live
+  // curve reserves and carries the sell balance, and the call it replaced
+  // read at `processed` too.
+  let multi = await getMultipleAccountInfo(p.httpUrl, addrs, 'processed');
   if (!multi.ok || !multi.data) return { ok: false, message: `account read: ${multi.message}` };
   const byAddr = new Map(addrs.map((a, i) => [a, multi.data?.[i] ?? null]));
 
@@ -1443,11 +1476,23 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
     solValueLamports = Number(p.solLamports);
     if (amount <= 0n) return { ok: false, message: 'buy quote is zero tokens' };
   } else {
-    const bal = await getTokenBalanceRaw(p.httpUrl, userAta);
-    if (!bal.ok || bal.data === undefined) return { ok: false, message: `token balance: ${bal.message}` };
-    if (bal.data <= 0n) return { ok: false, message: 'nothing to sell (zero token balance)' };
-    amount = sellAmountFor(bal.data, p.sellPct);
-    if (amount <= 0n) return { ok: false, message: `nothing to sell (${sellPctOf(p.sellPct)}% of ${bal.data} is zero)` };
+    // The batch above already holds the balance whenever the ATA could be
+    // derived before it. No account at that address is not a failure to
+    // report as one - it is a wallet holding none of this token, which the
+    // separate read also reported as 0.
+    let raw: bigint | null = null;
+    if (prefetchAta) {
+      const acc = byAddr.get(prefetchAta) ?? null;
+      raw = acc ? tokenAccountAmount(acc.data, acc.owner) : 0n;
+    }
+    if (raw === null) {
+      const bal = await getTokenBalanceRaw(p.httpUrl, userAta);
+      if (!bal.ok || bal.data === undefined) return { ok: false, message: `token balance: ${bal.message}` };
+      raw = bal.data;
+    }
+    if (raw <= 0n) return { ok: false, message: 'nothing to sell (zero token balance)' };
+    amount = sellAmountFor(raw, p.sellPct);
+    if (amount <= 0n) return { ok: false, message: `nothing to sell (${sellPctOf(p.sellPct)}% of ${raw} is zero)` };
     const q = sellQuote(amount, vSol, vTok);
     limit = (q.solOutLamports * BigInt(Math.round((1 - p.slippagePct / 100) * 10_000))) / 10_000n;
     solValueLamports = Number(q.solOutLamports);

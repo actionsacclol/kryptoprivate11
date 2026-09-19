@@ -21,7 +21,7 @@
 //   5. dust is ignored;
 //   6. a BUY must be big enough to be a trade rather than a receipt.
 
-import { resolveAccountKeys, type RawTransaction, type TokenBalanceEntry } from './rpcClient';
+import { resolveAccountKeys, type RawTransaction, type TokenBalanceEntry } from '../chain/rpcClient';
 
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const LAMPORTS = 1_000_000_000;

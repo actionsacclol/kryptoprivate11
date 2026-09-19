@@ -1,3 +1,67 @@
+/* ── Themes ───────────────────────────────────────────────────────────
+ *
+ * A theme moves the ACCENT and nothing else.
+ *
+ * What it deliberately does NOT move: emerald (up, filled, holding), rose
+ * and arc-crimson (down, refused, danger), and arc-gold (your money, pay
+ * attention). In a trading terminal those are DATA, not decoration - a
+ * green that means "profit" has to keep meaning profit when the chrome is
+ * also green, or the app starts lying in the one place it must not.
+ *
+ * That constraint is why the red and green accents below are not the
+ * obvious ones: the red leans warm/orange so it never reads as a loss
+ * badge, and the green leans teal so it never reads as a fill. Blue and
+ * grey have no such collision and are straight.
+ *
+ * Channels, not hex, so Tailwind's <alpha-value> keeps working:
+ * `bg-krypt-purple/20` is still a 20% wash of whatever the theme is.
+ */
+:root,
+html[data-theme='purple'] {
+  --krypt-accent: 139 124 232;      /* #8B7CE8 - the original */
+  --krypt-accent-soft: 183 166 255; /* #B7A6FF */
+  --krypt-indigo: 61 74 126;
+  --krypt-grad-from: 70 65 143;
+  --krypt-grad-to: 122 106 217;
+}
+
+html[data-theme='blue'] {
+  --krypt-accent: 56 148 235;
+  --krypt-accent-soft: 137 195 255;
+  --krypt-indigo: 38 78 128;
+  --krypt-grad-from: 25 66 122;
+  --krypt-grad-to: 52 140 224;
+}
+
+/* Warm, orange-leaning. A rose-red accent beside rose loss badges would
+   make the chrome and the bad news the same colour. */
+html[data-theme='red'] {
+  --krypt-accent: 232 106 76;
+  --krypt-accent-soft: 255 160 134;
+  --krypt-indigo: 122 60 48;
+  --krypt-grad-from: 128 52 38;
+  --krypt-grad-to: 224 100 70;
+}
+
+/* Teal-leaning, for the same reason in the other direction: emerald means
+   a fill landed, and the chrome must not be able to be mistaken for one. */
+html[data-theme='green'] {
+  --krypt-accent: 45 178 160;
+  --krypt-accent-soft: 120 226 210;
+  --krypt-indigo: 30 96 90;
+  --krypt-grad-from: 22 88 82;
+  --krypt-grad-to: 42 170 152;
+}
+
+/* No hue at all - for anyone who wants the data to be the only colour on
+   the screen. */
+html[data-theme='grey'] {
+  --krypt-accent: 150 156 174;
+  --krypt-accent-soft: 196 201 214;
+  --krypt-indigo: 74 80 96;
+  --krypt-grad-from: 62 67 80;
+  --krypt-grad-to: 140 147 165;
+}
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -10,30 +74,30 @@
     font-family: 'Spline Sans', system-ui, -apple-system, sans-serif;
     font-feature-settings: 'tnum' 0;
   }
-  ::selection { background-color: rgba(139, 124, 232, 0.35); color: #F0EDE2; }
+  ::selection { background-color: rgb(var(--krypt-accent) / 0.35); color: #F0EDE2; }
   * { box-sizing: border-box; }
   /* Observatory scrollbar — thin, dark, violet when handled. */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: rgba(240, 237, 226, 0.08); border-radius: 8px; }
-  ::-webkit-scrollbar-thumb:hover { background: rgba(139, 124, 232, 0.55); }
+  ::-webkit-scrollbar-thumb:hover { background: rgb(var(--krypt-accent) / 0.55); }
 }
 
 @layer utilities {
   /* Wordmark sheen — engraved silver catching violet light. */
   .text-krypt-gradient {
-    background-image: linear-gradient(105deg, #F0EDE2 0%, #B7A6FF 60%, #8B7CE8 100%);
+    background-image: linear-gradient(105deg, #F0EDE2 0%, rgb(var(--krypt-accent-soft)) 60%, rgb(var(--krypt-accent)) 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
   .text-krypt-shimmer {
-    background-image: linear-gradient(90deg, #F0EDE2 0%, #B7A6FF 50%, #F0EDE2 100%);
+    background-image: linear-gradient(90deg, #F0EDE2 0%, rgb(var(--krypt-accent-soft)) 50%, #F0EDE2 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  .glow-purple    { box-shadow: 0 0 22px rgba(139, 124, 232, 0.28); }
+  .glow-purple    { box-shadow: 0 0 22px rgb(var(--krypt-accent) / 0.28); }
   .glow-recording { box-shadow: 0 0 16px rgba(229, 72, 77, 0.5); }
   .glow-playing   { box-shadow: 0 0 16px rgba(52, 211, 153, 0.45); }
   .glow-text {
-    text-shadow: 0 0 18px rgba(139, 124, 232, 0.5), 0 0 44px rgba(139, 124, 232, 0.18);
+    text-shadow: 0 0 18px rgb(var(--krypt-accent) / 0.5), 0 0 44px rgb(var(--krypt-accent) / 0.18);
   }
   .glow-text-gold {
     text-shadow: 0 0 16px rgba(217, 180, 91, 0.45), 0 0 40px rgba(217, 180, 91, 0.15);
@@ -120,7 +184,7 @@
   .grid-backdrop {
     background-image:
       radial-gradient(rgba(240, 237, 226, 0.07) 1px, transparent 1px),
-      radial-gradient(rgba(139, 124, 232, 0.06) 1px, transparent 1px);
+      radial-gradient(rgb(var(--krypt-accent) / 0.06) 1px, transparent 1px);
     background-size: 34px 34px, 56px 56px;
     background-position: 0 0, 17px 23px;
     mask-image: radial-gradient(ellipse 90% 85% at 50% 40%, black 30%, transparent 78%);
@@ -251,13 +315,13 @@ html.lite [class*=' blur-'] {
   border-bottom-right-radius: 2px;
 }
 .react-grid-item > .react-resizable-handle:hover::after {
-  border-color: rgb(139, 124, 232);
+  border-color: rgb(var(--krypt-accent));
 }
 
 /* Where the panel will land. Default is red. */
 .react-grid-item.react-grid-placeholder {
-  background: rgba(139, 124, 232, 0.18);
-  border: 1px dashed rgba(139, 124, 232, 0.55);
+  background: rgb(var(--krypt-accent) / 0.18);
+  border: 1px dashed rgb(var(--krypt-accent) / 0.55);
   border-radius: 0.75rem;
   opacity: 1;
 }

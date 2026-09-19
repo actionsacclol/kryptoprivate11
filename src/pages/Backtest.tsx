@@ -47,7 +47,7 @@ function Slider({ label, value, min, max, step = 1, onChange, suffix }: { label:
         <span className="font-mono text-white">{value}{suffix}</span>
       </div>
       <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-[#8B7CE8]" />
+        className="w-full accent-[rgb(var(--krypt-accent))]" />
     </div>
   );
 }
@@ -118,7 +118,7 @@ export function Backtest() {
               <Slider label="Curve entry max" value={g.curveMax} min={5} max={90} onChange={(v) => set('curveMax', v)} suffix="%" />
               <Slider label="Min score" value={g.minScore} min={0} max={100} onChange={(v) => set('minScore', v)} />
               <label className="flex items-center gap-2 text-sm text-white cursor-pointer">
-                <input type="checkbox" checked={g.requireSmart} onChange={(e) => set('requireSmart', e.target.checked)} className="accent-[#8B7CE8] h-4 w-4" />
+                <input type="checkbox" checked={g.requireSmart} onChange={(e) => set('requireSmart', e.target.checked)} className="accent-[rgb(var(--krypt-accent))] h-4 w-4" />
                 Require smart-wallet buyer <span className="text-xs text-krypt-muted">({smartCount} trades have one)</span>
               </label>
             </Card>

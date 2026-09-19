@@ -22,7 +22,7 @@
 // is deliberately left undecoded — see PARSED_PREFIX notes per event.
 
 import { createHash } from 'node:crypto';
-import { base58Encode } from './base58';
+import { base58Encode } from '../chain/base58';
 import { CPI_EVENT_WRAPPER } from './pumpDecoder';
 
 export const PUMP_AMM_PROGRAM_ID = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';

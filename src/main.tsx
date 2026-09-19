@@ -9,6 +9,7 @@ import { TerminalProvider } from './state/TerminalProvider';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { LiteMotion } from './components/LiteModeHost';
 import { initLite } from './state/liteMode';
+import { initTheme } from './state/theme';
 
 // Self-hosted fonts (2026-08-16). These were loaded from fonts.googleapis.com,
 // which made "No telemetry" false on every launch — Google saw the IP and
@@ -82,6 +83,7 @@ sessionStorage.removeItem('krypt.bridgeRetryAt');
 // mirror of the setting — a lite user should not see one animated boot per
 // launch while settings are still on their way over IPC.
 initLite();
+initTheme();
 
 // A popped-out panel loads this same entry with `#panel=<id>`. It keeps every
 // provider — a panel reads the same state it does in the grid, and ipc.ts

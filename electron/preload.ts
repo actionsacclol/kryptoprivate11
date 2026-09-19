@@ -10,7 +10,7 @@ import type { CandleInterval, DiscoverColumn, StatsWindow } from '@shared/market
 import type { NewOrderRequest } from '@shared/orders';
 import type { NewAlertRequest } from '@shared/alerts';
 import type { CopyConfig } from '@shared/copytrade';
-import type { EvmChainKind } from '@shared/evm';
+import type { ChainKind, EvmChainKind } from '@shared/evm';
 
 const api = {
   app: {
@@ -298,6 +298,18 @@ const api = {
     opportunities: (chain: EvmChainKind) => ipcRenderer.invoke('rewards:opportunities', chain),
     /** Sends this wallet's address to Merkl. User-triggered only. */
     wallet: (chain: EvmChainKind) => ipcRenderer.invoke('rewards:wallet', chain),
+  },
+  // pump.fun Callouts — intel only. There is no create, like or reply here
+  // and there will not be: this app reads the feed, it does not post to it.
+  // The information hub. Read-only, and there is no 'news' here on purpose
+  // - see shared/wire.ts for why a headline feed was not built.
+  wire: {
+    boosts: () => ipcRenderer.invoke('wire:boosts'),
+    profiles: () => ipcRenderer.invoke('wire:profiles'),
+  },
+  callouts: {
+    feed: () => ipcRenderer.invoke('callouts:feed'),
+    forMint: (mint: string, chain: ChainKind) => ipcRenderer.invoke('callouts:forMint', mint, chain),
   },
   market: {
     providers: () => ipcRenderer.invoke('market:providers'),

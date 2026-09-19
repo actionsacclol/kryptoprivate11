@@ -33,12 +33,55 @@ import {
   markLastBuildPath,
   sellAmountFor,
   sellPctOf,
+  tokenAccountAmount,
 } from './.txbuilder.mjs';
+
+// Written out rather than imported: a token program id is a chain constant,
+// and a test that reads its expectation out of the code under test is not a
+// pin.
+const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
 let passed = 0;
 const cases = [];
 const test = (name, fn) => cases.push({ name, fn });
 
+
+// A sell's size comes from this number now. It used to arrive from
+// getTokenAccountBalance, a second RPC round trip after the batched account
+// read (~100 ms on the exit path, measured 2026-09-18); the balance rides in
+// that batch whenever the mint's token program is already cached, and these
+// are the bytes it is read from.
+test('token account amount is the u64 at offset 64', () => {
+  const acc = Buffer.alloc(165);
+  acc.writeBigUInt64LE(123_456_789_012n, 64);
+  assert.equal(tokenAccountAmount(acc, TOKEN_PROGRAM), 123_456_789_012n);
+  // Token-2022 shares the base layout; extensions live past byte 165.
+  const t22 = Buffer.alloc(300);
+  t22.writeBigUInt64LE(7n, 64);
+  assert.equal(tokenAccountAmount(t22, TOKEN_2022_PROGRAM), 7n);
+});
+
+test('a sell is never sized from bytes nobody checked', () => {
+  const acc = Buffer.alloc(165);
+  acc.writeBigUInt64LE(500n, 64);
+  // An account at the derived address that is NOT a token account reads 0,
+  // and 0 refuses the sell rather than sizing one from whatever was there.
+  assert.equal(tokenAccountAmount(acc, '11111111111111111111111111111111'), 0n);
+  // Too short to hold an amount.
+  assert.equal(tokenAccountAmount(Buffer.alloc(40), TOKEN_PROGRAM), 0n);
+  assert.equal(tokenAccountAmount(Buffer.alloc(0), TOKEN_PROGRAM), 0n);
+  // A closed/absent ATA is zero tokens, which is what the separate read
+  // also reported - not an error.
+  assert.equal(tokenAccountAmount(Buffer.alloc(165), TOKEN_PROGRAM), 0n);
+});
+
+test('a full u64 balance survives the parse', () => {
+  const acc = Buffer.alloc(165);
+  const max = 18_446_744_073_709_551_615n;
+  acc.writeBigUInt64LE(max, 64);
+  assert.equal(tokenAccountAmount(acc, TOKEN_PROGRAM), max);
+});
 test('a noted mint becomes the newest sampling source', () => {
   resetActiveMints();
   noteActiveMint('mintA');

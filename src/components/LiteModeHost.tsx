@@ -14,14 +14,23 @@ import { useEffect, type ReactNode } from 'react';
 import { MotionConfig } from 'framer-motion';
 import { useAppState } from '../state/AppStateProvider';
 import { setLite } from '../state/liteMode';
+import { setTheme } from '../state/theme';
 import { useLite } from '../state/useLite';
 
 export function LiteModeHost(): null {
   const { settings } = useAppState();
   const reduce = settings.reduceEffects;
+  // The accent rides along here rather than in its own leaf: both are
+  // one-line mirrors of a Display setting onto <html>, and a second
+  // subscriber to app state would be a second component re-rendering on
+  // the engine's 1/s push for no reason.
+  const theme = settings.theme;
   useEffect(() => {
     setLite(reduce);
   }, [reduce]);
+  useEffect(() => {
+    if (theme) setTheme(theme);
+  }, [theme]);
   return null;
 }
 

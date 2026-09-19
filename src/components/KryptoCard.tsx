@@ -110,31 +110,40 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
           one-click order, the same rule the Buy button above follows: this
           app does not turn a banner about its own coin into a trade.
 
-          Both states are gold. The difference is stated in words and in the
-          fill, not in the hue, because "is my fee waived" is a yes/no a
-          colour alone should not be carrying. */}
-      {held.at > 0 && (
+          Both states are yellow. The difference is stated in words and in
+          the fill, not in the hue, because "is my fee waived" is a yes/no a
+          colour alone should not be carrying.
+
+          It is NOT gated on a completed balance read any more. The offer is a
+          fact about the product - hold this much, pay no fee - and it is true
+          before anyone has a wallet. Gating it on `held.at > 0` meant a fresh
+          install, or anyone whose read had not landed yet, saw nothing at all
+          where the one thing this card is for should be (user report,
+          2026-09-18). Only the line about THEIR holding waits for a read. */}
+      {(
         <button
           onClick={() => mint && onOpenToken(mint)}
           className={cls(
             'mt-3 block w-full rounded-lg border px-4 py-3 text-left transition',
             held.waived
-              ? 'border-arc-gold/60 bg-arc-gold/15 hover:bg-arc-gold/20'
-              : 'border-arc-gold/40 bg-arc-gold/[0.07] hover:border-arc-gold/60 hover:bg-arc-gold/10',
+              ? 'border-amber-300/70 bg-amber-400/20 hover:bg-amber-400/25'
+              : 'border-amber-300/55 bg-amber-400/[0.12] hover:border-amber-300/80 hover:bg-amber-400/20',
           )}
         >
           <span className="flex items-center gap-2">
-            {held.waived ? <Check className="h-4 w-4 flex-shrink-0 text-arc-gold" /> : <Coins className="h-4 w-4 flex-shrink-0 text-arc-gold" />}
-            <span className="text-value font-bold text-arc-gold">
+            {held.waived ? <Check className="h-4 w-4 flex-shrink-0 text-amber-300" /> : <Coins className="h-4 w-4 flex-shrink-0 text-amber-300" />}
+            <span className="text-value font-bold text-amber-300">
               {held.waived ? `No fee on Krypto Bot — active` : `Use Krypto Bot with no fee`}
             </span>
           </span>
-          <span className="mt-1 block text-body leading-relaxed text-arc-gold/85">
+          <span className="mt-1 block text-body font-semibold leading-relaxed text-amber-200">
             Hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in the app and Krypt&rsquo;s
             0.5% trading fee is waived, on every chain.
           </span>
           <span className="mt-1 block text-label leading-relaxed text-krypt-muted/75">
-            {held.problem
+            {held.at === 0
+              ? 'Your wallets have not been checked for it yet.'
+              : held.problem
               ? `Your holding could not be read just now, so the fee is charged as usual — ${held.problem}.`
               : held.waived
                 ? `You hold ${held.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}${held.usd !== null ? ` (~$${held.usd.toFixed(2)})` : ''} across ${held.wallets} wallet${held.wallets === 1 ? '' : 's'}.`

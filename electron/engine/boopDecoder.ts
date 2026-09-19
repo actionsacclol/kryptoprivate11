@@ -22,7 +22,7 @@
 // There is no direction flag in the body — buys and sells are DIFFERENT
 // EVENTS with different discriminators. Verified 3/3 each way.
 
-import { base58Encode } from './base58';
+import { base58Encode } from '../chain/base58';
 
 export const BOOP_PROGRAM = 'boop8hVGQGqehUK2iVEMEnMrL5RbjywRzHKBmBE7ry4';
 

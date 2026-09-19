@@ -18,6 +18,8 @@ import type { AiAnalysis } from '@shared/ai';
 import type { BotKind } from '@shared/bots';
 import type { CreditUsage } from '@shared/credits';
 import type { KryptoHolding } from '@shared/krypto';
+import type { Callout } from '@shared/callouts';
+import type { BoostedToken, TokenProfile } from '@shared/wire';
 import type { BotStatus } from '../electron/system/bots';
 import type { RecorderStats } from '../electron/engine/recorder';
 import type { ProbeResult as RpcProbeResult } from '../electron/engine/rpcProbe';
@@ -395,6 +397,27 @@ declare global {
         /** SENDS THIS WALLET'S ADDRESS TO MERKL. Explicit user action only —
          *  never on mount, never on a timer. Main resolves the address. */
         wallet: (chain: EvmChainKind) => Promise<IpcResult<MerklAnswer<WalletReward>>>;
+      };
+      /**
+       * pump.fun Callouts, read-only.
+       *
+       * A failed call is `ok: false` — NOT an empty array. The difference is
+       * the whole point: [] means pump answered and nobody has called this
+       * coin, and a panel that renders a failure as [] tells the user the
+       * silence is real.
+       */
+      /** The information hub. `ok: false` is a failed call; `[]` means the
+       *  provider answered and there are none. */
+      wire: {
+        boosts: () => Promise<IpcResult<BoostedToken[]>>;
+        profiles: () => Promise<IpcResult<TokenProfile[]>>;
+      };
+      callouts: {
+        /** Every live callout, all chains, newest-first once sorted. */
+        feed: () => Promise<IpcResult<Callout[]>>;
+        /** The calls on one coin. Carries no caller position — that is only
+         *  in the feed, so `skinInTheGame` on these rows answers null. */
+        forMint: (mint: string, chain: ChainKind) => Promise<IpcResult<Callout[]>>;
       };
       market: {
         providers: () => Promise<IpcResult<ProviderStatus[]>>;

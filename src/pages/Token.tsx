@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Copy, ExternalLink, Loader2, RefreshCw, Star } from 'lucide-react';
+import { useAccent } from '../state/useAccent';
 import {
   CANDLE_INTERVALS,
   imageSrc,
@@ -508,6 +509,10 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
    *  SOL-priced feed and no SOL/USD rate. The axis says which. */
   const chartUnit = series?.unit ?? 'usd';
 
+  // Order markers are drawn onto the chart as literal colours; the semantic
+  // ones (stop = rose, limit buy = emerald) are fixed, the rest is the accent.
+  const accent = useAccent().rgb();
+
   const markers = useMemo(() => [], []);
 
   // Draw every armed order that has a knowable SOL trigger.
@@ -542,7 +547,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
             o.state === 'paused' ? '#D9B45B'
             : o.kind === 'stop_loss' || o.kind === 'trailing_stop' ? '#f43f5e'
             : o.kind === 'limit_buy' ? '#34d399'
-            : '#8B7CE8',
+            : accent,
           title:
             (o.state === 'paused' ? 'PAUSED ' : '') +
             (o.kind === 'stop_loss' ? 'SL'

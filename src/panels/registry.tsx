@@ -29,6 +29,9 @@ import { chainOf, leaderTooFast, type CopySnapshot } from '@shared/copytrade';
 import type { Alert } from '@shared/alerts';
 import type { Position } from '@shared/portfolio';
 import { cls } from '../utils/format';
+import { newestFirst } from '@shared/callouts';
+import { useCallouts } from '../state/callouts';
+import { CalloutRow } from '../components/CalloutRow';
 
 /**
  * What a panel may ask the app to do. Panels render as `<p.Body />` with no
@@ -96,6 +99,41 @@ function Empty({ children }: { children: ReactNode }) {
 /** A scrolling list that stays readable when the panel is dragged small. */
 function Rows({ children }: { children: ReactNode }) {
   return <div className="space-y-1 text-body">{children}</div>;
+}
+
+/**
+ * pump.fun callouts, on the grid.
+ *
+ * The same rows as the right-hand rail, from the same single poll - both
+ * subscribe to one store, so having the widget AND the rail open costs one
+ * request every 30 s, not two.
+ *
+ * Chain-aware like its neighbours, with one difference worth knowing: pump's
+ * feed carries chains this app has no rail for (hyperevm, arc). Those rows
+ * survive the `all` filter - a call is a call - but they are not clickable,
+ * because offering to open a coin this app cannot open is a worse answer
+ * than plain information.
+ */
+function CalloutsBody(): ReactNode {
+  const filter = usePanelChain();
+  const { openToken } = useContext(PanelActionsContext);
+  const { rows, answered, error, loading } = useCallouts(true);
+  const shown = useMemo(() => {
+    const sorted = newestFirst(rows).slice(0, 60);
+    return filter === 'all' ? sorted : sorted.filter((c) => c.chain !== null && chainMatches(filter, c.chain));
+  }, [rows, filter]);
+  if (!answered && loading) return <Empty>Reading pump.fun…</Empty>;
+  if (!answered && error) return <Empty>{error}</Empty>;
+  if (!shown.length) {
+    return <Empty>No callouts right now{filter === 'all' ? '' : ` on ${CHAIN_SHORT[filter]}`}.</Empty>;
+  }
+  return (
+    <Rows>
+      {shown.map((c) => (
+        <CalloutRow key={c.id} c={c} onOpen={openToken} />
+      ))}
+    </Rows>
+  );
 }
 
 // ── the widgets ──────────────────────────────────────────────────────────────
@@ -1058,6 +1096,7 @@ export const PANELS: PanelSpec[] = [
   { id: 'observatory', chainAware: true, title: 'Observatory', blurb: 'Each chain’s scanner: watching or not, how far behind, what it has flagged.', layout: { x: 6, y: 14, w: 3, h: 8, minW: 3, minH: 5 }, Body: ObservatoryBody },
   { id: 'chart', HeaderControl: ChartHeaderControl, title: 'Chart', blurb: 'The last token you opened, on a 1-minute chart.', layout: { x: 0, y: 14, w: 6, h: 10, minW: 4, minH: 6 }, Body: ChartBody },
   { id: 'runners', chainAware: true, title: 'Runner alerts', blurb: 'Launches flagged as potential runners this session.', layout: { x: 8, y: 6, w: 4, h: 8, minW: 3, minH: 4 }, Body: RunnersBody },
+  { id: 'callouts', chainAware: true, title: 'Callouts', blurb: 'Coins people are publicly calling on pump.fun, and whether the caller holds one.', layout: { x: 4, y: 32, w: 4, h: 8, minW: 3, minH: 4 }, Body: CalloutsBody },
 ];
 
 /** The panels a first-time layout opens with. */

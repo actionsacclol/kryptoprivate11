@@ -39,8 +39,8 @@
 import WebSocket from 'ws';
 import type { LogNotification, InnerEvent } from './feed';
 import { decodeCpiEventData, PUMP_PROGRAM_ID } from './pumpDecoder';
-import { getTransactions, resolveAccountKeys, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from './rpcClient';
-import { base58Decode } from './base58';
+import { getTransactions, resolveAccountKeys, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from '../chain/rpcClient';
+import { base58Decode } from '../chain/base58';
 
 export interface PriorityFeedHost {
   /** Helius websocket URL, or empty when no key is configured. */

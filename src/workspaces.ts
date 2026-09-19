@@ -53,10 +53,10 @@ export const WORKSPACES: WorkspaceSpec[] = [
     id: 'terminal',
     title: 'Terminal',
     blurb: 'Find a token, read it, and trade it by hand.',
-    routes: ['discover', 'token', 'watchlist', 'runners', 'trades', 'orders', 'positions'],
+    routes: ['discover', 'token', 'watchlist', 'runners', 'wire', 'trades', 'orders', 'positions'],
     extraRoutes: ['wallet', 'walletrobinhood', 'walletbnb'],
     groups: [
-      { label: 'Find', routes: ['discover', 'token', 'watchlist', 'runners'] },
+      { label: 'Find', routes: ['discover', 'token', 'watchlist', 'runners', 'wire'] },
       { label: 'Your trading', routes: ['trades', 'orders', 'positions', 'wallet', 'walletrobinhood', 'walletbnb'] },
     ],
     icon: 'compass',

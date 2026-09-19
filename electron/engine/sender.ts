@@ -24,7 +24,7 @@ import type { ExecutionSettings, ShadowSendPlan, SendLanePlan } from '@shared/ty
 import type { FeeEstimate } from './feeEstimator';
 import { priceFor } from './feeEstimator';
 import type { TipFloor } from './jitoTips';
-import type { PrewarmedAddresses } from './addresses';
+import type { PrewarmedAddresses } from '../chain/addresses';
 
 const BASE_FEE_LAMPORTS = 5_000; // 1 signature
 const UVA_RENT_LAMPORTS = 1_844_400; // one-time user_volume_accumulator rent on first buy

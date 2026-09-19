@@ -214,7 +214,7 @@ export function Switch({
         className={cls(
           'relative h-6 w-11 rounded-full transition flex-shrink-0 mt-0.5',
           checked
-            ? 'bg-krypt-gradient shadow-[0_0_10px_rgba(139,124,232,0.5)]'
+            ? 'bg-krypt-gradient shadow-[0_0_10px_rgb(var(--krypt-accent)/0.5)]'
             : 'bg-white/10',
         )}
       >

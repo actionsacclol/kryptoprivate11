@@ -15,9 +15,14 @@ export default {
         'krypt-surface': '#12172B',
         'krypt-panel': '#0A0D1A',
         'krypt-muted': '#8C92AB',
-        'krypt-indigo': '#3D4A7E',
-        'krypt-purple': '#8B7CE8',
-        'krypt-pink': '#B7A6FF',
+        // The ACCENT, and the only part of the palette a theme moves.
+        // Channels rather than hex, so `<alpha-value>` keeps every existing
+        // `bg-krypt-purple/20` working - 376 uses of krypt-purple alone, and
+        // rewriting them would have been the wrong way to add a theme.
+        // Values live in src/index.css under :root and html[data-theme].
+        'krypt-indigo': 'rgb(var(--krypt-indigo) / <alpha-value>)',
+        'krypt-purple': 'rgb(var(--krypt-accent) / <alpha-value>)',
+        'krypt-pink': 'rgb(var(--krypt-accent-soft) / <alpha-value>)',
         'arc-gold': '#D9B45B',
         'arc-crimson': '#E5484D',
       },
@@ -57,14 +62,14 @@ export default {
         action: '0.1em',    // large uppercase buttons — Buy, Sell
       },
       boxShadow: {
-        'krypt-glow': '0 0 22px rgba(139, 124, 232, 0.28)',
+        'krypt-glow': '0 0 22px rgb(var(--krypt-accent) / 0.28)',
         'krypt-card': '0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(240, 237, 226, 0.04)',
         'gold-glow': '0 0 18px rgba(217, 180, 91, 0.3)',
         'crimson-glow': '0 0 18px rgba(229, 72, 77, 0.35)',
       },
       backgroundImage: {
-        'krypt-gradient': 'linear-gradient(135deg, #46418F 0%, #7A6AD9 100%)',
-        'krypt-radial': 'radial-gradient(1100px circle at 50% -14%, rgba(101, 92, 214, 0.13), transparent 62%)',
+        'krypt-gradient': 'linear-gradient(135deg, rgb(var(--krypt-grad-from)) 0%, rgb(var(--krypt-grad-to)) 100%)',
+        'krypt-radial': 'radial-gradient(1100px circle at 50% -14%, rgb(var(--krypt-accent) / 0.13), transparent 62%)',
       },
       animation: {
         'gradient-x': 'gradient-x 8s ease infinite',

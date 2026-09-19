@@ -12,7 +12,7 @@
 // sell failure can name it instead of guessing. Pure parsing; the caller
 // fetches the bytes.
 
-import { base58Encode } from './base58';
+import { base58Encode } from '../chain/base58';
 
 /** Token-2022 extension type ids (spl-token-2022 `ExtensionType`). */
 const EXT_TRANSFER_FEE_CONFIG = 1;

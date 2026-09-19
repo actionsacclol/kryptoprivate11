@@ -28,7 +28,7 @@
 // shape as the existing PumpSwap `registerPool` path. `poolStateFor` is not
 // derivable here, so the caller resolves it once and remembers.
 
-import { base58Encode } from './base58';
+import { base58Encode } from '../chain/base58';
 
 /** Raydium LaunchLab. Verified against mainnet 2026-08-24. */
 export const LAUNCHLAB_PROGRAM = 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj';

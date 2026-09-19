@@ -15,6 +15,7 @@
 // the fills. The replay is an animation of a record, not a simulation.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { accent } from '../../state/theme';
 import { Image as ImageIcon, Loader2, Play, RotateCcw, Sparkles, Video, X } from 'lucide-react';
 import type { Candle, CandleInterval, CandleSeries } from '@shared/market';
 import type { IpcResult } from '@shared/types';
@@ -49,7 +50,10 @@ type Speed = (typeof SPEEDS)[number];
 const UP = '#34d399';
 const DOWN = '#f43f5e';
 const INK = '#F0EDE2';
-const ACCENT = '#8B7CE8';
+// Read per draw: a canvas keeps whatever colour it was painted with, so a
+// module constant would survive a theme change until something else
+// happened to repaint.
+const ACCENT = (): string => accent();
 
 /** How long the candles take to arrive, before speed. */
 const BASE_SECONDS = 9;
@@ -344,7 +348,7 @@ export function TradeReplay({
       };
       if (reachedEntry) markerAt(openSec, 'IN', INK);
       const reachedExit = last.time >= closeSec;
-      if (reachedExit) markerAt(closeSec, 'OUT', ACCENT);
+      if (reachedExit) markerAt(closeSec, 'OUT', ACCENT());
 
       // ── The numbers ───────────────────────────────────────────────
       // While the trade is open the PnL follows the price. Once the replay
@@ -392,7 +396,7 @@ export function TradeReplay({
       else if (path === 'scaled') parts.push(`USD history scaled to ${nativeSymbol} at entry`);
       ctx.fillText(parts.join('  ·  '), padX, L.footer);
 
-      ctx.fillStyle = ACCENT;
+      ctx.fillStyle = ACCENT();
       ctx.font = `600 ${L.footerSize}px "Spline Sans", system-ui, sans-serif`;
       const brand = 'krypt.cc';
       ctx.fillText(brand, W - padX - ctx.measureText(brand).width, L.footer);

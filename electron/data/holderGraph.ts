@@ -26,7 +26,7 @@
 // are excluded from being funders at all — without that filter every token
 // looks like one giant coordinated cluster.
 
-import { getSignaturesForAddress, getTransaction, resolveAccountKeys } from '../engine/rpcClient';
+import { getSignaturesForAddress, getTransaction, resolveAccountKeys } from '../chain/rpcClient';
 import type { HolderRow } from '@shared/market';
 
 /**

@@ -292,6 +292,13 @@ const MIN_GAP_MS: Record<HttpProviderId, number> = {
  */
 const WINDOW_LIMIT: Record<string, { n: number; ms: number }> = {
   'pumpfun:list': { n: 55, ms: 60_000 },
+  // Callouts ride the pump.fun host the app already uses, but they are
+  // intel a user reads, never anything the trade path waits on. pump meters
+  // this route at 60/60 s (`x-ratelimit-limit`, measured 2026-09-18); a
+  // third of it is more than a 30 s feed poll needs, and the rest stays for
+  // the coin lookups a buy depends on. A callouts burst must never be the
+  // reason a trade cannot price its token.
+  'pumpfun:callout': { n: 20, ms: 60_000 },
   geckoterminal: { n: 28, ms: 60_000 },
   rugcheck: { n: 50, ms: 60_000 },
   // LI.FI's real ceiling is a TWO-HOUR window, not a minute — 75 quotes per
@@ -352,7 +359,7 @@ export function providerLimits(id: HttpProviderId): {
 
 /** Route classes with their own window. Callers tag list routes; everything
  *  else is the provider's default lane. */
-export type FetchLane = 'list';
+export type FetchLane = 'list' | 'callout';
 
 const lastCallAt = new Map<HttpProviderId, number>();
 /** One serial chain per provider, and a SECOND one for priority calls — they

@@ -462,6 +462,16 @@ export interface AppSettings {
   /** Pin a token to the watchlist when you buy it by hand. On by default:
    *  a coin you just put money into is the definition of one you want to
    *  keep an eye on, and doing it manually is the step people skip. */
+  /**
+   * UI language. 'system' asks the OS once at startup and is the default,
+   * because someone whose machine is in Korean should not have to find a
+   * setting written in English to say so.
+   *
+   * It moves menus, buttons, settings and onboarding. The legal documents
+   * and every message about money stay English on purpose - see
+   * shared/i18n/en.ts for why.
+   */
+  locale: import('./i18n').LocaleId;
   watchOnBuy: boolean;
   /** Record every decoded event + decision to JSONL for replay. */
   recorderEnabled: boolean;
@@ -509,6 +519,9 @@ export interface AppSettings {
    * side applies at once; a scene leaves on the next visit to its page.
    * Also toggled by the Hub's "Laggy?" button.
    */
+  /** Accent colour. Moves the chrome only - the colours that carry meaning
+   *  (emerald up, rose down, gold money) are fixed. See src/index.css. */
+  theme: import('./theme').ThemeId;
   reduceEffects: boolean;
   /**
    * Let Chromium render through the GPU. Off = software rendering: slower,
@@ -1070,11 +1083,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   evm: { ...DEFAULT_EVM_SETTINGS },
   referrer: '',
   onboarded: false,
+  locale: 'system',
   watchOnBuy: true,
   recorderEnabled: false,
   scannersAutoStart: false,
   launch: { enabled: false, walletId: '', evmWalletId: '' },
   bridge: { enabled: false },
+  theme: 'purple',
   reduceEffects: false,
   hardwareAcceleration: true,
   recorderDir: '',

@@ -1,3 +1,4 @@
+import { useAccent } from '../../state/useAccent';
 // Session equity curve — single series (the title names it, no legend),
 // crosshair + tooltip on hover, recessive hairline grid, values in text
 // tokens. Zero-line shown when the series crosses it.
@@ -10,7 +11,8 @@ export interface SeriesPoint {
   v: number;
 }
 
-const PURPLE = '#8B7CE8';
+// The accent is read at render: an SVG presentation attribute does not
+// resolve var(), so the colour has to arrive as a literal string.
 
 export function AreaChart({
   data,
@@ -21,6 +23,8 @@ export function AreaChart({
   height?: number;
   valueSuffix?: string;
 }) {
+  const { rgb } = useAccent();
+  const PURPLE = rgb();
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<{ x: number; idx: number } | null>(null);
   // viewBox width tracks the actual container so a fixed aspect ratio never

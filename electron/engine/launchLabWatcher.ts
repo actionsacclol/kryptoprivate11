@@ -28,7 +28,7 @@
 // incoming events against it.
 
 import { FeedManager } from './feed';
-import { launchLabPoolFor } from './addresses';
+import { launchLabPoolFor } from '../chain/addresses';
 import { decodeLogs, LAUNCHLAB_PROGRAM, priceLamportsPerToken, curveProgressPct } from './launchLabDecoder';
 
 const WSOL = 'So11111111111111111111111111111111111111112';

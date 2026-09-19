@@ -48,6 +48,7 @@ import { Card, GhostButton, Section, Switch } from '../common';
 import { useTerminal } from '../../state/TerminalProvider';
 import { useToast } from '../../state/ToastProvider';
 import { cls, fmtAgo } from '../../utils/format';
+import { useLocale } from '../../state/useLocale';
 
 // Market-data settings + the privacy panel.
 //
@@ -75,6 +76,7 @@ export function MarketDataSettings({
   settings: AppSettings;
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
 }) {
+  const { t } = useLocale();
   const term = useTerminal();
   const toast = useToast();
   const [birdeyeKey, setBirdeyeKey] = useState(settings.data.birdeyeApiKey);
@@ -103,7 +105,7 @@ export function MarketDataSettings({
 
   return (
     <Section
-      title="Market data"
+      title={t('settings.marketData')}
       description="Which third-party APIs the terminal is allowed to contact, and exactly what each one sees."
     >
       <Card className="space-y-4">
@@ -178,7 +180,7 @@ export function MarketDataSettings({
                     className={cls(
                       'relative h-5 w-9 rounded-full transition flex-shrink-0',
                       !settings.data.networkDataEnabled && 'opacity-40 cursor-not-allowed',
-                      on ? 'bg-krypt-gradient shadow-[0_0_8px_rgba(139,124,232,0.45)]' : 'bg-white/10',
+                      on ? 'bg-krypt-gradient shadow-[0_0_8px_rgb(var(--krypt-accent)/0.45)]' : 'bg-white/10',
                     )}
                   >
                     <span

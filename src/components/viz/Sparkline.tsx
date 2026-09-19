@@ -1,3 +1,4 @@
+import { useAccent } from '../../state/useAccent';
 // Micro line chart for table rows and cards. One hue, no axes, no chrome —
 // the row it lives in carries the labels. Rendered as pure SVG.
 
@@ -5,16 +6,19 @@ export function Sparkline({
   data,
   width = 96,
   height = 28,
-  stroke = '#8B7CE8',
+  stroke,
   positive,
 }: {
   data: number[];
   width?: number;
   height?: number;
+  /** Overrides the accent. Omitted = whatever the theme's accent is. */
   stroke?: string;
   /** When set, overrides hue with PnL polarity (emerald/rose). */
   positive?: boolean;
 }) {
+  const { rgb } = useAccent();
+  const hue = stroke ?? rgb();
   if (data.length < 2) {
     return (
       <svg width={width} height={height} aria-hidden="true">
@@ -22,7 +26,7 @@ export function Sparkline({
       </svg>
     );
   }
-  const color = positive === undefined ? stroke : positive ? '#22C55E' : '#EF4444';
+  const color = positive === undefined ? hue : positive ? '#22C55E' : '#EF4444';
   const min = Math.min(...data);
   const max = Math.max(...data);
   const span = max - min || 1;
@@ -33,7 +37,7 @@ export function Sparkline({
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
   const last = pts[pts.length - 1].split(',');
-  const gid = `sp-${color.replace('#', '')}`;
+  const gid = `sp-${color.replace(/[^a-zA-Z0-9]/g, '')}`;
   return (
     <svg width={width} height={height} aria-label={`price trend, ${data.length} points`}>
       <defs>

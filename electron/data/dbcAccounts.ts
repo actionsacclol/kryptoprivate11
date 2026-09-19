@@ -29,8 +29,8 @@
 // 66.04 SOL across real pools. Never hardcode it; that is exactly why the
 // config account is read at all.
 
-import { getMultipleAccountsRaw } from '../engine/rpcClient';
-import { base58Encode } from '../engine/base58';
+import { getMultipleAccountsRaw } from '../chain/rpcClient';
+import { base58Encode } from '../chain/base58';
 
 const VIRTUAL_POOL_SIZE = 424;
 const POOL_CONFIG_MIN_SIZE = 272;

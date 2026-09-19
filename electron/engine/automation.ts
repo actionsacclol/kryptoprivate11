@@ -440,6 +440,10 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
     const codeChanged = existing.code !== input.code || existing.kind !== input.kind;
     const toLive = existing.mode !== 'live' && input.mode === 'live';
     const modeChanged = existing.mode !== input.mode;
+    // Moving a script to another chain is the same hazard as changing its
+    // mode: the mints in `opened` are addresses on the chain it LEFT, and a
+    // sell routes to the chain it is on now.
+    const chainChanged = scriptChain(existing) !== scriptChain(input);
     Object.assign(existing, input, { id: existing.id, createdAt: existing.createdAt, updatedAt: now });
     // Switching to live disarms: arming live is a separate, confirmed act.
     if (toLive) existing.enabled = false;
@@ -450,10 +454,10 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
     // market-sell a real hand-bought bag on its first live action. Clear it in
     // BOTH directions — the live→paper case strands nothing, because a live
     // bag is still in the wallet and still sellable by hand.
-    if (modeChanged) {
+    if (modeChanged || chainChanged) {
       const rt = runtimes.get(existing.id);
       if (rt && rt.opened.size) {
-        slog(existing, 'info', `mode changed to ${existing.mode} — dropping ${rt.opened.size} position(s) opened in the other mode; this script can no longer sell them`);
+        slog(existing, 'info', `${chainChanged ? `chain changed to ${chainLabel(scriptChain(existing))}` : `mode changed to ${existing.mode}`} — dropping ${rt.opened.size} position(s) opened before it; this script can no longer sell them`);
         rt.opened.clear();
       }
     }

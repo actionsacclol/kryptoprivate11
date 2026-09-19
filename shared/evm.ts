@@ -17,20 +17,21 @@ import type { ClosedTrade } from './portfolio';
 import { resolveEvmTreasury, type EvmFeeIntegrityResult } from './evmFeeIntegrity';
 import type { Launchpad } from './market';
 
-/** Every chain the terminal can show. */
-export type ChainKind = 'solana' | 'robinhood' | 'bnb';
-export const CHAIN_KINDS: ChainKind[] = ['solana', 'robinhood', 'bnb'];
-/** The chains served by the EVM rail. */
-export type EvmChainKind = 'robinhood' | 'bnb';
-export const EVM_CHAINS: EvmChainKind[] = ['robinhood', 'bnb'];
+// The chain kinds live in a leaf (shared/chainKind.ts) so that modules which
+// need only the type - evmRunners.ts, which this file imports a default from
+// - can have it without importing this one and closing a cycle. Re-exported
+// here because 38 modules already import them from `@shared/evm` and there is
+// no reason for any of them to change.
+import {
+  CHAIN_KINDS,
+  EVM_CHAINS,
+  isEvmChain,
+  isChainKind,
+  type ChainKind,
+  type EvmChainKind,
+} from './chainKind';
 
-export function isEvmChain(k: unknown): k is EvmChainKind {
-  return k === 'robinhood' || k === 'bnb';
-}
-
-export function isChainKind(k: unknown): k is ChainKind {
-  return k === 'solana' || isEvmChain(k);
-}
+export { CHAIN_KINDS, EVM_CHAINS, isEvmChain, isChainKind, type ChainKind, type EvmChainKind };
 
 export interface EvmChainMeta {
   kind: EvmChainKind;

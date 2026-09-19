@@ -1,6 +1,8 @@
 import { Fragment } from 'react';
+import { useLocale } from '../state/useLocale';
 import { UpdateNotice } from './UpdateNotice';
 import {
+  Activity,
   Scale,
   Home,
   Gift,
@@ -46,6 +48,7 @@ export type RouteId =
   | 'token'
   | 'watchlist'
   | 'runners'
+  | 'wire'
   | 'trades'
   | 'creator'
   | 'funder'
@@ -76,7 +79,11 @@ export type RouteId =
 
 export interface RouteSpec {
   id: RouteId;
+  /** English, and the fallback: a route with no `i18n` key shows this. */
   label: string;
+  /** Translation key, where one exists. Optional so adding a route never
+   *  waits on eight catalogues. */
+  i18n?: import('@shared/i18n').MessageKey;
   /** Plain-language tooltip for the ritual names. */
   hint?: string;
   icon: typeof Telescope;
@@ -89,73 +96,74 @@ export interface RouteSpec {
 // sniper — the engine, its shadow strategies and its recordings — which is
 // still here, still running, and still where the honest research lives.
 export const TERMINAL_ROUTES: RouteSpec[] = [
-  { id: 'discover', label: 'Discover', hint: 'New, graduating, migrated, trending', icon: Compass },
-  { id: 'token', label: 'Token', hint: 'The token you have open', icon: LineChart, hidden: true },
-  { id: 'watchlist', label: 'Watchlist', hint: 'Tokens you pinned', icon: Radar },
-  { id: 'runners', label: 'Runners', hint: 'Launches the scanner flagged as potential runners', icon: Flame },
-  { id: 'trades', label: 'Trades', hint: 'Every round trip you made, in and out', icon: Receipt },
-  { id: 'orders', label: 'Orders', hint: 'Place and manage stop losses, take profits, limits', icon: ListOrdered },
-  { id: 'positions', label: 'Portfolio', hint: 'Positions and PnL', icon: Wallet },
-  { id: 'wallet', label: 'Sol Wallet', hint: 'Your Solana trading wallet, keys and arming', icon: KeyRound },
+  { id: 'discover', label: 'Discover', i18n: 'nav.discover', hint: 'New, graduating, migrated, trending', icon: Compass },
+  { id: 'token', label: 'Token', i18n: 'nav.token', hint: 'The token you have open', icon: LineChart, hidden: true },
+  { id: 'watchlist', label: 'Watchlist', i18n: 'nav.watchlist', hint: 'Tokens you pinned', icon: Radar },
+  { id: 'runners', label: 'Runners', i18n: 'nav.runners', hint: 'Launches the scanner flagged as potential runners', icon: Flame },
+  { id: 'wire', label: 'Wire', i18n: 'nav.wire', hint: 'Rail health, and who is paying for placement', icon: Activity },
+  { id: 'trades', label: 'Trades', i18n: 'nav.trades', hint: 'Every round trip you made, in and out', icon: Receipt },
+  { id: 'orders', label: 'Orders', i18n: 'nav.orders', hint: 'Place and manage stop losses, take profits, limits', icon: ListOrdered },
+  { id: 'positions', label: 'Portfolio', i18n: 'nav.portfolio', hint: 'Positions and PnL', icon: Wallet },
+  { id: 'wallet', label: 'Sol Wallet', i18n: 'nav.solWallet', hint: 'Your Solana trading wallet, keys and arming', icon: KeyRound },
   // One page per EVM chain rather than one page with a chain switch: a user
   // looking for their BNB balance should find "BNB Wallet" in the menu, not
   // discover that "Wallet" means something different depending on a control
   // in the top bar. The KEY is shared across EVM chains and each page says so.
-  { id: 'walletrobinhood', label: 'Robinhood Wallet', hint: 'Your Robinhood Chain wallet and balances', icon: KeyRound },
-  { id: 'walletbnb', label: 'BNB Wallet', hint: 'Your BNB Smart Chain wallet and balances', icon: KeyRound },
+  { id: 'walletrobinhood', label: 'Robinhood Wallet', i18n: 'nav.robinhoodWallet', hint: 'Your Robinhood Chain wallet and balances', icon: KeyRound },
+  { id: 'walletbnb', label: 'BNB Wallet', i18n: 'nav.bnbWallet', hint: 'Your BNB Smart Chain wallet and balances', icon: KeyRound },
   // Its own entry rather than a card on the Solana wallet page: it is a tool
   // people come here to use, not housekeeping they find while checking a
   // balance.
-  { id: 'swap', label: 'Swap', hint: 'Trade one token for another — cash out to a stablecoin, or consolidate dust', icon: Repeat },
+  { id: 'swap', label: 'Swap', i18n: 'nav.swap', hint: 'Trade one token for another — cash out to a stablecoin, or consolidate dust', icon: Repeat },
   // Separate from Swap on purpose: a swap is atomic and nobody ever holds
   // your money; a bridge is two transactions with a third party in between.
-  { id: 'bridge', label: 'Bridge', hint: 'Move a chain’s own coin to another chain — off by default', icon: Shuffle },
+  { id: 'bridge', label: 'Bridge', i18n: 'nav.bridge', hint: 'Move a chain’s own coin to another chain — off by default', icon: Shuffle },
 ];
 
 export const AUTOMATION_ROUTES: RouteSpec[] = [
-  { id: 'dashboard', label: 'Observatory', hint: 'Solana engine dashboard', icon: Telescope },
+  { id: 'dashboard', label: 'Observatory', i18n: 'nav.observatory', hint: 'Solana engine dashboard', icon: Telescope },
   { id: 'observatoryrobinhood', label: 'Observatory · Robinhood', hint: 'Pons launches on Robinhood Chain', icon: Telescope },
   { id: 'observatorybnb', label: 'Observatory · BNB', hint: 'four.meme launches on BNB Smart Chain', icon: Telescope },
   // Lives under Automation, not Terminal: this is the one page that trades on
   // its own initiative, off someone else's activity rather than your click.
   // It also used to be called "Wallets", one letter from the page holding YOUR
   // keys — a collision that got worse once a single "Wallet" held several.
-  { id: 'wallets', label: 'Copy Trading', hint: "Follow other traders' wallets", icon: Users },
-  { id: 'scripts', label: 'Scripts', hint: 'Your own rules and code, under a budget — paper first', icon: Code2 },
+  { id: 'wallets', label: 'Copy Trading', i18n: 'nav.copyTrading', hint: "Follow other traders' wallets", icon: Users },
+  { id: 'scripts', label: 'Scripts', i18n: 'nav.scripts', hint: 'Your own rules and code, under a budget — paper first', icon: Code2 },
   { id: 'farming', label: 'Farming', hint: 'Not built yet — what it would be, and what has to be true first', icon: Sprout },
-  { id: 'creator', label: 'Group Wallets', hint: 'Make a group of wallets to fund, warm or trade together', icon: FolderPlus },
-  { id: 'funder', label: 'Funder', hint: 'Fund wallets from the active one, by group or individually; collect back', icon: Coins },
-  { id: 'launches', label: 'Launches', hint: 'Live launch scanner', icon: Rocket },
+  { id: 'creator', label: 'Group Wallets', i18n: 'nav.groupWallets', hint: 'Make a group of wallets to fund, warm or trade together', icon: FolderPlus },
+  { id: 'funder', label: 'Funder', i18n: 'nav.funder', hint: 'Fund wallets from the active one, by group or individually; collect back', icon: Coins },
+  { id: 'launches', label: 'Launches', i18n: 'nav.launches', hint: 'Live launch scanner', icon: Rocket },
   { id: 'strategy', label: 'Spellbook', hint: 'Strategy settings', icon: BookMarked },
-  { id: 'execution', label: 'Execution', hint: 'Fees, lanes and send plans', icon: Gauge },
+  { id: 'execution', label: 'Execution', i18n: 'nav.execution', hint: 'Fees, lanes and send plans', icon: Gauge },
   // 'paper' (the old Paper book page) is no longer listed: paper round trips
   // sit on the Trades page beside the real ones, marked, and the wallet
   // holdings it also carried moved to the Wallet page (2026-09-06).
-  { id: 'backtest', label: 'Backtest', icon: FlaskConical },
-  { id: 'history', label: 'History', icon: HistoryIcon },
+  { id: 'backtest', label: 'Backtest', i18n: 'nav.backtest', icon: FlaskConical },
+  { id: 'history', label: 'History', i18n: 'nav.history', icon: HistoryIcon },
   { id: 'console', label: 'Grimoire', hint: 'Console log', icon: ScrollText },
 ];
 
 export const REWARDS_ROUTES: RouteSpec[] = [
-  { id: 'rewards', label: 'Reward Pools', hint: 'Published reward rates, and what your wallets are earning', icon: Gift },
+  { id: 'rewards', label: 'Reward Pools', i18n: 'nav.rewardPools', hint: 'Published reward rates, and what your wallets are earning', icon: Gift },
 ];
 
 export const SCOUT_ROUTES: RouteSpec[] = [
-  { id: 'scout', label: 'Wallet Scout', hint: 'Top traders per chain, over a window you pick', icon: Users },
+  { id: 'scout', label: 'Wallet Scout', i18n: 'nav.walletScout', hint: 'Top traders per chain, over a window you pick', icon: Users },
 ];
 
 export const LAUNCH_ROUTES: RouteSpec[] = [
-  { id: 'launch', label: 'Launch a token', hint: 'Create your own token — off by default', icon: Rocket },
+  { id: 'launch', label: 'Launch a token', i18n: 'nav.launchToken', hint: 'Create your own token — off by default', icon: Rocket },
 ];
 
 export const LAYOUT_ROUTES: RouteSpec[] = [
-  { id: 'workspace', label: 'My Layout', hint: 'Panels you choose, arranged how you like', icon: LayoutGrid },
+  { id: 'workspace', label: 'My Layout', i18n: 'nav.myLayout', hint: 'Panels you choose, arranged how you like', icon: LayoutGrid },
 ];
 
 export const SYSTEM_ROUTES: RouteSpec[] = [
-  { id: 'settings', label: 'Settings', icon: Settings },
-  { id: 'about', label: 'About', icon: Sparkles },
-  { id: 'legal', label: 'Legal', hint: 'Terms, privacy, risk disclosure', icon: Scale },
+  { id: 'settings', label: 'Settings', i18n: 'nav.settings', icon: Settings },
+  { id: 'about', label: 'About', i18n: 'nav.about', icon: Sparkles },
+  { id: 'legal', label: 'Legal', i18n: 'nav.legal', hint: 'Terms, privacy, risk disclosure', icon: Scale },
 ];
 
 export const ROUTES: RouteSpec[] = [...TERMINAL_ROUTES, ...AUTOMATION_ROUTES, ...REWARDS_ROUTES, ...SCOUT_ROUTES, ...LAUNCH_ROUTES, ...LAYOUT_ROUTES, ...SYSTEM_ROUTES];
@@ -172,6 +180,7 @@ function NavButton({
   /** Small count chip (runners flagged in the last hour). */
   badge?: number;
 }) {
+  const { t } = useLocale();
   const Icon = route.icon;
   return (
     <button
@@ -188,7 +197,7 @@ function NavButton({
       )}
     >
       <Icon className={cls('h-4 w-4 flex-shrink-0', active && 'text-krypt-purple')} />
-      {route.label}
+      {route.i18n ? t(route.i18n) : route.label}
       {badge !== undefined && badge > 0 && (
         <span className="ml-auto mr-3 rounded-full border border-arc-gold/40 bg-arc-gold/10 px-1.5 py-px font-mono text-label text-arc-gold">
           {badge}
@@ -256,6 +265,7 @@ export function Sidebar({
    */
   groupsOverride?: Array<{ label: string | null; routes: RouteId[] }>;
 }) {
+  const { t } = useLocale();
   const spec = workspaceSpec(workspace);
   // Sections come from the WORKSPACE, not from the app-wide Terminal /
   // Automation / System split — inside "Wallet Utilities" those headings
@@ -278,7 +288,7 @@ export function Sidebar({
         <img
           src="./krypt.png"
           alt=""
-          className="h-9 w-9 rounded-md drop-shadow-[0_0_6px_rgba(139,124,232,0.6)]"
+          className="h-9 w-9 rounded-md drop-shadow-[0_0_6px_rgb(var(--krypt-accent)/0.6)]"
           onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
         />
         <div>
@@ -328,7 +338,7 @@ export function Sidebar({
                                   'bg-krypt-muted/40',
           )} />
           <div className="font-display text-label tracking-label uppercase text-krypt-muted">
-            {running && feedLive ? 'Scanning' : running ? 'Attuning' : 'Dormant'}
+            {running && feedLive ? t('status.scanning') : running ? t('status.attuning') : t('status.dormant')}
           </div>
         </div>
 

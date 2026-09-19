@@ -18,8 +18,8 @@
 // tip account or the user's own withdrawal address. Everything else is refused.
 
 import { VersionedTransaction, type MessageCompiledInstruction } from '@solana/web3.js';
-import { ALL_TIP_ACCOUNTS } from '../engine/tipAccounts';
-import { ataFor, TOKEN_PROGRAM, TOKEN_2022_PROGRAM, ATA_PROGRAM, PUMP_PROGRAM, PUMP_FEES_PROGRAM } from '../engine/addresses';
+import { ALL_TIP_ACCOUNTS } from '../chain/tipAccounts';
+import { ataFor, TOKEN_PROGRAM, TOKEN_2022_PROGRAM, ATA_PROGRAM, PUMP_PROGRAM, PUMP_FEES_PROGRAM } from '../chain/addresses';
 
 const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 

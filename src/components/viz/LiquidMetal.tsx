@@ -37,6 +37,7 @@
 //    than leaving a dead canvas lit.
 
 import { useEffect, useRef } from 'react';
+import { accentVec3, accentSoftVec3, subscribe as subscribeTheme } from '../../state/theme';
 import * as THREE from 'three';
 import { useReduceEffects } from './useReduceEffects';
 
@@ -77,8 +78,11 @@ const FRAG = `
   varying vec2  vUv;
 
   const vec3 VOID_C   = vec3(0.024, 0.027, 0.059); // #06070F
-  const vec3 VIOLET_C = vec3(0.545, 0.486, 0.910); // #8B7CE8
-  const vec3 PINK_C   = vec3(0.718, 0.651, 1.000); // #B7A6FF
+  /** The theme's accent and its soft partner, 0..1. Uniforms rather than
+   *  constants so a theme change repaints the sheet without rebuilding the
+   *  GL context - the thing this component's whole design avoids. */
+  uniform vec3 uAccent;
+  uniform vec3 uAccentSoft;
   const vec3 GOLD_C   = vec3(0.851, 0.706, 0.357); // #D9B45B
 
   float hash(vec2 p) {
@@ -153,10 +157,10 @@ const FRAG = `
     bands = pow(clamp(bands, 0.0, 1.0), 2.4);
 
     vec3 col = VOID_C;
-    col += VIOLET_C * (dKey * 0.19 + sKey * 0.58);
+    col += uAccent * (dKey * 0.19 + sKey * 0.58);
     col += GOLD_C   * (dRim * 0.05 + sRim * 0.30);
-    col += PINK_C   * bands * 0.13;
-    col += PINK_C   * fres * 0.11;
+    col += uAccentSoft   * bands * 0.13;
+    col += uAccentSoft   * fres * 0.11;
 
     // The cards and the title live in the middle, so the middle is where the
     // field goes quiet; it earns its keep out at the edges where there is
@@ -189,7 +193,7 @@ const FRAG = `
   }
 `;
 
-function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () => void; setIntensity: (v: number) => void } {
+function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () => void; setIntensity: (v: number) => void; setAccent: () => void } {
   let renderer: THREE.WebGLRenderer;
   try {
     renderer = new THREE.WebGLRenderer({
@@ -199,7 +203,7 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
     });
   } catch {
     // No WebGL: the app is fine without this.
-    return { dispose: () => undefined, setIntensity: () => undefined };
+    return { dispose: () => undefined, setIntensity: () => undefined, setAccent: () => undefined };
   }
 
   const scene = new THREE.Scene();
@@ -211,6 +215,8 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
     uRes: { value: new THREE.Vector2(1, 1) },
     uTime: { value: 0 },
     uIntensity: { value: initialIntensity },
+    uAccent: { value: new THREE.Vector3(...accentVec3()) },
+    uAccentSoft: { value: new THREE.Vector3(...accentSoftVec3()) },
   };
   const mat = new THREE.ShaderMaterial({
     vertexShader: VERT,
@@ -292,6 +298,13 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
     // context down and build another: creating a WebGL context costs far
     // more than this shader ever will, and doing it on every route change
     // would make navigation the expensive thing.
+    // Re-read the accent from the live CSS variable. Two vec3 writes; the
+    // next frame carries the new colour. No rebuild, for the same reason
+    // setIntensity does not rebuild.
+    setAccent: (): void => {
+      uniforms.uAccent.value.set(...accentVec3());
+      uniforms.uAccentSoft.value.set(...accentSoftVec3());
+    },
     setIntensity: (v: number): void => {
       const next = Math.max(0, Math.min(1, v));
       if (uniforms.uIntensity.value === next) return;
@@ -324,7 +337,7 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
  */
 function LiquidMetal({ intensity }: { intensity: number }): JSX.Element {
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const apiRef = useRef<{ setIntensity: (v: number) => void } | null>(null);
+  const apiRef = useRef<{ setIntensity: (v: number) => void; setAccent: () => void } | null>(null);
   // Read inside the mount effect without making it a dependency: the effect
   // must run ONCE for the life of the app, and re-running it would be the
   // context churn this design exists to avoid.
@@ -336,7 +349,7 @@ function LiquidMetal({ intensity }: { intensity: number }): JSX.Element {
     if (!mount) return;
     // Two frames: the page's text paints first, and a visit that leaves
     // inside that window never creates a context.
-    let built: { dispose: () => void; setIntensity: (v: number) => void } | null = null;
+    let built: { dispose: () => void; setIntensity: (v: number) => void; setAccent: () => void } | null = null;
     let raf = requestAnimationFrame(() => {
       raf = requestAnimationFrame(() => {
         built = build(mount, intensityRef.current);
@@ -354,6 +367,11 @@ function LiquidMetal({ intensity }: { intensity: number }): JSX.Element {
   useEffect(() => {
     apiRef.current?.setIntensity(intensity);
   }, [intensity]);
+
+  // A theme change lands here. The CSS variable has already moved by the
+  // time this fires, so the shader just re-reads it. Subscribing rather
+  // than taking a prop keeps this component out of every parent's render.
+  useEffect(() => subscribeTheme(() => apiRef.current?.setAccent()), []);
 
   // NO z-index, deliberately — this sits with `bg-krypt-radial` and
   // `stars-backdrop` in App's backdrop layer and paints in DOM order, which

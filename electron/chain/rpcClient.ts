@@ -721,12 +721,22 @@ export async function getAccountInfo(httpUrl: string, pubkey: string): Promise<R
 export async function getMultipleAccountInfo(
   httpUrl: string,
   addresses: string[],
+  /**
+   * Default `confirmed`, which is what every caller had before this
+   * existed. The local trade builder passes `processed`: it is quoting
+   * against live curve reserves and sizing a sell from a balance that may
+   * be one slot old, and `getTokenAccountBalance` — the call this batch
+   * replaced there — already read at `processed`. Reading the balance a
+   * commitment staler than before would make a sell placed straight after
+   * a buy see zero tokens and refuse.
+   */
+  commitment: 'processed' | 'confirmed' | 'finalized' = 'confirmed',
 ): Promise<RpcResult<Array<AccountInfo | null>>> {
   if (addresses.length === 0) return { ok: true, message: 'ok', data: [] };
   const r = await call<{ value: Array<{ owner: string; data: [string, string]; lamports: number } | null> }>(
     httpUrl,
     'getMultipleAccounts',
-    [addresses, { encoding: 'base64', commitment: 'confirmed' }],
+    [addresses, { encoding: 'base64', commitment }],
   );
   if (!r.ok) return { ok: false, message: r.message };
   const values = r.data?.value ?? [];

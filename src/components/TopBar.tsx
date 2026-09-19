@@ -7,6 +7,7 @@ import { useEvmState } from '../state/useEvmState';
 import { useModal } from '../state/ModalProvider';
 import { useToast } from '../state/ToastProvider';
 import { cls, shortAddr } from '../utils/format';
+import { useLocale } from '../state/useLocale';
 import { fmtNative } from '../utils/evm';
 
 // The command rail. Left: search and the app-wide CHAIN SWITCH — Solana |
@@ -67,6 +68,7 @@ function ChainSwitch() {
  * rail and nothing else. Switching the chain never arms or disarms anything.
  */
 function ModeToggle() {
+  const { t } = useLocale();
   const { chain } = useTerminal();
   const { status } = useAppState();
   const modal = useModal();
@@ -132,13 +134,13 @@ function ModeToggle() {
         onClick={() => void setMode(false)}
         className={cls('px-3 py-1.5 transition', !live && !evmLoading ? 'bg-emerald-500/20 text-emerald-200' : 'text-krypt-muted hover:text-white')}
       >
-        {evmLoading ? '…' : 'Paper'}
+        {evmLoading ? '…' : t('mode.paper')}
       </button>
       <button
         onClick={() => void setMode(true)}
         className={cls('px-3 py-1.5 transition', live ? 'bg-rose-500/25 text-rose-200 shadow-crimson-glow' : 'text-krypt-muted hover:text-white')}
       >
-        Live
+        {t('mode.live')}
       </button>
     </div>
   );

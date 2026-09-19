@@ -23,8 +23,8 @@
 // read as "holds nothing" rather than as an error.)
 
 import { KRYPTO_TOKEN, isValidMint, waivesFee, type KryptoHolding } from '@shared/krypto';
-import { ataFor, TOKEN_2022_PROGRAM } from './addresses';
-import { getMultipleAccountInfo } from './rpcClient';
+import { ataFor, TOKEN_2022_PROGRAM } from '../chain/addresses';
+import { getMultipleAccountInfo } from '../chain/rpcClient';
 import { logger } from '../system/logger';
 
 /** SPL token account layout: amount is a u64 at offset 64. */

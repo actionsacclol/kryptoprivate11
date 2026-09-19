@@ -34,8 +34,8 @@
 // wrong number on a row a user might trade. `isSolQuoted` says which is
 // which, and the caller is expected to honour it.
 
-import { base58Encode } from '../engine/base58';
-import { getMultipleAccountsRaw } from '../engine/rpcClient';
+import { base58Encode } from '../chain/base58';
+import { getMultipleAccountsRaw } from '../chain/rpcClient';
 
 /** Raydium LaunchLab program — pool accounts are owned by it. */
 export const LAUNCHLAB_PROGRAM = 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj';

@@ -36,7 +36,7 @@ import type { NotifyTarget } from '@shared/types';
 import type { ChainKind } from '@shared/evm';
 import { PositionManager, type TokenMarket } from './positions';
 import { noteActiveMint } from './txBuilder';
-import { getTokenBalanceForMint, getTokenBalanceRawForMint, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from './rpcClient';
+import { getTokenBalanceForMint, getTokenBalanceRawForMint, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from '../chain/rpcClient';
 import { solToLamports } from './curve';
 import * as wallet from '../system/wallet';
 import * as programWatch from './programWatch';
@@ -50,10 +50,11 @@ import * as recorder from './recorder';
 import * as feeEstimator from './feeEstimator';
 import * as jitoTips from './jitoTips';
 import * as tradePrewarm from './prewarm';
-import { quoteSellLamports } from './jupiterRoute';
-import { prewarm, TOKEN_2022_PROGRAM, type PrewarmedAddresses } from './addresses';
+import { quoteSellLamports, liquidationQuotes } from './jupiterRoute';
+import { prewarm, TOKEN_2022_PROGRAM, type PrewarmedAddresses } from '../chain/addresses';
 import { parseMintExtensions, mintWarning } from './mintExtensions';
 import * as tape from '../data/tape';
+import { createChartTicks } from './chartTicks';
 import * as market from '../data/market';
 import * as advOrders from './advOrders';
 import * as ledger from './ledger';
@@ -382,76 +383,15 @@ export class SniperEngine {
   private cashoutWarned = false;
   private lastCashoutAttemptAt = 0;
 
-  // ── Live chart ticks ────────────────────────────────────────────────
-  // Per-mint throttle for `tick` events pushed to the renderer's chart. A
-  // hot pump token trades 30×/s; the chart reads as live at 8 updates/s, so
-  // within each 125 ms window volume is summed and the last price/side wins.
-  // Gated on the tape subscription — the same "this mint is open" signal
-  // that gates tape recording — so the firehose costs nothing otherwise.
-  private static readonly CHART_TICK_GAP_MS = 125;
-  private chartTicks = new Map<
-    string,
-    {
-      lastEmitAt: number;
-      pending: { time: number; priceSol: number; volSol: number; isBuy: boolean } | null;
-      timer: NodeJS.Timeout | null;
-    }
-  >();
-
-  /** Push a live trade to the renderer chart, throttled to ≤8/s per mint.
-   *  `priceSol` is SOL per token; `volSol` is the SOL that changed hands. */
-  private emitChartTick(mint: string, atMs: number, priceSol: number, volSol: number, isBuy: boolean): void {
-    if (!tape.isSubscribed(mint)) return;
-    if (!Number.isFinite(priceSol) || priceSol <= 0) return;
-    let s = this.chartTicks.get(mint);
-    if (!s) {
-      // Drop state for mints no longer open before adding a new one, so the
-      // map tracks the tape's small subscription budget rather than growing.
-      if (this.chartTicks.size >= 16) {
-        for (const [m, st] of this.chartTicks) {
-          if (!tape.isSubscribed(m)) {
-            if (st.timer) clearTimeout(st.timer);
-            this.chartTicks.delete(m);
-          }
-        }
-      }
-      s = { lastEmitAt: 0, pending: null, timer: null };
-      this.chartTicks.set(mint, s);
-    }
-    if (s.pending) {
-      s.pending.time = Math.floor(atMs / 1000);
-      s.pending.priceSol = priceSol;
-      s.pending.volSol += volSol;
-      s.pending.isBuy = isBuy;
-    } else {
-      s.pending = { time: Math.floor(atMs / 1000), priceSol, volSol, isBuy };
-    }
-    if (s.timer) return; // a flush is already scheduled and will carry this trade
-    const wait = s.lastEmitAt + SniperEngine.CHART_TICK_GAP_MS - Date.now();
-    if (wait <= 0) {
-      this.flushChartTick(mint, s);
-    } else {
-      s.timer = setTimeout(() => {
-        s.timer = null;
-        this.flushChartTick(mint, s);
-      }, wait);
-    }
-  }
-
-  private flushChartTick(mint: string, s: { lastEmitAt: number; pending: { time: number; priceSol: number; volSol: number; isBuy: boolean } | null; timer: NodeJS.Timeout | null }): void {
-    const p = s.pending;
-    s.pending = null;
-    s.lastEmitAt = Date.now();
-    if (!p || !tape.isSubscribed(mint)) return;
-    this.emit({ kind: 'tick', mint, time: p.time, priceSol: p.priceSol, volSol: p.volSol, isBuy: p.isBuy });
-  }
-
-  private clearChartTicks(): void {
-    for (const s of this.chartTicks.values()) {
-      if (s.timer) clearTimeout(s.timer);
-    }
-    this.chartTicks.clear();
-  }
+  // ── Live chart ticks ──────────────────────────────────
+  // Throttling the trade firehose down to something a chart can draw lives
+  // in engine/chartTicks.ts. Both closures are deferred, so they read the
+  // constructor's parameter properties when a tick fires rather than while
+  // this field is being initialised.
+  private readonly chartTicks = createChartTicks({
+    emit: (ev) => this.emit(ev),
+    isOpen: (mint) => tape.isSubscribed(mint),
+  });
 
   constructor(
     private getSettings: () => AppSettings,
@@ -1056,7 +996,7 @@ export class SniperEngine {
           tokens: t.tokens,
           priceSol: t.priceSol,
         });
-        this.emitChartTick(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
+        this.chartTicks.push(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
         advOrders.onTick({ mint: t.mint, priceSol: t.priceSol, mcapUsd: null });
         alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: null });
         copyTrade.markToMarket(t.mint, t.priceSol);
@@ -1082,7 +1022,7 @@ export class SniperEngine {
           tokens: t.tokens,
           priceSol: t.priceSol,
         });
-        this.emitChartTick(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
+        this.chartTicks.push(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
         advOrders.onTick({ mint: t.mint, priceSol: t.priceSol, mcapUsd: null });
         alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: t.curvePct });
         copyTrade.markToMarket(t.mint, t.priceSol);
@@ -1110,7 +1050,7 @@ export class SniperEngine {
           tokens: t.tokens,
           priceSol: t.priceSol,
         });
-        this.emitChartTick(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
+        this.chartTicks.push(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
         advOrders.onTick({ mint: t.mint, priceSol: t.priceSol, mcapUsd: null });
         alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: t.curvePct });
         copyTrade.markToMarket(t.mint, t.priceSol);
@@ -1425,7 +1365,7 @@ export class SniperEngine {
     for (const p of this.positions.all()) {
       if (!tape.isSubscribed(p.mint)) priorityFeed.unwatch(p.mint);
     }
-    this.clearChartTicks();
+    this.chartTicks.clear();
     if (!this.running) return { ok: false, message: 'Engine is not running' };
     this.running = false;
     this.feed?.stop();
@@ -2848,7 +2788,7 @@ export class SniperEngine {
     // the holdings read, so it does not compete with it for the RPC bucket.
     void ledger.reconcilePending(httpUrl, owner || null).catch(() => undefined);
     // Liquidation quotes run alongside the price lookups below.
-    const liquidationP = this.liquidationQuotes(holdings);
+    const liquidationP = liquidationQuotes(holdings);
 
     const prices = new Map<string, {
       priceSol: number | null; priceUsd: number | null; marketCapUsd: number | null;
@@ -2952,34 +2892,6 @@ export class SniperEngine {
    * never hold the position panel. A mint that does not quote simply falls
    * back to spot × amount in build(), labelled as such.
    */
-  private async liquidationQuotes(holdings: WalletHolding[]): Promise<Map<string, number>> {
-    const out = new Map<string, number>();
-    const targets = holdings.filter((h) => {
-      try {
-        return BigInt(h.amountRaw) > 0n;
-      } catch {
-        return false;
-      }
-    });
-    const CONCURRENCY = 6;
-    await Promise.all(
-      Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async (_, lane) => {
-        for (let i = lane; i < targets.length; i += CONCURRENCY) {
-          const h = targets[i];
-          try {
-            const q = await Promise.race([
-              quoteSellLamports(h.mint, BigInt(h.amountRaw)),
-              new Promise<null>((r) => setTimeout(() => r(null), 2_500)),
-            ]);
-            if (q) out.set(h.mint, q.lamports);
-          } catch {
-            /* no quote → spot fallback */
-          }
-        }
-      }),
-    );
-    return out;
-  }
 
   /** Real fills from the ledger AND paper fills from the book, newest first.
    *  Paper rows carry `paper: true`; the Trades tab labels and filters them.
@@ -4279,7 +4191,7 @@ export class SniperEngine {
       priceSol,
     });
     this.rememberPrice(ev.mint, priceSol);
-    this.emitChartTick(ev.mint, n.receivedAt, priceSol, Number(ev.solAmount) / 1e9, ev.isBuy);
+    this.chartTicks.push(ev.mint, n.receivedAt, priceSol, Number(ev.solAmount) / 1e9, ev.isBuy);
   }
 
   // ── Position update throttle ───────────────────────────────────────
@@ -4490,7 +4402,7 @@ export class SniperEngine {
           tokens: Number(event.baseAmount) / 1e6,
           priceSol: executedPriceSol(event),
         });
-        this.emitChartTick(mint, n.receivedAt, executedPriceSol(event), Number(event.quoteAmount) / 1e9, event.isBuy);
+        this.chartTicks.push(mint, n.receivedAt, executedPriceSol(event), Number(event.quoteAmount) / 1e9, event.isBuy);
       }
       if (!sAmm.shadowStratLab) continue;
       this.emitLabEvents(this.lab.onAmmTrade(mint, executedPriceSol(event), n.receivedAt));

@@ -9,7 +9,7 @@
 
 import type { FeeUrgency } from '@shared/types';
 import { mentionsRateLimit } from '@shared/rpcErrors';
-import { rpcCall } from './rpcClient';
+import { rpcCall } from '../chain/rpcClient';
 
 export interface FeeEstimate {
   /** Compute-unit price in micro-lamports, per urgency percentile. */

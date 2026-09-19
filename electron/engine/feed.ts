@@ -29,8 +29,8 @@
 import WebSocket from 'ws';
 import { PUMP_PROGRAM_ID, type PumpEvent } from './pumpDecoder';
 import type { AmmEvent } from './ammDecoder';
-import { base58Decode } from './base58';
-import { noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs, parseWireTransaction, resolveAccountKeys, type RawIx } from './rpcClient';
+import { base58Decode } from '../chain/base58';
+import { noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs, parseWireTransaction, resolveAccountKeys, type RawIx } from '../chain/rpcClient';
 import type { FeedSocketStatus, FeedState } from '@shared/types';
 
 /** An event decoded from an emit_cpi inner instruction rather than a log. */

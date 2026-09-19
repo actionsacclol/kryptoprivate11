@@ -1,3 +1,4 @@
+import { useAccent } from '../../state/useAccent';
 // Horizontal share bar for a categorical breakdown (exit reasons, decision
 // mix). One row per category, direct-labeled, purple-tinted by share.
 
@@ -10,8 +11,10 @@ export function DistBar({
 }) {
   const total = items.reduce((a, b) => a + b.value, 0) || 1;
   const sorted = [...items].sort((a, b) => b.value - a.value);
+  // good/bad stay fixed: they are the up/down colours, not the accent.
+  const { rgb } = useAccent();
   const color = (tone?: string): string =>
-    tone === 'good' ? '#22C55E' : tone === 'bad' ? '#EF4444' : '#8B7CE8';
+    tone === 'good' ? '#22C55E' : tone === 'bad' ? '#EF4444' : rgb();
   return (
     <div className="space-y-2">
       {sorted.map((it) => {

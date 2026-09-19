@@ -35,9 +35,9 @@
 //
 // Read-only. Nothing here signs, sends or simulates.
 
-import { bondingCurveFor, globalFor, PUMP_PROGRAM } from './addresses';
-import { base58Decode } from './base58';
-import { getAccountInfo, getSignaturesForAddress, getTransaction } from './rpcClient';
+import { bondingCurveFor, globalFor, PUMP_PROGRAM } from '../chain/addresses';
+import { base58Decode } from '../chain/base58';
+import { getAccountInfo, getSignaturesForAddress, getTransaction } from '../chain/rpcClient';
 import { BUY_DISC, SELL_DISC, parseCurve, parseGlobal } from './txBuilder';
 
 export interface DecoderCheck {

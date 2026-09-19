@@ -17,10 +17,10 @@ import {
   TransactionInstruction,
   VersionedTransaction,
 } from '@solana/web3.js';
-import { getTokenAccountsByOwner, getLatestBlockhash, simulateTransaction } from './rpcClient';
+import { getTokenAccountsByOwner, getLatestBlockhash, simulateTransaction } from '../chain/rpcClient';
 import { broadcastAndConfirm } from './broadcast';
-import { base58Encode } from './base58';
-import { TOKEN_PROGRAM, TOKEN_2022_PROGRAM } from './addresses';
+import { base58Encode } from '../chain/base58';
+import { TOKEN_PROGRAM, TOKEN_2022_PROGRAM } from '../chain/addresses';
 import * as wallet from '../system/wallet';
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';

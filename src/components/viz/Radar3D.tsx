@@ -12,6 +12,7 @@
 // stay valid even as faded particles are compacted out of the buffer.
 
 import { useEffect, useRef, useState } from 'react';
+import { accentSoftHex } from '../../state/theme';
 import * as THREE from 'three';
 import type { LaunchRow } from '@shared/types';
 import { makeGlowTexture, makeRuneTexture } from './arcaneTextures';
@@ -37,7 +38,11 @@ interface Shockwave {
   live: boolean;
 }
 
-const COLOR_NEW = new THREE.Color('#B7A6FF');
+// Read at module load from the theme's own variable. THREE bakes a colour
+// into buffers, so a running scene keeps the hue it was built with and picks
+// up a theme change when it is next mounted - navigating away and back. The
+// two below it are NOT themed: gold means entered, crimson means rejected.
+const COLOR_NEW = new THREE.Color(accentSoftHex());
 const COLOR_ENTERED = new THREE.Color('#D9B45B');
 const COLOR_REJECTED = new THREE.Color('#61141f');
 

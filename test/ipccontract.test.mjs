@@ -93,4 +93,99 @@ for (const [channel, expected] of Object.entries(CHANNELS)) {
   ok('every chain-taking handler validates the chain before using it');
 }
 
+{
+  // The second way the two sides drift, and the one that actually shipped:
+  // main REBUILDS the renderer's object field by field ("the renderer's
+  // object is a claim"), and a field left out of that rebuild is silently
+  // dropped. It had happened three times before anyone went looking —
+  // `maxCopiesPerMinute` (fixed when a user noticed their rate limit did
+  // nothing), then `chain` on BOTH save handlers: a script written on the BNB
+  // tab was stored as a Solana script, and a copy config on an EVM chain was
+  // judged by Solana's address rules and refused a valid 0x leader, so
+  // following a leader on Robinhood or BNB was impossible from the form that
+  // offers it. `walletId` went the same way — the wallet picked to copy with
+  // fell back to the active signer.
+  //
+  // A field the renderer can set must be READ by the handler that rebuilds it.
+  const REBUILDERS = [
+    {
+      channel: 'automation:save',
+      until: 'automation:remove',
+      source: '../shared/automation.ts',
+      type: 'UserScript',
+      // Ids and timestamps are assigned by main, and arming a script is its
+      // own confirmed act (automation:setEnabled).
+      ownedByMain: ['createdAt', 'updatedAt', 'enabled'],
+    },
+    {
+      channel: 'copy:save',
+      until: 'copy:remove',
+      source: '../shared/copytrade.ts',
+      type: 'CopyConfig',
+      ownedByMain: ['createdAt'],
+    },
+    // The other three rebuilders. All complete when this was written
+    // (2026-09-18) - they are here so the NEXT field added to one of these
+    // types cannot be forgotten on the way across, which is the only way
+    // this bug has ever happened.
+    {
+      channel: 'templates:save',
+      until: 'templates:delete',
+      source: '../shared/orderTemplates.ts',
+      type: 'OrderTemplate',
+      ownedByMain: [],
+      chainless: true,
+    },
+    {
+      channel: 'orders:create',
+      until: 'orders:cancel',
+      source: '../shared/orders.ts',
+      type: 'NewOrderRequest',
+      ownedByMain: [],
+      chainless: true,
+    },
+    {
+      channel: 'alerts:create',
+      until: 'alerts:remove',
+      source: '../shared/alerts.ts',
+      type: 'NewAlertRequest',
+      ownedByMain: [],
+      chainless: true,
+    },
+  ];
+
+  for (const r of REBUILDERS) {
+    const src = fs.readFileSync(new URL(r.source, import.meta.url), 'utf8');
+    const at = src.indexOf(`export interface ${r.type} {`);
+    assert.ok(at > 0, `${r.source} declares ${r.type}`);
+    const iface = src.slice(at, src.indexOf('\n}', at));
+    const fields = [...iface.matchAll(/^\s{2}(\w+)\??:/gm)].map((m) => m[1]);
+    if (!r.chainless) {
+      assert.ok(fields.includes('chain'), `${r.type} has a chain field to check for`);
+    }
+    const start = ipc.indexOf(`ipcMain.handle('${r.channel}'`);
+    const end = ipc.indexOf(`ipcMain.handle('${r.until}'`);
+    assert.ok(start > 0 && end > start, `found the ${r.channel} handler body`);
+    const body = ipc.slice(start, end);
+    // Each handler names the incoming payload differently - `r`, `t`,
+    // `req`. Read the binding out of `const <name> = raw as ...` rather
+    // than assuming one, so this pin does not quietly stop checking a
+    // handler that renamed a local.
+    const bind = new RegExp('const (\\w+) = raw as').exec(body);
+    assert.ok(bind, `${r.channel} binds the raw payload to a local`);
+    const v = bind[1];
+    const owned = new Set(r.ownedByMain);
+    const checked = fields.filter((f) => !owned.has(f));
+    for (const f of checked) {
+      assert.ok(body.includes(`${v}.${f}`), `${r.channel} reads ${v}.${f} — a ${r.type} field it drops is a field the user silently loses`);
+    }
+    // Reading it is not enough: `chain` was read, validated, and then left out
+    // of the object that was actually saved.
+    if (!r.chainless) {
+      assert.ok(/\n\s+chain[,:]/.test(body), `${r.channel} puts the chain INTO the object it saves, not just into a local`);
+    }
+    ok(`${r.channel} rebuilds every user-set ${r.type} field (${checked.length} of them)${r.chainless ? '' : ' and saves the chain'}`);
+  }
+}
+
 console.log(`\nipccontract: ${passed}/${passed} passed`);

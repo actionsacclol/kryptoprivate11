@@ -27,7 +27,7 @@
 // signing path that costs nothing is a thing to be exploited, not a feature.
 
 import { draftProblems, launchWalletId, type LaunchChain, type LaunchConfig, type LaunchDraft, type LaunchOutcome } from '@shared/launch';
-import { getBalance } from './rpcClient';
+import { getBalance } from '../chain/rpcClient';
 import * as wallet from '../system/wallet';
 import { launchSolana } from './launchSolana';
 import { launchEvm } from '../evm/launch';

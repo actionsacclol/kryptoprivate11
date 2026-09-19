@@ -178,14 +178,28 @@ export const TERMS_OF_SERVICE: LegalDocument = {
       ],
     },
     {
-      heading: '15. Changes to these Terms',
+      // Added 2026-09-18, when the interface gained eight languages. The
+      // documents are not translated: a mistranslated indemnity or
+      // arbitration clause is worse than one in a language the reader has to
+      // work at, and nobody here can verify a legal translation in Korean or
+      // Vietnamese. The app says so at the language picker; this is the same
+      // statement in the place that makes it binding.
+      heading: '15. Language',
+      body: [
+        'These Terms, and every other document referenced by them, are written and provided in English only. The English text is the authoritative version and governs your agreement with us.',
+        'Parts of the software’s interface — menus, buttons, settings and the first-run walkthrough — may be shown in other languages for convenience. Those translations are not part of this agreement. Where a translated interface string and these Terms appear to differ, these Terms prevail.',
+        'If you do not read English well enough to understand these Terms, do not accept them. Have them translated by someone you trust, or do not use the software.',
+      ],
+    },
+    {
+      heading: '16. Changes to these Terms',
       body: [
         'We may update these Terms. Material changes come with a new version number, and the software will ask you to review and accept the updated Terms before you continue using it.',
         'If you do not accept the updated Terms, stop using the software.',
       ],
     },
     {
-      heading: '16. Contact',
+      heading: '17. Contact',
       body: [`Questions about these Terms: ${CONTACT_EMAIL}.`],
     },
   ],
@@ -542,6 +556,25 @@ export const CLICKWRAP_SUMMARY: SummaryPoint[] = [
   {
     title: `You are ${MINIMUM_AGE} or older`,
     detail: 'This software moves real money, so it is not for minors.',
+    flagged: true,
+  },
+  {
+    // Terms section 17 already carries the sanctions representation, but a
+    // representation nobody was shown is a representation nobody made. This
+    // puts it in front of the user at the moment they accept, so the
+    // acceptance record - which hashes the exact text shown - is evidence
+    // they affirmed it. It is the only sanctions control an app with no
+    // server can actually perform.
+    title: 'You are allowed to use this where you are',
+    detail:
+      'You confirm you are not in a sanctioned country, not acting for anyone who is, and not on a restricted-party list such as the US Treasury’s SDN list.',
+    flagged: true,
+  },
+  {
+    // Added with the eight-language interface. See Terms section 15.
+    title: 'These documents are in English, and English governs',
+    detail:
+      'The interface can be shown in other languages. These documents cannot — they are English only, and the English text is what binds. If you cannot read it, do not accept it.',
     flagged: true,
   },
   {

@@ -3,7 +3,8 @@ import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { TokenSummary } from '@shared/market';
 import type { AppSettings, LiveState, WalletInfo } from '@shared/types';
 import { FEE_BPS, splitFee } from '@shared/fees';
-import { KRYPTO_FEE_WAIVER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
+import { KRYPTO_TOKEN } from '@shared/krypto';
+import { WaiverHint } from './WaiverHint';
 import { useKryptoWaiver } from '../../state/useKryptoWaiver';
 import { cls, fmtUsd, shortAddr } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
@@ -240,10 +241,9 @@ export function TradePanel({
                 <span className="text-krypt-muted/60"> · incl. Krypt {(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side</span>
                 {/* The way out of that line, where the line is. Someone told
                     the fee is charged should be told what removes it in the
-                    same breath, not on another page. */}
-                <span className="text-krypt-muted/45">
-                  {' '}· hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} to waive it
-                </span>
+                    same breath, not on another page - and should be able to
+                    READ it, which at muted/45 on a dark panel they could not. */}
+                {' '}· <WaiverHint waived={waiver.waived} />
               </>
             )}
           </span>

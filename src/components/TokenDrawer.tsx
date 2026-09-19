@@ -10,6 +10,7 @@ import { useModal } from '../state/ModalProvider';
 import { Badge } from './common';
 import { Sparkline } from './viz/Sparkline';
 import { cls, fmtAgo, fmtPrice, shortAddr } from '../utils/format';
+import { useAccent } from '../state/useAccent';
 
 function Field({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' | 'gold' }) {
   return (
@@ -25,6 +26,8 @@ function Field({ label, value, tone }: { label: string; value: string; tone?: 'g
 
 /** Circular seal gauge — share of a whole (0..1), crimson past the danger mark. */
 function SealGauge({ label, share, dangerAt }: { label: string; share: number; dangerAt: number }) {
+  // Crimson stays crimson - that one means danger, not decoration.
+  const accent = useAccent().rgb();
   const pct = Math.max(0, Math.min(1, share));
   const danger = pct >= dangerAt;
   const r = 17;
@@ -35,7 +38,7 @@ function SealGauge({ label, share, dangerAt }: { label: string; share: number; d
         <circle cx="22" cy="22" r={r} fill="none" stroke="rgba(240,237,226,0.08)" strokeWidth="3" />
         <circle
           cx="22" cy="22" r={r} fill="none"
-          stroke={danger ? '#E5484D' : '#8B7CE8'}
+          stroke={danger ? '#E5484D' : accent}
           strokeWidth="3" strokeLinecap="round"
           strokeDasharray={`${c * pct} ${c}`}
         />

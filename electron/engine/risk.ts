@@ -6,7 +6,7 @@
 // synchronous. Fail-closed: if the mint account can't be read, that is
 // itself a flag — the scorer treats unverified safety as zero, not as fine.
 
-import { getAccountInfo } from './rpcClient';
+import { getAccountInfo } from '../chain/rpcClient';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, type PumpCreateEvent } from './pumpDecoder';
 import type { RiskFlag } from '@shared/types';
 

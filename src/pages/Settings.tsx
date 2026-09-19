@@ -12,6 +12,9 @@ import { RpcKeyWarning } from '../components/terminal/RpcKeyWarning';
 import { EvmSettingsCard } from '../components/terminal/EvmSettingsCard';
 import { feePctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
 import { KRYPTO_FEE_WAIVER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
+import { LanguagePicker } from '../components/LanguagePicker';
+import { ThemePicker } from '../components/ThemePicker';
+import { useLocale } from '../state/useLocale';
 import { useKryptoWaiver } from '../state/useKryptoWaiver';
 import type { RecorderStats } from '../../electron/engine/recorder';
 
@@ -90,6 +93,7 @@ function RecorderStatsPanel({ enabled }: { enabled: boolean }) {
 
 
 export function SettingsPage() {
+  const { t } = useLocale();
   const { settings, updateSettings, status } = useAppState();
   const toast = useToast();
   const waiver = useKryptoWaiver();
@@ -166,11 +170,39 @@ export function SettingsPage() {
   };
 
   return (
-    <Page title="Settings" subtitle="Market data providers, RPC endpoints, recorder, presence.">
+    <Page title={t('settings.title')} subtitle={t('settings.subtitle')}>
+      {/* First, and above the data providers: someone who cannot read the
+          page cannot use anything below it. */}
+      <Section
+        title={t('lang.title')}
+        description="Menus, buttons, settings and the first-run walkthrough. Legal documents and anything describing your money stay in English, which is the version that governs."
+      >
+        <Card>
+          <LanguagePicker />
+        </Card>
+      </Section>
+
+      {/* Beside Language, because both answer "how does this app read to
+          me" - and because buried under Display nobody found it. */}
+      <Section title={t('settings.theme')} description={t('settings.themeHint')}>
+        <Card>
+          <ThemePicker />
+        </Card>
+      </Section>
+
+      {/* The walkthrough, on demand. It resets NOTHING - it only clears the
+          'you have seen this' bit, so the screens come back. */}
+      <Section title={t('settings.replay')} description={t('settings.replayHint')}>
+        <Card>
+          <GhostButton onClick={() => void updateSettings({ onboarded: false })}>
+            {t('settings.replay')}
+          </GhostButton>
+        </Card>
+      </Section>
       <MarketDataSettings settings={settings} updateSettings={updateSettings} />
       <HotkeySettings settings={settings} updateSettings={updateSettings} />
       <Section
-        title="Solana RPC"
+        title={t('settings.solanaRpc')}
         description="Works out of the box on free public endpoints. A free Helius key upgrades the calls that decide real trades; the feed itself races multiple free sockets."
       >
         <Card className="space-y-3">
@@ -332,21 +364,21 @@ export function SettingsPage() {
       </Section>
 
       <Section
-        title="Chat bots"
+        title={t('settings.chatBots')}
         description="Telegram and Discord. Bring your own bot, pair it to your account, and query the terminal from your phone. Read-only — no command can trade."
       >
         <BotsPanel settings={settings} onSettings={(patch) => void updateSettings(patch)} />
       </Section>
 
       <Section
-        title="AI analysis"
+        title={t('settings.aiAnalysis')}
         description="Bring your own OpenAI or Anthropic key for an LLM second opinion on a token. Off by default; a local, on-demand feature that spends your own API credits."
       >
         <AiSettingsPanel settings={settings} onSettings={(patch) => void updateSettings(patch)} />
       </Section>
 
       <Section
-        title="Fees and referral"
+        title={t('settings.feesAndReferral')}
         description="What Krypt charges, and who gets credit for bringing you here."
       >
         <Card>
@@ -368,7 +400,7 @@ export function SettingsPage() {
                   <>
                     Krypt takes <span className="text-white">{feePctLabel()} of each trade</span>, both sides — about half
                     what most memecoin terminals charge, where 1% is the going rate.{' '}
-                    <span className="text-white/80">
+                    <span className="font-semibold text-amber-300">
                       Hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in this app and it
                       is waived entirely.
                     </span>{' '}
@@ -404,7 +436,7 @@ export function SettingsPage() {
       </Section>
 
       <EvmSettingsCard settings={settings} updateSettings={updateSettings} />
-      <Section title="General">
+      <Section title={t('settings.general')}>
         <div className="grid lg:grid-cols-2 gap-3">
           <Switch
             checked={settings.recorderEnabled}
@@ -445,7 +477,7 @@ export function SettingsPage() {
         </div>
       </Section>
 
-      <Section title="Display" description="For a slow machine, or one whose graphics driver does not like the app: stutter, a blue screen mid-session, or a driver that keeps crashing.">
+      <Section title={t('settings.display')} description="For a slow machine, or one whose graphics driver does not like the app: stutter, a blue screen mid-session, or a driver that keeps crashing.">
         <div className="grid lg:grid-cols-2 gap-3">
           <Switch
             checked={settings.reduceEffects}
@@ -462,7 +494,7 @@ export function SettingsPage() {
         </div>
       </Section>
 
-      <Section title="Data collection" description="Where recordings are stored and how much of the chain we capture.">
+      <Section title={t('settings.dataCollection')} description="Where recordings are stored and how much of the chain we capture.">
         <Card className="space-y-3">
           <div>
             <div className="text-xs font-semibold uppercase tracking-wider text-krypt-muted mb-1.5">Store directory</div>
@@ -504,7 +536,7 @@ export function SettingsPage() {
         </Card>
       </Section>
 
-      <Section title="Creator blocklist" description="Import known scam / drainer / sniper-ring addresses (one per line, or JSON array). Imported entries are hard-reject risk flags.">
+      <Section title={t('settings.creatorBlocklist')} description="Import known scam / drainer / sniper-ring addresses (one per line, or JSON array). Imported entries are hard-reject risk flags.">
         <BlocklistImporter />
       </Section>
     </Page>

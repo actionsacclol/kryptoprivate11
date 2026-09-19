@@ -31,8 +31,8 @@ import {
   MessageV0,
   VersionedTransaction,
 } from '@solana/web3.js';
-import { getAccountInfo, getBlockHeight, getSignatureStatuses, isChallengeResponse, sendRawTransaction, noteRpcRejection } from './rpcClient';
-import { HELIUS_TIP_ACCOUNTS, JITO_TIP_ACCOUNTS } from './tipAccounts';
+import { getAccountInfo, getBlockHeight, getSignatureStatuses, isChallengeResponse, sendRawTransaction, noteRpcRejection } from '../chain/rpcClient';
+import { HELIUS_TIP_ACCOUNTS, JITO_TIP_ACCOUNTS } from '../chain/tipAccounts';
 import * as confirmSocket from './confirmSocket';
 
 /** Exported so prewarm.ts can open these connections before a trade needs them. */

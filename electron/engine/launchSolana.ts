@@ -28,7 +28,7 @@ import { ComputeBudgetProgram, Keypair, PublicKey, TransactionMessage, Versioned
 import * as wallet from '../system/wallet';
 import { logger } from '../system/logger';
 import { createV2Instruction, type CreateV2Args } from './pumpLaunch';
-import { getBlockHeight, getLatestBlockhashInfo, getSignatureStatuses, sendRawTransaction, simulateTransaction, getBalance } from './rpcClient';
+import { getBlockHeight, getLatestBlockhashInfo, getSignatureStatuses, sendRawTransaction, simulateTransaction, getBalance } from '../chain/rpcClient';
 import { anchorReason } from './liveSigner';
 
 /**

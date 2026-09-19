@@ -32,7 +32,7 @@
 // against harvested mainnet events — see test/fixtures/dbc-events.json and
 // test/dbcdecoder.test.mjs. Nothing here is guessed.
 
-import { base58Decode, base58Encode } from './base58';
+import { base58Decode, base58Encode } from '../chain/base58';
 
 export const DBC_PROGRAM_ID = 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN';
 

@@ -20,7 +20,7 @@ import type { AiAnalysis } from '@shared/ai';
 import * as wallet from './system/wallet';
 import * as fund from './engine/fund';
 import * as lab from '@shared/lab';
-import { getBalance } from './engine/rpcClient';
+import { getBalance } from './chain/rpcClient';
 import * as bots from './system/bots';
 import * as heliusBudget from './system/heliusBudget';
 import * as integrityGuard from './system/integrityGuard';
@@ -33,6 +33,8 @@ import * as evmWallet from './evm/evmWallet';
 import { SCOUT_CHAINS, SCOUT_SCAN_HOURS, rankScout, summarise, type ScoutChain, type ScoutScanHours, type ScoutSort, type ScoutWindow } from '@shared/walletScout';
 import * as evmDiscover from './evm/discover';
 import * as merkl from './data/providers/merkl';
+import * as callouts from './data/providers/pumpCallouts';
+import * as dexMeta from './data/providers/dexscreenerMeta';
 import { clearRpcRejection } from './evm/client';
 import { EVM_CHAINS, EVM_CHAIN_META, isEvmAddress, isEvmChain, type EvmChainKind, type ChainKind } from '@shared/evm';
 import * as launcher from './engine/launcher';
@@ -411,7 +413,7 @@ export function registerIpc(): void {
       // once would keep being skipped for fifteen minutes after the user
       // pasted the corrected key.
       if (next.rpc.heliusApiKey !== before.rpc.heliusApiKey || next.rpc.httpUrl !== before.rpc.httpUrl) {
-        void import('./engine/rpcClient').then((m) => m.clearRpcRejections());
+        void import('./chain/rpcClient').then((m) => m.clearRpcRejections());
       }
       // Same for the EVM chains: a corrected Alchemy key or RPC URL gets a
       // fresh try, and a chain switched on at runtime warms its launch
@@ -860,7 +862,7 @@ export function registerIpc(): void {
   // Whether an endpoint is currently refusing our key. Polled by the panel
   // the key is pasted into, so the answer appears where the fix is made.
   ipcMain.handle('rpc:health', async () => {
-    const m = await import('./engine/rpcClient');
+    const m = await import('./chain/rpcClient');
     return ok('ok', { rejected: m.rpcCredentialsRejected() });
   });
 
@@ -2543,6 +2545,14 @@ export function registerIpc(): void {
     if (copyChain === 'solana' ? !isAddress(walletAddr) : !isEvmAddress(walletAddr)) return fail(`Enter a valid wallet address for ${copyChain === 'solana' ? 'Solana' : EVM_CHAIN_META[copyChain].name}`);
     const clean = {
       id: typeof r.id === 'string' && r.id ? r.id : undefined,
+      // Both of these were checked above and then left out of the rebuild,
+      // so neither survived a save. Without the chain, `validateConfig`
+      // judged a 0x leader by Solana’s rules and refused a valid address:
+      // following a leader on Robinhood or BNB was impossible from the form
+      // that offers it. Without walletId, the wallet the user picked to copy
+      // with fell back to the active signer.
+      chain: copyChain,
+      walletId: r.walletId ?? null,
       wallet: walletAddr,
       label: String(r.label ?? '').slice(0, 40),
       enabled: r.enabled === true,
@@ -2667,6 +2677,12 @@ export function registerIpc(): void {
     const clean = {
       id: typeof r.id === 'string' && r.id ? r.id : undefined,
       name: String(r.name ?? '').trim().slice(0, 60),
+      // The chain is the script's most consequential field: it decides which
+      // events it hears and, live, which coin it spends. Rebuilding `clean`
+      // without it silently filed every script under Solana - a new BNB
+      // script became a Solana one, and the in-editor Chain picker could not
+      // move a script at all (user report, 2026-09-18).
+      chain: (r.chain === 'robinhood' || r.chain === 'bnb' ? r.chain : 'solana') as ChainKind,
       kind: r.kind === 'code' ? ('code' as const) : ('rules' as const),
       enabled: false, // arming is its own act (automation:setEnabled)
       mode: r.mode === 'live' ? ('live' as const) : ('paper' as const),
@@ -2710,6 +2726,43 @@ export function registerIpc(): void {
     return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
   });
 
+  // ── information hub ───────────────────────────────
+  //
+  // Paid placement and fresh token profiles, from a host the app already
+  // contacts. The RAIL half of the hub needs no channel of its own: the
+  // page assembles it from `market:providers` and the engine snapshot it
+  // already reads, so nothing new is polled to draw it.
+  ipcMain.handle('wire:boosts', async () => {
+    const rows = await dexMeta.boostedTokens();
+    return rows ? ok('ok', rows) : fail('DexScreener is not answering right now');
+  });
+
+  ipcMain.handle('wire:profiles', async () => {
+    const rows = await dexMeta.tokenProfiles();
+    return rows ? ok('ok', rows) : fail('DexScreener is not answering right now');
+  });
+
+  // ── pump.fun callouts (read-only intel) ──────────────────
+  //
+  // Nothing here trades, arms anything or spends a lamport, and no URL
+  // crosses this boundary in either direction: the renderer asks for
+  // callouts, main owns the host. A failed fetch is `fail(...)` so the panel
+  // can say the feed is unreachable instead of showing an empty list, which
+  // would read as "nobody is calling anything".
+  ipcMain.handle('callouts:feed', async () => {
+    const rows = await callouts.calloutFeed();
+    return rows ? ok('ok', rows) : fail('pump.fun callouts are not answering right now');
+  });
+
+  ipcMain.handle('callouts:forMint', async (_e, mint: unknown, chain: unknown) => {
+    const c = chain === 'robinhood' || chain === 'bnb' ? chain : 'solana';
+    const m = typeof mint === 'string' ? mint.trim() : '';
+    // Solana mints are base58 addresses; the EVM chains are 0x addresses.
+    // Checked here so a malformed string never becomes a path segment.
+    if (c === 'solana' ? !isAddress(m) : !isEvmAddress(m)) return fail('Invalid token address');
+    const rows = await callouts.calloutsForMint(m, c);
+    return rows ? ok('ok', rows) : fail('pump.fun callouts are not answering right now');
+  });
   // ── log ──────────────────────────────────────────────────────────
   ipcMain.handle('log:recent', () => ok('ok', logger.recent()));
 }

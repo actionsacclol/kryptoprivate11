@@ -17,6 +17,7 @@
 // calls carry `priority: true` — they never queue behind Discover.
 
 import { getJson, memo, type FetchResult } from '../data/http';
+import type { WalletHolding } from '@shared/types';
 import { KNOWN_TRADE_PROGRAMS } from '../system/signPolicy';
 
 const WSOL = 'So11111111111111111111111111111111111111112';
@@ -284,3 +285,48 @@ export async function quoteSellLamports(mint: string, raw: bigint): Promise<{ la
     return { lamports, route: (quote.data.routePlan ?? []).map((r) => r.swapInfo?.label ?? '?') };
   });
 }
+
+/**
+ * What each holding would actually FETCH if sold right now, in lamports.
+ *
+ * Not the spot price times the balance: a real exit walks the book, and on a
+ * thin memecoin those are different numbers. A mint with no quote is absent
+ * from the map and the caller falls back to spot rather than reporting zero.
+ *
+ * Six lanes, each quote capped at 2.5 s: a wallet with thirty dead tokens in
+ * it must not hold the whole portfolio build hostage to the slowest router.
+ *
+ * Lived in engine.ts as a private method with no `this` in it (2026-09-18).
+ * It belongs beside the quote it calls, not in portfolio.ts: that module is
+ * pure assembly, and giving it a network call made its test bundle drag in
+ * web3.js to compute arithmetic.
+ */
+export async function liquidationQuotes(holdings: WalletHolding[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const targets = holdings.filter((h) => {
+    try {
+      return BigInt(h.amountRaw) > 0n;
+    } catch {
+      return false;
+    }
+  });
+  const CONCURRENCY = 6;
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async (_, lane) => {
+      for (let i = lane; i < targets.length; i += CONCURRENCY) {
+        const h = targets[i];
+        try {
+          const q = await Promise.race([
+            quoteSellLamports(h.mint, BigInt(h.amountRaw)),
+            new Promise<null>((r) => setTimeout(() => r(null), 2_500)),
+          ]);
+          if (q) out.set(h.mint, q.lamports);
+        } catch {
+          /* no quote → spot fallback */
+        }
+      }
+    }),
+  );
+  return out;
+}
+

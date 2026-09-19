@@ -22,6 +22,9 @@ import { entityInfo } from '@shared/legal/entity';
 import type { RouteId } from './Sidebar';
 import { useAppState } from '../state/AppStateProvider';
 import { GhostButton, PrimaryButton } from './common';
+import { LanguagePicker } from './LanguagePicker';
+import { ThemePicker } from './ThemePicker';
+import { useLocale } from '../state/useLocale';
 import { cls } from '../utils/format';
 
 // First run.
@@ -44,7 +47,7 @@ import { cls } from '../utils/format';
 // onboarding that traps someone who just wants to look around is a worse
 // product than one they can escape.
 
-type Step = 'loading' | 'legal' | 'referral' | 'keys' | 'wallet' | 'ready' | 'done';
+type Step = 'loading' | 'language' | 'legal' | 'referral' | 'keys' | 'wallet' | 'ready' | 'done';
 
 const FLOW: Step[] = ['referral', 'keys', 'wallet', 'ready'];
 
@@ -189,6 +192,10 @@ export function Onboarding({
   const info = entityInfo();
 
   const [step, setStep] = useState<Step>('loading');
+  // Onboarding is the one screen that must speak the user language before
+  // they have had a chance to set it, so it reads the resolved locale itself.
+  const lang = useLocale();
+  const [legalDone, setLegalDone] = useState(false);
   const gated = step !== 'done';
   useEffect(() => {
     onGateChange?.(gated);
@@ -211,8 +218,19 @@ export function Onboarding({
   const refresh = useCallback(async () => {
     const r = await window.krypt.legal.status();
     const accepted = r.ok && r.data ? r.data.accepted : false;
+    setLegalDone(accepted);
+    // Replaying from Settings: the documents are already accepted, so start
+    // at the language/colour screen and let Continue skip the legal gate
+    // rather than asking someone to re-accept what they accepted once.
+    if (accepted && !settings.onboarded) {
+      setStep('language');
+      return;
+    }
     if (!accepted) {
-      setStep('legal');
+      // Language first. The next screen is a page of English legal text, and
+      // asking someone to read that before offering to change the language
+      // is asking the people who most need this feature to find it last.
+      setStep('language');
       return;
     }
     setStep(settings.onboarded ? 'done' : 'referral');
@@ -284,6 +302,21 @@ export function Onboarding({
           </div>
           <StepDots current={step} />
         </div>
+
+        {/* ── 0. Language ─────────────────────── */}
+        {step === 'language' && (
+          <>
+            <div className="px-6 py-4 max-h-[54vh] overflow-y-auto space-y-5">
+              <LanguagePicker />
+              <div className="border-t border-white/10 pt-4">
+                <ThemePicker />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-white/10 flex justify-end">
+              <PrimaryButton onClick={() => setStep(legalDone ? 'referral' : 'legal')}>{lang.t('action.continue')}</PrimaryButton>
+            </div>
+          </>
+        )}
 
         {/* ── 1. Legal gate ─────────────────────────────────────────── */}
         {step === 'legal' && reading && <Reader onBack={() => setReading(false)} />}

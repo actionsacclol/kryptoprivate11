@@ -5,6 +5,7 @@ import { EVM_CHAIN_META, EVM_FEE_BPS, VENUE_LABEL, type EvmChainKind, type EvmQu
 import { cls, fmtUsd, shortAddr } from '../../utils/format';
 import { KRYPTO_TOKEN } from '@shared/krypto';
 import { useKryptoWaiver } from '../../state/useKryptoWaiver';
+import { WaiverHint } from './WaiverHint';
 import { fmtNative, fmtTokens, isPendingResult, PENDING_TOAST, rawToNumber, weiToNumber } from '../../utils/evm';
 import { useToast } from '../../state/ToastProvider';
 import { useModal } from '../../state/ModalProvider';
@@ -325,6 +326,10 @@ export function EvmTradePanel({
                   : '—'}
           </span>
         </div>
+        {/* The waiver is every chain's, so the way out belongs on every
+            chain's fee line. `charged` keeps it off a panel that is not
+            taking a fee in the first place. */}
+        <WaiverHint waived={waiver.waived} charged={feesOn} className="text-right" />
         <div className="flex items-center justify-between gap-3">
           <span className="text-krypt-muted/80">Gas (est.)</span>
           <span className="font-mono text-white/70 tabular-nums">{quote && gasNative !== null ? toUsd(gasNative) : '—'}</span>

@@ -23,7 +23,7 @@
 import { FeedManager, type LogNotification } from './feed';
 export { DBC_PROGRAM_ID, decodeDbcEventB58 } from './dbcDecoder';
 import { DBC_PROGRAM_ID, decodeDbcEventB58, dedupeSwaps, executedPriceSol, swapSol, swapTokens, type DbcSwapEvent } from './dbcDecoder';
-import { getSignaturesForAddress, getTransaction, resolveAccountKeys } from './rpcClient';
+import { getSignaturesForAddress, getTransaction, resolveAccountKeys } from '../chain/rpcClient';
 
 /** How many pools may be watched at once. The tape allows 8 subscriptions;
  *  this is deliberately smaller because each pool costs RPC calls. */

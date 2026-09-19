@@ -31,9 +31,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ed25519 } from '@noble/curves/ed25519';
 import { Keypair, VersionedTransaction } from '@solana/web3.js';
-import { base58Encode, base58Decode } from '../engine/base58';
+import { base58Encode, base58Decode } from '../chain/base58';
 import { logger } from './logger';
-import { getBalance } from '../engine/rpcClient';
+import { getBalance } from '../chain/rpcClient';
 import { checkOutflow, type SignPolicy } from './signPolicy';
 import {
   activeWallet,

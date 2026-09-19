@@ -17,8 +17,12 @@ import {
   getTokenLargestAccounts,
   getTokenSupply,
   type LargestAccount,
-} from '../engine/rpcClient';
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '../engine/pumpDecoder';
+} from '../chain/rpcClient';
+// The same two ids also sit in engine/pumpDecoder as TOKEN_PROGRAM_ID and
+// TOKEN_2022_PROGRAM_ID - byte-identical, two names. These are the canonical
+// copies: chain constants belong with the chain primitives, and the data
+// layer has no business reaching into a decoder for them.
+import { TOKEN_2022_PROGRAM as TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM as TOKEN_PROGRAM_ID } from '../chain/addresses';
 import { memo } from './http';
 import { holderPct, type HolderReport, type HolderRow } from '@shared/market';
 

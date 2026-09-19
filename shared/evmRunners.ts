@@ -29,7 +29,9 @@
 //  * Outcomes are only counted once a launch has had time to graduate, so the
 //    denominator is never quietly inflated by launches still in flight.
 
-import type { EvmChainKind } from './evm';
+// From the leaf, not from `./evm`: that file imports this one for its own
+// defaults, and taking the type from there was the codebase's only cycle.
+import type { EvmChainKind } from './chainKind';
 
 /** Buyer-count buckets. Edges are inclusive lower bounds. */
 export const BUYER_BUCKETS = [0, 1, 3, 6, 11, 21] as const;

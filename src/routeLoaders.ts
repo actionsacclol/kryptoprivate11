@@ -18,6 +18,7 @@ export const ROUTE_LOADERS = {
   bridge: () => import('./pages/Bridge'),
   watchlist: () => import('./pages/Watchlist'),
   runners: () => import('./pages/Runners'),
+  wire: () => import('./pages/Wire'),
   creator: () => import('./pages/lab/Creator'),
   funder: () => import('./pages/lab/Funder'),
   scripts: () => import('./pages/Scripts'),

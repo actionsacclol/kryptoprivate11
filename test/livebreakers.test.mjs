@@ -195,7 +195,10 @@ test('engine: manualSell passes `local` for EVERY sell, and the builder sizes pa
   assert.match(signer, /sellPct: sellPct \?\? undefined,/, 'the signer forwards the share to buildLocalTrade');
   assert.match(signer, /localCannotSize = p\.action === 'sell' && sellPct === null/, 'a token-denominated numeric sell still skips the local builder');
   const builder = fs.readFileSync(new URL('../electron/engine/txBuilder.ts', import.meta.url), 'utf8');
-  assert.match(builder, /amount = sellAmountFor\(bal\.data, p\.sellPct\)/, 'the builder sizes the sell from the share');
+  // The BALANCE's variable name is not the point and has changed once
+  // already (2026-09-18, when the read moved into the batched account
+  // fetch); that the size comes from `p.sellPct` is.
+  assert.match(builder, /amount = sellAmountFor\(\w+, p\.sellPct\)/, 'the builder sizes the sell from the share');
   assert.match(builder, /p\.action === 'sell' && sellPctOf\(p\.sellPct\) >= 100\) \{/, 'the ATA close is gated on a 100% sell');
 });
 

@@ -9,8 +9,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getAccountInfo } from './rpcClient';
-import { base58Encode } from './base58';
+import { getAccountInfo } from '../chain/rpcClient';
+import { base58Encode } from '../chain/base58';
 
 export interface ProgramCheck {
   ok: boolean;

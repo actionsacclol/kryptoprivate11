@@ -15,6 +15,8 @@
 
 import { BLOCK_FEED_WSS_URLS, DEFAULT_SETTINGS, type AppSettings } from '@shared/types';
 import { evmRpcUrlProblem } from '@shared/evm';
+import { LOCALES } from '@shared/i18n';
+import { THEMES } from '@shared/theme';
 import { webhookUrlProblem } from '@shared/webhook';
 
 export interface Validated {
@@ -129,6 +131,13 @@ const WEBHOOK_FIELDS = new Set([
 
 /** Fields that may only take one of a fixed set of values. */
 const ENUMS: Record<string, readonly unknown[]> = {
+  // The UI language. A free-text locale would be looked up, missed, and fall
+  // back to English on every key - the app would look broken rather than
+  // refuse. Bounded to the catalogues that actually ship, plus 'system'.
+  locale: ['system', ...LOCALES.map((l) => l.id)],
+  // An unknown theme matches no CSS block, so the app would render with no
+  // accent at all and look broken with nothing to explain it.
+  theme: THEMES,
   'execution.feeUrgency': ['normal', 'competitive', 'high', 'emergency'],
   'execution.mevMode': ['off', 'fast', 'private'],
   'execution.jitoTipPercentile': [50, 75, 95],

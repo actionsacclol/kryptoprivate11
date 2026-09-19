@@ -13,7 +13,7 @@
 
 import { ComputeBudgetProgram, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import * as wallet from '../system/wallet';
-import { getBalance, getBlockHeight, getLatestBlockhashInfo, getSignatureStatuses, sendRawTransaction } from './rpcClient';
+import { getBalance, getBlockHeight, getLatestBlockhashInfo, getSignatureStatuses, sendRawTransaction } from '../chain/rpcClient';
 import { RENT_EXEMPT_LAMPORTS } from '@shared/lab';
 
 const TX_FEE_HEADROOM_LAMPORTS = 10_000;

@@ -16,6 +16,7 @@ import { TokenSearch } from './components/terminal/TokenSearch';
 import { SidebarLive, TokenTabsLive } from './components/LiveChrome';
 import { chainForMint, closeTab, loadTabs, neighbourOf, openTab, saveTabs, tabKey, touchTab, type TokenTab } from './state/tokenTabs';
 import { HotkeyHost } from './components/HotkeyHost';
+import { CalloutsRail } from './components/CalloutsRail';
 import { LiteModeHost } from './components/LiteModeHost';
 import { Discover } from './pages/Discover';
 import { TokenPage } from './pages/Token';
@@ -41,6 +42,7 @@ const SwapPage = lazy(() => ROUTE_LOADERS.swap().then((m) => ({ default: m.Swap 
 const BridgePage = lazy(() => ROUTE_LOADERS.bridge().then((m) => ({ default: m.Bridge })));
 const WatchlistPage = lazy(() => ROUTE_LOADERS.watchlist().then((m) => ({ default: m.WatchlistPage })));
 const RunnersPage = lazy(() => ROUTE_LOADERS.runners().then((m) => ({ default: m.RunnersPage })));
+const WirePage = lazy(() => ROUTE_LOADERS.wire().then((m) => ({ default: m.WirePage })));
 const CreatorPage = lazy(() => ROUTE_LOADERS.creator().then((m) => ({ default: m.CreatorPage })));
 const FunderPage = lazy(() => ROUTE_LOADERS.funder().then((m) => ({ default: m.FunderPage })));
 const ScriptsPage = lazy(() => ROUTE_LOADERS.scripts().then((m) => ({ default: m.ScriptsPage })));
@@ -311,6 +313,9 @@ export default function App() {
           onHub={toHub}
         />
       )}
+      {/* The content column and the callouts rail sit side by side, so the
+          rail takes width rather than covering the page. */}
+      <div className="flex flex-1 min-w-0 min-h-0">
       <div className="flex flex-col flex-1 min-w-0 relative">
         <IntegrityBanner />
         <TopBar search={<TokenSearch onOpen={openToken} />} onOpenAutomation={() => navigate('dashboard')} onOpenRunners={() => navigate('runners')} onHub={onHub ? undefined : toHub} />
@@ -376,6 +381,7 @@ export default function App() {
                   )}
                   {route === 'watchlist' && <WatchlistPage onOpenToken={openToken} />}
                   {route === 'runners' && <RunnersPage onOpenToken={openToken} />}
+                  {route === 'wire' && <WirePage onOpenToken={openToken} />}
                   {route === 'creator' && <CreatorPage onOpenToken={openToken} />}
                   {route === 'funder' && <FunderPage onOpenToken={openToken} />}
                   {route === 'trades' && <TradesPage onOpenToken={openToken} />}
@@ -411,6 +417,19 @@ export default function App() {
             </div>
           )}
         </main>
+      </div>
+      {/* pump.fun callouts, beside the page rather than over it. A reader:
+          clicking a row opens that coin's chart, and there is nothing on it
+          that spends money. Shut, it is a tab and polls nothing. Not on the
+          Hub, which is a launcher rather than a workspace. */}
+      {!onHub && (
+        <CalloutsRail
+          onOpenToken={openToken}
+          openMint={route === 'token' ? openMint : null}
+          openChain={route === 'token' ? openChain : null}
+          openSymbol={route === 'token' ? (active?.symbol ?? null) : null}
+        />
+      )}
       </div>
       </div>
     </div>
