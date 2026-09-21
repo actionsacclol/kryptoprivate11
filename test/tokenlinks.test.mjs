@@ -139,7 +139,10 @@ const ADDR = '0xc3A0B2A457DAEc0490e35d48f635f972649308B3';
   const legal = src('../shared/legal/documents.ts');
   assert.ok(/The Links panel on the Widgets page/.test(legal), 'the privacy policy says what the panel sends where');
   const entity = src('../shared/legal/entity.ts');
-  assert.ok(/TERMS_VERSION = '2026-09-20\.2'/.test(entity), 'the policy change re-prompts');
+  // The panel's own bump was .2; later changes the same day (.3: the
+  // metadata gateways) bump past it, and must not roll it back.
+  const version = entity.match(/TERMS_VERSION = '([^']+)'/)?.[1] ?? '';
+  assert.ok(version >= '2026-09-20.2', `the policy change re-prompts (got ${version})`);
   ok('wired: panel, both token pages and the privacy policy');
 }
 

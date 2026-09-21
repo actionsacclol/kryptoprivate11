@@ -2,8 +2,9 @@
 // (2026-09-20). Read-only: attaches to a RUNNING dev app, opens the $KRYPTO
 // coin from the top-bar search, and checks that main looked up its Telegram
 // channel (t.me/kryptback) and its website's domain (krypt.cc) — the header
-// buttons carry "N subscribers" and "since 2010", and the Links tab shows
-// the cells. Touches no stored state.
+// buttons are plain links (the counts rode along there until the user
+// called it clutter, 2026-09-20 evening), and the Links tab shows the
+// cells. Touches no stored state.
 //
 //   KRYPT_DEBUG_PORT=9333 npm run dev
 //   node test/linkintel.e2e.mjs
@@ -58,21 +59,27 @@ try {
     await sleep(500);
   }
   check('the token page opened', !!heading && /KRYPTO/i.test(heading), heading ?? 'no heading');
-  // The header buttons: Telegram carries the count, Website the year, once main has answered.
-  const headerButtons = () => evaluate(`(() => [...document.querySelectorAll('main button')].map((b) => b.textContent.trim()).filter((t) => /^(Telegram|Website)\\b/.test(t)))()`);
+  // The header buttons are the links and nothing more (the counts are in
+  // the Links tab); opening the page is what asks main for the lookups.
+  const headerButtons = () => evaluate(`(() => [...document.querySelectorAll('main button')].map((b) => b.textContent.trim()).filter((t) => /^(Telegram|Website|X)\\b/.test(t)))()`);
   let buttons = [];
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 20; i++) {
     buttons = await headerButtons();
-    if (buttons.some((t) => /subscribers|members/.test(t)) && buttons.some((t) => /since \\d{4}|on /.test(t))) break;
+    if (buttons.some((t) => /^Telegram/.test(t)) && buttons.some((t) => /^Website/.test(t))) break;
     await sleep(500);
   }
   out('header buttons:', buttons);
-  const tgBtn = buttons.find((t) => /^Telegram/.test(t)) ?? null;
-  const webBtn = buttons.find((t) => /^Website/.test(t)) ?? null;
-  check('the Telegram button carries the public count', !!tgBtn && /\d+ subscribers/.test(tgBtn), tgBtn ?? 'no Telegram button');
-  check('the Website button carries the domain’s year', !!webBtn && /since 2010/.test(webBtn), webBtn ?? 'no Website button');
-  // What main actually holds, through the bridge.
-  const intel = await evaluate(`window.krypt.links.intel(${JSON.stringify(MINT)}, true)`);
+  check('the header lists the Telegram and Website links', buttons.some((t) => /^Telegram/.test(t)) && buttons.some((t) => /^Website/.test(t)));
+  check('the header buttons are plain links, no counts or dates', buttons.every((t) => /^(Telegram|Website|X)$/.test(t)), buttons.join(' | '));
+  // What main actually holds, through the bridge — polled, since the page
+  // has only just asked.
+  let intel = null;
+  for (let i = 0; i < 40; i++) {
+    intel = await evaluate(`window.krypt.links.intel(${JSON.stringify(MINT)}, true)`);
+    const t = intel?.data?.telegram, w = intel?.data?.website;
+    if (t && w && (t.state === 'ok' || t.state === 'failed') && (w.state === 'ok' || w.state === 'failed')) break;
+    await sleep(500);
+  }
   const tg = intel?.data?.telegram;
   const web = intel?.data?.website;
   check('main looked up the channel', !!tg && tg.state === 'ok' && tg.preview?.kind === 'channel' && tg.preview.members > 0, tg ? `${tg.state} · ${tg.preview?.members} ${tg.preview?.countWord}` : 'none');

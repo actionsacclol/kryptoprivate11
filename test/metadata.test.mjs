@@ -3,7 +3,17 @@
 // malformed input degrades to a clean "unresolved-shaped" result.
 
 import assert from 'node:assert/strict';
-import { extractSocialsForTest as extract, candidateUrlsForTest as urls } from './.metadata.mjs';
+import {
+  extractSocialsForTest as extract,
+  candidateUrlsForTest as urls,
+  extractLinksForTest as links,
+  fetchSocials,
+  fetchMetadataLinks,
+  metadataLinksIfCached,
+  clearCache,
+  setClockForTest,
+  parkedGatewaysForTest,
+} from './.metadata.mjs';
 
 // Full pump-style metadata with all three socials at top level.
 {
@@ -79,7 +89,10 @@ import { extractSocialsForTest as extract, candidateUrlsForTest as urls } from '
 // http(s) URL was fetched verbatim, leaking the IP + timestamp of every live
 // install to any launcher. These pin the allowlist shut.
 
-const ALLOWED = ['ipfs.io', 'cloudflare-ipfs.com'];
+// The gateway list, as the privacy policy names it (test/legal.test.mjs pins
+// the policy against the same three hosts). cloudflare-ipfs.com stopped
+// resolving and was replaced 2026-09-20.
+const ALLOWED = ['ipfs.io', 'ipfs.4everland.io', 'ipfs.filebase.io'];
 const CID = 'QmS4ustL54uo8FzR9455qaxZwuMiUhyvMcX9Ba8nUH4uVv';
 const hostOf = (u) => new URL(u).hostname;
 
@@ -136,4 +149,121 @@ const hostOf = (u) => new URL(u).hostname;
   console.log('ok  malformed cid / non-http scheme rejected');
 }
 
+// ── Links (2026-09-20): the URLs themselves, as the creator wrote them ───
+// The Links panel and the token page show these; until this day only the
+// yes/no fingerprint above left this module, so a coin whose X and website
+// pump.fun had not copied yet (every coin for its first minutes) had none.
+
+{
+  const l = links({
+    name: 'Source', symbol: 'SOURCE',
+    image: 'https://ipfs.io/ipfs/bafkreicyl6eewcnjazi4zbis2nvicw7n7bnhkazbosd2a26zfgmoxz3kry',
+    twitter: 'https://x.com/jackzampolin',
+    website: 'https://source.network/',
+    extensions: { telegram: 'https://t.me/source' },
+  });
+  assert.deepEqual(l, {
+    twitter: 'https://x.com/jackzampolin',
+    telegram: 'https://t.me/source',
+    website: 'https://source.network/',
+    image: 'https://ipfs.io/ipfs/bafkreicyl6eewcnjazi4zbis2nvicw7n7bnhkazbosd2a26zfgmoxz3kry',
+  });
+  console.log('ok  links read off the file, top level and extensions');
+}
+
+// Nothing is guessed: a handle is not a link, `x` stands in for twitter, an
+// absurd length is dropped.
+{
+  const l = links({ x: 'https://x.com/bar', twitter: 'not a url', website: '@handle', telegram: 't.me/foo' });
+  assert.equal(l.twitter, 'https://x.com/bar');
+  assert.equal(l.website, null);
+  assert.equal(l.telegram, null);
+  assert.equal(l.image, null);
+  assert.equal(links({ website: 'https://a.example/' + 'x'.repeat(3_000) }).website, null);
+  console.log('ok  handles and junk are not links; x alias; overlong dropped');
+}
+
+// ── Fetch behaviour, against a stubbed fetch ────────────────────────────
+const DOC = { twitter: 'https://x.com/source', website: 'https://source.network/', image: 'https://ipfs.io/ipfs/bafkreicyl6ee' };
+const calls = [];
+/** host → status; a host not listed serves DOC. */
+let status = {};
+let clock = 1_000_000;
+setClockForTest(() => clock);
+globalThis.fetch = async (url) => {
+  const host = new URL(url).hostname;
+  calls.push(host);
+  const st = status[host] ?? 200;
+  if (st !== 200) return new Response('no', { status: st });
+  return new Response(JSON.stringify(DOC), { status: 200, headers: { 'content-type': 'application/json' } });
+};
+const cidA = 'bafkreifperm6h64s2pan3jgsq2p6xbxlqf2tnwbd65bs44vzabsoqmp254';
+const cidB = 'bafkreicyl6eewcnjazi4zbis2nvicw7n7bnhkazbosd2a26zfgmoxz3kry';
+
+// A gateway that says 429 is parked and the next one serves; a second
+// lookup skips the parked one without asking it again.
+{
+  clearCache();
+  calls.length = 0;
+  status = { 'ipfs.io': 429 };
+  const l = await fetchMetadataLinks(`https://ipfs.io/ipfs/${cidA}`);
+  assert.equal(l?.twitter, 'https://x.com/source');
+  assert.deepEqual(calls, ['ipfs.io', 'ipfs.4everland.io']);
+  assert.deepEqual(parkedGatewaysForTest(), ['ipfs.io']);
+  calls.length = 0;
+  const l2 = await fetchMetadataLinks(`ipfs://${cidB}`);
+  assert.equal(l2?.website, 'https://source.network/');
+  assert.deepEqual(calls, ['ipfs.4everland.io'], 'the parked gateway is not asked while parked');
+  console.log('ok  a 429 parks the gateway; the next one serves; parked is skipped');
+}
+
+// Every gateway down: not known now, remembered as a miss for a minute, and
+// asked again after — a coin seconds old is often not on a gateway yet, and
+// the old permanent miss is why a runner flag could never show its X.
+{
+  clearCache();
+  calls.length = 0;
+  status = { 'ipfs.io': 503, 'ipfs.4everland.io': 429, 'ipfs.filebase.io': 502 };
+  const uri = `https://ipfs.io/ipfs/${cidA}`;
+  assert.equal(await fetchMetadataLinks(uri), null);
+  assert.equal(calls.length, 3);
+  assert.equal(await fetchMetadataLinks(uri), null);
+  assert.equal(calls.length, 3, 'a miss inside the window makes no request');
+  status = {};
+  clock += 61_000; // past the miss window AND the gateway parks
+  const l = await fetchMetadataLinks(uri);
+  assert.equal(l?.twitter, 'https://x.com/source');
+  assert.equal(calls.length, 4, 'asked once more after the window');
+  console.log('ok  a miss is retried after a minute, not remembered forever');
+}
+
+// The create path and a person's lookup seconds later share one fetch, and
+// the batch paths read the result without a request.
+{
+  clearCache();
+  calls.length = 0;
+  status = {};
+  const uri = `https://ipfs.io/ipfs/${cidB}`;
+  const [fp, l] = await Promise.all([fetchSocials(uri), fetchMetadataLinks(uri)]);
+  assert.equal(fp.twitter, true);
+  assert.equal(fp.socialCount, 2);
+  assert.equal(l?.twitter, 'https://x.com/source');
+  assert.equal(calls.length, 1, 'one request for both callers');
+  assert.equal(metadataLinksIfCached(uri)?.website, 'https://source.network/');
+  console.log('ok  fingerprint + links from one fetch; cached read is free');
+}
+
+// A URI nothing may be fetched from makes no request at all, either way.
+{
+  clearCache();
+  calls.length = 0;
+  const fp = await fetchSocials('https://evil.example.com/track.json');
+  assert.equal(fp.resolved, false);
+  assert.equal(await fetchMetadataLinks('https://evil.example.com/track.json'), null);
+  assert.equal(metadataLinksIfCached('https://evil.example.com/track.json'), null);
+  assert.equal(calls.length, 0);
+  console.log('ok  an unfetchable uri is never requested');
+}
+
+setClockForTest(null);
 console.log('metadata: all tests passed');

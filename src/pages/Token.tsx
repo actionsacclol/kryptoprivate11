@@ -19,8 +19,6 @@ import type { Alert } from '@shared/alerts';
 import type { CreatorHistory, LaunchIntelReport } from '@shared/launchintel';
 import { KryptChart, type KryptChartHandle } from '../components/terminal/KryptChart';
 import { tokenLinks } from '@shared/tokenLinks';
-import { fmtCount } from '@shared/xStats';
-import { useXStats } from '../state/useXStats';
 import { useLinkIntel } from '../state/useLinkIntel';
 import { SecurityPanel } from '../components/terminal/SecurityPanel';
 import { LinksPanel } from '../components/terminal/LinksPanel';
@@ -548,12 +546,10 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   }, [mint]);
 
   const s = detail?.summary ?? quick;
-  // What the Links panel last read off this token's X page, if a person
-  // opened it there: "12.3K followers" beside the X link, with its age.
-  const xs = useXStats(mint);
-  // Telegram members and the website's domain record, looked up by main
-  // when this page opened (2026-09-20).
-  const intel = useLinkIntel(mint);
+  // Telegram members and the website's domain record are looked up by main
+  // when this page opens (2026-09-20) — this call is the ask. The numbers
+  // show in the Links tab under the chart, not up in the header.
+  useLinkIntel(mint);
   // Circulating supply for the tick-driven market cap: the chart's own
   // multiplier first (same number the MC toggle uses), the summary's second.
   supplyRef.current = series?.supplyForMcap ?? s?.circSupply ?? null;
@@ -732,39 +728,22 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
               {/* The token's own links — X, website, Telegram — and its
                   launchpad page, up here where a trader looks first
                   (2026-09-20). Each opens the system browser; the Links
-                  panel on the Widgets page shows the same pages inside the app. */}
-              {tokenLinks('solana', mint, s?.launchpad ?? null, s?.socials ?? null).map((l) => {
-                // The X button carries what the Links panel read off the page
-                // (followers for a profile, likes for a post), when it has.
-                const st = l.kind === 'x' && xs && !xs.stats.loginWall ? xs.stats : null;
-                const readOn = st
-                  ? st.page === 'profile' && st.followers !== null
-                    ? `${fmtCount(st.followers)} followers`
-                    : st.page === 'post' && st.likes !== null
-                      ? `${fmtCount(st.likes)} likes`
-                      : null
-                  : null;
-                // The Telegram button carries the public member count, the
-                // website button the domain's registration year or the shared
-                // platform it sits on.
-                const tgp = l.kind === 'telegram' ? intel?.telegram?.preview ?? null : null;
-                const tgLabel = tgp && tgp.members !== null ? `${fmtCount(tgp.members)} ${tgp.countWord ?? 'members'}` : null;
-                const dom = l.kind === 'website' ? intel?.website ?? null : null;
-                const domLabel = dom?.hostedOn ? `on ${dom.hostedOn}` : dom?.record?.registeredAt ? `since ${new Date(dom.record.registeredAt).getUTCFullYear()}` : null;
-                const extra = readOn ?? tgLabel ?? domLabel;
-                return (
-                  <button
-                    key={l.url}
-                    onClick={() => void window.krypt.app.openExternal(l.url)}
-                    title={readOn && xs ? `${l.url} — ${readOn}, read ${fmtAgo(xs.readAt)} ago in the Links panel` : extra ? `${l.url} — ${extra}` : l.url}
-                    className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
-                  >
-                    {l.label}
-                    {extra && <span className="text-krypt-muted/70">· {extra}</span>}
-                    <ExternalLink className="h-3 w-3" />
-                  </button>
-                );
-              })}
+                  panel on the Widgets page shows the same pages inside the
+                  app. Plain links only: the followers, member counts and
+                  domain age used to ride along here and made the bar a
+                  clutter (user, same day) — they live in the Links tab
+                  under the chart. */}
+              {tokenLinks('solana', mint, s?.launchpad ?? null, s?.socials ?? null).map((l) => (
+                <button
+                  key={l.url}
+                  onClick={() => void window.krypt.app.openExternal(l.url)}
+                  title={l.url}
+                  className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
+                >
+                  {l.label}
+                  <ExternalLink className="h-3 w-3" />
+                </button>
+              ))}
             </div>
           </div>
 

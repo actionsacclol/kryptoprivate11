@@ -344,7 +344,10 @@ test('a Token-2022 coin with no Metaplex account is named from the mint\'s own m
   assert.equal(t.isToken2022, true);
   assert.equal(t.name, 'Krypto Bot');
   assert.equal(t.symbol, 'KRYPTO');
-  assert.equal(t.uri, null, 'the extension walk stops at the symbol — no uri claimed');
+  // Until 2026-09-20 the extension walk stopped at the symbol, so every
+  // create_v2 coin (Token-2022, no Metaplex account) had no known metadata
+  // URI — and no X or website in the app while pump.fun's record lagged.
+  assert.equal(t.uri, 'https://ipfs.io/ipfs/QmK', 'the extension carries the uri — the file the socials are in');
   const facts = await mintFacts(RPC, T);
   assert.equal(facts.isToken2022, true);
 });

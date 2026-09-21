@@ -75,7 +75,11 @@ export const LIABILITY_CAP_USD = 100;
 // Telegram link's public preview (t.me) and its website domain's registry
 // record (RDAP, via data.iana.org). New hosts receive requests, so it
 // re-prompts.
-export const TERMS_VERSION = '2026-09-20.2';
+// Same day, .3: token metadata (the file with a coin's image and links) is
+// fetched from ipfs.4everland.io and ipfs.filebase.io as well as ipfs.io;
+// cloudflare-ipfs.com, which the policy named, no longer exists. Two new
+// hosts receive requests, so it re-prompts.
+export const TERMS_VERSION = '2026-09-20.3';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
 export const TERMS_EFFECTIVE_DATE = '20 September 2026';

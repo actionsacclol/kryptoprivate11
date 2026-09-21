@@ -26,9 +26,11 @@
 // per call — answers for the whole batch, on an RPC budget the app is
 // nowhere near, and a second call of the same shape prices the graduated
 // ones. What is NOT here, and stays with the provider on a ten-minute
-// identity memo: the image, the socials, the creation time, pump's own
-// flags (banned, nsfw, king of the hill, ATH). Those do not change by the
-// second, so they are asked for once, and never on a batch path.
+// identity memo: the creation time and pump's own flags (banned, nsfw, king
+// of the hill, ATH). Those do not change by the second, so they are asked
+// for once, and never on a batch path. The image and the socials are in the
+// metadata JSON the `uri` above points at (engine/metadata.ts fetches it;
+// the summary merges it last) — pump.fun's record only copies that file.
 //
 // Honest-null rule throughout: a curve that does not exist is "not a pump
 // coin", cached as such briefly; an RPC that did not answer is UNKNOWN and
@@ -238,7 +240,11 @@ export async function readMany(httpUrl: string, mints: string[]): Promise<Map<st
         supplyRaw,
         name: meta?.name ?? ext?.name ?? null,
         symbol: meta?.symbol ?? ext?.symbol ?? null,
-        uri: meta?.uri ?? null,
+        // The URI reaches the metadata JSON — the file the socials are in.
+        // Every create_v2 coin is Token-2022 with no Metaplex account, so
+        // the extension is where it usually is (2026-09-20, user report:
+        // a runner's X and website on pump.fun, neither in the app).
+        uri: meta?.uri ?? ext?.uri ?? null,
         curve: { ...st, realSol },
         pool: null,
         priceSol: null,

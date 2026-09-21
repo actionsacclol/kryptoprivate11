@@ -307,8 +307,12 @@ ok('every outbound third-party host is disclosed in the privacy policy', () => {
     // launcher upload, update check, images
     'pump.fun',
     'krypt.cc',
+    // token metadata gateways (engine/metadata.ts IPFS_GATEWAYS — the two
+    // lists must agree; cloudflare-ipfs.com was replaced 2026-09-20 when it
+    // stopped resolving)
     'ipfs.io',
-    'cloudflare-ipfs.com',
+    'ipfs.4everland.io',
+    'ipfs.filebase.io',
     // opt-in
     'api.telegram.org',
     // a token's Telegram preview and its website domain's registry record,

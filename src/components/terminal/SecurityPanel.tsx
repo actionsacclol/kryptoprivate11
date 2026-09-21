@@ -54,6 +54,7 @@ const SOURCE_LABEL: Record<string, string> = {
   pumpswap: 'pump.fun swap API',
   birdeye: 'Birdeye',
   helius: 'Helius',
+  metadata: 'The token’s own metadata file, from the link on the chain',
   derived: 'Computed locally',
   none: 'No source answered',
 };

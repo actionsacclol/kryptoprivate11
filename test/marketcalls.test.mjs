@@ -133,6 +133,11 @@ let churnBase = 0;
 /** Accounts the stubbed RPC serves for `getMultipleAccounts` (the chain
  *  reads behind the feed-sourced Discover rows). address → { owner, data }. */
 const liveAccounts = new Map();
+/** Per-mint overrides for pump.fun's `/coins/{mint}` record (a record
+ *  minutes young has no socials yet — the shape a runner flag meets). */
+const coinExtra = new Map();
+/** cid → the metadata JSON the IPFS gateways serve; unknown cids are 404. */
+const ipfsDocs = new Map();
 /** pump.fun answering 429 to its list routes — the outage the banner names. */
 let pumpDown = false;
 /** The biggest chunk any request was asked for — the silent-truncation guard. */
@@ -201,7 +206,7 @@ function install() {
       if (p.startsWith('/coins/')) {
         bump('pump:coin');
         const mint = decodeURIComponent(p.slice('/coins/'.length));
-        return json({ ...pumpCoin(mintIndex.get(mint) ?? 0), mint });
+        return json({ ...pumpCoin(mintIndex.get(mint) ?? 0), mint, ...(coinExtra.get(mint) ?? {}) });
       }
       bump('pump:other');
       return json({});
@@ -314,6 +319,14 @@ function install() {
       }
       bump('gt:other');
       return json({ data: [] });
+    }
+
+    // The token-metadata gateways (engine/metadata.ts): the file behind a
+    // cid, or 404. Counted as one key whichever gateway was asked.
+    if (host === 'ipfs.io' || host === 'ipfs.4everland.io' || host === 'ipfs.filebase.io') {
+      bump('ipfs');
+      const doc = ipfsDocs.get(p.split('/ipfs/')[1] ?? '');
+      return doc ? json(doc) : new Response('not found', { status: 404 });
     }
 
     bump(`other:${host}`);
@@ -504,6 +517,52 @@ test('one token page reads getTokenLargestAccounts exactly once', async () => {
     1,
     `the public RPC's budget for this method is 0 — got ${n('rpc:getTokenLargestAccounts')} calls`,
   );
+});
+
+// ── The token's own metadata file (2026-09-20) ────────────────────────
+// User report: a coin flagged as a runner had an X and a website on pump.fun
+// and neither in the app — pump.fun's record copies them from the metadata
+// JSON minutes later, DexScreener and Jupiter had not indexed the coin, and
+// the app never read the file itself. Now the summary does, last, through
+// the URI the chain carries.
+
+test('a fresh pump coin nobody has indexed shows its X and website from its own metadata file', async () => {
+  http.clearCache();
+  resetCounts();
+  market.attach(baseCtx);
+  const mint = mintFor(61_000);
+  const CID = 'bafkreifperm6h64s2pan3jgsq2p6xbxlqf2tnwbd65bs44vzabsoqmp254';
+  const uri = `https://ipfs.io/ipfs/${CID}`;
+  // The chain: a curve, the mint, and a metadata account naming the file.
+  liveAccounts.set(bondingCurveFor(mint), { owner: 'pump', data: curveAccount({ vTok: vTokAt(5), vSol: 31_000_000_000n, realSol: 1_000_000_000n, creator: CREATOR }) });
+  liveAccounts.set(mint, { owner: TOKEN_PROGRAM, data: mintAccount() });
+  // Laid out by hand: `metaAccount` above writes `b58decode(mint)` for the
+  // 32-byte mint field, but the harness mints decode to 33 bytes, which
+  // shifts the strings and the parser reads nothing (the chain names in
+  // those tests come from the provider stubs, unnoticed). The parser does
+  // not read the mint field, so 32 zero bytes are the honest fixture.
+  liveAccounts.set(metadataFor(mint), {
+    owner: 'meta',
+    data: Buffer.concat([Buffer.from([4]), Buffer.alloc(32), Buffer.alloc(32), borsh('Source', 32), borsh('SOURCE', 10), borsh(uri, 200), Buffer.alloc(3)]),
+  });
+  // pump.fun's record at +60 s: no socials, no image, yet.
+  coinExtra.set(mint, { twitter: null, telegram: null, website: null, image_uri: null });
+  ipfsDocs.set(CID, { name: 'Source', symbol: 'SOURCE', twitter: 'https://x.com/jackzampolin', website: 'https://source.network/' });
+
+  const s = await market.summary(mint);
+  assert.equal(s.name, 'Source', 'the chain named it — the metadata account parsed');
+  assert.equal(s.socials.twitter, 'https://x.com/jackzampolin');
+  assert.equal(s.socials.website, 'https://source.network/');
+  assert.equal(s.socials.telegram, null);
+  assert.equal(s.sources.socials, 'metadata', 'the source says where the links came from');
+  assert.equal(n('ipfs'), 1, `one fetch of the file, got ${n('ipfs')}`);
+
+  // The next build (a token page rebuilds every five seconds) reads the
+  // module's own memory of the file — no second request.
+  http.clearCache();
+  const again = await market.summary(mint);
+  assert.equal(again.socials.twitter, 'https://x.com/jackzampolin');
+  assert.equal(n('ipfs'), 1, 'the file is remembered across builds');
 });
 
 // ── Task 5 + the honest-null rule on the new GeckoTerminal paths ──────

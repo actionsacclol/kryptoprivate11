@@ -123,3 +123,12 @@ its price.
 - A vault `accountSubscribe` for graduated coins: the per-mint
   `logsSubscribe` already carries PumpSwap swaps once the pool is
   registered, which the chain read now does.
+
+## Later the same day: the uri, and the image + socials
+
+The Token-2022 metadata extension's `uri` is now read (it was not — the
+walk stopped at the symbol, so every create_v2 coin had `uri: null`), and
+the image and the socials come from the metadata JSON that uri points at
+(`engine/metadata.ts`, merged last in `buildSummary`), not from pump.fun's
+record, which only copies that file minutes later. See
+docs/links-panel-2026-09-20.md, "Evening".

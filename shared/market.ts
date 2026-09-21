@@ -33,6 +33,7 @@ export type DataSource =
   | 'birdeye'
   | 'helius'
   | 'rugcheck'
+  | 'metadata'      // the token's own metadata JSON, reached through the URI the chain carries
   | 'derived'       // computed locally from the above
   | 'merged'        // provider history + our live tape, one chart (candles only)
   | 'none';         // no provider could answer

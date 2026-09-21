@@ -43,6 +43,12 @@ export interface MintExtensions {
   /** On-chain metadata, when the mint carries it. */
   name: string | null;
   symbol: string | null;
+  /** The metadata JSON's URI — the file with the image, the description and
+   *  the socials, the same record a Metaplex account points at. Null when the
+   *  mint has no TokenMetadata extension or the string is missing. Until
+   *  2026-09-20 the walk stopped at the symbol, so a Token-2022 pump coin
+   *  (every create_v2 mint) had no known URI and no links in the app. */
+  uri: string | null;
 }
 
 /**
@@ -52,9 +58,9 @@ export interface MintExtensions {
  */
 export function parseMintExtensions(data: Uint8Array): MintExtensions | null {
   const d = Buffer.from(data);
-  if (d.length <= ACCOUNT_TYPE_OFFSET) return d.length === MINT_BASE_LEN ? { permanentDelegate: null, nonTransferable: false, transferHook: null, transferFeeBps: null, defaultFrozen: false, name: null, symbol: null } : null;
+  if (d.length <= ACCOUNT_TYPE_OFFSET) return d.length === MINT_BASE_LEN ? { permanentDelegate: null, nonTransferable: false, transferHook: null, transferFeeBps: null, defaultFrozen: false, name: null, symbol: null, uri: null } : null;
   if (d[ACCOUNT_TYPE_OFFSET] !== ACCOUNT_TYPE_MINT) return null;
-  const out: MintExtensions = { permanentDelegate: null, nonTransferable: false, transferHook: null, transferFeeBps: null, defaultFrozen: false, name: null, symbol: null };
+  const out: MintExtensions = { permanentDelegate: null, nonTransferable: false, transferHook: null, transferFeeBps: null, defaultFrozen: false, name: null, symbol: null, uri: null };
   let off = ACCOUNT_TYPE_OFFSET + 1;
   while (off + 4 <= d.length) {
     const type = d.readUInt16LE(off);
@@ -97,6 +103,7 @@ export function parseMintExtensions(data: Uint8Array): MintExtensions | null {
         };
         out.name = str();
         out.symbol = str();
+        out.uri = str();
         break;
       }
       default:

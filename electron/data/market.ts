@@ -86,6 +86,8 @@ import * as holderGraph from './holderGraph';
 import * as be from './providers/birdeye';
 import * as onchain from './onchain';
 import * as pumpChain from './pumpChain';
+// A leaf module (global fetch, no imports of ours) — no cycle through data/.
+import { fetchMetadataLinks, metadataLinksIfCached, type MetadataLinks } from '../engine/metadata';
 import type { LiveCurve, LiveMigration } from '../engine/liveCurves';
 import * as tape from './tape';
 import { mergeLiveLaunches, summaryFromLaunch, PUMP_TOTAL_SUPPLY } from '@shared/liveRows';
@@ -1531,6 +1533,58 @@ export function parkedProviders(): ProviderId[] {
   return (Object.keys(PROVIDER_META) as ProviderId[]).filter((id) => cooldownRemainingMs(id) > 0);
 }
 
+/** How long a person's build waits for the metadata file before going on
+ *  without it. The fetch keeps running and lands in the module's cache, so
+ *  the next build (five seconds later on a token page) has the links. */
+const METADATA_WAIT_MS = 1_500;
+
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(null);
+      },
+    );
+  });
+}
+
+const httpsOnly = (v: string | null): string | null => (v && v.startsWith('https://') ? v : null);
+
+/**
+ * The token's own metadata JSON as a summary patch — the file every
+ * provider's "socials" and image are copied from, reached through the URI
+ * the chain carries (the Token-2022 metadata extension or the Metaplex
+ * account) or the create event. It exists the moment the coin does, where
+ * pump.fun's record says null for the first minutes and nobody else has
+ * indexed the coin at all (user report 2026-09-20: a runner flagged with an
+ * X and a website on pump.fun, and neither in the app). Merged LAST, so a
+ * provider that did answer keeps its values and this fills the gaps.
+ */
+function metadataPatch(mint: string, links: MetadataLinks): TokenSummary {
+  const patch = emptySummary(mint);
+  patch.imageUrl = httpsOnly(links.image);
+  patch.socials = {
+    twitter: httpsOnly(links.twitter),
+    telegram: httpsOnly(links.telegram),
+    website: httpsOnly(links.website),
+    dexPaid: false,
+  };
+  if (patch.socials.twitter || patch.socials.telegram || patch.socials.website) patch.sources = { socials: 'metadata' };
+  patch.fetchedAt = Date.now();
+  return patch;
+}
+
+/** Whether the summary still lacks what the metadata file would add. */
+function wantsMetadata(s: TokenSummary): boolean {
+  return (!s.socials.twitter && !s.socials.telegram && !s.socials.website) || s.imageUrl === null;
+}
+
 async function buildSummary(mint: string, build: BuildOptions = { identity: true }): Promise<TokenSummary> {
   const c = need();
   let s = emptySummary(mint);
@@ -1552,9 +1606,17 @@ async function buildSummary(mint: string, build: BuildOptions = { identity: true
 
   let solUsd: number | null = null;
   if (c.data().networkDataEnabled) {
-    // Identity — image, socials, creation time, pump's flags — is the ONLY
-    // thing still asked of pump.fun here, on a ten-minute memo, and only
-    // for a build a person is looking at (never a batch row).
+    // The metadata URI the app already holds — the scanner's row or the
+    // last chain read — so the file can be fetched alongside the providers
+    // rather than after them. The chain read below is the fallback.
+    const knownUri = pumpMint ? c.liveLaunch?.(mint)?.uri || pumpChain.readIfCached(mint)?.uri || null : null;
+    const earlyLinks = knownUri && build.identity ? fetchMetadataLinks(knownUri) : null;
+
+    // Identity — creation time, pump's flags — is the ONLY thing still asked
+    // of pump.fun here, on a ten-minute memo, and only for a build a person
+    // is looking at (never a batch row). Its image and socials are welcome
+    // too, but the metadata file below is where they come from when the
+    // record is minutes young and still says null.
     const wantIdentity = usable('pumpfun') && pumpMint;
     const [jupRows, pump, dsInfo, shieldMap, sol, chain] = await Promise.all([
       usable('jupiter') ? jup.search(mint) : Promise.resolve([]),
@@ -1600,6 +1662,28 @@ async function buildSummary(mint: string, build: BuildOptions = { identity: true
       // tape — register it so the 1s chart works after graduation too.
       for (const p of dsInfo.pools) {
         if (p.dexId.toLowerCase().includes('pump')) c.registerPool(p.address, mint);
+      }
+    }
+
+    // The metadata file, last: it fills what no provider answered — for a
+    // coin seconds old that is the X, the website and the image. A person's
+    // build waits a short while for it and takes it from the cache after;
+    // a batch row takes only what the create path already resolved (this
+    // is IPFS, not pump.fun, but a Discover pass is still no place for it).
+    const uri = knownUri ?? chain?.uri ?? null;
+    if (uri && wantsMetadata(s)) {
+      const links = build.identity
+        ? await withDeadline(earlyLinks ?? fetchMetadataLinks(uri), METADATA_WAIT_MS)
+        : metadataLinksIfCached(uri);
+      if (links) {
+        const before = s.socials;
+        s = merge(s, metadataPatch(mint, links));
+        // `merge` keeps the first source that ANSWERED, and a provider that
+        // answered "none" counts; when the values on screen came from the
+        // file, say so.
+        if (s.socials.twitter !== before.twitter || s.socials.telegram !== before.telegram || s.socials.website !== before.website) {
+          s.sources.socials = 'metadata';
+        }
       }
     }
   } else {

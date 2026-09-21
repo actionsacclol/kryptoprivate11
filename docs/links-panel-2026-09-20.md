@@ -242,3 +242,57 @@ additions in `test/automation.test.mjs`; live: `npm run test:linkintel`
 unregistered name honest), `npm run test:linkintel:e2e` (the token page's
 header buttons and Links tab), `npm run test:siteread:e2e` (the panel
 reads krypt.cc and main keeps it).
+
+## Evening: where the links come from, and a plainer header
+
+**User report.** `94BZEtg9…pump` was flagged as a runner; pump.fun showed
+an X and a website; the Links panel and the token page showed neither.
+
+**Three causes, all fixed.**
+
+1. **The chain reader never learned the metadata URI of a Token-2022
+   coin.** Every `create_v2` mint carries its metadata in the Token-2022
+   `TokenMetadata` extension, not a Metaplex account; `parseMintExtensions`
+   read the name and the symbol and stopped, and `pumpChain` took the uri
+   from Metaplex only (`test/pumpchain.test.mjs` pinned "no uri claimed").
+   Now the extension yields `uri` and `pumpChain` takes it from either.
+2. **The summary took link URLs from providers only.** pump.fun's own
+   record copies `twitter`/`website` from the metadata JSON minutes after a
+   launch (null at +60 s, when a runner flags), DexScreener and Jupiter do
+   not index a coin that young, and the app's own create-time fetch of the
+   JSON (`engine/metadata.ts`) kept only yes/no flags for the recorder.
+   `fetchMetadataLinks(uri)` now returns the URLs (and the image);
+   `market.buildSummary` merges them LAST, through the URI the scanner row
+   or the chain read carries, waiting at most 1.5 s for a person's build
+   and taking the cache on the next one; batch rows take only what is
+   already resolved. `sources.socials = 'metadata'` says so on hover.
+3. **The fetch itself was failing.** The gateway list was
+   ipfs.io + cloudflare-ipfs.com; measured from the dev machine with the
+   scanner running, ipfs.io answers 429 to every ask (the create path asks
+   it for every launch) and cloudflare-ipfs.com no longer resolves.
+   The list is now ipfs.io → ipfs.4everland.io (0.7 s) → ipfs.filebase.io
+   (0.9 s); a gateway that answers 429/5xx is parked 60 s; a miss is
+   retried after 60 s instead of being remembered forever (a coin seconds
+   old is often not on a gateway yet); a person's lookup takes the lane
+   ahead of the create-time queue, which is capped at 256 waiting.
+   Privacy §4 names the two new hosts; `TERMS_VERSION` → '2026-09-20.3'
+   (new hosts receive requests → re-prompts once).
+
+Live after the fix, the reported mint: chain uri read from the extension,
+ipfs.io 429 → parked, 4everland served X + website + image in 685 ms.
+
+**Header.** The token page's top-bar link buttons no longer carry the X
+followers, Telegram count or domain year — "too cluttered", the numbers
+are in the Links tab under the chart. They are plain links again;
+`useLinkIntel(mint)` stays on the page because that call is what asks main
+to look the token up. `test/linkintel.e2e.mjs` now checks plain buttons and
+polls the bridge for the lookups.
+
+**Tests.** `test/metadata.test.mjs` (link extraction; against a stubbed
+fetch: a 429 parks the gateway and the next serves, a miss retries after a
+minute, one fetch serves both callers, an unfetchable uri makes no
+request), `test/mintextensions.test.mjs` (the extension's uri, a cut-short
+string claims none), `test/pumpchain.test.mjs` (the Token-2022 coin's uri),
+`test/marketcalls.test.mjs` (a fresh coin nobody indexed shows its X and
+website from the file, once, remembered across builds), `test/legal.test.mjs`
+(the gateway hosts), `test/tokenlinks.test.mjs` (version ≥ .2).
