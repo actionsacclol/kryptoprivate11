@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_SETTINGS, SETTINGS_REVISION, type AppSettings } from '@shared/types';
 import { isLocaleId } from '@shared/i18n';
-import { isThemeId } from '@shared/theme';
+import { isSkinId, isThemeId } from '@shared/theme';
 import { logger } from './logger';
 
 let cached: AppSettings | null = null;
@@ -160,6 +160,9 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
     // carrying a theme this build does not ship, falls back to the default
     // rather than leaving <html> with an attribute no CSS block matches.
     theme: isThemeId(loaded.theme) ? loaded.theme : d.theme,
+    // And the look: a save from before looks existed renders Classic, which
+    // is exactly what it looked like when it was saved.
+    skin: isSkinId(loaded.skin) ? loaded.skin : d.skin,
     alerts: { ...d.alerts, ...(loaded.alerts ?? {}) },
     hotkeys,
     // Merged per bot so a saved token and owner survive, while a newly added

@@ -16,7 +16,7 @@ import {
   Wallet as WalletIcon,
   Zap, PlayCircle } from 'lucide-react';
 import { feePctLabel, referralProblem, TREASURY_ADDRESS } from '@shared/fees';
-import { KRYPTO_FEE_WAIVER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
+import { KRYPTO_HOLDER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
 import { CLICKWRAP_SUMMARY, ALL_DOCUMENTS, type LegalDocument } from '@shared/legal/documents';
 import { entityInfo } from '@shared/legal/entity';
 import type { RouteId } from './Sidebar';
@@ -570,7 +570,7 @@ export function Onboarding({
                   {
                     icon: Zap,
                     title: 'Trade manually',
-                    detail: `Arm live execution on the Wallet page, then buy and sell from the token page. Stop losses and take profits live under Orders. Krypt takes a ${feePctLabel()} fee per trade — about half the going rate — charged on-chain in the same transaction, and waived entirely while you hold ${KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} $${KRYPTO_TOKEN.symbol} in any wallet in the app.`,
+                    detail: `Arm live execution on the Wallet page, then buy and sell from the token page. Stop losses and take profits live under Orders. Krypt takes a ${feePctLabel()} fee per trade — about half the going rate — charged on-chain in the same transaction, and halved while you hold ${KRYPTO_HOLDER_TOKENS.toLocaleString()} $${KRYPTO_TOKEN.symbol} in any wallet in the app.`,
                   },
                   {
                     icon: KeyRound,

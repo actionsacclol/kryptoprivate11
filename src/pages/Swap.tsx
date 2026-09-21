@@ -7,7 +7,7 @@
 // gets its own entry in the menu.
 //
 // The page is deliberately thin: everything is in `SwapCard`, so the card can
-// still be dropped anywhere else (the My Layout panel registry, a future
+// still be dropped anywhere else (the Widgets panel registry, a future
 // token page) without dragging a route with it.
 
 import { Repeat } from 'lucide-react';

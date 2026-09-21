@@ -14,7 +14,7 @@
 // API — same arithmetic that prices a paper fill, so the number in the
 // Discover row and the number in the trade panel can never disagree.
 
-import { getJson, memo, putCache } from '../http';
+import { cached, getJson, memo, putCache } from '../http';
 import { curveProgressPct, INITIAL_VIRTUAL_SOL } from '../../engine/curve';
 import { emptySummary, type TokenSummary } from '@shared/market';
 
@@ -156,6 +156,29 @@ function rememberCoins(rows: PumpCoin[]): void {
  */
 export function coinForIntel(mint: string): Promise<PumpCoin | null> {
   return memo<PumpCoin>(intelKey(mint), COIN_INTEL_TTL_MS, () => coin(mint));
+}
+
+/**
+ * The coin record for IDENTITY only — image, socials, creation time, pump's
+ * own flags — which is all a summary still needs from pump.fun now that the
+ * price, the reserves, the progress and the creator are read from the chain
+ * (data/pumpChain.ts, 2026-09-20). None of it changes by the second, so it
+ * is remembered ten minutes; and any fresher record already in hand (a list
+ * row, an intel read, a price read) answers first, so this pays for at most
+ * one `/coins/{mint}` per opened token per ten minutes — where the summary
+ * used to buy one every six seconds, which is what kept the host parked.
+ */
+export const COIN_IDENTITY_TTL_MS = 10 * 60_000;
+const identityKey = (mint: string): string => `pf:coin:identity:${mint}`;
+
+export function coinIdentityIfCached(mint: string): PumpCoin | null {
+  return cached<PumpCoin>(`pf:coin:${mint}`) ?? cached<PumpCoin>(intelKey(mint)) ?? cached<PumpCoin>(identityKey(mint));
+}
+
+export function coinIdentity(mint: string): Promise<PumpCoin | null> {
+  const known = coinIdentityIfCached(mint);
+  if (known) return Promise.resolve(known);
+  return memo<PumpCoin>(identityKey(mint), COIN_IDENTITY_TTL_MS, () => coin(mint));
 }
 
 type Sort = 'created_timestamp' | 'market_cap' | 'last_trade_timestamp';

@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import { EVM_CHAIN_META, nativeSymbolOf, type ChainKind, type EvmWalletSummary } from '@shared/evm';
-import { Copy, FlaskConical, Plus, RotateCcw, Trash2, TriangleAlert, Zap } from 'lucide-react';
+import { Copy, FlaskConical, Plus, RotateCcw, Trash2, TriangleAlert, Users, Zap } from 'lucide-react';
 import {
   DEFAULT_COPIES_PER_MINUTE,
+  DEFAULT_EXIT_MAX_HOLD_MIN,
+  DEFAULT_EXIT_STOP_LOSS_PCT,
+  DEFAULT_EXIT_TAKE_PROFIT_PCT,
+  DEFAULT_FOMO_CROWD_EXIT_PCT,
+  DEFAULT_FOMO_MIN_WALLETS,
+  DEFAULT_FOMO_TOP_N,
+  DEFAULT_FOMO_WINDOW_SEC,
+  FOMO_SOURCES,
+  FOMO_SOURCE_LABEL,
+  directionOf,
+  fomoRuleOf,
+  isFomo,
   LEADER_RANK_KEYS,
   MIN_TRIPS_FOR_RANK,
   copySize,
@@ -15,7 +27,10 @@ import {
   type CopyConfig,
   type CopySnapshot,
   type LeaderRankKey,
-  type CopyStats, chainOf } from '@shared/copytrade';
+  type CopyStats,
+  type FomoSource,
+  chainOf,
+} from '@shared/copytrade';
 import type { WalletSummary, WatchedWallet } from '@shared/types';
 import { Card, Empty, GhostButton, Page, PrimaryButton, Section } from '../components/common';
 import { useToast } from '../state/ToastProvider';
@@ -137,18 +152,19 @@ function ConfigEditor({
   const ownWallets: Array<{ id: string; label: string }> = chain === 'solana' ? wallets : evmWallets[chain];
   const base = validateConfig(c);
   const validity =
-    base.ok && (chain === 'solana' ? !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.wallet.trim()) : !/^0x[0-9a-fA-F]{40}$/.test(c.wallet.trim()))
+    base.ok && !isFomo(c) && (chain === 'solana' ? !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.wallet.trim()) : !/^0x[0-9a-fA-F]{40}$/.test(c.wallet.trim()))
       ? { ok: false, message: chain === 'solana' ? 'Enter a valid wallet address' : `Enter a valid 0x address on ${EVM_CHAIN_META[chain].name}` }
       : base;
   const optNum = (raw: string): number | null => (raw.trim() === '' ? null : Number(raw));
 
   return (
     <Card className="space-y-3 border-krypt-purple/25">
-      <Field label="Chain">
+      <Field label="Chain" hint={isFomo(c) ? 'FOMO listens to the Solana feeds only' : undefined}>
         <select
           value={chain}
+          disabled={isFomo(c)}
           onChange={(e) => setC((p) => ({ ...p, chain: e.target.value as ChainKind, walletId: null, onlyPumpfun: e.target.value === 'solana' ? p.onlyPumpfun : false }))}
-          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white"
+          className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white disabled:opacity-60"
         >
           <option value="solana">Solana</option>
           <option value="robinhood">Robinhood Chain</option>
@@ -164,15 +180,17 @@ function ConfigEditor({
       </Field>
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Wallet address">
-          <input
-            value={c.wallet}
-            onChange={(e) => set('wallet', e.target.value.trim())}
-            spellCheck={false}
-            placeholder="7jA…8K"
-            className={numBox}
-          />
-        </Field>
+        {!isFomo(c) && (
+          <Field label="Wallet address">
+            <input
+              value={c.wallet}
+              onChange={(e) => set('wallet', e.target.value.trim())}
+              spellCheck={false}
+              placeholder="7jA…8K"
+              className={numBox}
+            />
+          </Field>
+        )}
         <Field label="Label">
           <input
             value={c.label}
@@ -229,6 +247,114 @@ function ConfigEditor({
             Live copies spend real {sym} on their own, every time that wallet trades. Saving leaves this switched off;
             arming it is a separate, confirmed click.
           </span>
+        </p>
+      )}
+
+      {/*
+        Direction (2026-09-20). Copy buys when they buy and mirrors their
+        sells. Reverse buys when they SELL and exits when they buy back. FOMO
+        follows a CROWD: several wallets from a set buying the same coin
+        inside a window. Reverse and FOMO have no leader sell to close them,
+        so they carry their own exits; a copy may set them too. Measured
+        nowhere (reverse) or measured to hurt (FOMO) — paper first.
+      */}
+      <Field label="Direction">
+        <div className="flex rounded-md border border-white/10 overflow-hidden">
+          {(['copy', 'reverse', 'fomo'] as const).map((d) => (
+            <button
+              key={d}
+              onClick={() =>
+                setC((p) => {
+                  const dir = directionOf(p);
+                  if (dir === d) return p;
+                  const next = { ...p, direction: d };
+                  // Leaving or entering FOMO swaps the wallet for the sentinel
+                  // and back, and FOMO is Solana-only.
+                  if (d === 'fomo') return { ...next, wallet: defaultConfig('', '', 'solana', 'fomo').wallet, chain: 'solana', walletId: p.chain === 'solana' ? p.walletId : null, fomoSource: p.fomoSource ?? 'followed' };
+                  if (dir === 'fomo') return { ...next, wallet: '' };
+                  return next;
+                })
+              }
+              className={cls(
+                'inline-flex items-center gap-1.5 px-3 py-1.5 text-body font-semibold transition',
+                directionOf(c) === d ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
+              )}
+            >
+              {d === 'copy' ? 'Copy' : d === 'reverse' ? 'Reverse' : 'FOMO'}
+            </button>
+          ))}
+        </div>
+      </Field>
+      <p className="text-label leading-relaxed text-krypt-muted">
+        {directionOf(c) === 'reverse'
+          ? 'Reverse buys when this wallet SELLS and sells when it buys back — betting the coin keeps going after they leave. Nothing has measured that bet, so it starts on paper. A reverse position also closes on its own take-profit, stop-loss or max hold, since a leader rarely buys the same coin twice.'
+          : directionOf(c) === 'fomo'
+            ? 'FOMO buys when several wallets from the set below pile into the same coin within the window — the crowd is the signal, not any one wallet. It gets out when enough of that crowd has sold, or on its own take-profit, stop-loss or max hold.'
+            : 'Copy buys when this wallet buys and mirrors its sells, proportionally to what you hold.'}
+      </p>
+      {directionOf(c) === 'fomo' && (
+        <>
+          <p className="rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-label leading-relaxed text-amber-200/90">
+            Measured over 9.3 million trades on this rail: when two to four strong wallets converged on a coin within minutes, the
+            follower&rsquo;s outcome got WORSE with each extra wallet, from −15% to −32% an hour later. That is the definition of
+            FOMO. It ships because people ask for it, and it starts on paper.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="The crowd" hint="which wallets count">
+              <select
+                value={fomoRuleOf(c).source}
+                onChange={(e) => set('fomoSource', e.target.value as FomoSource)}
+                className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white"
+              >
+                {FOMO_SOURCES.map((src) => (
+                  <option key={src} value={src}>
+                    {FOMO_SOURCE_LABEL[src]}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {fomoRuleOf(c).source === 'top' ? (
+              <Field label="Top N" hint={`by Copy score · blank = ${DEFAULT_FOMO_TOP_N}`}>
+                <input type="number" value={c.fomoTopN ?? ''} onChange={(e) => set('fomoTopN', optNum(e.target.value))} className={numBox} />
+              </Field>
+            ) : (
+              <div />
+            )}
+            <Field label="Wallets to trigger" hint={`distinct · blank = ${DEFAULT_FOMO_MIN_WALLETS}`}>
+              <input type="number" value={c.fomoMinWallets ?? ''} onChange={(e) => set('fomoMinWallets', optNum(e.target.value))} className={numBox} />
+            </Field>
+            <Field label="Within" hint={`seconds · blank = ${DEFAULT_FOMO_WINDOW_SEC}`}>
+              <input type="number" value={c.fomoWindowSec ?? ''} onChange={(e) => set('fomoWindowSec', optNum(e.target.value))} className={numBox} />
+            </Field>
+            <Field label="Exit when the crowd leaves" hint={`% of them sold · blank = ${DEFAULT_FOMO_CROWD_EXIT_PCT}`}>
+              <input type="number" value={c.fomoCrowdExitPct ?? ''} onChange={(e) => set('fomoCrowdExitPct', optNum(e.target.value))} className={numBox} />
+            </Field>
+          </div>
+          <p className="text-label leading-relaxed text-krypt-muted">
+            {FOMO_SOURCE_LABEL[fomoRuleOf(c).source] === FOMO_SOURCE_LABEL.followed
+              ? 'The wallets your enabled copy and reverse configs follow.'
+              : fomoRuleOf(c).source === 'saved'
+                ? 'The wallets you saved on the Wallet Scout.'
+                : fomoRuleOf(c).source === 'tracked'
+                  ? 'The wallets on your tracked list on this page.'
+                  : 'The Scout\u2019s best wallets by Copy score right now; the list moves as the score does.'}
+          </p>
+        </>
+      )}
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Take profit" hint={directionOf(c) === 'copy' ? '% · blank = off' : `% · blank = ${DEFAULT_EXIT_TAKE_PROFIT_PCT}`}>
+          <input type="number" value={c.exitTakeProfitPct ?? ''} onChange={(e) => set('exitTakeProfitPct', optNum(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Stop loss" hint={directionOf(c) === 'copy' ? '% · blank = off' : `% · blank = ${DEFAULT_EXIT_STOP_LOSS_PCT}`}>
+          <input type="number" value={c.exitStopLossPct ?? ''} onChange={(e) => set('exitStopLossPct', optNum(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Max hold" hint={directionOf(c) === 'copy' ? 'minutes · blank = off' : `minutes · blank = ${DEFAULT_EXIT_MAX_HOLD_MIN}`}>
+          <input type="number" value={c.exitMaxHoldMin ?? ''} onChange={(e) => set('exitMaxHoldMin', optNum(e.target.value))} className={numBox} />
+        </Field>
+      </div>
+      {directionOf(c) === 'copy' && (
+        <p className="text-label leading-relaxed text-krypt-muted">
+          Your own exits on top of theirs, judged on every price tick. Blank means their sells alone decide.
         </p>
       )}
 
@@ -328,7 +454,7 @@ function ConfigEditor({
             className={numBox}
           />
         </Field>
-        <Field label="Copy their sells">
+        <Field label={directionOf(c) === 'reverse' ? 'Exit when they buy back' : directionOf(c) === 'fomo' ? 'Mirror the crowd’s sells' : 'Copy their sells'}>
           <button
             onClick={() => set('copySells', !c.copySells)}
             className={cls(
@@ -444,9 +570,13 @@ export function WalletsPage() {
       const yes = await modal.confirm({
         title: 'Arm LIVE copy trading',
         message:
-          `Every buy by ${c.label || shortAddr(c.wallet)} will spend real ${nativeSymbolOf(chainOf(c))} on ${chainName(chainOf(c))}, up to ${c.maxTradeSol} per trade, ` +
-          `until you hit your ${c.dailyLossLimitSol} ${nativeSymbolOf(chainOf(c))} daily loss limit. Six months of research in this repo ` +
-          `failed to find a profitable automated memecoin strategy — run it on paper first if you have not.`,
+          (isFomo(c)
+            ? `Every time ${fomoRuleOf(c).minWallets} of ${FOMO_SOURCE_LABEL[fomoRuleOf(c).source].toLowerCase()} buy the same coin within ${fomoRuleOf(c).windowSec} s, ${c.label || 'this crowd'} will spend real ${nativeSymbolOf(chainOf(c))} on ${chainName(chainOf(c))}, up to ${c.maxTradeSol} per trade, `
+            : `Every ${directionOf(c) === 'reverse' ? 'SELL' : 'buy'} by ${c.label || shortAddr(c.wallet)} will spend real ${nativeSymbolOf(chainOf(c))} on ${chainName(chainOf(c))}, up to ${c.maxTradeSol} per trade, `) +
+          `until you hit your ${c.dailyLossLimitSol} ${nativeSymbolOf(chainOf(c))} daily loss limit. ` +
+          (directionOf(c) === 'reverse' ? 'Reverse copying bets the coin keeps going after they leave; nothing has measured that bet. ' : '') +
+          (isFomo(c) ? 'Measured, wallets converging on a coin made the follower’s outcome WORSE with each extra wallet. ' : '') +
+          `Six months of research in this repo failed to find a profitable automated memecoin strategy — run it on paper first if you have not.`,
         confirmLabel: 'Arm live copying',
         destructive: true,
       });
@@ -537,13 +667,22 @@ export function WalletsPage() {
       title="Copy Trading"
       subtitle="Track other traders' wallets, and follow them on paper before you follow them with money. Your own keys live under Wallet."
       actions={
-        <PrimaryButton
-          onClick={() => setEditing(defaultConfig('', '', termChain))}
-          className="!py-2 !px-3 text-xs"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Follow a wallet
-        </PrimaryButton>
+        <div className="flex items-center gap-2">
+          <GhostButton
+            onClick={() => setEditing(defaultConfig('', '', 'solana', 'fomo'))}
+            className="!py-2 !px-3 text-xs"
+          >
+            <Users className="h-3.5 w-3.5" />
+            New FOMO copy
+          </GhostButton>
+          <PrimaryButton
+            onClick={() => setEditing(defaultConfig('', '', termChain))}
+            className="!py-2 !px-3 text-xs"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Follow a wallet
+          </PrimaryButton>
+        </div>
       }
     >
       {/* The copy store exists but could not be read, so NOTHING is being
@@ -740,11 +879,34 @@ export function WalletsPage() {
                       {c.mode === 'paper' ? <FlaskConical className="h-2.5 w-2.5" /> : <Zap className="h-2.5 w-2.5" />}
                       {c.mode}
                     </span>
+                    {directionOf(c) === 'reverse' && (
+                      <span
+                        className="inline-flex items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-amber-300"
+                        title="Buys when they sell, sells when they buy back; closes on its own take-profit, stop-loss or max hold."
+                      >
+                        reverse
+                      </span>
+                    )}
+                    {isFomo(c) && (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full border border-krypt-purple/40 bg-krypt-purple/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-krypt-purple"
+                        title="Buys when several wallets from a set pile into the same coin; exits when the crowd leaves or on its own take-profit, stop-loss or max hold."
+                      >
+                        <Users className="h-2.5 w-2.5" />
+                        fomo
+                      </span>
+                    )}
                     <div className="min-w-0">
                       <div className="text-value font-semibold text-white truncate">
-                        {c.label || shortAddr(c.wallet, 6)}
+                        {c.label || (isFomo(c) ? FOMO_SOURCE_LABEL[fomoRuleOf(c).source] : shortAddr(c.wallet, 6))}
                       </div>
-                      <div className="text-label font-mono text-krypt-muted">{shortAddr(c.wallet, 6)}</div>
+                      {isFomo(c) ? (
+                        <div className="text-label text-krypt-muted">
+                          {fomoRuleOf(c).minWallets} of {FOMO_SOURCE_LABEL[fomoRuleOf(c).source].toLowerCase()} within {fomoRuleOf(c).windowSec} s
+                        </div>
+                      ) : (
+                        <div className="text-label font-mono text-krypt-muted">{shortAddr(c.wallet, 6)}</div>
+                      )}
                       <div className="text-label text-krypt-muted">
                         {chainName(chainOf(c))} · signs with{' '}
                         {c.walletId ? (walletsFor(chainOf(c)).find((w) => w.id === c.walletId)?.label ?? 'a wallet that no longer exists') : 'the active wallet'}
@@ -856,7 +1018,24 @@ export function WalletsPage() {
                   {/* How the wallet is being watched. Every followed wallet
                       has its own subscription on the live socket, on any DEX;
                       this line is what turns silence into an explanation. */}
-                  {c.enabled && (() => {
+                  {c.enabled && isFomo(c) && (() => {
+                    const crowd = snap?.crowd?.[c.id];
+                    if (!crowd) return null;
+                    if (crowd.wallets === 0) {
+                      return (
+                        <p className="text-label text-arc-gold/90">
+                          Listening to nobody: {FOMO_SOURCE_LABEL[crowd.source].toLowerCase()} is empty right now, so this crowd cannot fire.
+                        </p>
+                      );
+                    }
+                    return (
+                      <p className="text-label text-krypt-muted/60">
+                        Listening to {crowd.wallets} wallet{crowd.wallets === 1 ? '' : 's'} ({FOMO_SOURCE_LABEL[crowd.source].toLowerCase()}) on the
+                        curve feed and their own subscriptions.
+                      </p>
+                    );
+                  })()}
+                  {c.enabled && !isFomo(c) && (() => {
                     const w = snap?.watch?.[c.wallet];
                     if (!w) return null;
                     if (w.state === 'over-cap') {
@@ -896,6 +1075,14 @@ export function WalletsPage() {
                         Watching on the live socket, any DEX · {w.seen} transaction{w.seen === 1 ? '' : 's'} seen
                         {w.lastSeenAt ? `, last ${fmtAgo(w.lastSeenAt)} ago` : ' so far'} · {w.swaps} swap{w.swaps === 1 ? '' : 's'}
                         {w.lastSwapAt ? ` (last ${fmtAgo(w.lastSwapAt)} ago)` : ''}
+                        {(w.notSwap ?? 0) > 0 && <span title="Read fine, but not a swap this copier acts on — a transfer, an LP move, a claim."> · {w.notSwap} not swaps</span>}
+                        {(w.unreadable ?? 0) > 0 && (
+                          // The stage where a trade disappears silently: the socket saw
+                          // it, the RPC would not hand it over. Those were NOT copied.
+                          <span className="text-rose-300/80" title="Seen on the socket, but the RPC could not return the transaction after every retry. Those trades were not copied — the Console has the reason for each.">
+                            {' '}· {w.unreadable} unreadable
+                          </span>
+                        )}
                       </p>
                     );
                   })()}

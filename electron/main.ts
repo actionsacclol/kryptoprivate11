@@ -12,7 +12,7 @@ import * as evmRail from './evm/rail';
 import * as bots from './system/bots';
 import * as heliusBudget from './system/heliusBudget';
 import * as discord from './system/discord';
-import { guardWebContents, applyCsp } from './system/webSecurity';
+import { guardWebContents, applyCsp, guardWebviews } from './system/webSecurity';
 import { logger } from './system/logger';
 import * as crashGuard from './system/crashGuard';
 import * as acceptance from './system/acceptance';
@@ -211,6 +211,10 @@ if (process.platform === 'win32') {
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 }
 
+// Embedded browser views (the Links panel on My Layout) are hardened here,
+// before any window exists that could attach one.
+guardWebviews();
+
 // GPU. A user-mode app cannot blue-screen Windows, but a WebGL scene that
 // renders every frame can provoke a bad graphics driver into one (a user's
 // BSOD, 2026-09-08). Hardware acceleration is a setting, read here because
@@ -336,6 +340,9 @@ function showMainWindow(): BrowserWindow {
       // a sandboxed renderer — so there is no reason to run it unsandboxed.
       sandbox: true,
       webSecurity: true,
+      // The Links panel embeds a token's own pages in a <webview>; what a view
+      // may be is decided in webSecurity.guardWebviews, not here.
+      webviewTag: true,
       // Chromium throttles a hidden/minimised window's timers to ~1/min,
       // which stalled every poll and the chart tail; positions came back
       // stale on restore. Prices keep moving whether the window shows or not.
@@ -566,6 +573,7 @@ function openPanelWindow(panelId: string): { ok: boolean; message: string } {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      webviewTag: true,
       backgroundThrottling: false,
       devTools: !app.isPackaged,
     },

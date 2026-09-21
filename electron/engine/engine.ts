@@ -31,7 +31,7 @@ import { computeScore } from './scoring';
 import { curveProgressPct, curveProgressTokenPct, mayhemFromReserves, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, CURVE_COMPLETE_VIRTUAL_TOKENS } from './curve';
 import { oddsFeaturesFromTrades, scoreOdds } from '@shared/odds';
 import type { LaunchTrade } from '@shared/launchintel';
-import { runnerVerdict, runnerNotification, pruneRunners, markCreatorSold, RunnerRateLimit, ODDS_TAPE_CAP, type RunnerFlag } from '@shared/runners';
+import { runnerVerdict, runnerNotification, pruneRunners, markCreatorSold, windowAllowed, RunnerRateLimit, ODDS_TAPE_CAP, RUNNER_TTL_MS, type RunnerFlag } from '@shared/runners';
 import type { NotifyTarget } from '@shared/types';
 import type { ChainKind } from '@shared/evm';
 import { PositionManager, type TokenMarket } from './positions';
@@ -55,11 +55,19 @@ import { prewarm, bondingCurveFor, TOKEN_2022_PROGRAM, type PrewarmedAddresses }
 import { parseMintExtensions, mintWarning } from './mintExtensions';
 import * as tape from '../data/tape';
 import { createChartTicks } from './chartTicks';
+import { LiveCurves, LiveMigrations } from './liveCurves';
 import * as market from '../data/market';
+import * as launchIntel from '../data/launchIntel';
+import * as xStatsStore from '../data/xStats';
+import * as linkIntel from '../data/linkIntel';
+import * as siteReadStore from '../data/siteRead';
+import { marketFactsFromSummary, scriptLinksFromSummary } from '@shared/automation';
+import { countReuse, parseXLink } from '@shared/xLink';
+import type { AiAnalysis } from '@shared/ai';
 import * as advOrders from './advOrders';
 import * as ledger from './ledger';
 import * as scout from './walletScout';
-import { tradeId } from '@shared/walletScout';
+import { rankScout, summarise, tradeId } from '@shared/walletScout';
 import * as paperBook from './paperBook';
 import * as walletWatcher from './walletWatcher';
 import { PAPER_FILL_MODEL, paperToPosition, modelledPaperFill, paperHistoryRows } from '@shared/paper';
@@ -67,12 +75,14 @@ import * as alerts from './alerts';
 import * as copyTrade from './copyTrade';
 import * as kryptoHolding from './kryptoHolding';
 import { KRYPTO_TOKEN, isValidMint } from '@shared/krypto';
+import { liveSessionLedger } from '@shared/liveSession';
 import * as automation from './automation';
 import * as scriptSandbox from '../system/scriptSandbox';
 import { positionPnl, type ScriptPosition } from '@shared/automation';
 import * as dbcWatcher from './dbcWatcher';
 import * as launchLabWatcher from './launchLabWatcher';
 import * as boopWatcher from './boopWatcher';
+import * as raydiumWatcher from './raydiumWatcher';
 import * as heliusBudget from '../system/heliusBudget';
 import * as priorityFeed from './priorityFeed';
 import * as portfolio from './portfolio';
@@ -357,6 +367,8 @@ export class SniperEngine {
   private liveChain: Promise<void> = Promise.resolve();
   private liveBuys = 0;
   private liveSells = 0;
+  /** A fee-estimate failure streak is logged once, not every 8 s. */
+  private feeEstimateFailing = false;
   /** When the live counters last started from zero, and why — so the ledger
    *  can say "this is a new session" instead of looking wiped. */
   private liveSessionAt: number | null = null;
@@ -532,6 +544,7 @@ export class SniperEngine {
         }
         return out;
       },
+      liveLaunch: (mint) => this.tokens.get(mint)?.row ?? null,
       registerPool: (pool, mint) => this.rememberAmmPool(pool, mint),
       watchPumpMint: (mint) => this.watchPumpMint(mint),
       unwatchPumpMint: (mint) => this.unwatchPumpMint(mint),
@@ -552,8 +565,14 @@ export class SniperEngine {
             const httpUrl = rpc.execHttpUrl ?? rpc.httpUrl;
             const info = await getAccountInfo(httpUrl, poolHint);
             if (!info.ok || !info.data) return;
-            if (info.data.owner !== dbcWatcher.DBC_PROGRAM_ID) return; // not a DBC curve
             if (!tape.isSubscribed(mint)) return; // the page closed while we checked
+            // A Raydium pool a provider labelled as something else still
+            // gets its tape: the owner is the truth, whatever the label said.
+            if (info.data.owner === raydiumWatcher.RAYDIUM_AMM_V4_PROGRAM || info.data.owner === raydiumWatcher.RAYDIUM_CPMM_PROGRAM) {
+              void raydiumWatcher.watchPool(mint, poolHint, () => tape.isSubscribed(mint)).catch(() => undefined);
+              return;
+            }
+            if (info.data.owner !== dbcWatcher.DBC_PROGRAM_ID) return; // not a DBC curve
             dbcWatcher.watch(mint, poolHint, decimals);
           } catch {
             /* no tape for this token, and no error worth showing */
@@ -570,6 +589,22 @@ export class SniperEngine {
       // a pool hint nor a pool→mint map, and its ticks carry real wallets.
       watchBoop: (mint, decimals) => boopWatcher.watch(mint, decimals),
       unwatchBoop: (mint) => boopWatcher.unwatch(mint),
+      // Raydium AMM v4 / CPMM: the pool's OWNER decides, read once — a
+      // provider's "raydium" label is a hint to try first, never the
+      // authority. The watcher refuses a pool with no SOL side, and asks
+      // whether the page is still open before it opens a socket. See
+      // raydiumWatcher.ts.
+      watchRaydiumPool: (mint, poolHint) => {
+        if (!poolHint) return;
+        void raydiumWatcher.watchPool(mint, poolHint, () => tape.isSubscribed(mint)).catch(() => undefined);
+      },
+      unwatchRaydiumPool: (mint) => raydiumWatcher.unwatch(mint),
+      livePools: (limit) => raydiumWatcher.recentPools(limit),
+      // The program feed's own books, for the Discover columns. Both are
+      // empty while the scanner is stopped, which `scannerRunning` says.
+      scannerRunning: () => this.running,
+      liveCurves: (limit) => this.liveCurves.graduating(limit),
+      liveMigrations: (limit) => this.liveMigrations.recent(limit),
     });
 
     // Advanced orders (term.txt §2). This module never decides to trade —
@@ -588,6 +623,24 @@ export class SniperEngine {
       else if (f.state === 'unreconciled' && /failed on chain|did not land/i.test(f.note ?? '')) {
         this.emitFill(f.mint, f.side, f.signature, 'failed');
       }
+    });
+    // The kept wallet balance moves the moment a fill is booked from the
+    // chain: the fill's own lamport delta is applied and status pushed, so
+    // the session PnL on every surface reflects the trade NOW — not at the
+    // next poll of the public endpoint, which runs every 8–30 s and fails
+    // silently while that host is parked (user report 2026-09-20: the
+    // Observatory headline stopped after the first trade). A chain read
+    // follows to settle any drift.
+    ledger.onSettled((f) => {
+      if (f.state !== 'reconciled' || f.solDeltaLamports === null) return;
+      const owner = wallet.publicKey();
+      if (!owner || (f.wallet && f.wallet !== owner)) return;
+      if (this.walletBalanceLamports !== null) {
+        this.walletBalanceLamports = Math.max(0, this.walletBalanceLamports + f.solDeltaLamports);
+        wallet.noteBalance(owner, this.walletBalanceLamports);
+        this.pushStatus();
+      }
+      void this.refreshWalletBalance();
     });
     ledger.onSettled((f) => {
       if (f.side !== 'sell' || f.state !== 'reconciled') return;
@@ -837,6 +890,16 @@ export class SniperEngine {
       // Solana wallets are watched one subscription each; an EVM leader is
       // seen through its chain's scanner poll, and a config on a stopped one
       // is a follower watching nothing.
+      // FOMO crowd sources (2026-09-20). Solana only: the crowd is heard on
+      // the pump curve firehose and the followed wallets' subscriptions.
+      scoutSaved: (chain) => (chain === 'solana' ? scout.savedList('solana') : []),
+      trackedWallets: (chain) => (chain === 'solana' ? watchlist.all().map((w) => w.address) : []),
+      scoutTop: (chain, n) =>
+        chain === 'solana'
+          ? rankScout(scout.wallets('solana').map((w) => summarise(w, 'week')).filter((r) => r.copyScore !== null), 'copyScore')
+              .slice(0, Math.max(1, n))
+              .map((r) => r.address)
+          : [],
       leaderFeed: (chain) => (chain === 'solana' ? null : (this.evmCopy?.leaderFeed?.(chain) ?? null)),
     });
 
@@ -904,7 +967,7 @@ export class SniperEngine {
         // from the bridge and only on request, so "cached" is honestly nothing.
         if (chain && chain !== 'solana') return null;
         const s = market.summaryIfCached(mint);
-        return s ? { priceSol: s.priceSol, priceUsd: s.priceUsd, marketCapUsd: s.marketCapUsd, liquidityUsd: s.liquidityUsd, holders: s.holders, launchpad: s.launchpad ?? null, symbol: s.symbol, name: s.name } : null;
+        return s ? marketFactsFromSummary(s, this.xReuseFor(s.socials.twitter, mint).handle, xStatsStore.get(mint), linkIntel.facts(mint), siteReadStore.get(mint)) : null;
       },
       market: async (mint, chain) => {
         if (chain && chain !== 'solana') {
@@ -925,10 +988,74 @@ export class SniperEngine {
         }
         try {
           const s = await market.summary(mint);
-          return { priceSol: s.priceSol, priceUsd: s.priceUsd, marketCapUsd: s.marketCapUsd, liquidityUsd: s.liquidityUsd, holders: s.holders, launchpad: s.launchpad ?? null, symbol: s.symbol, name: s.name };
+          // A script asked about this token: start its Telegram and domain
+          // lookups (budgeted, cached); the answers ride into later reads.
+          linkIntel.trigger(mint);
+          return marketFactsFromSummary(s, this.xReuseFor(s.socials.twitter, mint).handle, xStatsStore.get(mint), linkIntel.facts(mint), siteReadStore.get(mint));
         } catch {
           return null;
         }
+      },
+      // The rest of what the app knows about a token (2026-09-20). Solana only:
+      // the EVM rails have no security report, creator record or AI opinion.
+      links: (mint, chain) => {
+        if (chain && chain !== 'solana') return null;
+        const s = market.summaryIfCached(mint);
+        if (s) linkIntel.trigger(mint);
+        return s ? scriptLinksFromSummary('solana', s, this.xReuseFor(s.socials.twitter, mint), xStatsStore.get(mint), linkIntel.facts(mint), siteReadStore.get(mint)) : null;
+      },
+      security: async (mint, chain) => {
+        if (chain && chain !== 'solana') return null;
+        try {
+          const d = await market.tokenDetail(mint);
+          return {
+            score: d.security.score,
+            checksResolved: d.security.checksResolved,
+            checksTotal: d.security.checksTotal,
+            checks: d.security.checks.map((c) => ({ id: c.id, label: c.label, verdict: c.verdict, detail: c.detail })),
+            warnings: d.warnings,
+          };
+        } catch {
+          return null;
+        }
+      },
+      creator: async (mint, chain) => {
+        if (chain && chain !== 'solana') return null;
+        let creator = market.summaryIfCached(mint)?.creator ?? this.tokens.get(mint)?.createEvent.creator ?? null;
+        if (!creator) {
+          try {
+            creator = (await market.summary(mint)).creator;
+          } catch {
+            return null;
+          }
+        }
+        if (!creator) return null;
+        const h = await launchIntel.creatorHistory(creator).catch(() => null);
+        if (!h) return null;
+        return {
+          address: h.address,
+          launches: h.launches,
+          graduated: h.graduated,
+          graduationRate: h.graduationRate,
+          medianAthUsd: h.medianAthUsd,
+          bestAthUsd: h.bestAthUsd,
+          firstLaunchAt: h.firstLaunchAt,
+          lastLaunchAt: h.lastLaunchAt,
+          truncated: h.truncated,
+        };
+      },
+      analyze: async (mint, chain) => {
+        if (chain && chain !== 'solana') throw new Error('AI analysis is Solana-only for now');
+        // Cached per token for ten minutes: the same question twice must not
+        // spend the user's key twice.
+        const hit = this.scriptAiCache.get(mint);
+        if (hit && Date.now() - hit.at < 10 * 60_000) return hit;
+        const d = await market.tokenDetail(mint);
+        const { analyze } = await import('../data/aiAnalysis');
+        const r = await analyze(this.getSettings().ai, d.summary, d, Date.now());
+        if (!r.ok || !r.analysis) throw new Error(r.message);
+        this.scriptAiCache.set(mint, r.analysis);
+        return r.analysis;
       },
       positions: (mode, chain) => this.scriptPositions(mode, chain),
       wallet: (chain) => {
@@ -1076,6 +1203,45 @@ export class SniperEngine {
       log: (level, line) => this.log(level, line),
     });
 
+    // Raydium AMM v4 / CPMM — the post-migration rail. Two subscriptions on
+    // the pool-creation fee accounts hear every new pool (opened with the
+    // scanner in start()); the tape for an open token's pool is per pool,
+    // like DBC's, but decoded from logs with no transaction fetch. Ticks
+    // carry no wallet: logs have no account list. See raydiumWatcher.ts.
+    raydiumWatcher.attach({
+      wssUrls: () => {
+        const rpc = this.getSettings().rpc;
+        return [rpc.wssUrl, ...(rpc.extraWssUrls ?? [])].filter(Boolean);
+      },
+      httpUrl: () => {
+        const rpc = this.getSettings().rpc;
+        return rpc.execHttpUrl ?? rpc.httpUrl;
+      },
+      commitment: () => this.getSettings().rpc.commitment,
+      onTick: (t) => {
+        this.rememberPrice(t.mint, t.priceSol);
+        tape.record(t.mint, {
+          at: t.at,
+          wallet: t.wallet,
+          isBuy: t.isBuy,
+          sol: t.sol,
+          tokens: t.tokens,
+          priceSol: t.priceSol,
+        });
+        this.chartTicks.push(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
+        advOrders.onTick({ mint: t.mint, priceSol: t.priceSol, mcapUsd: null });
+        // An AMM pool has no curve. Null rather than 100: a token that never
+        // had a curve completed nothing, and an alert keyed on graduation
+        // must not fire because a pool merely exists.
+        alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: null });
+        copyTrade.markToMarket(t.mint, t.priceSol);
+      },
+      onPool: (p) => {
+        recorder.record('raydium_pool', { kind: p.kind, pool: p.pool, mint: p.mint, solQuoted: p.solQuoted, priceSol: p.priceSol, solInPool: p.solInPool, sig: p.signature });
+      },
+      log: (level, line) => this.log(level, line),
+    });
+
     // Deliberately started here rather than in start(): orders on migrated
     // tokens are not on the launch feed at all, so tying their evaluation to
     // the scanner would mean a stop loss silently stops watching whenever
@@ -1201,6 +1367,9 @@ export class SniperEngine {
       ammBlockUrls.length ? { urls: ammBlockUrls, decodeInner: decodeCpiAmmEventData, mentions: PUMP_AMM_GLOBAL_CONFIG } : undefined,
     );
     this.ammFeed.start();
+    // New Raydium pools for the Migrated column: two subscriptions that sit
+    // idle between creations (see raydiumWatcher.ts).
+    raydiumWatcher.startCreations();
 
     // Priority feed: attached in the constructor (it also serves the terminal's
     // open tokens); the 1 s priorityTick below keeps it pointed at held mints.
@@ -1339,6 +1508,7 @@ export class SniperEngine {
     dbcWatcher.stopAll();
     launchLabWatcher.stopAll();
     boopWatcher.stopAll();
+    raydiumWatcher.stopAll();
   }
 
   /** Back up in priority order, one every 750 ms, so ten handshakes are not
@@ -1354,6 +1524,9 @@ export class SniperEngine {
       },
       () => {
         if (this.running) this.ammFeed?.start();
+      },
+      () => {
+        if (this.running) raydiumWatcher.startCreations();
       },
     ];
     steps.forEach((fn, i) =>
@@ -1373,6 +1546,7 @@ export class SniperEngine {
     dbcWatcher.stopAll();
     launchLabWatcher.stopAll();
     boopWatcher.stopAll();
+    raydiumWatcher.stopAll();
     // The fast socket also carries the terminal's open-token tape, which is
     // not the scanner's to stop — release only the mints held for positions.
     for (const p of this.positions.all()) {
@@ -1592,6 +1766,19 @@ export class SniperEngine {
         this.liveBaselineLamports !== null && this.walletBalanceLamports !== null
           ? Math.round((this.walletBalanceLamports + this.sweptLamports - this.liveBaselineLamports) / 1e3) / 1e6
           : null,
+      // The session's REAL fills, trips and open positions — what the
+      // Observatory ledger shows while armed. Read from the kept portfolio
+      // build (never triggers one: this runs every second) and only when
+      // that build is the active wallet's.
+      liveSession:
+        this.liveSessionAt !== null
+          ? liveSessionLedger(
+              this.liveSessionAt,
+              ledger.all(),
+              this.lastPortfolio && this.lastPortfolio.owner === (wallet.publicKey() ?? '') ? this.lastPortfolio.summary : null,
+              wallet.publicKey(),
+            )
+          : null,
       walletBalanceSol: this.walletBalanceLamports !== null ? this.walletBalanceLamports / 1e9 : null,
     };
   }
@@ -1619,11 +1806,21 @@ export class SniperEngine {
     // Helius credits on the better getPriorityFeeEstimate only while real
     // buys are actually armed, when fee quality pays for itself.
     const feeUrl = this.autoLiveActive() ? (s.rpc.execHttpUrl ?? s.rpc.httpUrl) : s.rpc.httpUrl;
-    const [fee] = await Promise.all([
-      feeEstimator.estimate(feeUrl, scope),
-      s.execution.useJito ? jitoTips.refresh() : Promise.resolve(jitoTips.current()),
-    ]);
-    this.feeEstimate = fee;
+    // The balance read below must not depend on the fee and tip providers:
+    // a rejected estimate used to abandon this whole poll, and with it the
+    // only periodic balance read the session PnL had. Logged once per
+    // failure streak, not every 8 s.
+    try {
+      const [fee] = await Promise.all([
+        feeEstimator.estimate(feeUrl, scope),
+        s.execution.useJito ? jitoTips.refresh() : Promise.resolve(jitoTips.current()),
+      ]);
+      this.feeEstimate = fee;
+      this.feeEstimateFailing = false;
+    } catch (err) {
+      if (!this.feeEstimateFailing) this.log('warn', `fee estimate failed: ${(err as Error).message} — the last estimate stands`);
+      this.feeEstimateFailing = true;
+    }
 
     // Track the trading wallet balance so the UI can show real live PnL as
     // the actual balance change since live went active.
@@ -2155,6 +2352,27 @@ export class SniperEngine {
     return this.armed && this.getSettings().execution.liveEnabled;
   }
 
+  /** AI opinions handed to scripts, per mint — see the host's `analyze`. */
+  private readonly scriptAiCache = new Map<string, AiAnalysis>();
+
+  /** How many OTHER launches in view link the same X account or post as
+   *  `twitter` — the free half of the X-link check, for scripts. "In view"
+   *  is every launch the scanner tracks whose provider summary is cached:
+   *  the tracked row itself only knows WHETHER a link exists (metadata.ts),
+   *  the URL lives in the summary. A launch with no cached summary is not
+   *  counted, so the count is a floor. */
+  private xReuseFor(twitter: string | null, selfMint: string): { handle: number; post: number } {
+    const link = parseXLink(twitter);
+    if (link.kind === 'none' || link.kind === 'not-x') return { handle: 0, post: 0 };
+    const others: Array<{ mint: string; twitter: string | null }> = [];
+    for (const t of this.tokens.values()) {
+      if (t.row.mint === selfMint || !t.socials?.twitter) continue;
+      const tw = market.summaryIfCached(t.row.mint)?.socials.twitter ?? null;
+      if (tw) others.push({ mint: t.row.mint, twitter: tw });
+    }
+    return countReuse(link, others, selfMint);
+  }
+
   /** Buy size + fee/rent headroom the wallet must hold before a live buy. */
   private static readonly LIVE_BALANCE_HEADROOM_SOL = 0.02;
   private static readonly MAX_LIVE_SEND_FAILS = 3;
@@ -2483,6 +2701,13 @@ export class SniperEngine {
    *  a direction. Bounded with the tape's own subscription budget in mind. */
   private readonly lastCurveVSol = new Map<string, bigint>();
 
+  /** Every curve the program feed hears trading, and every migration it
+   *  hears — the Discover columns' local source while the scanner runs
+   *  (engine/liveCurves.ts). Fed from onTrade / onComplete / the AMM
+   *  migration event; read through the terminal context. */
+  private readonly liveCurves = new LiveCurves();
+  private readonly liveMigrations = new LiveMigrations();
+
   dbcWatchedMints(): string[] {
     return dbcWatcher.watchedMints();
   }
@@ -2633,7 +2858,7 @@ export class SniperEngine {
   }
 
   /**
-   * How often the $KRYPTO holding behind the fee waiver is re-read.
+   * How often the $KRYPTO holding behind the holder rate is re-read.
    *
    * One `getMultipleAccounts` for every wallet, so the cost does not grow
    * with the trade rate — and the fee path never waits for it, it reads the
@@ -2641,23 +2866,23 @@ export class SniperEngine {
    * fees for long, without polling a balance nobody is watching.
    */
   private kryptoTimer: NodeJS.Timeout | null = null;
-  private kryptoWaived = false;
+  private kryptoHolder = false;
 
   /** Re-read the holding, and say so in the log when the answer changes. */
   private async refreshKrypto(): Promise<void> {
     if (!isValidMint(KRYPTO_TOKEN.mint)) return;
     // The price comes from the market layer's cache, so ask it to have one.
     // Failure is fine: an unpriceable token leaves the holding unknown, and
-    // unknown does not waive.
+    // unknown does not qualify.
     try {
       await market.summary(KRYPTO_TOKEN.mint);
     } catch {
       /* the holding read below reports the missing price itself */
     }
     await kryptoHolding.refresh();
-    const now = kryptoHolding.feeWaived();
-    kryptoHolding.logState(this.kryptoWaived, now);
-    this.kryptoWaived = now;
+    const now = kryptoHolding.holderRateApplies();
+    kryptoHolding.logState(this.kryptoHolder, now);
+    this.kryptoHolder = now;
   }
 
   private copySweepTimer: NodeJS.Timeout | null = null;
@@ -2820,7 +3045,11 @@ export class SniperEngine {
    *  buys does not start five builds. */
   markPortfolioDirty(): void {
     this.portfolioDirtyAt = Date.now();
-    if (this.lastPortfolio) this.schedulePortfolioRebuild(1_500);
+    // With no build yet, a real fill while live starts one anyway: the
+    // Observatory ledger and the Wallet panel read the kept build for their
+    // realized and unrealized figures, and used to show "—" until some page
+    // happened to ask for a portfolio.
+    if (this.lastPortfolio || this.manualLiveActive()) this.schedulePortfolioRebuild(1_500);
   }
 
   private schedulePortfolioRebuild(delayMs: number): void {
@@ -3395,6 +3624,28 @@ export class SniperEngine {
     };
     void tick();
     this.ordersPollTimer = setInterval(() => void tick(), 12_000);
+  }
+
+  /** When the order / alert / copy evaluation last threw for a mint. */
+  private evalErrorAt = new Map<string, number>();
+
+  /**
+   * The per-trade evaluation threw. The trade handler has already recorded
+   * the tape and carries on; this says what broke, at most once a minute per
+   * mint, so a throwing order is a line in the Console and never a silent
+   * chart. Before 2026-09-20 the same throw skipped the tape record itself.
+   */
+  private noteEvalError(what: string, mint: string, err: unknown): void {
+    const now = Date.now();
+    const last = this.evalErrorAt.get(mint) ?? 0;
+    if (now - last < 60_000) return;
+    this.evalErrorAt.set(mint, now);
+    if (this.evalErrorAt.size > 500) {
+      const oldest = this.evalErrorAt.keys().next().value;
+      if (oldest !== undefined) this.evalErrorAt.delete(oldest);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    this.log('error', `${what} evaluation threw for ${mint.slice(0, 8)}… — ${msg}. The chart tape was recorded first and is unaffected.`);
   }
 
   /** An armed order whose mint has had no price for 20 s cannot evaluate.
@@ -4456,29 +4707,18 @@ export class SniperEngine {
     for (const event of decoded) {
       if (event.kind === 'amm_migration') {
         this.rememberAmmPool(event.pool, event.mint);
+        this.liveMigrations.note(event.mint, event.pool, event.solAmount, n.receivedAt);
+        this.liveCurves.complete(event.mint);
         if (sAmm.shadowMigration) this.emitMigEvents(this.mig.onMigration(event.mint, event.pool, n.receivedAt));
         continue;
       }
       if (sAmm.shadowMigration) this.emitMigEvents(this.mig.onAmmSwap(event, n.receivedAt));
       const mint = this.ammPoolToMint.get(event.pool);
       if (mint === undefined) continue;
-      // Orders on a graduated token evaluate at feed rate here, the way
-      // curve trades do in onTrade. The 12 s poller is the floor that always
-      // covers them (see `curveFeedIsTicking`); this is the fast path for
-      // the session that watched the token migrate, and it is what keeps a
-      // trailing stop's peak honest across the seam.
-      {
-        const priceSol = executedPriceSol(event);
-        if (Number.isFinite(priceSol) && priceSol > 0) {
-          this.rememberPrice(mint, priceSol);
-          advOrders.onTick({ mint, priceSol, mcapUsd: null });
-          alerts.onTick({ mint, priceSol, curvePct: 100 });
-          copyTrade.markToMarket(mint, priceSol);
-        }
-      }
       // A graduated token keeps charting: the terminal tape follows the mint
       // onto PumpSwap via the pool map, which the token page seeds from the
-      // pool DexScreener reports.
+      // pool DexScreener reports. Recorded FIRST, before the order
+      // evaluation below, for the same reason as in onTrade (2026-09-20).
       if (tape.isSubscribed(mint)) {
         tape.record(mint, {
           at: n.receivedAt,
@@ -4489,6 +4729,22 @@ export class SniperEngine {
           priceSol: executedPriceSol(event),
         });
         this.chartTicks.push(mint, n.receivedAt, executedPriceSol(event), Number(event.quoteAmount) / 1e9, event.isBuy);
+      }
+      // Orders on a graduated token evaluate at feed rate here, the way
+      // curve trades do in onTrade. The 12 s poller is the floor that always
+      // covers them (see `curveFeedIsTicking`); this is the fast path for
+      // the session that watched the token migrate, and it is what keeps a
+      // trailing stop's peak honest across the seam. Fenced like onTrade's.
+      try {
+        const priceSol = executedPriceSol(event);
+        if (Number.isFinite(priceSol) && priceSol > 0) {
+          this.rememberPrice(mint, priceSol);
+          advOrders.onTick({ mint, priceSol, mcapUsd: null });
+          alerts.onTick({ mint, priceSol, curvePct: 100 });
+          copyTrade.markToMarket(mint, priceSol);
+        }
+      } catch (err) {
+        this.noteEvalError('orders/alerts/copy', mint, err);
       }
       if (!sAmm.shadowStratLab) continue;
       this.emitLabEvents(this.lab.onAmmTrade(mint, executedPriceSol(event), n.receivedAt));
@@ -4986,6 +5242,24 @@ export class SniperEngine {
   }
 
   private onTrade(ev: PumpTradeEvent, n: LogNotification): void {
+    // Every trade, tracked or not: the reserves on the event are the curve's
+    // progress and price, which is what the Graduating column ranks by.
+    this.liveCurves.note(ev.mint, ev.virtualSolReserves, ev.virtualTokenReserves, ev.creator, n.receivedAt);
+    // FOMO: a wallet some crowd config is listening for, on any mint — a
+    // set lookup for everyone else (2026-09-20).
+    if (copyTrade.crowdWants('solana', ev.user, n.receivedAt)) {
+      copyTrade.noteCrowdTrade({
+        wallet: ev.user,
+        mint: ev.mint,
+        symbol: this.tokens.get(ev.mint)?.row.symbol ?? market.summaryIfCached(ev.mint)?.symbol ?? '',
+        isBuy: ev.isBuy,
+        sol: Number(ev.solAmount) / 1e9,
+        priceSol: spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves),
+        at: n.receivedAt,
+        signature: n.signature,
+        tradeAt: ev.timestamp > 0 ? ev.timestamp * 1_000 : null,
+      });
+    }
     const t = this.tokens.get(ev.mint);
     if (!t) {
       // A token the terminal has OPEN but this session never saw launch —
@@ -5034,13 +5308,26 @@ export class SniperEngine {
     }
     const held = this.positions.hasOpenFor(ev.mint);
 
+    // Terminal tape FIRST (2026-09-20). The chart and the trades list must
+    // never depend on what the order, alert and copy evaluation below does:
+    // it used to run after them, so a throw or a stall in that evaluation
+    // skipped this record on every trade of the mint — a chart frozen for
+    // exactly the token that had an order on it (user report). Runs before
+    // the decided/unheld fast-path return below too, because the token page
+    // is usually open on a mint the strategy already passed on — that is the
+    // whole point of a terminal. Gated on an explicit subscription (a Set
+    // lookup) so the firehose costs nothing when nobody is looking.
+    if (tape.isSubscribed(ev.mint)) this.recordTapeTrade(ev, n);
+
     // Advanced orders evaluate on EVERY trade of a mint we are tracking, at
     // full feed rate — ahead of the decided/unheld fast-path below, because
     // a stop loss on a token the strategy passed on must still fire. The
     // creator-sell flag is read from the token's flow state, which onTrade
     // sets further down; using the pre-update value here is deliberate, so
     // an order sees the same event the flow does rather than one tick late.
-    {
+    // Fenced: whatever goes wrong in here is logged (once a minute per mint)
+    // and the trade handler carries on — the tape above is already recorded.
+    try {
       const priceSol = spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves);
       this.rememberPrice(ev.mint, priceSol);
       // The order poller skips mints this feed is already ticking. It has to
@@ -5090,14 +5377,9 @@ export class SniperEngine {
           signature: n.signature,
         });
       }
+    } catch (err) {
+      this.noteEvalError('orders/alerts/copy', ev.mint, err);
     }
-
-    // Terminal tape. Runs BEFORE the decided/unheld fast-path return below,
-    // because the token page is usually open on a mint the strategy already
-    // passed on — that is the whole point of a terminal. Gated on an explicit
-    // subscription (a Set lookup) so the firehose costs nothing when nobody
-    // is looking.
-    if (tape.isSubscribed(ev.mint)) this.recordTapeTrade(ev, n);
 
     // Smart-money signal runs even for decided/unheld tokens (a watched wallet
     // buying a launch we passed on is exactly the correlation we want). Just a
@@ -5155,7 +5437,18 @@ export class SniperEngine {
         }
       }
     }
-    if (t.decided && !held) {
+    // Once the strategy has decided a launch (the evaluation window is 15 s
+    // by default) its trades used to stop being read unless a position held
+    // it: no flow, no score, no launchUpdate. Runner flags come at +60 s and
+    // +120 s, so a script that subscribed to a flagged runner got price ticks
+    // from the tape and never another launch update (user report,
+    // 2026-09-20: "40 tick events, zero launchUpdate"). A launch stays fully
+    // tracked while anyone still needs its metrics: a held position, a
+    // runner flag inside its 15 min, or a tape subscription — the terminal
+    // chart or a script's bot.subscribe/bot.watch. Bounded by those three
+    // sets, so the firehose still costs one price write for everything else.
+    const kept = held || this.runnerFlagged(ev.mint, n.receivedAt) || tape.isSubscribed(ev.mint);
+    if (t.decided && !kept) {
       t.row.priceSol = spotPriceSol(t.virtualSolReserves, t.virtualTokenReserves);
       return;
     }
@@ -5199,7 +5492,11 @@ export class SniperEngine {
       this.refreshFlow(t);
       this.maybeDecide(t, n.receivedAt);
     } else {
-      this.pushLaunchThrottled(t);
+      // Kept alive past the decision: the flow is re-read with the push so
+      // the row a script or the Runners page sees carries current buyers,
+      // inflow and curve progress, not the figures frozen at decision time.
+      // The score stays what the decision computed.
+      this.pushLaunchThrottled(t, true);
     }
     this.positions.onTradeFor(ev.mint);
   }
@@ -5215,6 +5512,7 @@ export class SniperEngine {
       migrated: true,
     });
     alerts.onTick({ mint, symbol: t?.row.symbol, migrated: true, curvePct: 100 });
+    this.liveCurves.complete(mint);
     if (!t) return;
     t.curveComplete = true;
     creators.recordCompletion(t.createEvent.creator);
@@ -5461,6 +5759,13 @@ export class SniperEngine {
   // notification (and the paired chat bots) — never bought. See
   // shared/runners.ts for the verdict and the wording.
   private runners: RunnerFlag[] = [];
+
+  /** Is this mint a runner flag still inside its 15 min? The list is short
+   *  (a handful of flags an hour), so a scan beats keeping a second index. */
+  private runnerFlagged(mint: string, now: number): boolean {
+    for (const r of this.runners) if (r.mint === mint && now - r.flaggedAt < RUNNER_TTL_MS) return true;
+    return false;
+  }
   private runnerLimiter = new RunnerRateLimit();
 
   private judgeRunners(now: number): void {
@@ -5482,6 +5787,8 @@ export class SniperEngine {
       const windowS: 60 | 120 | null = age >= 120_000 && t.oddsJudged < 120 ? 120 : age >= 60_000 && t.oddsJudged < 60 ? 60 : null;
       if (windowS === null) continue;
       t.oddsJudged = windowS;
+      // A window the user turned off is not judged; the next one still is.
+      if (!windowAllowed(cfg, windowS)) continue;
       if (t.oddsTrades.length < 3) continue;
       let report;
       try {
@@ -5505,6 +5812,13 @@ export class SniperEngine {
         alreadyFlagged: t.flagged,
         tapeTruncated: t.oddsTapeTruncated,
         nonSolQuote: t.virtualSolReserves === 0n,
+        regime: report?.regime,
+        // The user's own filters read the same facts the flag would carry.
+        windowS,
+        uniqueBuyers: t.row.flow.uniqueBuyers,
+        netInflowSol: t.row.flow.netInflowSol,
+        curvePct: curveProgressTokenPct(t.virtualTokenReserves),
+        creatorPriorDumps: t.row.creatorPriorRugs,
       });
       if (!verdict.flag || !report?.graduate) continue;
       const flag: RunnerFlag = {
@@ -5626,10 +5940,13 @@ export class SniperEngine {
     this.emit({ kind: 'launchUpdate', launch: { ...t.row, flow: { ...t.row.flow } } });
   }
 
-  /** Trade streams are hot — cap UI updates per token at ~4/s. */
-  private pushLaunchThrottled(t: TrackedToken): void {
+  /** Trade streams are hot — cap UI updates per token at ~4/s. With
+   *  `refresh`, the flow is recomputed just before a push that goes out. */
+  private pushLaunchThrottled(t: TrackedToken, refresh = false): void {
     const last = this.lastPush.get(t.row.mint) ?? 0;
-    if (Date.now() - last >= 250) this.pushLaunch(t);
+    if (Date.now() - last < 250) return;
+    if (refresh) this.refreshFlow(t);
+    this.pushLaunch(t);
   }
 
   /** mint -> when the pump curve feed last delivered a trade for it. */
@@ -5652,8 +5969,11 @@ export class SniperEngine {
     while (this.launchOrder.length > LAUNCH_LIST_CAP) {
       const mint = this.launchOrder.shift()!;
       const t = this.tokens.get(mint);
-      // Never evict a token backing an open position.
-      if (t && this.positions.hasOpenFor(mint)) {
+      // Never evict a token backing an open position, nor a runner flag
+      // still inside its window: a busy hour fills 300 launches in minutes,
+      // and a flagged runner evicted here would lose its updates that way
+      // instead (2026-09-20).
+      if (t && (this.positions.hasOpenFor(mint) || this.runnerFlagged(mint, Date.now()))) {
         this.launchOrder.push(mint);
         if (this.launchOrder.length <= LAUNCH_LIST_CAP + 5) break;
         continue;

@@ -30,10 +30,10 @@ export const es: Catalogue = {
   'nav.execution': 'Ejecución',
   'nav.backtest': 'Backtest',
   'nav.history': 'Historial',
-  'nav.rewardPools': 'Pools de recompensas',
+  'nav.guides': 'Guías',
   'nav.walletScout': 'Rastreo de billeteras',
   'nav.launchToken': 'Lanzar un token',
-  'nav.myLayout': 'Mi diseño',
+  'nav.widgets': 'Widgets',
   'nav.settings': 'Ajustes',
   'nav.about': 'Acerca de',
   'nav.legal': 'Legal',
@@ -83,7 +83,7 @@ export const es: Catalogue = {
   'onboarding.everythingUnderSettings': 'Todo está en Ajustes',
   'onboarding.getStarted': 'Comenzar',
 
-  'waiver.hold': 'Mantén {amount} $KRYPTO y esta comisión no se cobra',
+  'waiver.hold': 'Mantén {amount} $KRYPTO y esta comisión se reduce a la mitad',
 
   'mode.paper': 'Simulado',
   'mode.live': 'Real',
@@ -105,7 +105,7 @@ export const es: Catalogue = {
   'settings.subtitle': 'Proveedores de datos, endpoints RPC, grabación, presencia.',
 
   'settings.theme': 'Tema',
-  'settings.themeHint': 'Cambia solo el color de acento. El verde de subida, el rojo de bajada y el dorado del dinero se mantienen igual.',
+  'settings.themeHint': 'Elige un estilo — tipografías, superficies, esquinas, efectos — y luego un color de acento. El verde de subida, el rojo de bajada y el dorado del dinero se mantienen igual.',
   'settings.replay': 'Repetir la introducción',
   'settings.replayHint': 'Vuelve a mostrar las pantallas de inicio. No se restablece nada: tus billeteras, claves y ajustes no se tocan.',
   'onboarding.appearance': 'Idioma y color',

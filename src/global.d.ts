@@ -18,6 +18,9 @@ import type { AiAnalysis } from '@shared/ai';
 import type { BotKind } from '@shared/bots';
 import type { CreditUsage } from '@shared/credits';
 import type { KryptoHolding } from '@shared/krypto';
+import type { XStats } from '@shared/xStats';
+import type { LinkIntel } from '@shared/linkIntel';
+import type { SiteRead } from '@shared/siteRead';
 import type { Callout } from '@shared/callouts';
 import type { BoostedToken, TokenProfile } from '@shared/wire';
 import type { BotStatus } from '../electron/system/bots';
@@ -36,7 +39,7 @@ import type { LaunchDraft, LaunchOutcome } from '@shared/launch';
 import type { UpdateStatus } from '@shared/version';
 import type { SwapDraft, SwapQuote } from '@shared/swap';
 import type { BridgeDraft, BridgeQuote, InFlight } from '@shared/bridge';
-import type { ScoutChain, ScoutRow, ScoutScanHours, ScoutScanStatus, ScoutSort, ScoutWindow } from '@shared/walletScout';
+import type { ScoutChain, ScoutRow, ScoutScanHours, ScoutScanStatus, ScoutSort, ScoutWallet, ScoutWindow } from '@shared/walletScout';
 import type {
   EvmChainKind,
   EvmFill,
@@ -119,10 +122,20 @@ declare global {
       backtest: {
         dataset: () => Promise<IpcResult<BacktestTrade[]>>;
       };
+      links: {
+        /** Keep what the Links panel read off a token's X page, for the scripts. */
+        setXStats: (mint: string, stats: XStats) => Promise<IpcResult<{ stats: XStats; readAt: number }>>;
+        xStats: (mint: string) => Promise<IpcResult<{ stats: XStats; readAt: number } | null>>;
+        /** Telegram members + the website's registry record, looked up by main from the token's own links (wait = fetch now). */
+        intel: (mint: string, wait?: boolean) => Promise<IpcResult<LinkIntel>>;
+        /** Keep what the Links panel read off the token's own website, for the scripts. */
+        setSiteRead: (mint: string, read: SiteRead) => Promise<IpcResult<{ read: SiteRead; readAt: number }>>;
+        siteRead: (mint: string) => Promise<IpcResult<{ read: SiteRead; readAt: number } | null>>;
+      };
       krypto: {
-        /** The live holding across every wallet, and whether it waives the fee.
+        /** The live holding across every wallet, and whether it halves the fee.
          *  Pass true to force a fresh read (a button, never a poll). */
-        holding: (refresh?: boolean) => Promise<IpcResult<KryptoHolding & { waived: boolean; thresholdTokens: number }>>;
+        holding: (refresh?: boolean) => Promise<IpcResult<KryptoHolding & { halved: boolean; thresholdTokens: number }>>;
       };
       rpc: {
         credits: () => Promise<IpcResult<CreditUsage>>;
@@ -280,6 +293,8 @@ declare global {
         scan: (chain: ScoutChain, hours: ScoutScanHours) => Promise<IpcResult<ScoutScanStatus>>;
         scanStatus: (chain: ScoutChain) => Promise<IpcResult<ScoutScanStatus>>;
         scanCancel: (chain: ScoutChain) => Promise<IpcResult<ScoutScanStatus>>;
+        /** One wallet's whole record for the drawer; `wallet` is null when unknown. */
+        detail: (chain: ScoutChain, address: string) => Promise<IpcResult<{ wallet: ScoutWallet | null; saved: boolean }>>;
         /** Forget every tracked wallet on a chain; saved ones survive. */
         clear: (chain: ScoutChain) => Promise<IpcResult<number>>;
       };
@@ -453,3 +468,20 @@ declare global {
 }
 
 export {};
+
+// Electron's <webview> (the Links panel on the Widgets page). Declared here because
+// React knows the HTML elements and this is not one; the attributes are the
+// ones the panel sets. What the view may be is enforced in main
+// (electron/system/webSecurity.ts guardWebviews), not by this type.
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      webview: React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
+        src?: string;
+        partition?: string;
+        allowpopups?: string;
+        useragent?: string;
+      };
+    }
+  }
+}

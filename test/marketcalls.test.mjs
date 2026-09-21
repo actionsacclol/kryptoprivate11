@@ -27,12 +27,21 @@
 
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { market, http, ds, gt } from './.marketmod.mjs';
+import { ataFor, bondingCurveFor, metadataFor, pumpSwapCanonicalPoolFor, TOKEN_PROGRAM, WSOL_MINT } from './.addr2.mjs';
 
 // ── Counting fetch stub ───────────────────────────────────────────────
 
 const counts = new Map();
-const bump = (k) => counts.set(k, (counts.get(k) ?? 0) + 1);
+/** Request timeline (key, ms since the harness started) — for diagnosing
+ *  why two asks did or did not merge. */
+const stamps = [];
+const T0 = Date.now();
+const bump = (k) => {
+  counts.set(k, (counts.get(k) ?? 0) + 1);
+  stamps.push(`${k}@${Date.now() - T0}`);
+};
 const n = (k) => counts.get(k) ?? 0;
 const resetCounts = () => counts.clear();
 
@@ -121,6 +130,11 @@ const json = (body, status = 200) =>
 /** Newest-first list window. pump.fun launches dozens a minute, so a static
  *  list would make every memo hit and hide the per-row work entirely. */
 let churnBase = 0;
+/** Accounts the stubbed RPC serves for `getMultipleAccounts` (the chain
+ *  reads behind the feed-sourced Discover rows). address → { owner, data }. */
+const liveAccounts = new Map();
+/** pump.fun answering 429 to its list routes — the outage the banner names. */
+let pumpDown = false;
 /** The biggest chunk any request was asked for — the silent-truncation guard. */
 let widestBatch = 0;
 
@@ -151,7 +165,15 @@ function install() {
             },
           };
         }
-        if (m === 'getMultipleAccounts') return { context: { slot: 1 }, value: (params?.[0] ?? []).map(() => null) };
+        if (m === 'getMultipleAccounts') {
+          return {
+            context: { slot: 1 },
+            value: (params?.[0] ?? []).map((a) => {
+              const acc = liveAccounts.get(a);
+              return acc ? { owner: acc.owner, data: [acc.data.toString('base64'), 'base64'], lamports: 1, executable: false } : null;
+            }),
+          };
+        }
         if (m === 'getTokenSupply') {
           return { context: { slot: 1 }, value: { amount: '1000000000000000', decimals: 6, uiAmount: 1e9 } };
         }
@@ -164,6 +186,10 @@ function install() {
 
     if (host === 'frontend-api-v3.pump.fun') {
       if (p === '/coins') {
+        if (pumpDown) {
+          bump('pump:list');
+          return new Response('rate limited', { status: 429, headers: { 'content-type': 'text/plain' } });
+        }
         const creator = url.searchParams.get('creator');
         if (creator) {
           bump('pump:creator');
@@ -297,7 +323,7 @@ function install() {
 
 install();
 
-market.attach({
+const baseCtx = {
   httpUrl: () => 'https://rpc.harness.test',
   data: () => ({
     networkDataEnabled: true,
@@ -332,7 +358,8 @@ market.attach({
   unwatchLaunchLabPool: () => {},
   watchBoop: () => {},
   unwatchBoop: () => {},
-});
+};
+market.attach(baseCtx);
 
 // ── Runner ────────────────────────────────────────────────────────────
 
@@ -570,6 +597,268 @@ test('the chain batch is capped like the Solana one, and casing does not split i
   // case-insensitive and a split would buy the same row twice.
   await ds.tokenPairsOnMany('bsc', [...addrs, addrs[0].toUpperCase().replace('0X', '0x')]);
   assert.equal(n('ds:chainbatch'), 2, '31 tokens is two chunks of at most 30');
+});
+
+// ── 5: with the scanner running, the feed is the pump source ──────────
+//
+// 2026-09-20. pump.fun 429'd this app's list routes almost every time, so
+// the New, Graduating and Migrated columns said "Rate limited by pump.fun"
+// all day over rows that were entirely fresh — the scanner already hears
+// every create, every trade on every curve and every migration. Now those
+// columns take their pump rows from the feed's own books (engine/liveCurves
+// .ts) and ask pump.fun only to bootstrap a column the feed has not filled
+// yet; and a park is stamped on a column only for a provider it ASKED.
+
+const B58_ALPHABET = B58;
+/** Real 32-byte keys for the live books: the chain reads derive PDAs from
+ *  them and the token accounts carry them, so the harness mints above (which
+ *  decode to 33 bytes) will not do here. */
+function liveMintFor(i) {
+  let v = i + 1;
+  let s = '';
+  while (v > 0) {
+    s = B58_ALPHABET[v % 58] + s;
+    v = Math.floor(v / 58);
+  }
+  const mint = `12${s.padStart(38, '1')}pump`;
+  assert.equal(b58decode(mint).length, 32, `${mint} must be a 32-byte key`);
+  return mint;
+}
+function b58decode(str) {
+  let n = 0n;
+  for (const ch of str) n = n * 58n + BigInt(B58_ALPHABET.indexOf(ch));
+  const bytes = [];
+  while (n > 0n) {
+    bytes.unshift(Number(n & 0xffn));
+    n >>= 8n;
+  }
+  let zeros = 0;
+  while (str[zeros] === '1') zeros++;
+  return Buffer.from([...new Array(zeros).fill(0), ...bytes]);
+}
+function keyFor(tag) {
+  const bytes = createHash('sha256').update(tag).digest();
+  let n = 0n;
+  for (const b of bytes) n = (n << 8n) | BigInt(b);
+  let s = '';
+  while (n > 0n) {
+    s = B58_ALPHABET[Number(n % 58n)] + s;
+    n /= 58n;
+  }
+  return s;
+}
+const sha8 = (t) => createHash('sha256').update(t).digest().subarray(0, 8);
+const CURVE_DISC = sha8('account:BondingCurve');
+const POOL_DISC = sha8('account:Pool');
+const INITIAL_VTOK = 1_073_000_000_000_000n;
+const SELLABLE_TOK = 793_100_000_000_000n;
+const vTokAt = (pct) => INITIAL_VTOK - (SELLABLE_TOK * BigInt(Math.round(pct * 100))) / 10_000n;
+
+function curveAccount({ vTok, vSol, realSol = 0n, complete = false, creator }) {
+  const d = Buffer.alloc(151);
+  CURVE_DISC.copy(d, 0);
+  d.writeBigUInt64LE(vTok, 8);
+  d.writeBigUInt64LE(vSol, 16);
+  d.writeBigUInt64LE(realSol, 32);
+  d.writeBigUInt64LE(1_000_000_000_000_000n, 40);
+  d[48] = complete ? 1 : 0;
+  if (creator) b58decode(creator).copy(d, 49);
+  return d;
+}
+function mintAccount() {
+  const d = Buffer.alloc(82);
+  d.writeBigUInt64LE(1_000_000_000_000_000n, 36);
+  d.writeUInt8(6, 44);
+  d.writeUInt8(1, 45);
+  return d;
+}
+const borsh = (str, width) => {
+  const body = Buffer.alloc(width);
+  body.write(str, 'utf8');
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE(width, 0);
+  return Buffer.concat([len, body]);
+};
+const metaAccount = (mint, name, symbol) =>
+  Buffer.concat([Buffer.from([4]), Buffer.alloc(32), b58decode(mint), borsh(name, 32), borsh(symbol, 10), borsh('https://ipfs.io/ipfs/Qm', 200), Buffer.alloc(3)]);
+function tokenAccount(mint, owner, amount) {
+  const d = Buffer.alloc(165);
+  b58decode(mint).copy(d, 0);
+  b58decode(owner).copy(d, 32);
+  d.writeBigUInt64LE(amount, 64);
+  return d;
+}
+function poolAccount({ baseMint, poolBaseAta, poolQuoteAta, creator }) {
+  const d = Buffer.alloc(301);
+  POOL_DISC.copy(d, 0);
+  d[8] = 254;
+  b58decode(creator).copy(d, 11);
+  b58decode(baseMint).copy(d, 43);
+  b58decode(WSOL_MINT).copy(d, 75);
+  b58decode(keyFor('lp')).copy(d, 107);
+  b58decode(poolBaseAta).copy(d, 139);
+  b58decode(poolQuoteAta).copy(d, 171);
+  d.writeBigUInt64LE(1n, 203);
+  b58decode(creator).copy(d, 211);
+  d.writeBigUInt64LE(17_584_500_000n, 245);
+  return d;
+}
+
+const CREATOR = keyFor('live-creator');
+/** The feed's books, `count` deep each, with the chain accounts behind them. */
+function seedLiveBooks(count) {
+  liveAccounts.clear();
+  const now = Date.now();
+  const curves = [];
+  for (let i = 0; i < count; i++) {
+    const mint = liveMintFor(i);
+    const pct = 95 - i; // most progressed first, distinct
+    const vTok = vTokAt(pct);
+    const vSol = 40_000_000_000n + BigInt(i) * 1_000_000_000n;
+    liveAccounts.set(bondingCurveFor(mint), { owner: 'pump', data: curveAccount({ vTok, vSol, realSol: 12_000_000_000n, creator: CREATOR }) });
+    liveAccounts.set(mint, { owner: TOKEN_PROGRAM, data: mintAccount() });
+    liveAccounts.set(metadataFor(mint), { owner: 'meta', data: metaAccount(mint, `Live ${i}`, `LV${i}`) });
+    curves.push({ mint, vSol, vTok, creator: CREATOR, trades: 10, firstSeenAt: now - 60_000, lastTradeAt: now - i * 100, progressPct: pct, complete: false });
+  }
+  const migrations = [];
+  for (let i = 0; i < count; i++) {
+    const mint = liveMintFor(1_000 + i);
+    const pool = pumpSwapCanonicalPoolFor(mint);
+    const quoteAta = ataFor(pool, WSOL_MINT, TOKEN_PROGRAM);
+    const baseAta = ataFor(pool, mint, TOKEN_PROGRAM);
+    liveAccounts.set(bondingCurveFor(mint), { owner: 'pump', data: curveAccount({ vTok: vTokAt(100), vSol: 115_000_000_000n, complete: true, creator: CREATOR }) });
+    liveAccounts.set(mint, { owner: TOKEN_PROGRAM, data: mintAccount() });
+    liveAccounts.set(metadataFor(mint), { owner: 'meta', data: metaAccount(mint, `Grad ${i}`, `GR${i}`) });
+    liveAccounts.set(pool, { owner: 'pAMM', data: poolAccount({ baseMint: mint, poolBaseAta: baseAta, poolQuoteAta: quoteAta, creator: CREATOR }) });
+    liveAccounts.set(quoteAta, { owner: TOKEN_PROGRAM, data: tokenAccount(WSOL_MINT, pool, 50_000_000_000n) });
+    liveAccounts.set(baseAta, { owner: TOKEN_PROGRAM, data: tokenAccount(mint, pool, 270_000_000_000_000n) });
+    migrations.push({ mint, pool, solSeeded: 85_000_000_000n, detectedAt: now - i * 5_000 });
+  }
+  const launches = [];
+  for (let i = 0; i < count; i++) {
+    const mint = liveMintFor(2_000 + i);
+    launches.push({
+      mint, name: `Fresh ${i}`, symbol: `FR${i}`, uri: '', creator: CREATOR, bondingCurve: bondingCurveFor(mint), signature: `sig${i}`, slot: 1,
+      detectedAt: now - i * 1_000, phase: 'watching', riskFlags: [], flow: { curveProgressPct: 3 }, score: null, priceSol: 3e-8, priceHistory: [],
+      reason: null, creatorPriorLaunches: 0, creatorPriorRugs: 0, smartBuyerCount: 0, smartEarly: false,
+    });
+  }
+  return { curves, migrations, launches };
+}
+const liveCtx = (books) => ({
+  ...baseCtx,
+  // The harness above predates the Raydium rail; the Migrated column asks
+  // for its live pools too.
+  livePools: () => [],
+  scannerRunning: () => true,
+  liveLaunches: (limit) => books.launches.slice(0, limit),
+  liveLaunch: (mint) => books.launches.find((l) => l.mint === mint) ?? null,
+  liveCurves: (limit) => books.curves.slice(0, limit),
+  liveMigrations: (limit) => books.migrations.slice(0, limit),
+});
+const jupTotal = () => [...counts.entries()].filter(([k]) => k.startsWith('jup:')).reduce((a, [, v]) => a + v, 0);
+
+test('scanner running: a full Discover pass asks pump.fun for nothing and reads the chain instead', async () => {
+  http.clearCache();
+  resetCounts();
+  const books = seedLiveBooks(40);
+  market.attach(liveCtx(books));
+  // Warm GeckoTerminal's four listings first (memoised 45–90 s). With them
+  // cold, the three columns assemble their rows seconds apart — GeckoTerminal
+  // is paced at one request per 2.1 s — and their Jupiter asks fall into
+  // different merge windows; warm, they finish together, which is the shape
+  // of every pass but the first after a start.
+  await Promise.all([gt.poolsForDex('raydium-launchlab', 1), gt.poolsForDex('boop-fun', 1), gt.poolsForDex('meteora-dbc', 1), gt.newPools(1)]);
+  resetCounts();
+  const [fresh, grad, mig] = await Promise.all([
+    market.discover('new', 40, '5m'),
+    market.discover('graduating', 40, '5m'),
+    market.discover('migrated', 40, '5m'),
+  ]);
+  // Three columns asked together: their Shield and enrichment asks merge
+  // into one request per hundred mints (jupiter.ts coalescer + the route's
+  // 100-mint chunk), not one request per column. 130 distinct mints here
+  // (40 + 40 + 40 + the ten `recent` rows) is two chunks.
+  const chunks = Math.ceil(new Set([...fresh, ...grad, ...mig].map((r) => r.mint)).size / 100);
+  assert.ok(n('jup:shield') <= chunks, `three columns' Shield asks merged — ${n('jup:shield')} requests for ${chunks} chunk(s) (timeline ${stamps.slice(-16).join(' ')})`);
+  assert.ok(n('jup:batch') <= chunks, `three columns' enrichment asks merged — ${n('jup:batch')} requests for ${chunks} chunk(s)`);
+  await market.discover('trending', 40, '5m');
+  assert.equal(n('pump:list') + n('pump:coin') + n('pump:creator'), 0, `no pump.fun request at all — got ${n('pump:list')} list, ${n('pump:coin')} coin`);
+  assert.ok(n('rpc:getMultipleAccounts') >= 2 && n('rpc:getMultipleAccounts') <= 8, `batched chain reads priced the rows — ${n('rpc:getMultipleAccounts')} calls`);
+
+  assert.equal(grad.length, 40, 'the Graduating column is full from the feed');
+  assert.equal(grad[0].name, 'Live 0', 'named from the chain\'s metadata');
+  assert.equal(grad[0].symbol, 'LV0');
+  assert.ok(grad.every((r, i) => i === 0 || (r.bondingCurvePct ?? 0) <= (grad[i - 1].bondingCurvePct ?? 0)), 'most progressed first');
+  assert.ok(Math.abs(grad[0].bondingCurvePct - 95) < 0.01, `token-side progress from the curve: ${grad[0].bondingCurvePct}`);
+  assert.equal(grad[0].sources.price, 'onchain');
+  assert.equal(grad[0].creator, CREATOR);
+  assert.ok(grad[0].liquidityUsd > 0, 'real SOL priced as liquidity');
+
+  assert.equal(mig.length, 40, 'the Migrated column is full from the feed');
+  assert.equal(mig[0].name, 'Grad 0');
+  assert.equal(mig[0].dexId, 'pumpswap');
+  assert.ok(mig[0].priceSol > 0 && mig[0].sources.price === 'onchain', 'priced on the canonical pool');
+  assert.equal(mig[0].poolAddress, books.migrations[0].pool);
+  assert.equal(mig[0].createdAt, books.migrations[0].detectedAt, 'sorted by the migration moment');
+  assert.ok(mig.every((r, i) => i === 0 || (r.createdAt ?? 0) <= (mig[i - 1].createdAt ?? 0)), 'newest migration first');
+
+  assert.ok(fresh.some((r) => r.mint === books.launches[0].mint && r.name === 'Fresh 0'), 'the New column carries the scanner\'s launches');
+  assert.equal(market.discoverParkNote('graduating'), '', 'nothing parked, nothing said');
+});
+
+test('scanner running but the feed still thin: pump.fun bootstraps the column once, then is left alone', async () => {
+  http.clearCache();
+  resetCounts();
+  market.attach(liveCtx(seedLiveBooks(5)));
+  await market.discover('graduating', 40, '5m');
+  assert.equal(n('pump:list'), 1, 'five live curves cannot fill a column of forty: the list is asked');
+  http.clearCache();
+  market.attach(liveCtx(seedLiveBooks(40)));
+  await market.discover('graduating', 40, '5m');
+  assert.equal(n('pump:list'), 1, 'once the feed carries the column, it is not');
+});
+
+test('a parked pump.fun is stamped only on a column that actually asked it', async () => {
+  http.clearCache();
+  resetCounts();
+  pumpDown = true;
+  try {
+    market.attach(baseCtx); // scanner stopped: the list IS the source
+    await market.discover('graduating', 40, '5m');
+    assert.ok(n('pump:list') >= 1, 'the stopped-scanner path asked pump.fun');
+    assert.match(market.discoverParkNote('graduating'), /pump\.fun/, 'and its 429 is reported on the column that depends on it');
+    market.attach(liveCtx(seedLiveBooks(40)));
+    http.clearCache();
+    await market.discover('graduating', 40, '5m');
+    assert.equal(market.discoverParkNote('graduating'), '', 'the feed-filled column says nothing about a provider it never asked');
+    assert.ok(http.cooldownRemainingMs('pumpfun') > 0, '(the park itself is still on — the banner moved, the state did not)');
+  } finally {
+    pumpDown = false;
+  }
+});
+
+test('one full pass costs Jupiter a handful of calls, and the next pass within the memos costs none', async () => {
+  http.clearCache();
+  resetCounts();
+  market.attach(liveCtx(seedLiveBooks(40)));
+  for (const col of ['new', 'graduating', 'migrated', 'trending']) await market.discover(col, 40, '5m');
+  const first = jupTotal();
+  // recent + two trending lists, one enrichment batch per column that has
+  // rows Jupiter has not described, Shield per column, SOL/USD once.
+  assert.ok(first <= 12, `a cold pass is at most a dozen Jupiter calls — got ${first} (${[...counts.entries()].filter(([k]) => k.startsWith('jup:')).map(([k, v]) => `${k}=${v}`).join(' ')})`);
+  assert.equal(n('jup:single'), 0, 'never one search per row');
+  const batchesBefore = n('jup:batch');
+  const shieldBefore = n('jup:shield');
+  // A pass takes real seconds here (the rug attach has a 2 s budget per
+  // column and the queues space themselves), so the 12 s `recent` list and
+  // the 20 s SOL/USD rate may legitimately expire between the two passes.
+  // What must NOT recur is the per-row work: the enrichment batches and the
+  // Shield verdicts are remembered per mint for 45 s and 60 s.
+  for (const col of ['new', 'graduating', 'migrated', 'trending']) await market.discover(col, 40, '5m');
+  assert.equal(n('jup:batch'), batchesBefore, `no enrichment batch is bought back for rows already described — got ${n('jup:batch') - batchesBefore} more`);
+  assert.equal(n('jup:shield'), shieldBefore, `no Shield verdict is bought back within its memo — got ${n('jup:shield') - shieldBefore} more`);
+  assert.ok(jupTotal() - first <= 2, `at most the two short-lived lists on a second pass — got ${jupTotal() - first} more (${[...counts.entries()].filter(([k]) => k.startsWith('jup:')).map(([k, v]) => `${k}=${v}`).join(' ')})`);
 });
 
 // ── Go ────────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@
 // number is only shown when it was actually read.
 
 import { useEffect, useState } from 'react';
-import { Bot, Compass, Cpu, Gauge, Gift, LayoutGrid, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, ZapOff, type LucideIcon } from 'lucide-react';
+import { BookOpen, Bot, Compass, Cpu, Gauge, LayoutGrid, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, ZapOff, type LucideIcon } from 'lucide-react';
 import { WORKSPACES, type WorkspaceId, type WorkspaceSpec } from '../workspaces';
 import { useAppState } from '../state/AppStateProvider';
 import { useToast } from '../state/ToastProvider';
@@ -23,7 +23,7 @@ const ICONS: Record<WorkspaceSpec['icon'], LucideIcon> = {
   automation: Bot,
   cpu: Cpu,
   wallet: Wallet,
-  gift: Gift,
+  book: BookOpen,
   scout: Users,
   launch: Rocket,
   layout: LayoutGrid,
@@ -45,6 +45,10 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
   const toast = useToast();
   const [copyCount, setCopyCount] = useState<number | null>(null);
   const [walletCount, setWalletCount] = useState<number | null>(null);
+  // Running scripts, paper or live (user report 2026-09-20: a paper script
+  // was running and the card said "Nothing running" — it only counted
+  // followed wallets). Null until read; the kill switch means none run.
+  const [scripts, setScripts] = useState<{ running: number; live: number; killed: boolean } | null>(null);
   const [liteBusy, setLiteBusy] = useState(false);
 
   // "Laggy?" — Lite mode. The same switch as Settings › Display "Reduce
@@ -84,6 +88,14 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
         if (alive && r.ok && Array.isArray(r.data)) setWalletCount(r.data.length);
       })
       .catch(() => undefined);
+    void window.krypt.automation
+      .list()
+      .then((r) => {
+        if (!alive || !r.ok || !r.data || !Array.isArray(r.data.scripts)) return;
+        const on = r.data.scripts.filter((x) => x.enabled);
+        setScripts({ running: r.data.killSwitch ? 0 : on.length, live: r.data.killSwitch ? 0 : on.filter((x) => x.mode === 'live').length, killed: r.data.killSwitch && on.length > 0 });
+      })
+      .catch(() => undefined);
     return () => {
       alive = false;
     };
@@ -100,14 +112,20 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
         const open = positions.filter((p) => p.state !== 'closed').length;
         return { line: open > 0 ? `${open} open position${open === 1 ? '' : 's'}` : 'Ready', tone: open > 0 ? 'live' : 'idle' };
       }
-      case 'automation':
-        // The workspace holds more than copy trading now, but followed
-        // wallets are the only part of it that has a number worth a glance.
+      case 'automation': {
+        // Followed wallets AND running scripts, each only when it was read.
         // An em dash still means "could not read it", never zero.
-        if (copyCount === null) return { line: '—', tone: 'idle' };
-        return copyCount > 0
-          ? { line: `${copyCount} wallet${copyCount === 1 ? '' : 's'} followed`, tone: 'live' }
-          : { line: 'Nothing running', tone: 'idle' };
+        if (copyCount === null && scripts === null) return { line: '—', tone: 'idle' };
+        const parts: string[] = [];
+        if (copyCount !== null && copyCount > 0) parts.push(`${copyCount} wallet${copyCount === 1 ? '' : 's'} followed`);
+        if (scripts !== null && scripts.running > 0) {
+          const paper = scripts.running - scripts.live;
+          parts.push(`${scripts.running} script${scripts.running === 1 ? '' : 's'} running${scripts.live === 0 ? ' (paper)' : paper > 0 ? ` (${scripts.live} live)` : ' (live)'}`);
+        }
+        if (parts.length) return { line: parts.join(' · '), tone: 'live' };
+        if (scripts?.killed) return { line: 'Kill switch on — scripts stopped', tone: 'idle' };
+        return { line: 'Nothing running', tone: 'idle' };
+      }
       case 'engine':
         return status.running
           ? { line: `Scanning — ${status.launchesSeen} launches seen`, tone: 'live' }

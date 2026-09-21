@@ -10,8 +10,8 @@ import { AiSettingsPanel } from '../components/terminal/AiSettingsPanel';
 import { CreditMeter } from '../components/terminal/CreditMeter';
 import { RpcKeyWarning } from '../components/terminal/RpcKeyWarning';
 import { EvmSettingsCard } from '../components/terminal/EvmSettingsCard';
-import { feePctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
-import { KRYPTO_FEE_WAIVER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
+import { feePctLabel, holderFeePctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
+import { KRYPTO_HOLDER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
 import { LanguagePicker } from '../components/LanguagePicker';
 import { ThemePicker } from '../components/ThemePicker';
 import { useLocale } from '../state/useLocale';
@@ -389,26 +389,26 @@ export function SettingsPage() {
                     reading "Krypt takes 0.5%" on the settings page while
                     being charged nothing is being told something false about
                     their own money. */}
-                {waiver.waived ? (
+                {waiver.halved ? (
                   <>
-                    <span className="text-emerald-300">Krypt charges you nothing on your trades right now</span> — you
+                    <span className="text-emerald-300">Krypt charges you half its fee right now — {holderFeePctLabel()} of each trade instead of {feePctLabel()}</span> — you
                     hold {waiver.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol},
-                    over the {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} the waiver needs. Without it Krypt takes{' '}
-                    {feePctLabel()} of each trade, both sides.{' '}
+                    over the {KRYPTO_HOLDER_TOKENS.toLocaleString()} the holder rate needs. The referral share halves with it,
+                    so whoever sent you here still earns.{' '}
                   </>
                 ) : (
                   <>
                     Krypt takes <span className="text-white">{feePctLabel()} of each trade</span>, both sides — about half
                     what most memecoin terminals charge, where 1% is the going rate.{' '}
                     <span className="font-semibold text-amber-300">
-                      Hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in this app and it
-                      is waived entirely.
+                      Hold {KRYPTO_HOLDER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in this app and it
+                      is halved to {holderFeePctLabel()}.
                     </span>{' '}
                   </>
                 )}
                 It funds referral rewards and keeps Krypt in development, and is charged in the same transaction as the
                 trade itself. The launchpad&apos;s own fee (about 1% per side on pump.fun) is separate and does not come
-                to Krypt — the waiver cannot touch it.
+                to Krypt — the holder rate cannot touch it.
               </>
             ) : (
               <>This build has no fee address configured, so Krypt charges nothing on your trades.</>

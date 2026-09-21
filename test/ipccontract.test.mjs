@@ -188,4 +188,30 @@ for (const [channel, expected] of Object.entries(CHANNELS)) {
   }
 }
 
+{
+  // The third way the two sides drift, and the one that shipped most
+  // recently: a channel main ANSWERS that preload never EXPOSES. Nothing
+  // typechecks it — global.d.ts is written by hand, and a renderer call to
+  // an entry preload lacks throws a TypeError, which any try/catch around an
+  // IPC call swallows. 'krypto:holding' lived that way for three days: the
+  // fee waiver worked in main while the Hub card told a holder their wallets
+  // were "not checked yet" (2026-09-19).
+  const handled = [...ipc.matchAll(/ipcMain\.handle\('([^']+)'/g)].map((m) => m[1]);
+  const invoked = [...preload.matchAll(/ipcRenderer\.invoke\('([^']+)'/g)].map((m) => m[1]);
+  const handledSet = new Set(handled);
+  const invokedSet = new Set(invoked);
+  // Handlers nothing in the renderer calls. An entry here is a claim that
+  // the handler is DEAD, not that the gap is fine — remove the handler or
+  // add the bridge, and take it off this list either way.
+  const UNCALLED = ['recorder:usage'];
+  const unreachable = handled.filter((c) => !invokedSet.has(c) && !UNCALLED.includes(c));
+  assert.deepEqual(unreachable, [], `main handles ${unreachable.join(', ')} but preload never invokes it — the renderer cannot reach it`);
+  for (const c of UNCALLED) {
+    assert.ok(handledSet.has(c) && !invokedSet.has(c), `${c} is no longer an uncalled handler — take it off UNCALLED`);
+  }
+  const unhandled = invoked.filter((c) => !handledSet.has(c));
+  assert.deepEqual(unhandled, [], `preload invokes ${unhandled.join(', ')} but main never handles it`);
+  ok(`every handled channel is reachable from preload and every invoked one is handled (${handled.length} channels, ${UNCALLED.length} known dead)`);
+}
+
 console.log(`\nipccontract: ${passed}/${passed} passed`);

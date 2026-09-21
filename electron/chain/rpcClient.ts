@@ -918,8 +918,20 @@ export interface RawTransaction {
       accountKeys: string[];
       header: { numRequiredSignatures: number; numReadonlySignedAccounts: number; numReadonlyUnsignedAccounts: number };
       instructions: RawIx[];
+      /** v1 only: the compute budget moved out of instructions and into the
+       *  message. `priorityFee` is TOTAL lamports, not micro-lamports per
+       *  unit; `heapSize` is null when the default applies. */
+      transactionConfig?: {
+        computeUnitLimit?: number | null;
+        heapSize?: number | null;
+        loadedAccountsDataSizeLimit?: number | null;
+        priorityFee?: number | null;
+      } | null;
     };
+    signatures?: string[];
   };
+  /** 'legacy', 0 or 1. Absent on nodes that predate versioned replies. */
+  version?: number | 'legacy';
 }
 
 /**
@@ -943,6 +955,41 @@ export function resolveAccountKeys(tx: RawTransaction): string[] {
   return [...stat, ...(loaded.writable ?? []), ...(loaded.readonly ?? [])];
 }
 
+/** A v1 transaction's first byte. Legacy and v0 start with the signature
+ *  count (1..n, never 0x81 for any realistic count). */
+const TX_V1_PREFIX = 0x81;
+
+/**
+ * Transaction v1 (SIMD-0385) on the wire — verified against a mainnet v1
+ * transaction, byte for byte, on 2026-09-20 (test/fixtures/v1-wire.json):
+ *
+ *   0      0x81
+ *   1..3   header: numRequiredSignatures, numReadonlySigned, numReadonlyUnsigned
+ *   4..7   config mask (u32 LE) — which budget fields follow the keys
+ *   8..39  recent blockhash
+ *   40     number of instructions (u8 — v1 uses fixed-width counts)
+ *   41     number of static account keys (u8; v1 has no lookup tables, every
+ *          account travels inline, at most 64)
+ *   42..   the keys, 32 bytes each
+ *   ...    config values, instructions (headers grouped before payloads)
+ *   tail   the signatures, 64 bytes each, signer order — LAST, which is what
+ *          frees offset zero for the version byte
+ *
+ * Only the keys and the first signature are read here, exactly as for v0.
+ */
+function parseWireV1(buf: Buffer): { signature: string; accountKeys: string[] } | null {
+  if (buf.length < 42) return null;
+  const numRequiredSignatures = buf[1];
+  const nKeys = buf[41];
+  if (numRequiredSignatures < 1 || nKeys < 1) return null;
+  const keysEnd = 42 + nKeys * 32;
+  const sigStart = buf.length - numRequiredSignatures * 64;
+  if (keysEnd > sigStart) return null;
+  const accountKeys: string[] = [];
+  for (let i = 0; i < nKeys; i++) accountKeys.push(base58Encode(buf.subarray(42 + i * 32, 42 + (i + 1) * 32)));
+  return { signature: base58Encode(buf.subarray(sigStart, sigStart + 64)), accountKeys };
+}
+
 /**
  * Static account keys + first signature straight off the wire bytes of a
  * transaction (what `encoding: 'base64'` hands back on blockSubscribe /
@@ -959,6 +1006,7 @@ export function parseWireTransaction(txBase64: string): { signature: string; acc
   } catch {
     return null;
   }
+  if (buf.length > 0 && buf[0] === TX_V1_PREFIX) return parseWireV1(buf);
   let off = 0;
   const compactU16 = (): number => {
     let v = 0;
@@ -993,10 +1041,23 @@ export function parseWireTransaction(txBase64: string): { signature: string; acc
   }
 }
 
+/**
+ * The newest transaction format this client reads. Solana's transaction v1
+ * (SIMD-0385) went live on mainnet at epoch 1035 on 2026-09-15: a node
+ * answers a request for a v1 transaction with error -32015 unless the
+ * request says it can take one, so with `0` here every v1 transaction a
+ * followed wallet made was "not readable" and its copy did not fire (user
+ * report 2026-09-20; leader 4vw54Bm…'s swaps were v1). The JSON shape is
+ * the v0 shape plus `transactionConfig` on the message and `costUnits` in
+ * meta, so every reader of `RawTransaction` keeps working; only the wire
+ * bytes differ (see parseWireTransaction).
+ */
+export const MAX_SUPPORTED_TX_VERSION = 1;
+
 export async function getTransaction(httpUrl: string, signature: string): Promise<RpcResult<RawTransaction | null>> {
   return call<RawTransaction | null>(httpUrl, 'getTransaction', [
     signature,
-    { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+    { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: MAX_SUPPORTED_TX_VERSION },
   ]);
 }
 
@@ -1014,7 +1075,7 @@ export async function getTransactions(httpUrl: string, signatures: string[]): Pr
     jsonrpc: '2.0',
     id: firstId + i,
     method: 'getTransaction',
-    params: [sig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }],
+    params: [sig, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: MAX_SUPPORTED_TX_VERSION }],
   }));
   // Same park and bucket as a single call, at the batch's real cost.
   await awaitPark(httpUrl, 'getTransaction');

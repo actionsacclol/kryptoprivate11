@@ -29,10 +29,10 @@ export const tr: Catalogue = {
   'nav.execution': 'Yürütme',
   'nav.backtest': 'Backtest',
   'nav.history': 'Geçmiş',
-  'nav.rewardPools': 'Ödül havuzları',
+  'nav.guides': 'Rehberler',
   'nav.walletScout': 'Cüzdan takibi',
   'nav.launchToken': 'Token çıkar',
-  'nav.myLayout': 'Düzenim',
+  'nav.widgets': 'Widgetlar',
   'nav.settings': 'Ayarlar',
   'nav.about': 'Hakkında',
   'nav.legal': 'Hukuki',
@@ -82,7 +82,7 @@ export const tr: Catalogue = {
   'onboarding.everythingUnderSettings': 'Her şey Ayarlar’da',
   'onboarding.getStarted': 'Başla',
 
-  'waiver.hold': '{amount} $KRYPTO tutun, bu ücret alınmasın',
+  'waiver.hold': '{amount} $KRYPTO tutun, bu ücret yarıya insin',
 
   'mode.paper': 'Sanal',
   'mode.live': 'Gerçek',
@@ -104,7 +104,7 @@ export const tr: Catalogue = {
   'settings.subtitle': 'Veri sağlayıcıları, RPC uç noktaları, kayıt, durum.',
 
   'settings.theme': 'Tema',
-  'settings.themeHint': 'Yalnızca vurgu rengini değiştirir. Yükseliş yeşili, düşüş kırmızısı ve paraya dair altın rengi aynı kalır.',
+  'settings.themeHint': 'Bir görünüm seçin — yazı tipleri, yüzeyler, köşeler, efektler — sonra bir vurgu rengi. Yükseliş yeşili, düşüş kırmızısı ve paraya dair altın rengi aynı kalır.',
   'settings.replay': 'Tanıtımı tekrar izle',
   'settings.replayHint': 'İlk çalıştırma ekranlarını yeniden gösterir. Hiçbir şey sıfırlanmaz — cüzdanlarınız, anahtarlarınız ve ayarlarınız olduğu gibi kalır.',
   'onboarding.appearance': 'Dil ve renk',

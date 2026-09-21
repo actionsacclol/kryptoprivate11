@@ -9,7 +9,8 @@ import { useSyncExternalStore } from 'react';
 import { accent, accentHex, accentSoft, getTheme, subscribe } from './theme';
 
 export interface Accent {
-  /** `rgb(r g b)`, or `rgb(r g b / a)` when given an alpha. */
+  /** `rgb(r, g, b)`, or `rgba(r, g, b, a)` when given an alpha — the comma
+   *  form, because the chart library parses nothing else. */
   rgb: (alpha?: number) => string;
   /** The soft accent, same shape. */
   soft: (alpha?: number) => string;

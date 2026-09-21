@@ -110,7 +110,7 @@ const LAUNCHPADS: Array<{ id: Launchpad; label: string; hint: string }> = [
   { id: 'boop', label: 'Boop', hint: 'Own curve program, fully decoded — but the rail is nearly dormant' },
   { id: 'moonshot', label: 'Moonshot', hint: 'Listed by providers; no dedicated decoder' },
   { id: 'believe', label: 'Believe', hint: 'Runs on Meteora DBC' },
-  { id: 'raydium', label: 'Raydium', hint: 'Post-migration AMM pools' },
+  { id: 'raydium', label: 'Raydium', hint: 'Post-migration AMM pools (AMM v4 and CPMM) — new pools live from the chain, live tape for the pool you open (trades arrive without a trader)' },
   { id: 'pons', label: 'Pons', hint: 'Robinhood Chain — bonding curve, graduates to Uniswap v4 at 4.2 ETH; on-chain progress and execution' },
   { id: 'fourmeme', label: 'four.meme', hint: 'BNB Smart Chain — bonding curve, graduates to PancakeSwap v2 at 18 BNB; on-chain progress and execution' },
   // Every EVM row that did NOT come from a launchpad decoder is tagged with

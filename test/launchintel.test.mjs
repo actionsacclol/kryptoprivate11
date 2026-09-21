@@ -304,6 +304,11 @@ buildSync({
   format: 'esm',
   platform: 'node',
   alias: { '@shared': './shared', ...oddsAlias },
+  // launchIntel reads the chain through data/pumpChain since 2026-09-20,
+  // which pulls the PumpSwap builder and its web3.js dependency into the
+  // graph; that CJS package cannot be inlined into an ESM bundle.
+  external: ['@solana/web3.js', 'undici', 'ws'],
+  banner: { js: "import{createRequire}from 'module';const require=createRequire(import.meta.url);" },
   outfile: 'test/.launchintelmain.mjs',
   logLevel: 'silent',
 });

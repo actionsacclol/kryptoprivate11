@@ -62,6 +62,40 @@ html[data-theme='grey'] {
   --krypt-grad-from: 62 67 80;
   --krypt-grad-to: 140 147 165;
 }
+/* ── Looks ────────────────────────────────────────────────────────────
+ *
+ * The second axis (2026-09-20). Where an accent moves one colour, a look
+ * moves the fonts, the surfaces, the corner radius and the effects: the
+ * character of the screen. `data-skin` is set by src/state/skin.ts from
+ * Settings › Theme › Look. Classic is what the app always looked like, so
+ * `:root` carries its values and a build with no attribute renders it.
+ *
+ * Surfaces are channels for the same reason the accent is: bg-white/5,
+ * bg-krypt-panel/80 and a thousand other alpha uses keep working. `white`
+ * in Tailwind is the TEXT colour (parchment on Classic), not #fff.
+ *
+ * What a look never moves: emerald, rose, crimson, gold. Data, not decoration.
+ */
+:root,
+html[data-skin='classic'] {
+  --krypt-text: 240 237 226;    /* the parchment */
+  --krypt-ink: 0 0 0;           /* what bg-black/N washes with */
+  --krypt-black: 3 4 9;
+  --krypt-void: 6 7 15;
+  --krypt-surface: 18 23 43;
+  --krypt-panel: 10 13 26;
+  --krypt-muted: 140 146 171;
+  --font-sans: 'Spline Sans', system-ui, -apple-system, sans-serif;
+  --font-display: Cinzel, Georgia, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --radius-sm: 0.125rem;
+  --radius: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -69,28 +103,28 @@ html[data-theme='grey'] {
 @layer base {
   html, body, #root {
     height: 100%;
-    background-color: #06070F;
-    color: #F0EDE2;
-    font-family: 'Spline Sans', system-ui, -apple-system, sans-serif;
+    background-color: rgb(var(--krypt-void));
+    color: rgb(var(--krypt-text));
+    font-family: var(--font-sans);
     font-feature-settings: 'tnum' 0;
   }
-  ::selection { background-color: rgb(var(--krypt-accent) / 0.35); color: #F0EDE2; }
+  ::selection { background-color: rgb(var(--krypt-accent) / 0.35); color: rgb(var(--krypt-text)); }
   * { box-sizing: border-box; }
   /* Observatory scrollbar — thin, dark, violet when handled. */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: rgba(240, 237, 226, 0.08); border-radius: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgb(var(--krypt-text) / 0.08); border-radius: 8px; }
   ::-webkit-scrollbar-thumb:hover { background: rgb(var(--krypt-accent) / 0.55); }
 }
 
 @layer utilities {
   /* Wordmark sheen — engraved silver catching violet light. */
   .text-krypt-gradient {
-    background-image: linear-gradient(105deg, #F0EDE2 0%, rgb(var(--krypt-accent-soft)) 60%, rgb(var(--krypt-accent)) 100%);
+    background-image: linear-gradient(105deg, rgb(var(--krypt-text)) 0%, rgb(var(--krypt-accent-soft)) 60%, rgb(var(--krypt-accent)) 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
   .text-krypt-shimmer {
-    background-image: linear-gradient(90deg, #F0EDE2 0%, rgb(var(--krypt-accent-soft)) 50%, #F0EDE2 100%);
+    background-image: linear-gradient(90deg, rgb(var(--krypt-text)) 0%, rgb(var(--krypt-accent-soft)) 50%, rgb(var(--krypt-text)) 100%);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
   .glow-purple    { box-shadow: 0 0 22px rgb(var(--krypt-accent) / 0.28); }
@@ -116,16 +150,16 @@ html[data-theme='grey'] {
    */
   .plate {
     position: relative;
-    border: 1px solid rgba(240, 237, 226, 0.09);
-    background-color: rgba(10, 13, 26, 0.82);
-    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(240, 237, 226, 0.045);
+    border: 1px solid rgb(var(--krypt-text) / 0.09);
+    background-color: rgb(var(--krypt-panel) / 0.82);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgb(var(--krypt-text) / 0.045);
   }
   .plate::after {
     content: '';
     position: absolute;
     inset: 5px;
     pointer-events: none;
-    --tick: rgba(240, 237, 226, 0.18);
+    --tick: rgb(var(--krypt-text) / 0.18);
     background-image:
       linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
       linear-gradient(var(--tick), var(--tick)), linear-gradient(var(--tick), var(--tick)),
@@ -152,9 +186,9 @@ html[data-theme='grey'] {
    */
   .card {
     position: relative;
-    border: 1px solid rgba(240, 237, 226, 0.09);
-    background-color: rgba(10, 13, 26, 0.82);
-    box-shadow: inset 0 1px 0 rgba(240, 237, 226, 0.045);
+    border: 1px solid rgb(var(--krypt-text) / 0.09);
+    background-color: rgb(var(--krypt-panel) / 0.82);
+    box-shadow: inset 0 1px 0 rgb(var(--krypt-text) / 0.045);
   }
   .card:hover {
     border-color: rgba(157, 106, 255, 0.35);
@@ -183,7 +217,7 @@ html[data-theme='grey'] {
   /* Faint celestial dust behind hero panels. */
   .grid-backdrop {
     background-image:
-      radial-gradient(rgba(240, 237, 226, 0.07) 1px, transparent 1px),
+      radial-gradient(rgb(var(--krypt-text) / 0.07) 1px, transparent 1px),
       radial-gradient(rgb(var(--krypt-accent) / 0.06) 1px, transparent 1px);
     background-size: 34px 34px, 56px 56px;
     background-position: 0 0, 17px 23px;
@@ -194,15 +228,15 @@ html[data-theme='grey'] {
   /* Fixed ambient star layer over the whole shell. */
   .stars-backdrop {
     background-image:
-      radial-gradient(rgba(240, 237, 226, 0.05) 1px, transparent 1px),
-      radial-gradient(rgba(240, 237, 226, 0.032) 1px, transparent 1px);
+      radial-gradient(rgb(var(--krypt-text) / 0.05) 1px, transparent 1px),
+      radial-gradient(rgb(var(--krypt-text) / 0.032) 1px, transparent 1px);
     background-size: 190px 190px, 310px 310px;
     background-position: 40px 60px, 130px 220px;
   }
 
   .scanlines {
     background-image: repeating-linear-gradient(to bottom,
-      rgba(240,237,226,0.02) 0, rgba(240,237,226,0.02) 1px, transparent 1px, transparent 3px);
+      rgb(var(--krypt-text) / 0.02) 0, rgb(var(--krypt-text) / 0.02) 1px, transparent 1px, transparent 3px);
   }
 
   /* Celestial dust slowly drifting across a grid-backdrop surface. */
@@ -348,3 +382,231 @@ html.lite [class*=' blur-'] {
 .no-drag textarea {
   -webkit-app-region: no-drag;
 }
+
+/* ── The other looks ──────────────────────────────────────────────────
+   Each block sets the variables from the Looks section and restyles the
+   handful of classes that carry Classic's character — the plate, the card,
+   the backdrops, the glows. Everything else follows the variables. Lite
+   mode's rules carry !important and still win over all of this. */
+
+/* Futuristic: sharp corners, a faint grid instead of stars, headings wide
+   and uppercase, panels edged in the accent. A little denser. */
+html[data-skin='futuristic'] {
+  --krypt-text: 226 238 247;
+  --krypt-ink: 0 0 0;
+  --krypt-black: 2 4 8;
+  --krypt-void: 4 8 14;
+  --krypt-surface: 12 22 36;
+  --krypt-panel: 7 13 22;
+  --krypt-muted: 122 146 168;
+  --font-sans: Rajdhani, 'Spline Sans', system-ui, sans-serif;
+  --font-display: Orbitron, Rajdhani, sans-serif;
+  --font-mono: 'Share Tech Mono', 'JetBrains Mono', monospace;
+  --radius-sm: 0;
+  --radius: 1px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 6px;
+  font-size: 15px;
+}
+html[data-skin='futuristic'] .font-display { text-transform: uppercase; letter-spacing: 0.12em; }
+html[data-skin='futuristic'] .plate,
+html[data-skin='futuristic'] .card {
+  border-color: rgb(var(--krypt-accent) / 0.25);
+  box-shadow: inset 0 0 0 1px rgb(var(--krypt-accent) / 0.05), 0 0 24px rgb(var(--krypt-accent) / 0.07);
+}
+html[data-skin='futuristic'] .plate::after { --tick: rgb(var(--krypt-accent) / 0.6); }
+html[data-skin='futuristic'] .stars-backdrop {
+  background-image:
+    linear-gradient(rgb(var(--krypt-accent) / 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(var(--krypt-accent) / 0.07) 1px, transparent 1px);
+  background-size: 44px 44px, 44px 44px;
+  background-position: 0 0, 0 0;
+}
+
+/* Minimal: flat and quiet. Nothing glows, no runes, no backdrops, softer
+   corners and a little more room around everything. */
+html[data-skin='minimal'] {
+  --krypt-text: 236 236 236;
+  --krypt-ink: 0 0 0;
+  --krypt-black: 6 6 8;
+  --krypt-void: 10 10 12;
+  --krypt-surface: 24 24 28;
+  --krypt-panel: 16 16 19;
+  --krypt-muted: 140 140 148;
+  --font-sans: Inter, system-ui, -apple-system, sans-serif;
+  --font-display: Inter, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-2xl: 18px;
+  font-size: 16.5px;
+}
+html[data-skin='minimal'] .font-display { letter-spacing: -0.01em; font-weight: 600; }
+html[data-skin='minimal'] .plate,
+html[data-skin='minimal'] .card {
+  background-color: rgb(var(--krypt-panel));
+  border-color: rgb(var(--krypt-text) / 0.08);
+  box-shadow: none;
+}
+html[data-skin='minimal'] .plate::after { display: none; }
+html[data-skin='minimal'] .stars-backdrop,
+html[data-skin='minimal'] .grid-backdrop,
+html[data-skin='minimal'] .scanlines,
+html[data-skin='minimal'] .bg-krypt-radial { background-image: none; mask-image: none; -webkit-mask-image: none; }
+html[data-skin='minimal'] .glow-purple,
+html[data-skin='minimal'] .shadow-krypt-glow,
+html[data-skin='minimal'] [class*='shadow-krypt'] { box-shadow: none; }
+html[data-skin='minimal'] .glow-text,
+html[data-skin='minimal'] .glow-text-gold { text-shadow: none; }
+html[data-skin='minimal'] .text-krypt-gradient,
+html[data-skin='minimal'] .text-krypt-shimmer { background-image: none; color: rgb(var(--krypt-text)); }
+
+/* Hacker: a black screen, monospace everywhere, scanlines over the whole
+   shell, a blinking cursor after the page title. The picker pairs it with
+   the green accent the first time. */
+html[data-skin='hacker'] {
+  --krypt-text: 214 236 214;
+  --krypt-ink: 0 0 0;
+  --krypt-black: 0 0 0;
+  --krypt-void: 0 0 0;
+  --krypt-surface: 8 14 8;
+  --krypt-panel: 3 6 3;
+  --krypt-muted: 110 150 110;
+  --font-sans: 'Share Tech Mono', 'JetBrains Mono', ui-monospace, monospace;
+  --font-display: VT323, 'Share Tech Mono', monospace;
+  --font-mono: 'Share Tech Mono', 'JetBrains Mono', ui-monospace, monospace;
+  --radius-sm: 0;
+  --radius: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  font-size: 15px;
+}
+html[data-skin='hacker'] .font-display { font-size: 1.2em; letter-spacing: 0.04em; text-shadow: 0 0 8px rgb(var(--krypt-accent) / 0.45); }
+html[data-skin='hacker'] main h1::after { content: '_'; margin-left: 0.15em; animation: caret-blink 1s steps(1) infinite; }
+@keyframes caret-blink { 50% { opacity: 0; } }
+html[data-skin='hacker'] .plate,
+html[data-skin='hacker'] .card {
+  background-color: rgb(var(--krypt-panel) / 0.92);
+  border-color: rgb(var(--krypt-accent) / 0.35);
+  box-shadow: none;
+}
+html[data-skin='hacker'] .plate::after { display: none; }
+html[data-skin='hacker'] .bg-krypt-radial { background-image: none; }
+html[data-skin='hacker'] .stars-backdrop {
+  background-image: repeating-linear-gradient(to bottom, rgb(var(--krypt-text) / 0.04) 0, rgb(var(--krypt-text) / 0.04) 1px, transparent 1px, transparent 3px);
+  background-size: auto;
+  background-position: 0 0;
+  opacity: 1 !important;
+}
+html[data-skin='hacker'] ::-webkit-scrollbar-thumb { border-radius: 0; }
+html.lite[data-skin='hacker'] main h1::after { animation: none; }
+
+/* Retro: an arcade cabinet. A pixel page title with a hard accent shadow,
+   pixel text, chunky panels with an offset drop, faint CRT lines and a
+   vignette closing in from the edges. */
+html[data-skin='retro'] {
+  --krypt-text: 240 236 255;
+  --krypt-ink: 0 0 0;
+  --krypt-black: 6 4 16;
+  --krypt-void: 12 8 28;
+  --krypt-surface: 30 22 60;
+  --krypt-panel: 20 14 44;
+  --krypt-muted: 156 148 190;
+  /* Pixel faces for the title and the headings only: at table size a
+     pixel B reads as an 8, and "BNB" cannot become "8N8" on a trading
+     screen. Text stays on the terminal face the numbers use. */
+  --font-sans: 'Share Tech Mono', 'JetBrains Mono', ui-monospace, monospace;
+  --font-display: 'Press Start 2P', 'Share Tech Mono', monospace;
+  --font-mono: 'Share Tech Mono', 'JetBrains Mono', monospace;
+  --radius-sm: 0;
+  --radius: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  font-size: 15px;
+}
+/* Press Start 2P is drawn on an 8px grid and reads only at title size, so
+   the page title gets it and every smaller heading and label takes the
+   terminal face, uppercase and tracked, where a C is never an O. */
+html[data-skin='retro'] .font-display { font-family: 'Share Tech Mono', 'JetBrains Mono', monospace; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
+html[data-skin='retro'] main h1.font-display { font-family: 'Press Start 2P', 'Share Tech Mono', monospace; font-size: 0.8em; line-height: 1.5; letter-spacing: 0.02em; text-shadow: 3px 3px 0 rgb(var(--krypt-accent) / 0.6); }
+html[data-skin='retro'] .plate,
+html[data-skin='retro'] .card {
+  border: 2px solid rgb(var(--krypt-text) / 0.28);
+  background-color: rgb(var(--krypt-panel) / 0.94);
+  box-shadow: 5px 5px 0 rgb(var(--krypt-ink) / 0.55);
+}
+html[data-skin='retro'] .plate::after { display: none; }
+html[data-skin='retro'] .stars-backdrop {
+  background-image: repeating-linear-gradient(to bottom, rgb(var(--krypt-ink) / 0.16) 0, rgb(var(--krypt-ink) / 0.16) 1px, transparent 1px, transparent 4px);
+  background-size: auto;
+  background-position: 0 0;
+  opacity: 1 !important;
+}
+html[data-skin='retro'] .bg-krypt-radial {
+  background-image: radial-gradient(ellipse at center, transparent 58%, rgb(var(--krypt-ink) / 0.55) 100%);
+}
+html[data-skin='retro'] ::-webkit-scrollbar-thumb { border-radius: 0; }
+
+/* XP / Y2K: the first LIGHT look. Luna blue on white, a Bliss sky behind
+   the shell, the system's Tahoma. Every dark wash (bg-black/N) becomes a
+   blue-grey wash through --krypt-ink, and the colours that carry meaning
+   are DARKENED for contrast on white — still green for up, red for down,
+   gold for money; only their shade moves, never what they mean. */
+html[data-skin='xp'] {
+  --krypt-text: 20 28 46;
+  --krypt-ink: 150 176 214;   /* Luna: bg-black/40 becomes a pale blue wash */
+  --krypt-black: 214 224 240;
+  --krypt-void: 232 238 248;
+  --krypt-surface: 244 247 252;
+  --krypt-panel: 255 255 255;
+  --krypt-muted: 92 104 128;
+  --font-sans: Tahoma, Verdana, 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Trebuchet MS', Tahoma, Verdana, sans-serif;
+  --font-mono: 'Lucida Console', 'Courier New', ui-monospace, monospace;
+  --radius-sm: 3px;
+  --radius: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
+  font-size: 15px;
+  color-scheme: light;
+}
+html[data-skin='xp'] .font-display { font-weight: 700; letter-spacing: 0; text-transform: none; }
+html[data-skin='xp'] .plate,
+html[data-skin='xp'] .card {
+  background-color: rgb(var(--krypt-panel));
+  border: 1px solid rgb(0 84 227 / 0.35);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.12), inset 0 3px 0 rgb(0 84 227 / 0.85);
+}
+html[data-skin='xp'] .plate::after { display: none; }
+html[data-skin='xp'] .stars-backdrop {
+  background-image: linear-gradient(180deg, rgb(90 168 240) 0%, rgb(160 208 255) 42%, rgb(124 196 106) 66%, rgb(63 143 58) 100%);
+  background-size: auto;
+  background-position: 0 0;
+  opacity: 0.35 !important;
+}
+html[data-skin='xp'] .bg-krypt-radial,
+html[data-skin='xp'] .grid-backdrop,
+html[data-skin='xp'] .scanlines { background-image: none; mask-image: none; -webkit-mask-image: none; }
+html[data-skin='xp'] .glow-purple,
+html[data-skin='xp'] [class*='shadow-krypt'] { box-shadow: 0 1px 3px rgb(0 0 0 / 0.12); }
+html[data-skin='xp'] .glow-text,
+html[data-skin='xp'] .glow-text-gold { text-shadow: none; }
+html[data-skin='xp'] .text-krypt-gradient,
+html[data-skin='xp'] .text-krypt-shimmer { background-image: none; color: rgb(0 84 227); }
+html[data-skin='xp'] [class*='text-emerald-'] { color: rgb(4 120 87) !important; }
+html[data-skin='xp'] [class*='text-rose-'] { color: rgb(190 18 60) !important; }
+html[data-skin='xp'] [class*='text-amber-'] { color: rgb(146 64 14) !important; }
+html[data-skin='xp'] [class*='text-arc-gold'] { color: rgb(138 109 31) !important; }
+html[data-skin='xp'] [class*='text-arc-crimson'] { color: rgb(185 28 28) !important; }
+html[data-skin='xp'] ::-webkit-scrollbar-thumb { background: rgb(0 84 227 / 0.35); }

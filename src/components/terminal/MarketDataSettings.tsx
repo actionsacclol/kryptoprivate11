@@ -222,6 +222,17 @@ export function MarketDataSettings({
                     )}
                   </div>
                 )}
+                {on && (p.routes?.length ?? 0) > 0 && (
+                  // What is spending this provider's budget (2026-09-20): the
+                  // routes asked this session, most-called first. The tooltip
+                  // carries the full list.
+                  <div
+                    className="mt-1 truncate text-nano font-mono text-krypt-muted/70"
+                    title={(p.routes ?? []).map((r) => `${r.route} ×${r.calls}`).join('  ·  ')}
+                  >
+                    {(p.routes ?? []).slice(0, 3).map((r) => `${r.route.replace(/^\/api\/v2\/networks\//, '…/')} ×${r.calls}`).join(' · ')}
+                  </div>
+                )}
               </div>
             );
           })}

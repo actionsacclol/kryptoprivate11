@@ -522,6 +522,9 @@ export interface AppSettings {
   /** Accent colour. Moves the chrome only - the colours that carry meaning
    *  (emerald up, rose down, gold money) are fixed. See src/index.css. */
   theme: import('./theme').ThemeId;
+  /** The look: fonts, surfaces, corner radius, effects. Classic is what the
+   *  app always was. Combines freely with the accent. See src/index.css. */
+  skin: import('./theme').SkinId;
   reduceEffects: boolean;
   /**
    * Let Chromium render through the GPU. Off = software rendering: slower,
@@ -647,6 +650,14 @@ export interface EngineStatus {
   liveSells: number;
   /** Actual wallet-balance change since live went active, in SOL (null if not live). */
   liveRealizedPnlSol: number | null;
+  /**
+   * Real fills since the live session began, from the ledger and the last
+   * portfolio build — see shared/liveSession.ts. `liveBuys` / `liveSells`
+   * above count only the scanner's own trades, which no longer exist, so
+   * they read 0 through a day of manual trading; this is what the
+   * Observatory's ledger shows while armed. Null when no session began.
+   */
+  liveSession?: import('./liveSession').LiveSessionLedger | null;
   /** Current trading-wallet balance in SOL (null if unread). */
   walletBalanceSol: number | null;
 }
@@ -1046,7 +1057,24 @@ export const DEFAULT_SETTINGS: AppSettings = {
     maxSessionLossSol: 0.5,
     maxConsecutiveLosses: 4,
     mayhemFilter: 'all',
-    runnerAlerts: { enabled: true, minBucket: 'top1_5', maxPerHour: 12, webhookUrl: '' },
+    // EVERY field, spelled out: the settings validator drops any key the
+    // defaults do not have, so a switch whose field is missing here saves
+    // as nothing. `excludeMixed` was missing for a day (2026-09-19→20) and
+    // "Skip mixed curves" never persisted. Kept equal to
+    // shared/runners.ts DEFAULT_RUNNER_ALERTS, pinned by a test.
+    runnerAlerts: {
+      enabled: true,
+      minBucket: 'top1_5',
+      maxPerHour: 12,
+      webhookUrl: '',
+      excludeMixed: false,
+      windows: 'both',
+      minBuyers: 0,
+      minNetSol: 0,
+      minCurvePct: 0,
+      maxCurvePct: 100,
+      skipRepeatDumpers: false,
+    },
     paperEntries: false,
   },
   execution: {
@@ -1090,6 +1118,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   launch: { enabled: false, walletId: '', evmWalletId: '' },
   bridge: { enabled: false },
   theme: 'purple',
+  skin: 'classic',
   reduceEffects: false,
   hardwareAcceleration: true,
   recorderDir: '',

@@ -251,6 +251,17 @@ ok('the treasury is exactly Krypt’s EVM address', () => {
   assert.equal(s.treasuryWei, 4_000_000_000_000_000n);
 });
 
+ok('a $KRYPTO holder pays half on the EVM rails too, and the referrer still earns', () => {
+  if (!evmFeesEnabled()) return;
+  const s = splitEvmFee(WEI, true, 25);
+  assert.equal(s.totalWei, 2_500_000_000_000_000n, '0.25 % of 1 native');
+  assert.equal(s.referrerWei, 500_000_000_000_000n, '20 % of the halved fee');
+  assert.equal(s.treasuryWei, 2_000_000_000_000_000n);
+  // Never a surcharge: a rate above the ordinary one falls back to it.
+  assert.equal(splitEvmFee(WEI, false, 500).totalWei, 5_000_000_000_000_000n);
+  assert.equal(splitEvmFee(WEI, false, 0).totalWei, 5_000_000_000_000_000n);
+});
+
 ok('the split arithmetic (runs against whatever the treasury state is)', () => {
   const basis = WEI; // 1 native
   const s = splitEvmFee(basis, true);

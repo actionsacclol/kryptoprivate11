@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Copy, ExternalLink, Loader2, RefreshCw, Star } from 'lucide-react';
+import { tokenLinks } from '@shared/tokenLinks';
 import { imageSrc, type CandleInterval, type CandleSeries } from '@shared/market';
 import type { AppSettings } from '@shared/types';
 import { EVM_CHAIN_META, explorerToken, VENUE_LABEL, type EvmChainKind, type EvmTokenDetail } from '@shared/evm';
@@ -234,6 +235,19 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
                 DexScreener
                 <ExternalLink className="h-3 w-3" />
               </button>
+              {/* The token's own links and its launchpad page (four.meme,
+                  Pons), up here where a trader looks first (2026-09-20). */}
+              {tokenLinks(chain, address, s?.launchpad ?? null, s?.socials ?? null).map((l) => (
+                <button
+                  key={l.url}
+                  onClick={() => void window.krypt.app.openExternal(l.url)}
+                  title={l.url}
+                  className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
+                >
+                  {l.label}
+                  <ExternalLink className="h-3 w-3" />
+                </button>
+              ))}
             </div>
           </div>
 

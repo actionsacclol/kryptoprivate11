@@ -122,8 +122,21 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
     return dd;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [positions]);
-  const buys = status.liveActive ? status.liveBuys : positions.length;
-  const sells = status.liveActive ? status.liveSells : closed.length;
+  // While live, every figure below the headline comes from the session's
+  // REAL fills (shared/liveSession.ts): the headline is the wallet's balance
+  // change, and the counters used to be the scanner's own trades — which no
+  // longer exist — so a day of manual trading read "0 buys, 0 sells,
+  // realized +0.000" under a real loss (user report, 2026-09-19).
+  const ls = status.liveActive ? status.liveSession ?? null : null;
+  const buys = ls ? ls.buys : positions.length;
+  const sells = ls ? ls.sells : closed.length;
+  const shownRealized = ls ? ls.realizedSol : pnl;
+  const shownUnrealized = ls ? ls.unrealizedSol : unrealized;
+  const shownOpen = ls ? ls.open : status.openPositions;
+  const shownWinRate = ls ? ls.winRatePct : winRate;
+  const shownMaxDd = ls ? ls.maxDrawdownSol : maxDrawdown;
+  const sol = (v: number | null): string => (v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(3)}`);
+  const toneOf = (v: number | null): 'good' | 'bad' | undefined => (v === null ? undefined : v > 0 ? 'good' : v < 0 ? 'bad' : undefined);
   const evaluating = launches.filter((l) => l.phase === 'evaluating').length;
   const recent = positions
     .filter((p) => p.state === 'closed')
@@ -172,7 +185,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
             </div>
             <div className="pointer-events-none absolute top-4 right-5 flex flex-col items-end gap-2">
               <OrbLabel text={`Evaluating ${evaluating}`} on={evaluating > 0} />
-              <OrbLabel text="Risk wards active" on={status.running} />
+              <OrbLabel text="Risk checks active" on={status.running} />
               <OrbLabel text="Creator scans" on={status.running && status.feed === 'live'} />
               <OrbLabel text={`Runners ${status.runnersFlagged}`} on={status.runnersFlagged > 0} tone="gold" />
             </div>
@@ -231,14 +244,26 @@ export function Dashboard({ onNavigate }: { onNavigate: (r: RouteId) => void }) 
 
             <div className="mt-4 grid grid-cols-4 gap-x-4 gap-y-3">
               <LedgerStat label="Wallet" value={status.walletBalanceSol != null ? `${status.walletBalanceSol.toFixed(3)}` : '—'} />
-              <LedgerStat label="Realized" value={`${pnl >= 0 ? '+' : ''}${pnl.toFixed(3)}`} tone={pnl > 0 ? 'good' : pnl < 0 ? 'bad' : undefined} />
-              <LedgerStat label="Unrealized" value={`${unrealized >= 0 ? '+' : ''}${unrealized.toFixed(3)}`} tone={unrealized > 0 ? 'good' : unrealized < 0 ? 'bad' : undefined} />
-              <LedgerStat label="Open" value={String(status.openPositions)} />
+              <LedgerStat label="Realized" value={sol(shownRealized)} tone={toneOf(shownRealized)} />
+              <LedgerStat label="Unrealized" value={sol(shownUnrealized)} tone={toneOf(shownUnrealized)} />
+              <LedgerStat label="Open" value={String(shownOpen)} />
               <LedgerStat label="Buys" value={String(buys)} />
               <LedgerStat label="Sells" value={String(sells)} />
-              <LedgerStat label="Win rate" value={winRate != null ? `${winRate.toFixed(0)}%` : '—'} tone={winRate != null ? (winRate >= 50 ? 'good' : 'bad') : undefined} />
-              <LedgerStat label="Max DD" value={maxDrawdown > 0 ? `−${maxDrawdown.toFixed(3)}` : '—'} tone={maxDrawdown > 0 ? 'bad' : undefined} />
+              <LedgerStat label="Win rate" value={shownWinRate != null ? `${shownWinRate.toFixed(0)}%` : '—'} tone={shownWinRate != null ? (shownWinRate >= 50 ? 'good' : 'bad') : undefined} />
+              <LedgerStat label="Max DD" value={shownMaxDd !== null && shownMaxDd > 0 ? `−${shownMaxDd.toFixed(3)}` : '—'} tone={shownMaxDd !== null && shownMaxDd > 0 ? 'bad' : undefined} />
             </div>
+            {ls && (
+              <div className="mt-2 text-label text-krypt-muted/60">
+                {/* What these count, so a fresh session's zeros read as "nothing
+                    yet" and a stale build reads as stale. */}
+                Real fills since the session began
+                {ls.pending > 0 ? ` · ${ls.pending} still reconciling` : ''}
+                {ls.unreconciled > 0 ? ` · ${ls.unreconciled} could not be read from the chain` : ''}
+                {ls.portfolioAt === null
+                  ? ' · realized and unrealized appear once the portfolio has been read'
+                  : ` · positions marked ${fmtDur(Math.max(0, Date.now() - ls.portfolioAt))} ago`}
+              </div>
+            )}
 
             <div className="flex-1 mt-2 -mx-2 min-h-0">
               <AreaChart data={equity} height={130} />

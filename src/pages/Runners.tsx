@@ -18,8 +18,9 @@ import { RunnerWebhook } from '../components/terminal/RunnerWebhook';
 import { useToast } from '../state/ToastProvider';
 import { Card, Empty, IconButton, NumberInput, Page, Section } from '../components/common';
 import { cls } from '../utils/format';
-import { RUNNER_BUCKET_LABEL, RUNNER_TTL_MS, bucketLabel, pruneRunners, FLAG_FORWARD_LINE } from '@shared/runners';
+import { RUNNER_BUCKET_LABEL, RUNNER_TTL_MS, bucketLabel, describeRunnerFilters, pruneRunners, FLAG_FORWARD_LINE } from '@shared/runners';
 import type { RunnerFlag } from '@shared/runners';
+import { useRunnerScores } from '../state/useRunnerScores';
 
 /** Where the quick-buy size is remembered, matching Discover's own. */
 const QUICK_KEY = 'krypto:runners:quickBuySol';
@@ -36,6 +37,7 @@ function RunnerRow({
   r,
   live,
   refreshedPriceSol,
+  score,
   watched,
   quickSol,
   canBuy,
@@ -53,6 +55,9 @@ function RunnerRow({
   /** A price pulled by the refresh button for a launch the scanner has
    *  stopped tracking, so the move since the flag is still answerable. */
   refreshedPriceSol: number | null;
+  /** The token page's Krypt score: undefined = not asked yet, null = the
+   *  providers cannot score it yet (a flag is minutes old). */
+  score: number | null | undefined;
   watched: boolean;
   /** Size a quick buy sends, in SOL. */
   quickSol: number;
@@ -98,6 +103,12 @@ function RunnerRow({
             {bucketLabel(r.bucket)} · {r.observedPct.toFixed(0)} % graduated
           </span>
           <span className="text-krypt-muted">base {r.basePct.toFixed(1)} % · {failPct.toFixed(0)} % did not · n={r.n}</span>
+          <span
+            className={cls('font-mono', score === null || score === undefined ? 'text-krypt-muted/60' : score >= 70 ? 'text-emerald-300' : score >= 40 ? 'text-amber-300' : 'text-rose-300')}
+            title="Krypt score, the token page's: liquidity, Shield sellability, the creator's record and a pump ban. A flag is minutes old, so the providers may not score it yet — Refresh asks again."
+          >
+            Krypt {score === undefined ? '…' : score === null ? '—' : `${score}/100`}
+          </span>
           {r.regime === 'mixed' && (
             <span
               className="rounded border border-amber-400/40 bg-amber-500/10 px-1.5 py-0.5 text-label font-semibold text-amber-300"
@@ -165,7 +176,10 @@ function RunnerRow({
 
       <div className="hidden md:flex flex-col items-end gap-0.5 flex-shrink-0 w-28">
         {live && live.priceHistory.length > 1 ? (
-          <Sparkline data={live.priceHistory} width={96} height={24} positive={sinceFlag === null ? undefined : sinceFlag >= 0} />
+          // floorSpan: the box always spans at least half the first price,
+          // so a wiggle on a near-dead curve draws flat instead of filling
+          // the height like a rocket.
+          <Sparkline data={live.priceHistory} width={96} height={24} positive={sinceFlag === null ? undefined : sinceFlag >= 0} floorSpan={0.5} />
         ) : (
           <span
             className="text-label text-krypt-muted/50"
@@ -180,6 +194,14 @@ function RunnerRow({
         >
           {sinceFlag === null ? '—' : `${sinceFlag >= 0 ? '+' : ''}${sinceFlag.toFixed(1)}% since flag`}
         </span>
+        {live && (
+          <span
+            className={cls('text-label font-mono', live.flow.netInflowSol < 1 ? 'text-amber-300/80' : 'text-krypt-muted/60')}
+            title="Net SOL that has gone into this curve. A large percentage on under a SOL of it is a move on almost nothing — most flags are mixed curves that graduate with about 0.16 SOL behind them."
+          >
+            on {live.flow.netInflowSol.toFixed(2)} SOL net
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-2 flex-shrink-0">
         <button
@@ -228,6 +250,8 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const term = useTerminal();
   const toast = useToast();
   const cfg = settings.strategy.runnerAlerts;
+  // The user's own filters, so the subtitle says why the list is short.
+  const filters = cfg ? describeRunnerFilters(cfg) : [];
 
   // The webhook rides with the rest of this chain's runner-alert settings.
   // Main validates the URL against Discord's hosts and rejects anything else,
@@ -260,6 +284,11 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
     const id = setInterval(() => setTick((n) => n + 1), 10_000);
     return () => clearInterval(id);
   }, []);
+  // Krypt scores for the flags on screen — asked once per mint, re-asked by
+  // Refresh. `tick` re-derives the list as flags expire.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const scoreMints = useMemo(() => pruneRunners(runners, Date.now()).map((r) => r.mint), [runners, tick]);
+  const scores = useRunnerScores(scoreMints, refreshedAt ?? 0);
 
   // Which runners are held decides the Sell button, nothing more — so the
   // engine's kept build is enough. This used to start a full 5–10 s
@@ -359,7 +388,7 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
   return (
     <Page
       title="Potential runners"
-      subtitle={`${visible.length} active · flags expire after ${ttlMin} min · floor: ${cfg ? RUNNER_BUCKET_LABEL[cfg.minBucket] : '—'}${refreshedAt ? ` · refreshed ${ago(refreshedAt)}` : ''}`}
+      subtitle={`${visible.length} active · flags expire after ${ttlMin} min · floor: ${cfg ? RUNNER_BUCKET_LABEL[cfg.minBucket] : '—'}${filters.length ? ` · ${filters.join(' · ')}` : ''}${refreshedAt ? ` · refreshed ${ago(refreshedAt)}` : ''}`}
       actions={
         <div className="flex flex-shrink-0 items-center gap-2">
           <span className="whitespace-nowrap text-body text-krypt-muted">Quick buy</span>
@@ -390,7 +419,7 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
         {!cfg?.enabled ? (
           <Empty
             title="Runner alerts are off"
-            message="Turn on “Flag potential runners” in Spellbook → Runner alerts. The scanner must be running too."
+            message="Turn on “Flag potential runners” on the Execution page. The scanner must be running too."
           />
         ) : !status.running && runners.length === 0 ? (
           <Empty
@@ -400,7 +429,7 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
         ) : visible.length === 0 ? (
           <Empty
             title={runners.length ? `Nothing flagged in the last ${ttlMin} minutes` : 'Nothing flagged yet'}
-            message="Flags arrive a minute or two after a launch. Lower the bucket floor in Spellbook → Runner alerts to see more; raise it to see only the top 1 %."
+            message="Flags arrive a minute or two after a launch. Lower the bucket floor on the Execution page to see more, or loosen your own filters there; raise the floor to see only the top 1 %."
           />
         ) : (
           <Card padded={false} className="overflow-hidden">
@@ -410,6 +439,7 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
                 r={r}
                 live={liveByMint.get(r.mint) ?? null}
                 refreshedPriceSol={pulled[r.mint] ?? null}
+                score={scores[r.mint]}
                 quickSol={quickSol}
                 canBuy={canBuy}
                 held={heldMints.has(r.mint)}

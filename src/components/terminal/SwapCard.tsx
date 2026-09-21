@@ -5,7 +5,8 @@
 // inputs settle, and the Swap button stays disabled until a quote exists —
 // you never send something the chain has not already priced.
 
-import { KRYPTO_TOKEN } from '@shared/krypto';
+import { KRYPTO_TOKEN, holderFeeBps } from '@shared/krypto';
+import { FEE_BPS } from '@shared/fees';
 import { useKryptoWaiver } from '../../state/useKryptoWaiver';
 import { WaiverHint } from './WaiverHint';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -358,29 +359,29 @@ export function SwapCard() {
                 so, and an unpriceable one is charged nothing at all. */}
             Platform fee:{' '}
             <span className="text-white/70">
-              {/* The quote is priced main-side and already has the waiver in
-                  it, so this reports the quote rather than deciding again —
-                  two places computing the same fee is how they come to
-                  disagree. The badge below just names why it is zero. */}
+              {/* The quote is priced main-side and already has the holder
+                  rate in it, so this reports the quote rather than deciding
+                  again — two places computing the same fee is how they come
+                  to disagree. The badge below just names why it is half. */}
               {quote.feeBasis === 'on-top' || quote.feeBasis === 'follows' || quote.feeBasis === 'inside'
                 ? quote.feeNative !== null
                   ? `${quote.feeNative.toFixed(6)} ${nativeSymbol(draft.chain)}`
-                  : '0.5%'
+                  : `${(holderFeeBps(FEE_BPS, waiver.halved) / 100).toFixed(2).replace(/\.?0+$/, '')}%`
                 : feeSol === null || feeSol === 0
                   ? 'none'
                   : `${feeSol.toFixed(6)} SOL`}
             </span>
-            {waiver.waived ? <span className="text-emerald-300/80"> — waived (${KRYPTO_TOKEN.symbol} holder)</span> : null}
+            {waiver.halved ? <span className="text-emerald-300/80"> — halved (${KRYPTO_TOKEN.symbol} holder)</span> : null}
             {quote.feeBasis === 'on-top' ? ` — added on top of the ${nativeSymbol(draft.chain)} you send` : ''}
             {quote.feeBasis === 'follows' ? ' — sent as a second transaction right after the buy lands' : ''}
             {quote.feeBasis === 'inside' ? ' — taken out of the proceeds; the amount above is what you get' : ''}
-            {quote.feeBasis === 'quoted' && feeSol ? ' (0.5% of the input priced in SOL)' : ''}
+            {quote.feeBasis === 'quoted' && feeSol ? ` (${(holderFeeBps(FEE_BPS, waiver.halved) / 100).toFixed(2).replace(/\.?0+$/, '')}% of the input priced in SOL)` : ''}
             {quote.feeBasis === 'unpriced' ? ' — this pair could not be priced in SOL, so nothing is charged' : ''}
             {/* Not offered on a pair that is charged nothing anyway — there
                 would be no fee for the holding to remove. */}
             {quote.feeBasis !== 'unpriced' && (
               <>
-                {' '}· <WaiverHint waived={waiver.waived} />
+                {' '}· <WaiverHint halved={waiver.halved} />
               </>
             )}
           </div>

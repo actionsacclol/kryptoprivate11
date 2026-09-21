@@ -22,6 +22,7 @@
 // "most people won't bother", never as "cannot be avoided".
 
 import { resolveTreasury } from './feeIntegrity';
+import { holderFeeBps } from './krypto';
 
 /** Our cut, in basis points of the trade's SOL value. 50 bps = 0.5%. */
 export const FEE_BPS = 50;
@@ -152,6 +153,13 @@ export function referralProblem(addr: string, ctx: ReferralContext): string | nu
  *  never drift from the constant that is actually charged. */
 export function feePctLabel(): string {
   return `${(FEE_BPS / 100).toFixed(FEE_BPS % 100 === 0 ? 0 : 2).replace(/\.?0+$/, '')}%`;
+}
+
+/** "0.25%" — the fee a $KRYPTO holder pays per side, derived from the same
+ *  constants the signer charges with (shared/krypto.ts halves FEE_BPS). */
+export function holderFeePctLabel(): string {
+  const bps = holderFeeBps(FEE_BPS, true);
+  return `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 2).replace(/\.?0+$/, '')}%`;
 }
 
 /** "0.1%" — what a referrer earns per trade, as a share of trade value. */

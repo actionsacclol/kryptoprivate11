@@ -23,7 +23,7 @@ import {
 // copies: chain constants belong with the chain primitives, and the data
 // layer has no business reaching into a decoder for them.
 import { TOKEN_2022_PROGRAM as TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM as TOKEN_PROGRAM_ID } from '../chain/addresses';
-import { memo } from './http';
+import { memo, putCache } from './http';
 import { holderPct, type HolderReport, type HolderRow } from '@shared/market';
 
 export interface MintFacts {
@@ -75,11 +75,24 @@ const UNCHECKED = (message: string): MintFacts => ({
  * trades a few seconds of staleness for not hammering the endpoint — it must
  * never grow into a long-lived cache.
  */
-const MINT_FACTS_TTL_MS = 15_000;
+export const MINT_FACTS_TTL_MS = 15_000;
+const mintKey = (mint: string): string => `onchain:mint:${mint}`;
 
 export async function mintFacts(httpUrl: string, mint: string): Promise<MintFacts> {
-  const hit = await memo<MintFacts>(`onchain:mint:${mint}`, MINT_FACTS_TTL_MS, () => mintFactsUncached(httpUrl, mint));
+  const hit = await memo<MintFacts>(mintKey(mint), MINT_FACTS_TTL_MS, () => mintFactsUncached(httpUrl, mint));
   return hit ?? UNCHECKED('mint read failed');
+}
+
+/**
+ * A reader that already holds the mint account's bytes hands them over, so
+ * `mintFacts()` is a cache hit instead of a second request for the same
+ * account. The pump reader (pumpChain.ts) fetches the mint in the batch with
+ * the curve; before this, `summary()` re-read it alone a moment later.
+ */
+export function seedMintFacts(mint: string, owner: string, data: Buffer): MintFacts {
+  const facts = mintFactsFromAccount(owner, data);
+  putCache(mintKey(mint), facts, MINT_FACTS_TTL_MS);
+  return facts;
 }
 
 async function mintFactsUncached(httpUrl: string, mint: string): Promise<MintFacts | null> {
@@ -95,8 +108,12 @@ async function mintFactsUncached(httpUrl: string, mint: string): Promise<MintFac
   // exactly when this app is used. Every consumer already renders null
   // correctly (`shared/market.ts` gates on `!m.checked`).
   if (!res.data) return UNCHECKED('mint account not found');
+  return mintFactsFromAccount(res.data.owner, res.data.data);
+}
 
-  const { owner, data } = res.data;
+/** The facts in a mint account's bytes. `checked: true` throughout: the
+ *  account was READ, whatever it turned out to contain. */
+export function mintFactsFromAccount(owner: string, data: Buffer): MintFacts {
   const isToken2022 = owner === TOKEN_2022_PROGRAM_ID;
   if (!isToken2022 && owner !== TOKEN_PROGRAM_ID) {
     return { ...UNCHECKED(`unknown token program ${owner.slice(0, 8)}`), checked: true, exists: true };

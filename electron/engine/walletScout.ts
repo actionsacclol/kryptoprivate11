@@ -29,6 +29,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { COPY_LATENCY_FLOOR_MS } from '@shared/copytrade';
+import { FOLLOWER_FILL_STALE_MS, FOLLOWER_LAG_MS, followerNetReturnPct } from '@shared/walletScore';
 import {
   MIN_TRIPS_FOR_RANK,
   SCOUT_CHAINS,
@@ -38,6 +40,7 @@ import {
   type ScoutChain,
   type ScoutDay,
   type ScoutWallet,
+  type ScoutTrip,
 } from '@shared/walletScout';
 
 const FILE = 'wallet-scout.json';
@@ -62,6 +65,17 @@ const MAX_HOLDS = 200;
  * over an hour of pump's whole-chain flow, which is the overlap that matters.
  */
 const MAX_SEEN_TX = 40_000;
+/** Recent closed trips kept per wallet, for the detail drawer. */
+const MAX_RECENT_TRIPS = 12;
+/** Distinct mints remembered by name per wallet; past this the count is a
+ *  floor. Sixty is far past where "coins per trip" stops moving. */
+const MAX_MINTS = 60;
+/** Follower returns stored per day bucket; counts keep going past it. */
+const MAX_RETURNS_PER_DAY = 40;
+/** Follower fills waiting for a print, all mints together. */
+const MAX_PENDING = 30_000;
+/** Stale pendings are swept this often (in notes). */
+const SWEEP_EVERY = 1_000;
 
 /** What `note` did with a trade — a scan reports these back to the user. */
 export type NoteResult = 'noted' | 'duplicate' | 'own' | 'ignored';
@@ -71,6 +85,19 @@ interface Pos {
   cost: number;
   tokens: number;
   openedAt: number;
+  /** Everything ever put in, and realised so far, for the trip record. */
+  spent: number;
+  realised: number;
+  /**
+   * The follower's side (2026-09-20, shared/walletScore.ts). A copy of this
+   * wallet fills at the FIRST PRINT on the mint at or after `followerDue` —
+   * the leader's buy plus the lag — never at the leader's own price, which
+   * a follower cannot have. Null until such a print arrives; if the leader is
+   * out before one does, the trip was unreachable.
+   */
+  followerEntry: number | null;
+  followerDue: number;
+  closed: boolean;
 }
 
 interface Book {
@@ -80,7 +107,18 @@ interface Book {
   days: Map<number, ScoutDay>;
   positions: Map<string, Pos>;
   holds: number[];
+  /** Distinct mints traded, by name up to MAX_MINTS… */
+  mints: Set<string>;
+  /** …plus how many a saved record knew but could not name. */
+  mintsFloor: number;
+  /** Newest first. */
+  recentTrips: ScoutTrip[];
 }
+
+/** A follower fill waiting for the next print on its mint. */
+type Pending =
+  | { kind: 'entry'; pos: Pos }
+  | { kind: 'exit'; due: number; entry: number; trip: ScoutTrip; bucket: ScoutDay };
 
 interface ChainState {
   tracked: Map<string, Book>;
@@ -97,9 +135,14 @@ interface ChainState {
   saved: Set<string>;
   /** Trade ids already recorded — see MAX_SEEN_TX. */
   seenTx: Set<string>;
+  /** Follower fills waiting for a print, by mint. Every trade on a mint —
+   *  anyone's — is a print for it. */
+  pending: Map<string, Pending[]>;
+  pendingCount: number;
+  notes: number;
 }
 
-const freshState = (): ChainState => ({ tracked: new Map(), sightings: new Map(), saved: new Set(), seenTx: new Set() });
+const freshState = (): ChainState => ({ tracked: new Map(), sightings: new Map(), saved: new Set(), seenTx: new Set(), pending: new Map(), pendingCount: 0, notes: 0 });
 
 const state = new Map<ScoutChain, ChainState>();
 for (const c of SCOUT_CHAINS) state.set(c, freshState());
@@ -168,7 +211,106 @@ function totalTrips(b: Book): number {
 }
 
 function emptyDay(day: number): ScoutDay {
-  return { day, buys: 0, sells: 0, roundTrips: 0, wins: 0, losses: 0, pnl: 0, volume: 0 };
+  return { day, buys: 0, sells: 0, roundTrips: 0, wins: 0, losses: 0, pnl: 0, volume: 0, fTrips: 0, fWins: 0, fReturns: [], unreachable: 0, fast: 0, measured: 0 };
+}
+
+// ── The follower's fills ──────────────────────────────────────────────
+
+function addPending(s: ChainState, mint: string, p: Pending): void {
+  let list = s.pending.get(mint);
+  if (!list) {
+    list = [];
+    s.pending.set(mint, list);
+  }
+  list.push(p);
+  s.pendingCount += 1;
+  // Bounded: the oldest mints' waiting fills go first. A dropped entry leaves
+  // its position with no follower price, which the close then reports as
+  // unreachable — the honest reading of "we lost track of it".
+  while (s.pendingCount > MAX_PENDING) {
+    const oldest = s.pending.keys().next().value;
+    if (oldest === undefined) break;
+    const gone = s.pending.get(oldest) ?? [];
+    s.pending.delete(oldest);
+    s.pendingCount -= gone.length;
+  }
+}
+
+function markUnreachableExit(pd: Extract<Pending, { kind: 'exit' }>): void {
+  pd.trip.followerNote = 'no-exit';
+  pd.bucket.unreachable = (pd.bucket.unreachable ?? 0) + 1;
+}
+
+/**
+ * A print on `mint` at `at`: the first one at or after a fill's due time IS
+ * the follower's price. Stale fills (no print for FOLLOWER_FILL_STALE_MS past
+ * due) are given up: an entry stays null and the close reports it; an exit
+ * is counted unreachable now.
+ */
+function resolvePending(s: ChainState, mint: string, price: number, at: number): void {
+  const list = s.pending.get(mint);
+  if (!list) return;
+  const keep: Pending[] = [];
+  for (const pd of list) {
+    if (pd.kind === 'entry') {
+      if (pd.pos.closed) continue;
+      if (at >= pd.pos.followerDue) {
+        pd.pos.followerEntry = price;
+        continue;
+      }
+      if (at - pd.pos.followerDue > FOLLOWER_FILL_STALE_MS) continue;
+      keep.push(pd);
+      continue;
+    }
+    if (at >= pd.due) {
+      const ret = followerNetReturnPct(pd.entry, price);
+      if (ret === null) {
+        markUnreachableExit(pd);
+        continue;
+      }
+      pd.trip.followerReturnPct = ret;
+      pd.trip.followerNote = 'filled';
+      pd.bucket.fTrips = (pd.bucket.fTrips ?? 0) + 1;
+      if (ret > 0) pd.bucket.fWins = (pd.bucket.fWins ?? 0) + 1;
+      const rs = (pd.bucket.fReturns ??= []);
+      if (rs.length < MAX_RETURNS_PER_DAY) rs.push(ret);
+      continue;
+    }
+    keep.push(pd);
+  }
+  s.pendingCount -= list.length - keep.length;
+  if (keep.length) s.pending.set(mint, keep);
+  else s.pending.delete(mint);
+}
+
+/** Every so often, give up on fills whose mint never printed again. */
+function sweepPending(s: ChainState, now: number): void {
+  for (const [mint, list] of [...s.pending]) {
+    const keep: Pending[] = [];
+    for (const pd of list) {
+      const due = pd.kind === 'entry' ? pd.pos.followerDue : pd.due;
+      if (pd.kind === 'entry' && pd.pos.closed) continue;
+      if (now - due > FOLLOWER_FILL_STALE_MS) {
+        if (pd.kind === 'exit') markUnreachableExit(pd);
+        continue;
+      }
+      keep.push(pd);
+    }
+    s.pendingCount -= list.length - keep.length;
+    if (keep.length) s.pending.set(mint, keep);
+    else s.pending.delete(mint);
+  }
+}
+
+function rememberMint(b: Book, mint: string): void {
+  if (b.mints.has(mint)) return;
+  if (b.mints.size < MAX_MINTS) b.mints.add(mint);
+  else b.mintsFloor += 1;
+}
+
+function pushTrip(b: Book, t: ScoutTrip): void {
+  b.recentTrips.unshift(t);
+  if (b.recentTrips.length > MAX_RECENT_TRIPS) b.recentTrips.length = MAX_RECENT_TRIPS;
 }
 
 function dayBucket(b: Book, at: number): ScoutDay {
@@ -207,8 +349,6 @@ export function note(
   if (!address || !Number.isFinite(native) || native <= 0) return 'ignored';
   const s = chainState(chain);
   const key = address.toLowerCase();
-  // Never record the user's own wallets — see ownAddresses.
-  if (ownAddresses.get(chain)?.has(key)) return 'own';
   if (tx) {
     if (s.seenTx.has(tx)) return 'duplicate';
     s.seenTx.add(tx);
@@ -218,6 +358,14 @@ export function note(
       s.seenTx.delete(oldest);
     }
   }
+  // Every trade is a PRINT on its mint — the user's own included — and a
+  // print is what fills a waiting follower leg. Resolved before anything is
+  // scored for this trade, so a leader's own next trade never fills their
+  // follower's leg at their own price.
+  if (Number.isFinite(tokens) && tokens > 0) resolvePending(s, mint, native / tokens, at);
+  if (++s.notes % SWEEP_EVERY === 0) sweepPending(s, at);
+  // Never record the user's own wallets — see ownAddresses.
+  if (ownAddresses.get(chain)?.has(key)) return 'own';
 
   let b = s.tracked.get(key);
   if (!b) {
@@ -229,7 +377,7 @@ export function note(
       return 'noted';
     }
     s.sightings.delete(key);
-    b = { address: key, firstSeen: at, lastSeen: at, days: new Map(), positions: new Map(), holds: [] };
+    b = { address: key, firstSeen: at, lastSeen: at, days: new Map(), positions: new Map(), holds: [], mints: new Set(), mintsFloor: 0, recentTrips: [] };
     s.tracked.set(key, b);
     evict(s);
   }
@@ -243,13 +391,18 @@ export function note(
   if (isBuy) {
     bucket.buys += 1;
     bucket.volume += native;
+    rememberMint(b, mint);
     const p = b.positions.get(mint);
     if (p) {
       p.cost += native;
       p.tokens += tokens;
+      p.spent += native;
     } else {
       if (b.positions.size >= MAX_OPEN) return 'noted';
-      b.positions.set(mint, { cost: native, tokens, openedAt: at });
+      // The follower mirrors the FIRST buy, at the first print after the lag.
+      const pos: Pos = { cost: native, tokens, openedAt: at, spent: native, realised: 0, followerEntry: null, followerDue: at + FOLLOWER_LAG_MS, closed: false };
+      b.positions.set(mint, pos);
+      addPending(s, mint, { kind: 'entry', pos });
     }
     return 'noted';
   }
@@ -264,17 +417,34 @@ export function note(
   const pnl = native - costOut;
   p.cost -= costOut;
   p.tokens -= Math.min(tokens, p.tokens);
+  p.realised += pnl;
 
   // Flat, or so close that what is left is dust — the trip is closed and
   // scored on the day it CLOSED, which is what makes a daily window mean
   // "what did this wallet make today".
   if (p.tokens <= 0 || p.cost <= 1e-9) {
     b.positions.delete(mint);
+    p.closed = true;
     bucket.roundTrips += 1;
     if (pnl > 0) bucket.wins += 1;
     else if (pnl < 0) bucket.losses += 1;
-    b.holds.push(Math.max(0, at - p.openedAt));
+    const holdMs = Math.max(0, at - p.openedAt);
+    b.holds.push(holdMs);
     if (b.holds.length > MAX_HOLDS) b.holds.shift();
+    bucket.measured = (bucket.measured ?? 0) + 1;
+    if (holdMs < COPY_LATENCY_FLOOR_MS) bucket.fast = (bucket.fast ?? 0) + 1;
+
+    // The follower's trip: mirrored on the FINAL close, both legs at the
+    // first print after the lag. No entry print before the leader was out
+    // means a copy was never in it.
+    const trip: ScoutTrip = { mint, openedAt: p.openedAt, closedAt: at, cost: p.spent, pnl: p.realised, holdMs, followerReturnPct: null, followerNote: 'no-exit' };
+    if (p.followerEntry === null) {
+      trip.followerNote = at < p.followerDue ? 'too-fast' : 'no-entry';
+      bucket.unreachable = (bucket.unreachable ?? 0) + 1;
+    } else {
+      addPending(s, mint, { kind: 'exit', due: at + FOLLOWER_LAG_MS, entry: p.followerEntry, trip, bucket });
+    }
+    pushTrip(b, trip);
   }
   bucket.pnl += pnl;
   schedulePersist();
@@ -339,6 +509,8 @@ function toWallet(chain: ScoutChain, b: Book): ScoutWallet {
     openCount: b.positions.size,
     openCost,
     medianHoldMs: median(b.holds),
+    distinctMints: b.mints.size + b.mintsFloor,
+    recentTrips: [...b.recentTrips],
   };
 }
 
@@ -401,6 +573,11 @@ interface StoredWallet {
   lastSeen: number;
   days: ScoutDay[];
   medianHoldMs: number | null;
+  /** Named mints (ranked wallets only, capped) and the count beyond them. */
+  mints?: string[];
+  mintsFloor?: number;
+  /** Ranked wallets only — thin records have nothing worth a drawer. */
+  recentTrips?: ScoutTrip[];
 }
 
 export function init(userDataDir: string): void {
@@ -450,6 +627,9 @@ export function init(userDataDir: string): void {
         days,
         positions: new Map(),
         holds: typeof r.medianHoldMs === 'number' ? [r.medianHoldMs, r.medianHoldMs, r.medianHoldMs, r.medianHoldMs] : [],
+        mints: new Set(Array.isArray(r.mints) ? r.mints.filter((x) => typeof x === 'string').slice(0, MAX_MINTS) : []),
+        mintsFloor: typeof r.mintsFloor === 'number' && r.mintsFloor > 0 ? Math.floor(r.mintsFloor) : 0,
+        recentTrips: Array.isArray(r.recentTrips) ? r.recentTrips.filter((t) => t && typeof t.mint === 'string' && typeof t.closedAt === 'number').slice(0, MAX_RECENT_TRIPS) : [],
       });
     }
   }
@@ -471,13 +651,27 @@ export function persist(): void {
     const s = chainState(chain);
     saved[chain] = [...s.saved];
     chains[chain] = [...s.tracked.values()]
-      .map((b) => ({
-        address: b.address,
-        firstSeen: b.firstSeen,
-        lastSeen: b.lastSeen,
-        days: rotate([...b.days.values()]),
-        medianHoldMs: median(b.holds),
-      }))
+      .map((b) => {
+        const ranked = totalTrips(b) >= MIN_TRIPS_FOR_RANK;
+        const w: StoredWallet = {
+          address: b.address,
+          firstSeen: b.firstSeen,
+          lastSeen: b.lastSeen,
+          days: rotate([...b.days.values()]),
+          medianHoldMs: median(b.holds),
+        };
+        // Names and trips only for the records the board can show: most of
+        // six thousand wallets are three trades, and a file that carried a
+        // dozen trips for each would be written every thirty seconds.
+        if (ranked) {
+          w.mints = [...b.mints];
+          if (b.mintsFloor > 0) w.mintsFloor = b.mintsFloor;
+          if (b.recentTrips.length) w.recentTrips = b.recentTrips;
+        } else if (b.mints.size + b.mintsFloor > 0) {
+          w.mintsFloor = b.mints.size + b.mintsFloor;
+        }
+        return w;
+      })
       .filter((w) => w.days.length > 0);
   }
   try {

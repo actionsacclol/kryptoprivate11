@@ -42,6 +42,12 @@ interface WalletStats {
   lastSwapAt: number | null;
   seen: number;
   swaps: number;
+  /** Seen on the socket but the transaction could not be READ after every
+   *  retry — the stage where the v1 outage of 2026-09-15..20 disappeared
+   *  everything. Counted separately so the status line can say so. */
+  unreadable: number;
+  /** Read fine, but not a copyable swap (a transfer, an LP move, a claim). */
+  notSwap: number;
   overCap: boolean;
   /** A subscription for this wallet has been acked at least once THIS
    *  process. Only then is a reconnect a gap worth filling — on the first
@@ -144,7 +150,7 @@ export function attach(h: WalletWatcherHost): void {
 function statsFor(wallet: string): WalletStats {
   let s = stats.get(wallet);
   if (!s) {
-    s = { lastSeenAt: null, lastSwapAt: null, seen: 0, swaps: 0, overCap: false, subscribed: false, recoveredAt: 0 };
+    s = { lastSeenAt: null, lastSwapAt: null, seen: 0, swaps: 0, unreadable: 0, notSwap: 0, overCap: false, subscribed: false, recoveredAt: 0 };
     stats.set(wallet, s);
   }
   return s;
@@ -176,6 +182,8 @@ export function status(): Record<string, CopyWatchStatus> {
       lastSwapAt: s.lastSwapAt,
       seen: s.seen,
       swaps: s.swaps,
+      unreadable: s.unreadable,
+      notSwap: s.notSwap,
     };
   }
   return out;
@@ -434,7 +442,10 @@ async function onNotification(wallet: string, signature: string, err: unknown, r
     const res = await getTransaction(h.httpUrl(), signature);
     if (res.ok && res.data) {
       const swap = decodeWalletSwap(res.data, wallet);
-      if (!swap) return;
+      if (!swap) {
+        s.notSwap += 1;
+        return;
+      }
       s.swaps += 1;
       s.lastSwapAt = Date.now();
       // WHEN THEY TRADED, not when we read it. A recovered transaction can
@@ -457,7 +468,10 @@ async function onNotification(wallet: string, signature: string, err: unknown, r
   // Silence here was the bug: a leader trade that is KNOWN to have happened
   // and could not be read is a copy that will not fire, and the user had no
   // way to know it. It stays in `seen`, so a later catch-up will not re-chase
-  // a transaction this endpoint cannot serve.
+  // a transaction this endpoint cannot serve. Counted too, so the wallet's
+  // status line shows "N unreadable" instead of a swap count that quietly
+  // stopped moving (the v1 outage was found from this line in the Console).
+  s.unreadable += 1;
   h.log('warn', `wallet watcher: could not read ${wallet.slice(0, 6)}…'s transaction ${signature.slice(0, 8)}… — ${why}. That trade was not copied.`);
 }
 

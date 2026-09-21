@@ -4,6 +4,7 @@ import type { AppSettings } from '@shared/types';
 import { EVM_CHAIN_META, EVM_FEE_BPS, VENUE_LABEL, type EvmChainKind, type EvmQuote, type EvmTokenState } from '@shared/evm';
 import { cls, fmtUsd, shortAddr } from '../../utils/format';
 import { KRYPTO_TOKEN } from '@shared/krypto';
+import { holderFeeBps } from '@shared/krypto';
 import { useKryptoWaiver } from '../../state/useKryptoWaiver';
 import { WaiverHint } from './WaiverHint';
 import { fmtNative, fmtTokens, isPendingResult, PENDING_TOAST, rawToNumber, weiToNumber } from '../../utils/evm';
@@ -311,25 +312,23 @@ export function EvmTradePanel({
           </span>
         </div>
         <div className="flex items-center justify-between gap-3">
-          {/* The $KRYPTO waiver covers every chain, so this line has to know
-              about it too — the quote is already priced with it main-side. */}
+          {/* The $KRYPTO holder rate covers every chain, so this line has to
+              know about it too — the quote is already priced with it main-side. */}
           <span className="text-krypt-muted/80">
-            Krypt fee {feesOn && !waiver.waived ? `${(EVM_FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}%` : ''}
+            Krypt fee {feesOn ? `${(holderFeeBps(EVM_FEE_BPS, waiver.halved) / 100).toFixed(2).replace(/\.?0+$/, '')}%` : ''}
           </span>
-          <span className={cls('font-mono tabular-nums', waiver.waived ? 'text-emerald-300/80' : 'text-white/70')}>
+          <span className={cls('font-mono tabular-nums', waiver.halved ? 'text-emerald-300/80' : 'text-white/70')}>
             {!feesOn
               ? 'no platform fee yet'
-              : waiver.waived
-                ? `waived (${KRYPTO_TOKEN.symbol} holder)`
-                : quote
-                  ? `${fmtNative(feeNative, sym)}${feeNative !== null && nativeUsd ? ` (${fmtUsd(feeNative * nativeUsd)})` : ''}`
-                  : '—'}
+              : quote
+                ? `${fmtNative(feeNative, sym)}${feeNative !== null && nativeUsd ? ` (${fmtUsd(feeNative * nativeUsd)})` : ''}${waiver.halved ? ` · halved (${KRYPTO_TOKEN.symbol} holder)` : ''}`
+                : '—'}
           </span>
         </div>
-        {/* The waiver is every chain's, so the way out belongs on every
+        {/* The holder rate is every chain's, so the way to it belongs on every
             chain's fee line. `charged` keeps it off a panel that is not
             taking a fee in the first place. */}
-        <WaiverHint waived={waiver.waived} charged={feesOn} className="text-right" />
+        <WaiverHint halved={waiver.halved} charged={feesOn} className="text-right" />
         <div className="flex items-center justify-between gap-3">
           <span className="text-krypt-muted/80">Gas (est.)</span>
           <span className="font-mono text-white/70 tabular-nums">{quote && gasNative !== null ? toUsd(gasNative) : '—'}</span>

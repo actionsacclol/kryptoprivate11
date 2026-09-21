@@ -35,13 +35,64 @@ export interface RunnerAlertSettings {
    * to post your flags somewhere you did not choose.
    */
   webhookUrl: string;
+  /**
+   * Skip flags on "mixed" curves — reserves that do not follow the constant
+   * product. On the measured day (2026-07-27) those graduated into a pool
+   * seeded with ~0.16 SOL against 84.99 for a classic curve and held a median
+   * 0.008× of the flag price an hour later; they were 76 % of that day's
+   * flags and 91 % of live September ones, and their percentage moves are
+   * moves on almost nothing (a runner row reading +400 % while its market
+   * cap bounced around a thousand dollars, 2026-09-19). Off by default:
+   * skipping them leaves few alerts, and the app never hides a launch for a
+   * reason the user did not choose. Absent on settings saved before it.
+   */
+  excludeMixed?: boolean;
+  // ── The user's own filters on top of the odds (2026-09-20). Each one
+  //    applies only when the fact is KNOWN: a missing count or record is
+  //    never a reason to hide a launch. All absent on older saves and read
+  //    as "off". ──
+  /**
+   * Which judge windows may raise the flag. The scanner judges a launch at
+   * +60 s and, when that did not flag, again at +120 s. '60' keeps only the
+   * earlier call (earlier, on thinner evidence), '120' only the later one.
+   */
+  windows?: RunnerWindows;
+  /** Unique buyers the launch must have at the judge; 0 = no floor. */
+  minBuyers?: number;
+  /**
+   * Net SOL (buys − sells) the launch must have drawn at the judge; 0 = no
+   * floor. The honest answer to "+400 % on nothing": a runner call on a
+   * launch that drew half a SOL is a call about half a SOL.
+   */
+  minNetSol?: number;
+  /** Share of the supply sold at the judge, inclusive bounds in percent;
+   *  0 and 100 mean no bound. */
+  minCurvePct?: number;
+  maxCurvePct?: number;
+  /**
+   * Skip creators with a dump already on the app's record — a creator sell
+   * inside an earlier launch's window. Flags whose creator had not sold
+   * graduated 21.6 % on the held-out day, those whose creator had 4.7 %
+   * (runner-outcome swarm 09-11). A creator the app has no record on is
+   * NOT skipped: no record is not a dump.
+   */
+  skipRepeatDumpers?: boolean;
 }
+
+export type RunnerWindows = 'both' | '60' | '120';
 
 export const DEFAULT_RUNNER_ALERTS: RunnerAlertSettings = {
   enabled: true,
   minBucket: 'top1_5',
   maxPerHour: 12,
   webhookUrl: '',
+  excludeMixed: false,
+  windows: 'both',
+  minBuyers: 0,
+  minNetSol: 0,
+  minCurvePct: 0,
+  maxCurvePct: 100,
+  skipRepeatDumpers: false,
 };
 
 export const RUNNER_BUCKET_LABEL: Record<RunnerBucketFloor, string> = {
@@ -49,6 +100,34 @@ export const RUNNER_BUCKET_LABEL: Record<RunnerBucketFloor, string> = {
   top1_5: 'Top 5 %',
   top5_10: 'Top 10 %',
 };
+
+export const RUNNER_WINDOWS_LABEL: Record<RunnerWindows, string> = {
+  both: '+60 s, then +120 s',
+  '60': '+60 s only',
+  '120': '+120 s only',
+};
+
+/** May a judge at `windowS` raise a flag under `cfg`? */
+export function windowAllowed(cfg: Pick<RunnerAlertSettings, 'windows'>, windowS: 60 | 120): boolean {
+  const w = cfg.windows ?? 'both';
+  return w === 'both' || Number(w) === windowS;
+}
+
+/** The user's own filters, one short phrase each, for a subtitle. Empty
+ *  when nothing but the bucket floor applies. */
+export function describeRunnerFilters(cfg: RunnerAlertSettings): string[] {
+  const out: string[] = [];
+  const w = cfg.windows ?? 'both';
+  if (w !== 'both') out.push(RUNNER_WINDOWS_LABEL[w]);
+  if ((cfg.minBuyers ?? 0) > 0) out.push(`≥ ${cfg.minBuyers} buyers`);
+  if ((cfg.minNetSol ?? 0) > 0) out.push(`≥ ${cfg.minNetSol} SOL net`);
+  const lo = cfg.minCurvePct ?? 0;
+  const hi = cfg.maxCurvePct ?? 100;
+  if (lo > 0 || hi < 100) out.push(`${lo}–${hi} % of supply sold`);
+  if (cfg.excludeMixed) out.push('no mixed curves');
+  if (cfg.skipRepeatDumpers) out.push('no repeat dumpers');
+  return out;
+}
 
 export interface RunnerFlag {
   mint: string;
@@ -157,7 +236,24 @@ export const ODDS_TAPE_CAP = 5000;
 export function runnerVerdict(
   report: OddsReport | null,
   cfg: RunnerAlertSettings,
-  ctx: { hardRejected: boolean; creatorSold: boolean; alreadyFlagged: boolean; tapeTruncated?: boolean; nonSolQuote?: boolean },
+  ctx: {
+    hardRejected: boolean;
+    creatorSold: boolean;
+    alreadyFlagged: boolean;
+    tapeTruncated?: boolean;
+    nonSolQuote?: boolean;
+    regime?: 'classic' | 'mixed' | 'unknown';
+    /** The judge this verdict is for; absent = not a window question. */
+    windowS?: 60 | 120;
+    /** Facts at the judge, for the user's own filters. Absent = unknown,
+     *  and an unknown never hides a launch. */
+    uniqueBuyers?: number;
+    netInflowSol?: number;
+    /** Percent of the supply sold. */
+    curvePct?: number;
+    /** Creator dumps on the app's record; null/absent = no record. */
+    creatorPriorDumps?: number | null;
+  },
 ): RunnerVerdict {
   if (!cfg.enabled) return { flag: false, reason: 'runner alerts off' };
   if (ctx.alreadyFlagged) return { flag: false, reason: 'already flagged' };
@@ -169,6 +265,30 @@ export function runnerVerdict(
   // 07-27 flags, one creator behind 54 of 91), no rug rule can fire, and the
   // builder refuses to buy it. Unknown quote → not scored.
   if (ctx.nonSolQuote) return { flag: false, reason: 'curve is not quoted in SOL (unknown quote) — not scored' };
+  // Only a curve KNOWN to be mixed is skipped: an unknown regime is not a
+  // reason to hide a launch the user asked to see.
+  if (cfg.excludeMixed && ctx.regime === 'mixed') return { flag: false, reason: 'mixed curve (skipped by the runner-alert setting)' };
+  // The user's own filters. Each applies only when the fact is KNOWN.
+  if (ctx.windowS !== undefined && !windowAllowed(cfg, ctx.windowS)) {
+    return { flag: false, reason: `+${ctx.windowS} s window is off (runner-alert setting)` };
+  }
+  const minBuyers = cfg.minBuyers ?? 0;
+  if (minBuyers > 0 && ctx.uniqueBuyers !== undefined && ctx.uniqueBuyers < minBuyers) {
+    return { flag: false, reason: `${ctx.uniqueBuyers} buyers, under the ${minBuyers} floor (runner-alert setting)` };
+  }
+  const minNet = cfg.minNetSol ?? 0;
+  if (minNet > 0 && ctx.netInflowSol !== undefined && ctx.netInflowSol < minNet) {
+    return { flag: false, reason: `${ctx.netInflowSol.toFixed(2)} SOL net, under the ${minNet} SOL floor (runner-alert setting)` };
+  }
+  const lo = cfg.minCurvePct ?? 0;
+  const hi = cfg.maxCurvePct ?? 100;
+  if (ctx.curvePct !== undefined && (ctx.curvePct < lo || ctx.curvePct > hi)) {
+    return { flag: false, reason: `${ctx.curvePct.toFixed(0)} % of supply sold, outside ${lo}–${hi} % (runner-alert setting)` };
+  }
+  const dumps = ctx.creatorPriorDumps ?? 0;
+  if (cfg.skipRepeatDumpers && dumps > 0) {
+    return { flag: false, reason: `creator dumped ${dumps} earlier launch${dumps === 1 ? '' : 'es'} (runner-alert setting)` };
+  }
   if (!report || !report.graduate) return { flag: false, reason: 'no odds (too few trades)' };
   if (!bucketWithin(report.graduate.bucket, cfg.minBucket)) {
     return { flag: false, reason: `bucket ${report.graduate.bucket} below ${cfg.minBucket}` };

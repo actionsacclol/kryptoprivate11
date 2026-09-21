@@ -175,6 +175,16 @@ export function boopPoolFor(mint: string, programId: string): string {
 export function bondingCurveFor(mint: string): string {
   return findProgramAddress([enc.encode('bonding-curve'), key(mint)], key(PUMP_PROGRAM));
 }
+/** Metaplex Token Metadata program — the `Metadata` account every pump coin
+ *  created through the classic SPL token program carries. */
+export const METADATA_PROGRAM = 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s';
+/** The mint's Metaplex metadata PDA — `["metadata", program, mint]` under the
+ *  metadata program. Derived, never looked up: with it, a coin's name and
+ *  symbol are one account in the same batch as its curve (data/pumpChain.ts).
+ *  A Token-2022 mint may have none — its metadata lives in the mint itself. */
+export function metadataFor(mint: string): string {
+  return findProgramAddress([enc.encode('metadata'), key(METADATA_PROGRAM), key(mint)], key(METADATA_PROGRAM));
+}
 export function creatorVaultFor(creator: string): string {
   return findProgramAddress([enc.encode('creator-vault'), key(creator)], key(PUMP_PROGRAM));
 }
@@ -237,6 +247,68 @@ export const PUMP_FEE_VAULT_FALLBACK = 'A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8
  *  coin demands; a normal recipient reverts `NotAuthorized (6000)` on both buy
  *  and sell (measured 2026-09-07). #0 of pump's published reserved list. */
 export const PUMP_RESERVED_FEE_RECIPIENT_FALLBACK = 'GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS';
+
+// ── PumpSwap (pump-amm) ───────────────────────────────────────────────
+//
+// Where a pump coin trades once its curve is complete. Every address below
+// was verified against direct top-level pump-amm trades and three recent
+// migrations on 2026-09-19 (docs/pumpswap-builder-2026-09-19.md).
+
+export const PUMP_AMM_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+/** The pump-fees program's `BuybackVault`, passed (with its WSOL ATA) by
+ *  every pump-amm buy and sell. Read from GlobalConfig @835 at build time;
+ *  this is the live value, used only when the config cannot be read. */
+export const PUMP_SWAP_BUYBACK_VAULT_FALLBACK = '5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD';
+
+/** `["global_config"]` — ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw. */
+export function pumpSwapGlobalConfigFor(): string {
+  return once('pswap:global', () => findProgramAddress([enc.encode('global_config')], key(PUMP_AMM_PROGRAM)));
+}
+/** `["__event_authority"]` — GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR. */
+export function pumpSwapEventAuthorityFor(): string {
+  return once('pswap:eventAuthority', () => findProgramAddress([enc.encode('__event_authority')], key(PUMP_AMM_PROGRAM)));
+}
+/** `["global_volume_accumulator"]` — C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw. */
+export function pumpSwapGlobalVolumeAccumulatorFor(): string {
+  return once('pswap:gva', () => findProgramAddress([enc.encode('global_volume_accumulator')], key(PUMP_AMM_PROGRAM)));
+}
+/** `["user_volume_accumulator", user]` — writable on every buy. */
+export function pumpSwapUserVolumeAccumulatorFor(user: string): string {
+  return findProgramAddress([enc.encode('user_volume_accumulator'), key(user)], key(PUMP_AMM_PROGRAM));
+}
+/** `["creator_vault", coin_creator]` — the authority whose WSOL ATA takes
+ *  the creator fee. `coin_creator` is the pool's own field, the system
+ *  program when the coin has none. */
+export function pumpSwapCreatorVaultAuthorityFor(coinCreator: string): string {
+  return findProgramAddress([enc.encode('creator_vault'), key(coinCreator)], key(PUMP_AMM_PROGRAM));
+}
+/** Fee program's `["fee_config", PUMP_AMM_PROGRAM]` — 5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx. */
+export function pumpSwapFeeConfigFor(): string {
+  return once('pswap:feeConfig', () => findProgramAddress([enc.encode('fee_config'), key(PUMP_AMM_PROGRAM)], key(PUMP_FEES_PROGRAM)));
+}
+/** Pump's `["pool-authority", mint]` — the creator of the pool pump's
+ *  migration makes for a graduated coin. Verified on 3/3 recent migrations. */
+export function pumpPoolAuthorityFor(mint: string): string {
+  return findProgramAddress([enc.encode('pool-authority'), key(mint)], key(PUMP_PROGRAM));
+}
+/** pump-amm `["pool", index u16 LE, creator, base_mint, quote_mint]`. */
+export function pumpSwapPoolFor(index: number, creator: string, baseMint: string, quoteMint: string): string {
+  return findProgramAddress([enc.encode('pool'), new Uint8Array([index & 0xff, (index >> 8) & 0xff]), key(creator), key(baseMint), key(quoteMint)], key(PUMP_AMM_PROGRAM));
+}
+/** The pool a graduated pump coin trades in: index 0, created by pump's
+ *  pool authority for the mint, quoted in WSOL. Derived, never fetched. */
+export function pumpSwapCanonicalPoolFor(mint: string): string {
+  return pumpSwapPoolFor(0, pumpPoolAuthorityFor(mint), mint, WSOL_MINT);
+}
+/** pump-amm `["pool-v2", base_mint]` — the account every buy and sell must
+ *  pass just before the buyback vault, whether or not it exists yet (the
+ *  program validates the ADDRESS: without it, `InvalidPoolV2 (6062) pool_v2
+ *  remaining account is missing or invalid`). Not one sampled coin had it
+ *  initialised. Found by seed search against three pools' trades. */
+export function pumpSwapPoolV2For(mint: string): string {
+  return findProgramAddress([enc.encode('pool-v2'), key(mint)], key(PUMP_AMM_PROGRAM));
+}
 
 /** Derive and cache the buy-path PDAs for a freshly detected launch. */
 export function prewarm(mint: string, creator: string): PrewarmedAddresses {

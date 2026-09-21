@@ -311,6 +311,10 @@ ok('every outbound third-party host is disclosed in the privacy policy', () => {
     'cloudflare-ipfs.com',
     // opt-in
     'api.telegram.org',
+    // a token's Telegram preview and its website domain's registry record,
+    // fetched when a person opens the token (2026-09-20)
+    't.me',
+    'data.iana.org',
     'discord.com',
     'api.openai.com',
     'api.anthropic.com',

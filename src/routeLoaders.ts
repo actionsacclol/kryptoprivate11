@@ -31,10 +31,11 @@ export const ROUTE_LOADERS = {
   positions: () => import('./pages/Portfolio'),
   paper: () => import('./pages/Positions'),
   wallets: () => import('./pages/Wallets'),
+  copysimple: () => import('./pages/CopySimple'),
   execution: () => import('./pages/Execution'),
   history: () => import('./pages/History'),
   backtest: () => import('./pages/Backtest'),
-  rewards: () => import('./pages/Rewards'),
+  guides: () => import('./pages/Guides'),
   farming: () => import('./pages/Farming'),
   wallet: () => import('./pages/Wallet'),
   // Both EVM wallet pages live in the same chunk as the Solana one — they

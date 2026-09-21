@@ -1,6 +1,6 @@
 // One panel, alone, in its own frameless window.
 //
-// A popped-out panel is the SAME component the My Layout grid renders — the
+// A popped-out panel is the SAME component the Widgets grid renders — the
 // registry is the single source, so a panel never behaves differently
 // depending on which window it is in. What changes is the chrome around it:
 // there is none.

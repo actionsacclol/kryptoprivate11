@@ -1,11 +1,12 @@
 // How much $KRYPTO this install holds, across every wallet it has keys for.
 //
-// This decides whether Krypt's own fee is waived (shared/krypto.ts), so two
+// This decides whether Krypt's own fee is halved (shared/krypto.ts), so two
 // properties matter more than the number itself:
 //
 //   • IT NEVER BLOCKS A TRADE. The fee path reads `current()`, which is a
-//     cached value and never a request. A refresh runs on a timer and after
-//     a wallet changes; a trade that arrives mid-refresh uses the last
+//     cached value and never a request. A refresh runs on a timer (every
+//     two minutes, engine.ts) and when the user asks for one (the Hub
+//     card's Scan button); a trade that arrives mid-refresh uses the last
 //     answer. Putting an RPC read in front of a buy to work out a discount
 //     would cost more than the discount is worth.
 //   • UNKNOWN IS NOT QUALIFIED. A failed read, or a wallet list we could not
@@ -22,7 +23,7 @@
 // yields a real-looking address that simply never has a balance, which would
 // read as "holds nothing" rather than as an error.)
 
-import { KRYPTO_TOKEN, isValidMint, waivesFee, type KryptoHolding } from '@shared/krypto';
+import { KRYPTO_TOKEN, isValidMint, holderRateApplies as qualifies, type KryptoHolding } from '@shared/krypto';
 import { ataFor, TOKEN_2022_PROGRAM } from '../chain/addresses';
 import { getMultipleAccountInfo } from '../chain/rpcClient';
 import { logger } from '../system/logger';
@@ -40,7 +41,11 @@ export interface KryptoHost {
 }
 
 let host: KryptoHost | null = null;
-let snapshot: KryptoHolding = { tokens: 0, usd: null, wallets: 0, at: 0, problem: 'not read yet' };
+// Before the first read: `at` is 0 and `problem` is null. A problem is set
+// only by a read that RAN and failed, so the card can tell "not checked yet"
+// from "checked, and the check broke" — it used to say the former for both,
+// which hid the failure from the one person who could act on it.
+let snapshot: KryptoHolding = { tokens: 0, usd: null, wallets: 0, at: 0, problem: null };
 let inFlight: Promise<void> | null = null;
 
 export function attach(h: KryptoHost): void {
@@ -53,14 +58,14 @@ export function current(): KryptoHolding {
 }
 
 /**
- * Is the fee waived right now?
+ * Does this install earn the holder rate (half of Krypt's fee) right now?
  *
  * The one question the signer asks. False whenever the holding is unknown,
- * for the reason in `waivesFee`: a waiver the app cannot justify is a fee
- * anyone can avoid by breaking a single read.
+ * for the reason in shared/krypto.ts: a discount the app cannot justify is
+ * a fee anyone can halve by breaking a single read.
  */
-export function feeWaived(): boolean {
-  return waivesFee(usableTokens());
+export function holderRateApplies(): boolean {
+  return qualifies(usableTokens());
 }
 
 /**
@@ -74,10 +79,10 @@ export function feeWaived(): boolean {
 const MAX_AGE_MS = 10 * 60_000;
 
 /**
- * The reading, with staleness applied. What `feeWaived` really means.
+ * The reading, with staleness applied. What `holderRateApplies` really means.
  *
  * Null when nothing has been read or the last read is too old, and null does
- * not waive — a balance from twenty minutes ago is not evidence of a balance
+ * not qualify — a balance from twenty minutes ago is not evidence of a balance
  * now. `problem` is set whenever the balance itself failed, and that leaves
  * the previous reading in place rather than replacing it with a zero; this
  * is where that stale value stops counting.
@@ -168,18 +173,18 @@ export function _set(next: KryptoHolding): void {
 }
 
 export function _reset(): void {
-  snapshot = { tokens: 0, usd: null, wallets: 0, at: 0, problem: 'not read yet' };
+  snapshot = { tokens: 0, usd: null, wallets: 0, at: 0, problem: null };
   inFlight = null;
   host = null;
 }
 
-/** One line for the log when the waiver changes state, so a user who asks
- *  "why was I charged" has an answer in the file. */
+/** One line for the log when the holder rate changes state, so a user who
+ *  asks "why was I charged" has an answer in the file. */
 export function logState(prev: boolean, now: boolean): void {
   if (prev === now) return;
   logger.info(
     now
-      ? `krypto: fee waived — this install holds ${snapshot.tokens.toLocaleString()} KRYPTO${snapshot.usd !== null ? ` (~$${snapshot.usd.toFixed(2)})` : ''} across ${snapshot.wallets} wallet(s)`
-      : `krypto: fee no longer waived — ${snapshot.problem ?? `holding is ${snapshot.tokens.toLocaleString()} KRYPTO`}`,
+      ? `krypto: fee halved — this install holds ${snapshot.tokens.toLocaleString()} KRYPTO${snapshot.usd !== null ? ` (~${snapshot.usd.toFixed(2)})` : ''} across ${snapshot.wallets} wallet(s)`
+      : `krypto: fee back to full — ${snapshot.problem ?? `holding is ${snapshot.tokens.toLocaleString()} KRYPTO`}`,
   );
 }

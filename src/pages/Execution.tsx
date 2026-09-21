@@ -1,13 +1,40 @@
+// Execution — what gets flagged as a potential runner, the live fee and tip
+// telemetry, and the lanes the trades YOU place go out on.
+//
+// Until 2026-09-20 this page also listed "paper send plans": what a live buy
+// would have submitted for each paper entry, a leftover from when the
+// scanner bought on its own (it has not since 2026-08-16, and paper entries
+// have been an opt-in research switch since 09-02). The runner-alert
+// controls lived on the Strategy page beside the paper-entry gates, which
+// read as if the gates decided the flags. They do not: the flag is the
+// odds model's call plus the filters below, and nothing here buys.
+
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Fuel, Layers, ShieldCheck, Zap } from 'lucide-react';
-import { Badge, Card, Empty, Page, Section, Switch } from '../components/common';
+import { Flame, Fuel, ShieldCheck, Zap } from 'lucide-react';
+import { Badge, Card, NumberInput, Page, Section, Switch } from '../components/common';
 import { useAppState } from '../state/AppStateProvider';
 import type { ExecutionSnapshot, FeeUrgency } from '@shared/types';
-import { cls, fmtClock, shortAddr } from '../utils/format';
+import { DEFAULT_RUNNER_ALERTS, RUNNER_BUCKET_LABEL, RUNNER_WINDOWS_LABEL, describeRunnerFilters } from '@shared/runners';
+import type { RunnerAlertSettings, RunnerBucketFloor, RunnerWindows } from '@shared/runners';
+import { cls } from '../utils/format';
 
 const LAMPORTS = 1e9;
 const solFrom = (l: number): string => `${(l / LAMPORTS).toFixed(6)} SOL`;
+
+function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-md border border-white/10 bg-black/20 px-4 py-3">
+      <div>
+        <div className="text-sm font-semibold text-white">{label}</div>
+        {hint && <div className="text-xs text-krypt-muted mt-0.5">{hint}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const SELECT_CLASS = 'rounded-md border border-white/10 bg-black/30 px-2 py-1 text-note text-white';
 
 function FeeLadder({ snap }: { snap: ExecutionSnapshot }) {
   const fe = snap.feeEstimate;
@@ -49,8 +76,131 @@ function FeeLadder({ snap }: { snap: ExecutionSnapshot }) {
   );
 }
 
-export function Execution() {
+/**
+ * The runner-alert controls. The bucket floor is the odds model's call; the
+ * rest are the user's own filters on top of it, and each applies only when
+ * the fact is known — an unmeasured launch is never hidden by a filter.
+ */
+function RunnerAlertsSection() {
   const { settings, updateSettings, status } = useAppState();
+  const ra: RunnerAlertSettings = { ...DEFAULT_RUNNER_ALERTS, ...(settings.strategy.runnerAlerts ?? {}) };
+  const patch = (p: Partial<RunnerAlertSettings>): void => {
+    void updateSettings({ strategy: { ...settings.strategy, runnerAlerts: { ...ra, ...p } } });
+  };
+  const filters = describeRunnerFilters(ra);
+  const mayhem = settings.strategy.mayhemFilter ?? 'all';
+
+  return (
+    <Section
+      title="Runner alerts — what gets flagged"
+      description="Every launch the scanner watches is judged with the graduation-odds model (measured on 73,890 launches) at +60 s and, if that did not flag, at +120 s. The bucket floor is the model's call; everything under it is your own filter on top. A launch the app cannot measure is never hidden by a filter. Flags land on the Runners tab, as a desktop notification, on paired chat bots, and on the Discord webhook set on the Runners tab. Nothing is bought for you."
+    >
+      <div className="grid gap-3">
+        <Switch
+          checked={ra.enabled}
+          onChange={(v) => patch({ enabled: v })}
+          label="Flag potential runners"
+          description="Off = the scanner still runs and the Launches page still fills; nothing is flagged or pushed."
+        />
+        <Row label="Flag from bucket" hint="Top 1 % ≈ 1 in 4 graduated on the measured day; top 5 % ≈ 1 in 6; top 10 % ≈ 1 in 8">
+          <select value={ra.minBucket} onChange={(e) => patch({ minBucket: e.target.value as RunnerBucketFloor })} className={SELECT_CLASS}>
+            {(Object.keys(RUNNER_BUCKET_LABEL) as RunnerBucketFloor[]).map((k) => (
+              <option key={k} value={k}>{RUNNER_BUCKET_LABEL[k]}</option>
+            ))}
+          </select>
+        </Row>
+        <Row label="Judge window" hint="+60 s flags earlier on thinner evidence; +120 s later on more. The default tries +120 s only when +60 s did not flag.">
+          <select value={ra.windows ?? 'both'} onChange={(e) => patch({ windows: e.target.value as RunnerWindows })} className={SELECT_CLASS}>
+            {(Object.keys(RUNNER_WINDOWS_LABEL) as RunnerWindows[]).map((k) => (
+              <option key={k} value={k}>{RUNNER_WINDOWS_LABEL[k]}</option>
+            ))}
+          </select>
+        </Row>
+        <Row label="Min buyers at the judge" hint="Unique buyers so far. 0 = no floor.">
+          <NumberInput value={ra.minBuyers ?? 0} min={0} max={1000} onChange={(v) => patch({ minBuyers: Math.max(0, Math.round(v)) })} />
+        </Row>
+        <Row label="Min net SOL at the judge" hint="Buys minus sells. 0 = no floor. A +400 % move on half a SOL is a move on half a SOL.">
+          <NumberInput value={ra.minNetSol ?? 0} min={0} max={10_000} onChange={(v) => patch({ minNetSol: Math.max(0, v) })} suffix="SOL" />
+        </Row>
+        <Row label="Supply sold at the judge" hint="Percent of the supply the curve has sold. 0 to 100 = no bound; raise the low end to skip launches nobody has bought, lower the high end to skip ones already near graduation.">
+          <div className="flex items-center gap-2">
+            <NumberInput value={ra.minCurvePct ?? 0} min={0} max={100} onChange={(v) => patch({ minCurvePct: Math.min(100, Math.max(0, v)) })} suffix="%" className="w-24" />
+            <span className="text-krypt-muted text-xs">to</span>
+            <NumberInput value={ra.maxCurvePct ?? 100} min={0} max={100} onChange={(v) => patch({ maxCurvePct: Math.min(100, Math.max(0, v)) })} suffix="%" className="w-24" />
+          </div>
+        </Row>
+        <Switch
+          checked={ra.excludeMixed ?? false}
+          onChange={(v) => patch({ excludeMixed: v })}
+          label="Skip mixed curves"
+          description="Curves whose reserves do not follow the constant product. On the measured day they graduated into pools seeded with about 0.16 SOL (a classic curve seeds 85) and held 0.008× of the flag price an hour later — their big percentage moves are moves on almost nothing. They were 91 % of live flags in September, so this leaves few alerts, but the ones left are the ones that were about break-even."
+        />
+        <Switch
+          checked={ra.skipRepeatDumpers ?? false}
+          onChange={(v) => patch({ skipRepeatDumpers: v })}
+          label="Skip creators who dumped before"
+          description="A creator sell inside an earlier launch's window, on this app's own record. Flags whose creator had not sold graduated 21.6 % on the held-out day, those whose creator had 4.7 %. A creator with no record is not skipped."
+        />
+        <Row label="Max alerts per hour" hint="Flags past the cap still land on the Runners tab; they just do not notify.">
+          <NumberInput value={ra.maxPerHour} min={1} max={120} onChange={(v) => patch({ maxPerHour: Math.max(1, Math.round(v)) })} />
+        </Row>
+
+        {/* Which pump curve variants the scanner even looks at. A filtered
+            launch never gets a mint check, an eval window, a scorer pass or a
+            judge — so it sits with the flag filters, as the first of them. */}
+        <div className="rounded-lg border border-white/10 bg-black/25 p-3">
+          <div className="mb-2 flex items-baseline gap-2">
+            <span className="text-value font-semibold text-white">Mayhem coins</span>
+            <span className="text-body text-krypt-muted">which pump curves the Solana scanner watches at all</span>
+          </div>
+          <div className="grid gap-1.5 sm:grid-cols-3">
+            {(
+              [
+                ['all', 'All (default)', 'Every pump.fun launch, standard and mayhem alike. What the scanner has always done.'],
+                ['standard', 'No mayhem', 'Standard curves only. A launch the app cannot classify still shows — hiding one for a reason it cannot state would hide a real launch.'],
+                ['mayhem', 'Mayhem only', 'Only launches it can SEE are mayhem. An unclassified launch is not shown, because "mayhem only" that includes unknowns is not mayhem only.'],
+              ] as const
+            ).map(([mode, label, desc]) => (
+              <button
+                key={mode}
+                onClick={() => void updateSettings({ strategy: { ...settings.strategy, mayhemFilter: mode } })}
+                className={cls(
+                  'rounded-md border px-3 py-2 text-left transition',
+                  mayhem === mode ? 'border-krypt-purple/60 bg-krypt-purple/15' : 'border-white/10 bg-white/[0.02] hover:border-white/20',
+                )}
+              >
+                <div className={cls('text-note font-semibold', mayhem === mode ? 'text-white' : 'text-krypt-muted')}>{label}</div>
+                <div className="mt-0.5 text-label leading-relaxed text-krypt-muted/80">{desc}</div>
+              </button>
+            ))}
+          </div>
+          <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">
+            A mayhem coin trades against inflated virtual reserves — hundreds of SOL rather than the standard 30 — so it
+            can run to a six-figure market cap while still on the bonding curve. Read free from the launch event, so
+            this costs no extra request.
+            {mayhem !== 'all' && (status.launchesFiltered ?? 0) > 0 ? (
+              <span className="text-krypt-muted"> {status.launchesFiltered} launch{status.launchesFiltered === 1 ? '' : 'es'} hidden this session.</span>
+            ) : null}
+            {' '}Solana only — the EVM launchpads have no equivalent; their runner alerts are on their own Observatory pages.
+          </p>
+        </div>
+
+        <div className="flex items-start gap-2 rounded-md border border-white/10 bg-black/20 px-4 py-3">
+          <Flame className="mt-0.5 h-4 w-4 flex-shrink-0 text-arc-gold" />
+          <p className="text-xs text-krypt-muted leading-relaxed">
+            <span className="font-semibold text-white">Right now:</span>{' '}
+            {!ra.enabled
+              ? 'runner alerts are off.'
+              : `flags from ${RUNNER_BUCKET_LABEL[ra.minBucket].toLowerCase()}${filters.length ? ` · ${filters.join(' · ')}` : ' · no other filter'}${mayhem === 'standard' ? ' · no mayhem coins' : mayhem === 'mayhem' ? ' · mayhem coins only' : ''} · at most ${ra.maxPerHour} notification${ra.maxPerHour === 1 ? '' : 's'} an hour.`}
+          </p>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+export function Execution() {
+  const { settings, updateSettings } = useAppState();
   const [snap, setSnap] = useState<ExecutionSnapshot | null>(null);
   const e = settings.execution;
 
@@ -75,22 +225,24 @@ export function Execution() {
 
   return (
     <Page
-      title="Execution Lab"
-      subtitle="Live priority-fee + Jito tip telemetry, and the send lanes real trades use."
+      title="Execution"
+      subtitle="What gets flagged as a potential runner, live priority-fee and tip telemetry, and the lanes your trades go out on."
     >
       <div className="mb-6 rounded-xl border border-amber-400/25 bg-amber-500/5 px-4 py-3 flex items-center gap-3">
         <ShieldCheck className="h-5 w-5 text-amber-300 flex-shrink-0" />
         <p className="text-xs text-krypt-muted leading-relaxed">
-          These lanes are <span className="text-white font-semibold">live</span>: when real execution fires, tip
-          transfers are injected into the transaction before signing (so the simulation loss-guard bounds them) and the
-          signed transaction is fanned to every enabled lane — Helius Sender (staked, free), the Jito block engine, and
-          plain RPC — with rebroadcast until it confirms. Sells always escalate to the p95 tip: exit landing protects
-          funds. The paper plans below still show each would-be snipe priced off live fee and tip data.
+          <span className="text-white font-semibold">Nothing on this page buys on its own.</span> The scanner only flags
+          launches; every buy and sell is one you place. The lanes below are live for those: tip transfers are injected
+          into the transaction before signing (so the simulation loss guard bounds them) and the signed transaction is
+          fanned to every enabled lane — Helius Sender (staked, free), the Jito block engine, and plain RPC — with
+          rebroadcast until it confirms. Sells always escalate to the p95 tip: exit landing protects funds.
         </p>
       </div>
 
+      <RunnerAlertsSection />
+
       <div className="grid lg:grid-cols-2 gap-4">
-        <Section title="Priority fee ladder" description="getPriorityFeeEstimate / getRecentPrioritizationFees, scoped to the snipe's writable accounts.">
+        <Section title="Priority fee ladder" description="getPriorityFeeEstimate / getRecentPrioritizationFees, scoped to the trade's writable accounts.">
           <Card>
             <div className="flex items-center gap-2 mb-3">
               <Fuel className="h-4 w-4 text-krypt-purple" />
@@ -123,7 +275,7 @@ export function Execution() {
         </Section>
       </div>
 
-      <Section title="Landing configuration">
+      <Section title="Landing configuration" description="How the trades you place are priced and sent.">
         <div className="grid lg:grid-cols-2 gap-3">
           <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
             <div className="text-sm font-semibold text-white mb-2">Fee urgency</div>
@@ -160,56 +312,11 @@ export function Execution() {
               ))}
             </div>
           </div>
-          {/* Which pump curve variants the scanner even looks at. Here
-              rather than in Strategy because it is a decision about what the
-              scanner spends its attention and its RPC budget on, not a gate
-              on a launch it evaluated — a filtered launch never gets a mint
-              check, an eval window or a scorer pass. */}
-          <div className="rounded-lg border border-white/10 bg-black/25 p-3 lg:col-span-2">
-            <div className="mb-2 flex items-baseline gap-2">
-              <span className="text-value font-semibold text-white">Mayhem coins</span>
-              <span className="text-body text-krypt-muted">which pump curves the Solana scanner watches</span>
-            </div>
-            <div className="grid gap-1.5 sm:grid-cols-3">
-              {(
-                [
-                  ['all', 'All (default)', 'Every pump.fun launch, standard and mayhem alike. What the scanner has always done.'],
-                  ['standard', 'No mayhem', 'Standard curves only. A launch the app cannot classify still shows — hiding one for a reason it cannot state would hide a real launch.'],
-                  ['mayhem', 'Mayhem only', 'Only launches it can SEE are mayhem. An unclassified launch is not shown, because "mayhem only" that includes unknowns is not mayhem only.'],
-                ] as const
-              ).map(([mode, label, desc]) => (
-                <button
-                  key={mode}
-                  onClick={() => void updateSettings({ strategy: { ...settings.strategy, mayhemFilter: mode } })}
-                  className={cls(
-                    'rounded-md border px-3 py-2 text-left transition',
-                    (settings.strategy.mayhemFilter ?? 'all') === mode
-                      ? 'border-krypt-purple/60 bg-krypt-purple/15'
-                      : 'border-white/10 bg-white/[0.02] hover:border-white/20',
-                  )}
-                >
-                  <div className={cls('text-note font-semibold', (settings.strategy.mayhemFilter ?? 'all') === mode ? 'text-white' : 'text-krypt-muted')}>
-                    {label}
-                  </div>
-                  <div className="mt-0.5 text-label leading-relaxed text-krypt-muted/80">{desc}</div>
-                </button>
-              ))}
-            </div>
-            <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">
-              A mayhem coin trades against inflated virtual reserves — hundreds of SOL rather than the standard 30 —
-              so it can run to a six-figure market cap while still on the bonding curve. Read free from the launch
-              event, so this costs no extra request.
-              {(settings.strategy.mayhemFilter ?? 'all') !== 'all' && (status.launchesFiltered ?? 0) > 0 ? (
-                <span className="text-krypt-muted"> {status.launchesFiltered} launch{status.launchesFiltered === 1 ? '' : 'es'} hidden this session.</span>
-              ) : null}
-              {' '}Solana only — the EVM launchpads have no equivalent.
-            </p>
-          </div>
           {/* The mode, above the lane switches it governs. Named for the
               thing traders search for, described by the ROUTE rather than a
               promise — we cannot measure how much sandwiching this avoids,
               so we do not claim a number. */}
-          <div className="rounded-lg border border-white/10 bg-black/25 p-3">
+          <div className="rounded-lg border border-white/10 bg-black/25 p-3 lg:col-span-2">
             <div className="mb-2 flex items-baseline gap-2">
               <span className="text-value font-semibold text-white">Sandwich exposure (MEV)</span>
               <span className="text-body text-krypt-muted">how a BUY is routed</span>
@@ -263,51 +370,9 @@ export function Execution() {
             checked={e.localTxBuild}
             onChange={(v) => void updateSettings({ execution: { ...e, localTxBuild: v } })}
             label="Local transaction builder"
-            description="Build pump curve buys/sells locally — one account read instead of a relayer round trip, and no relayer fee. Every tx is still simulated before signing and falls back to the relayer if anything is off. Graduated tokens always use the relayer."
+            description="Build pump buys and sells locally from chain state — on the bonding curve and, since 2026-09-19, on PumpSwap after graduation — one batched account read instead of a service round trip, and no relayer fee. Every transaction is still simulated before signing; a build that fails falls back to Jupiter, then the relayer."
           />
         </div>
-      </Section>
-
-      <Section title="Paper send plans" description="What a live buy would submit for each paper entry — priced off the data above.">
-        {!snap || snap.recentPlans.length === 0 ? (
-          <Empty
-            title="No send plans yet"
-            message={status.running ? 'A plan is built each time a launch qualifies and a paper entry opens.' : 'Start the engine and let a launch qualify.'}
-          />
-        ) : (
-          <div className="space-y-3">
-            {snap.recentPlans.slice(0, 12).map((p) => (
-              <motion.div key={`${p.mint}-${p.builtAt}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-                <Card padded={false}>
-                  <div className="flex items-center justify-between px-5 py-3 border-b border-white/5">
-                    <div className="flex items-center gap-2">
-                      <Layers className="h-4 w-4 text-krypt-purple" />
-                      <span className="text-sm font-bold text-white">{p.symbol}</span>
-                      <Badge tone="warn">paper</Badge>
-                    </div>
-                    <span className="text-xs text-krypt-muted font-mono">{fmtClock(p.builtAt)}</span>
-                  </div>
-                  <div className="px-5 py-3 grid lg:grid-cols-2 gap-x-8 gap-y-1.5 text-xs font-mono">
-                    <div className="flex justify-between"><span className="text-krypt-muted">CU price</span><span className="text-white">{p.computeUnitPrice.toLocaleString()} µlpt ({p.feeSource})</span></div>
-                    <div className="flex justify-between"><span className="text-krypt-muted">CU limit</span><span className="text-white">{p.computeUnitLimit.toLocaleString()}</span></div>
-                    <div className="flex justify-between"><span className="text-krypt-muted">bonding curve</span><span className="text-white">{shortAddr(p.bondingCurve, 5)}</span></div>
-                    <div className="flex justify-between"><span className="text-krypt-muted">token ATA</span><span className="text-white">{shortAddr(p.associatedTokenAccount, 5)}</span></div>
-                    <div className="flex justify-between lg:col-span-2 pt-1 border-t border-white/5 mt-1"><span className="text-krypt-muted">est. all-in cost</span><span className="text-krypt-purple font-semibold">{solFrom(p.estCostLamports)}</span></div>
-                  </div>
-                  <div className="px-5 pb-3 flex flex-wrap gap-1.5">
-                    {p.lanes.map((l, i) => (
-                      <span key={i} className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-body">
-                        <span className="font-semibold text-white">{l.lane}</span>
-                        <span className="text-krypt-muted">· {l.detail}</span>
-                        {l.tipLamports > 0 && <span className="text-krypt-purple font-mono">tip {solFrom(l.tipLamports)}</span>}
-                      </span>
-                    ))}
-                  </div>
-                </Card>
-              </motion.div>
-            ))}
-          </div>
-        )}
       </Section>
     </Page>
   );

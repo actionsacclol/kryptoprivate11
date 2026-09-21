@@ -15,6 +15,7 @@ import { MotionConfig } from 'framer-motion';
 import { useAppState } from '../state/AppStateProvider';
 import { setLite } from '../state/liteMode';
 import { setTheme } from '../state/theme';
+import { setSkin } from '../state/skin';
 import { useLite } from '../state/useLite';
 
 export function LiteModeHost(): null {
@@ -25,12 +26,16 @@ export function LiteModeHost(): null {
   // subscriber to app state would be a second component re-rendering on
   // the engine's 1/s push for no reason.
   const theme = settings.theme;
+  const skin = settings.skin;
   useEffect(() => {
     setLite(reduce);
   }, [reduce]);
   useEffect(() => {
     if (theme) setTheme(theme);
   }, [theme]);
+  useEffect(() => {
+    if (skin) setSkin(skin);
+  }, [skin]);
   return null;
 }
 

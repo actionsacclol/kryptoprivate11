@@ -18,8 +18,12 @@ import { triggerPriceSol, type AdvOrder } from '@shared/orders';
 import type { Alert } from '@shared/alerts';
 import type { CreatorHistory, LaunchIntelReport } from '@shared/launchintel';
 import { KryptChart, type KryptChartHandle } from '../components/terminal/KryptChart';
+import { tokenLinks } from '@shared/tokenLinks';
+import { fmtCount } from '@shared/xStats';
+import { useXStats } from '../state/useXStats';
+import { useLinkIntel } from '../state/useLinkIntel';
 import { SecurityPanel } from '../components/terminal/SecurityPanel';
-import { XLinkPanel } from '../components/terminal/XLinkPanel';
+import { LinksPanel } from '../components/terminal/LinksPanel';
 import { OddsPanel } from '../components/terminal/OddsPanel';
 import { LaunchPanel } from '../components/terminal/LaunchPanel';
 import { HoldersPanel } from '../components/terminal/HoldersPanel';
@@ -43,7 +47,7 @@ import { Stat } from '../components/common';
 // interval, live trades follow the tape, and the security report is only
 // re-read on demand because it costs two RPC round trips.
 
-type Tab = 'security' | 'launch' | 'holders' | 'trades' | 'traders' | 'ai';
+type Tab = 'security' | 'links' | 'launch' | 'holders' | 'trades' | 'traders' | 'ai';
 
 /** Seconds per candle bucket — used to bucket live ticks client-side so the
  *  chart's last bar can be built between polls. */
@@ -544,6 +548,12 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
   }, [mint]);
 
   const s = detail?.summary ?? quick;
+  // What the Links panel last read off this token's X page, if a person
+  // opened it there: "12.3K followers" beside the X link, with its age.
+  const xs = useXStats(mint);
+  // Telegram members and the website's domain record, looked up by main
+  // when this page opened (2026-09-20).
+  const intel = useLinkIntel(mint);
   // Circulating supply for the tick-driven market cap: the chart's own
   // multiplier first (same number the MC toggle uses), the summary's second.
   supplyRef.current = series?.supplyForMcap ?? s?.circSupply ?? null;
@@ -719,6 +729,42 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                 Solscan
                 <ExternalLink className="h-3 w-3" />
               </button>
+              {/* The token's own links — X, website, Telegram — and its
+                  launchpad page, up here where a trader looks first
+                  (2026-09-20). Each opens the system browser; the Links
+                  panel on the Widgets page shows the same pages inside the app. */}
+              {tokenLinks('solana', mint, s?.launchpad ?? null, s?.socials ?? null).map((l) => {
+                // The X button carries what the Links panel read off the page
+                // (followers for a profile, likes for a post), when it has.
+                const st = l.kind === 'x' && xs && !xs.stats.loginWall ? xs.stats : null;
+                const readOn = st
+                  ? st.page === 'profile' && st.followers !== null
+                    ? `${fmtCount(st.followers)} followers`
+                    : st.page === 'post' && st.likes !== null
+                      ? `${fmtCount(st.likes)} likes`
+                      : null
+                  : null;
+                // The Telegram button carries the public member count, the
+                // website button the domain's registration year or the shared
+                // platform it sits on.
+                const tgp = l.kind === 'telegram' ? intel?.telegram?.preview ?? null : null;
+                const tgLabel = tgp && tgp.members !== null ? `${fmtCount(tgp.members)} ${tgp.countWord ?? 'members'}` : null;
+                const dom = l.kind === 'website' ? intel?.website ?? null : null;
+                const domLabel = dom?.hostedOn ? `on ${dom.hostedOn}` : dom?.record?.registeredAt ? `since ${new Date(dom.record.registeredAt).getUTCFullYear()}` : null;
+                const extra = readOn ?? tgLabel ?? domLabel;
+                return (
+                  <button
+                    key={l.url}
+                    onClick={() => void window.krypt.app.openExternal(l.url)}
+                    title={readOn && xs ? `${l.url} — ${readOn}, read ${fmtAgo(xs.readAt)} ago in the Links panel` : extra ? `${l.url} — ${extra}` : l.url}
+                    className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
+                  >
+                    {l.label}
+                    {extra && <span className="text-krypt-muted/70">· {extra}</span>}
+                    <ExternalLink className="h-3 w-3" />
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -861,6 +907,7 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
             <div className="flex items-center gap-1 mb-3 border-b border-white/8 pb-2">
               {([
                 ['security', 'Security'],
+                ['links', 'Links'],
                 ['launch', 'Launch'],
                 ['holders', 'Holders'],
                 ['trades', 'Live trades'],
@@ -881,17 +928,15 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+              {/* Links, and what the Links panel read off the X page, and the
+                  X-link classification that used to sit on the Security tab
+                  (2026-09-20): one tab for the coin's off-chain face. */}
+              {tab === 'links' && (
+                <LinksPanel mint={mint} chain="solana" summary={s ?? null} launches={Object.values(term.columns).flatMap((c) => c.rows)} />
+              )}
               {tab === 'security' &&
                 (detail ? (
                   <div className="space-y-3">
-                    {/* Free, offline: what the X link actually points at, and
-                        whether the same account or post is behind other
-                        launches on screen. */}
-                    <XLinkPanel
-                      mint={mint}
-                      twitter={s?.socials.twitter ?? null}
-                      launches={Object.values(term.columns).flatMap((c) => c.rows)}
-                    />
                     <SecurityPanel report={detail.security} />
                   </div>
                 ) : (

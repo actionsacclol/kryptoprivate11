@@ -87,7 +87,7 @@ export function HoldingsSection() {
     });
     if (!yes) return;
     const r = await window.krypt.live.sellAll();
-    if (r.ok) toast.warn('Sell-all queued — watch the Grimoire');
+    if (r.ok) toast.warn('Sell-all queued — watch the Console');
     else toast.error(r.message);
   };
 

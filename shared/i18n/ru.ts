@@ -29,10 +29,10 @@ export const ru: Catalogue = {
   'nav.execution': 'Исполнение',
   'nav.backtest': 'Бэктест',
   'nav.history': 'История',
-  'nav.rewardPools': 'Пулы наград',
+  'nav.guides': 'Руководства',
   'nav.walletScout': 'Разведка кошельков',
   'nav.launchToken': 'Запустить токен',
-  'nav.myLayout': 'Мой макет',
+  'nav.widgets': 'Виджеты',
   'nav.settings': 'Настройки',
   'nav.about': 'О программе',
   'nav.legal': 'Правовая информация',
@@ -82,7 +82,7 @@ export const ru: Catalogue = {
   'onboarding.everythingUnderSettings': 'Всё находится в настройках',
   'onboarding.getStarted': 'Начать',
 
-  'waiver.hold': 'Держите {amount} $KRYPTO — и эта комиссия не взимается',
+  'waiver.hold': 'Держите {amount} $KRYPTO — и эта комиссия уменьшится вдвое',
 
   'mode.paper': 'Демо',
   'mode.live': 'Реальный',
@@ -104,7 +104,7 @@ export const ru: Catalogue = {
   'settings.subtitle': 'Источники данных, RPC-узлы, запись, статус.',
 
   'settings.theme': 'Тема',
-  'settings.themeHint': 'Меняется только акцентный цвет. Зелёный для роста, красный для падения и золотой для всего, что касается денег, остаются прежними.',
+  'settings.themeHint': 'Выберите стиль — шрифты, поверхности, углы, эффекты — затем акцентный цвет. Зелёный для роста, красный для падения и золотой для всего, что касается денег, остаются на месте.',
   'settings.replay': 'Пройти обзор заново',
   'settings.replayHint': 'Показывает экраны первого запуска ещё раз. Ничего не сбрасывается — кошельки, ключи и настройки не затрагиваются.',
   'onboarding.appearance': 'Язык и цвет',

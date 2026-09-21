@@ -69,7 +69,7 @@ const { loadPinned, savePinned, subscribePinned, isPinnable } = await import('./
   assert.equal(isPinnable('evmToken'), false);
   assert.equal(isPinnable('workspace'), false);
   assert.equal(isPinnable('discover'), true);
-  ok('token pages and My Layout itself cannot be pinned');
+  ok('token pages and Widgets itself cannot be pinned');
 }
 
 {

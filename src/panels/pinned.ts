@@ -1,12 +1,12 @@
 // Pages the user pinned to their own sidebar.
 //
-// My Layout lets someone build a dashboard out of panels; this is the other
+// Widgets lets someone build a dashboard out of panels; this is the other
 // half — the left-hand menu. Any page from any workspace can be pinned, so a
 // user who lives in three pages does not have to keep going back to the Hub to
 // hop between them.
 //
 // This is a tiny store rather than context because two very distant components
-// need it: App renders the sidebar, and the My Layout page owns the picker.
+// need it: App renders the sidebar, and the Widgets page owns the picker.
 // Threading a setter from one to the other would put a prop through the whole
 // tree for a per-machine convenience.
 //

@@ -78,7 +78,7 @@ test('the three workspaces asked for exist and hold the right pages', () => {
   }
 });
 
-test('My Layout is its own workspace and owns the page it opens', () => {
+test('Widgets is its own workspace and owns the page it opens', () => {
   // The user-arranged dashboard. It is a workspace rather than a page inside
   // one because it belongs to no job in particular — it is whatever the user
   // makes it.
@@ -186,16 +186,34 @@ test('Farming is reachable but ships with nothing running', () => {
   }
 });
 
-test('Rewards states what you earn — it is not an airdrop hunter', () => {
-  // The name and the shape are the finding, not decoration
-  // (docs/airdrop-research-2026-09-09.md). A future edit that turns this back
-  // into a hunt should have to delete a test that says why.
-  const w = WORKSPACES.find((x) => x.id === 'rewards');
-  assert.ok(w, 'the rewards workspace exists');
-  assert.equal(w.title, 'Rewards');
-  assert.doesNotMatch(w.title, /airdrop|hunt/i, 'not a hunt');
+test('Guides has a plain-words guide for every tile on the Hub', () => {
+  // Rewards became Guides on 2026-09-20; the reward check moved to the
+  // Robinhood and BNB wallet pages. The Guides page is keyed by workspace
+  // id, so a tile added to the Hub without a guide fails here.
+  const w = WORKSPACES.find((x) => x.id === 'guides');
+  assert.ok(w, 'the guides workspace exists');
+  assert.equal(w.title, 'Guides');
   assert.ok(w.ready, 'it has a page, so it is enterable');
-  assert.deepEqual(routesFor('rewards'), ['rewards']);
+  assert.deepEqual(routesFor('guides'), ['guides']);
+  assert.equal(WORKSPACES.find((x) => x.id === 'rewards'), undefined, 'Rewards is gone');
+  const page = fs.readFileSync(new URL('../src/pages/Guides.tsx', import.meta.url), 'utf8');
+  for (const ws of WORKSPACES) assert.ok(new RegExp(`^  ${ws.id}: \\{`, 'm').test(page), `Guides.tsx has a guide for ${ws.id}`);
+  assert.ok(/START_GUIDE/.test(page) && /Start here/.test(page), 'and a Start here guide before them');
+  // Plain words: every step is one short line.
+  const steps = [...page.matchAll(/^\s{6}'([^']{20,})',$/gm)].map((m) => m[1]);
+  assert.ok(steps.length >= 30, `guides carry steps (${steps.length})`);
+  for (const st of steps) assert.ok(st.length <= 170, `a step stays short: ${st.slice(0, 60)}…`);
+  // The reward check lives on the EVM wallet pages now, and the old page is gone.
+  const wallet = fs.readFileSync(new URL('../src/pages/Wallet.tsx', import.meta.url), 'utf8');
+  assert.ok(/<WalletRewards chain=\{chain\} \/>/.test(wallet), 'the EVM wallet page carries Check my rewards');
+  assert.ok(!fs.existsSync(new URL('../src/pages/Rewards.tsx', import.meta.url)), 'Rewards.tsx is gone');
+  const rewards = fs.readFileSync(new URL('../src/components/terminal/WalletRewards.tsx', import.meta.url), 'utf8');
+  // Code only: the header comment names the fields it refuses to render.
+  const rewardsCode = rewards.split('\n').filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l)).join('\n');
+  assert.ok(!/href=|openExternal|depositUrl|explorerAddress/.test(rewardsCode), 'the reward block renders no third-party link — a claim link is how wallets get drained');
+  assert.ok(/window\.krypt\.rewards\.wallet\(chain\)/.test(rewards) && /useCallback/.test(rewards), 'the address leaves only on the button');
+  const legal = fs.readFileSync(new URL('../shared/legal/documents.ts', import.meta.url), 'utf8');
+  assert.ok(/Reward rates \(the Robinhood Chain and BNB wallet pages\)/.test(legal), 'the privacy policy names where the check lives');
 });
 
 test('the hub is not a workspace you can be inside', () => {

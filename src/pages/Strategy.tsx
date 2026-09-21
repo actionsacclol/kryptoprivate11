@@ -1,6 +1,6 @@
-// The Spellbook — the strategy editor set as two facing pages with a gilded
-// spine. Presets are spell cards that inscribe a known configuration; every
-// gate below remains a precise, ordinary form control.
+// The Strategy page — the paper-entry gate editor set as two facing pages.
+// Presets apply a known configuration; every gate below is a plain form
+// control. Plain names since 2026-09-20 (the themed ones read as decoration).
 
 import { NumberInput, Page, Section, Switch, Card } from '../components/common';
 import { useAppState } from '../state/AppStateProvider';
@@ -37,7 +37,7 @@ const BALANCED_PATCH = Object.fromEntries(
 
 const PRESETS: SpellPreset[] = [
   {
-    name: 'Warded',
+    name: 'Strict',
     glyph: '◈',
     line: 'Every protection raised. Fewer entries, smaller stakes, tight stops.',
     tone: 'violet',
@@ -60,9 +60,9 @@ const PRESETS: SpellPreset[] = [
     patch: BALANCED_PATCH,
   },
   {
-    name: 'Reckless',
+    name: 'Loose',
     glyph: '⟁',
-    line: 'Looser wards, larger stakes, wider stops. You were warned.',
+    line: 'Looser gates, larger stakes, wider stops. You were warned.',
     tone: 'crimson',
     patch: {
       minScore: 45,
@@ -104,10 +104,10 @@ export function Strategy() {
 
   return (
     <Page
-      title="Spellbook"
-      subtitle="Strategy — filtered early momentum. Pay a slightly later entry for substantially better evidence."
+      title="Strategy"
+      subtitle="Paper-entry gates and backtest defaults. Nothing here buys."
     >
-      <Section title="Inscriptions" description="Apply a known configuration, then tune the gates below.">
+      <Section title="Presets" description="Apply a known configuration, then tune the gates below.">
         <div className="grid md:grid-cols-3 gap-3">
           {PRESETS.map((p) => {
             const tone = PRESET_TONE[p.tone];
@@ -128,7 +128,7 @@ export function Strategy() {
                     {p.name}
                   </span>
                   <span className="text-micro font-display uppercase tracking-label text-krypt-muted/70 opacity-0 group-hover:opacity-100 transition">
-                    Inscribe
+                    Apply
                   </span>
                 </div>
                 <p className="mt-2 text-xs text-krypt-muted leading-relaxed">{p.line}</p>
@@ -138,36 +138,22 @@ export function Strategy() {
         </div>
       </Section>
 
+      {/* What this page still decides. The scanner has not bought anything
+          on its own since 2026-08-16 and stopped opening paper positions by
+          default on 09-02; the gates below matter to a simulated position
+          (when the switch is on), to the Backtest page's starting values,
+          and to the "did not qualify" line on a launch row. What gets
+          FLAGGED is tuned on the Execution page, next to the mayhem filter. */}
       <Section
-        title="Runner alerts"
-        description="What the scanner is for: every launch is judged with the graduation-odds model (measured on 73,890 launches) at +60 s and +120 s; the top buckets are flagged and you are notified. Nothing is bought for you."
+        title="Paper entries (research)"
+        description="Nothing on this page buys anything. The gates below decide which launches open a SIMULATED position when this switch is on, seed the Backtest page, and explain “did not qualify” on launch rows. What gets flagged as a potential runner is tuned on the Execution page."
       >
         <div className="grid gap-3">
-          <Switch
-            checked={s.runnerAlerts?.enabled ?? true}
-            onChange={(v) => patch({ runnerAlerts: { ...(s.runnerAlerts ?? { minBucket: 'top1_5', maxPerHour: 12 }), enabled: v } })}
-            label="Flag potential runners"
-            description="Desktop notification, paired chat bots, and the list on the Launches page"
-          />
-          <Row label="Flag from bucket" hint="Top 1 % ≈ 1 in 4 graduated on the measured day; top 5 % ≈ 1 in 6; top 10 % ≈ 1 in 8">
-            <select
-              value={s.runnerAlerts?.minBucket ?? 'top1_5'}
-              onChange={(e) => patch({ runnerAlerts: { ...(s.runnerAlerts ?? { enabled: true, maxPerHour: 12 }), minBucket: e.target.value as 'top1' | 'top1_5' | 'top5_10' } })}
-              className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-note text-white"
-            >
-              <option value="top1">Top 1 % only</option>
-              <option value="top1_5">Top 5 %</option>
-              <option value="top5_10">Top 10 %</option>
-            </select>
-          </Row>
-          <Row label="Max alerts per hour" hint="Flags past the cap still show on the Launches page">
-            <NumberInput value={s.runnerAlerts?.maxPerHour ?? 12} min={1} max={120} onChange={(v) => patch({ runnerAlerts: { ...(s.runnerAlerts ?? { enabled: true, minBucket: 'top1_5' }), maxPerHour: v } })} />
-          </Row>
           <Switch
             checked={s.paperEntries ?? false}
             onChange={(v) => patch({ paperEntries: v })}
             label="Paper entries (research)"
-            description="Open simulated positions on qualifying launches. Off by default: the measured record is negative even with perfect landing (docs/strat-swarm-2026-07-24.md)."
+            description="Open simulated positions on qualifying launches. Off by default: the measured record is negative even with perfect landing (docs/strat-swarm-2026-07-24.md). Runner alerts do not depend on this."
           />
         </div>
       </Section>
@@ -175,7 +161,7 @@ export function Strategy() {
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_auto_1fr] gap-x-4">
         {/* ── Left page: what may enter ── */}
         <div>
-          <Section title="Entry wards" description="Every gate must pass inside the evaluation window; failures are shown on the launch row.">
+          <Section title="Entry gates" description="Every gate must pass inside the evaluation window; failures are shown on the launch row.">
             <div className="grid gap-3">
               <Row label="Evaluation window" hint="Seconds of live flow before deciding">
                 <NumberInput value={s.evalWindowSec} min={5} max={60} onChange={(v) => patch({ evalWindowSec: v })} suffix="s" />
@@ -237,7 +223,7 @@ export function Strategy() {
             </div>
           </Section>
 
-          <Section title="Rites of exit" description="Independent triggers — first one to fire wins.">
+          <Section title="Exit rules" description="Independent triggers — first one to fire wins.">
             <div className="grid gap-3">
               <Row label="Stop loss" hint="Hard stop below entry">
                 <NumberInput value={Math.round(s.stopLossPct * 100)} min={5} max={95} onChange={(v) => patch({ stopLossPct: v / 100 })} suffix="%" />
@@ -275,7 +261,7 @@ export function Strategy() {
             </div>
           </Section>
 
-          <Section title="Honesty box">
+          <Section title="About these defaults">
             <Card>
               <p className="text-sm text-krypt-muted leading-relaxed">
                 These defaults are starting points, not alpha. The recorder captures every event and

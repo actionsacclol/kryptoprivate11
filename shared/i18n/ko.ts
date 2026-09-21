@@ -30,10 +30,10 @@ export const ko: Catalogue = {
   'nav.execution': '실행',
   'nav.backtest': '백테스트',
   'nav.history': '기록',
-  'nav.rewardPools': '리워드 풀',
+  'nav.guides': '가이드',
   'nav.walletScout': '지갑 추적',
   'nav.launchToken': '토큰 발행',
-  'nav.myLayout': '내 레이아웃',
+  'nav.widgets': '위젯',
   'nav.settings': '설정',
   'nav.about': '정보',
   'nav.legal': '법적 고지',
@@ -83,7 +83,7 @@ export const ko: Catalogue = {
   'onboarding.everythingUnderSettings': '모든 항목은 설정에 있습니다',
   'onboarding.getStarted': '시작하기',
 
-  'waiver.hold': '$KRYPTO {amount}개를 보유하면 이 수수료가 면제됩니다',
+  'waiver.hold': '$KRYPTO {amount}개를 보유하면 이 수수료가 절반이 됩니다',
 
   'mode.paper': '모의',
   'mode.live': '실거래',
@@ -105,7 +105,7 @@ export const ko: Catalogue = {
   'settings.subtitle': '시세 데이터 제공자, RPC 엔드포인트, 레코더, 상태 표시.',
 
   'settings.theme': '테마',
-  'settings.themeHint': '강조 색상만 변경됩니다. 상승의 초록, 하락의 빨강, 자금 관련 금색은 그대로 유지됩니다.',
+  'settings.themeHint': '룩(글꼴, 표면, 모서리, 효과)을 고른 뒤 강조 색상을 선택하세요. 상승의 초록, 하락의 빨강, 자금 관련 금색은 그대로 유지됩니다.',
   'settings.replay': '둘러보기 다시 보기',
   'settings.replayHint': '첫 실행 화면을 다시 표시합니다. 초기화되는 것은 없습니다 — 지갑, 키, 설정은 그대로입니다.',
   'onboarding.appearance': '언어와 색상',

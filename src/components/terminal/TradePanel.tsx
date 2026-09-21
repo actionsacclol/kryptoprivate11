@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { TokenSummary } from '@shared/market';
 import type { AppSettings, LiveState, WalletInfo } from '@shared/types';
-import { FEE_BPS, splitFee } from '@shared/fees';
+import { FEE_BPS, feePctLabel, holderFeePctLabel, splitFee } from '@shared/fees';
+import { holderFeeBps } from '@shared/krypto';
 import { KRYPTO_TOKEN } from '@shared/krypto';
 import { WaiverHint } from './WaiverHint';
 import { useKryptoWaiver } from '../../state/useKryptoWaiver';
@@ -66,7 +67,7 @@ export function TradePanel({
     // Krypt's own cut. Leaving it out of a block headed "estimated total
     // fees" understated what the same transaction charges, on the screen
     // where the user decides the size.
-    const krypt = waiver.waived ? 0 : splitFee(Math.round(amountSol * 1e9), false).totalLamports / 1e9;
+    const krypt = splitFee(Math.round(amountSol * 1e9), false, holderFeeBps(FEE_BPS, waiver.halved)).totalLamports / 1e9;
     const priority = 0.002; // modeled; the real figure comes from the fee estimator
     // Landing tips are paid on the same transaction whenever a fast lane is on.
     const tips = settings.execution.useJito || settings.execution.useHeliusSender ? 0.0005 : 0;
@@ -74,7 +75,7 @@ export function TradePanel({
     const rent = 0.00204; // ATA creation, refundable via rent sweep
     const total = protocol + relayer + krypt + priority + tips + network + rent;
     return { usd, protocol, relayer, krypt, priority, tips, network, rent, total };
-  }, [amountSol, solUsd, waiver.waived, settings.execution.localTxBuild, settings.execution.useJito, settings.execution.useHeliusSender]);
+  }, [amountSol, solUsd, waiver.halved, settings.execution.localTxBuild, settings.execution.useJito, settings.execution.useHeliusSender]);
 
   const toUsd = (sol: number): string => (solUsd ? fmtUsd(sol * solUsd) : `${sol.toFixed(5)} SOL`);
 
@@ -222,9 +223,9 @@ export function TradePanel({
             title={[
               `pump.fun protocol ${PROTOCOL_FEE_PCT}%: ${toUsd(cost.protocol)}`,
               cost.relayer > 0 ? `Relayer ${RELAYER_FEE_PCT}%: ${toUsd(cost.relayer)}` : null,
-              waiver.waived
-                ? `Krypt ${(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side: WAIVED — you hold ${waiver.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}`
-                : `Krypt ${(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side: ${toUsd(cost.krypt)}`,
+              waiver.halved
+                ? `Krypt ${holderFeePctLabel()} per side (halved from ${feePctLabel()} — you hold ${waiver.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}): ${toUsd(cost.krypt)}`
+                : `Krypt ${feePctLabel()} per side: ${toUsd(cost.krypt)}`,
               `Priority fee (est.): ${toUsd(cost.priority)}`,
               cost.tips > 0 ? `Landing tips (est.): ${toUsd(cost.tips)}` : null,
               `Network: ${toUsd(cost.network)}`,
@@ -234,16 +235,16 @@ export function TradePanel({
               .join('\n')}
           >
             Est. fees <span className="font-mono text-white/80">{toUsd(cost.total)}</span>
-            {waiver.waived ? (
-              <span className="text-emerald-300/80"> · Krypt fee waived (${KRYPTO_TOKEN.symbol} holder)</span>
+            {waiver.halved ? (
+              <span className="text-emerald-300/80"> · Krypt fee halved to {holderFeePctLabel()} (${KRYPTO_TOKEN.symbol} holder)</span>
             ) : (
               <>
-                <span className="text-krypt-muted/60"> · incl. Krypt {(FEE_BPS / 100).toFixed(2).replace(/\.?0+$/, '')}% per side</span>
+                <span className="text-krypt-muted/60"> · incl. Krypt {feePctLabel()} per side</span>
                 {/* The way out of that line, where the line is. Someone told
                     the fee is charged should be told what removes it in the
                     same breath, not on another page - and should be able to
                     READ it, which at muted/45 on a dark panel they could not. */}
-                {' '}· <WaiverHint waived={waiver.waived} />
+                {' '}· <WaiverHint halved={waiver.halved} />
               </>
             )}
           </span>

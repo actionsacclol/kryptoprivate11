@@ -85,8 +85,11 @@ import * as dbcAccounts from './dbcAccounts';
 import * as holderGraph from './holderGraph';
 import * as be from './providers/birdeye';
 import * as onchain from './onchain';
+import * as pumpChain from './pumpChain';
+import type { LiveCurve, LiveMigration } from '../engine/liveCurves';
 import * as tape from './tape';
-import { mergeLiveLaunches, PUMP_TOTAL_SUPPLY } from '@shared/liveRows';
+import { mergeLiveLaunches, summaryFromLaunch, PUMP_TOTAL_SUPPLY } from '@shared/liveRows';
+import { mergeLivePools, type LiveAmmPool } from '@shared/raydium';
 import type { LaunchRow } from '@shared/types';
 
 // ── Host context ──────────────────────────────────────────────────────
@@ -115,6 +118,10 @@ export interface TerminalContext {
    * then the app is not watching the feed and knows of no launches.
    */
   liveLaunches(limit: number): LaunchRow[];
+  /** The scanner's row for ONE mint, when it is tracking it — the name,
+   *  creator and detection time a summary would otherwise buy. Optional so a
+   *  call-count harness built before it existed still attaches. */
+  liveLaunch?(mint: string): LaunchRow | null;
   /** Register a PumpSwap pool so AMM swaps for it reach the tape. */
   registerPool(pool: string, mint: string): void;
   /**
@@ -140,6 +147,29 @@ export interface TerminalContext {
   /** Boop needs only the mint — its events name it. */
   watchBoop(mint: string, decimals: number): void;
   unwatchBoop(mint: string): void;
+  /**
+   * Start/stop taping a Raydium AMM v4 / CPMM pool. The engine reads the
+   * pool's owner once and refuses anything that is not one of the two, or
+   * that has no SOL side — see raydiumWatcher.ts.
+   */
+  watchRaydiumPool(mint: string, poolHint: string | null): void;
+  unwatchRaydiumPool(mint: string): void;
+  /**
+   * Raydium pools the engine saw created, newest first — a second source
+   * for the Migrated column, seconds ahead of any indexer and unaffected
+   * by a park. Empty while the scanner is off. See shared/raydium.ts.
+   */
+  livePools(limit: number): LiveAmmPool[];
+  /**
+   * The program feed's own books (engine/liveCurves.ts), the Discover
+   * columns' free source while the scanner runs: every pump curve trading
+   * right now ranked by progress, and every migration seen, newest first.
+   * Both empty when the scanner is stopped — `scannerRunning` says which.
+   * Optional so a call-count harness built before them still attaches.
+   */
+  scannerRunning?(): boolean;
+  liveCurves?(limit: number): LiveCurve[];
+  liveMigrations?(limit: number): LiveMigration[];
 }
 
 let ctx: TerminalContext | null = null;
@@ -267,6 +297,7 @@ export function providerStatuses(): ProviderStatus[] {
       // other needs the user to do something.
       cooldownIsQuota: parkIsQuota(id),
       queued: queueDepth(id),
+      routes: t.routes.slice(0, 12),
       ...(() => {
         const w = windowUsage(id);
         return w ? { minuteUsed: w.used, minuteCap: w.n } : {};
@@ -306,8 +337,18 @@ const COLUMN_ROW_SOURCES: Record<DiscoverColumn, ProviderId[]> = {
   trending: ['jupiter'],
 };
 
+/**
+ * Which row providers each column ASKED on its last pass. With the scanner
+ * running, the New, Graduating and Migrated columns take their pump rows
+ * from the feed and never ask pump.fun — so a parked pump.fun is not their
+ * problem and must not be stamped on them (2026-09-20: it was, on all three,
+ * for as long as the host kept 429ing, over rows that were entirely fresh).
+ * A column that has not run yet falls back to the static table.
+ */
+const askedByColumn = new Map<DiscoverColumn, ProviderId[]>();
+
 export function discoverParkNote(column: DiscoverColumn): string {
-  return parkNote(COLUMN_ROW_SOURCES[column]);
+  return parkNote(askedByColumn.get(column) ?? COLUMN_ROW_SOURCES[column]);
 }
 
 // ── Merge helpers ─────────────────────────────────────────────────────
@@ -450,9 +491,9 @@ type DevRecord = { mints: number | null; migrations: number | null };
 interface RugIntelApi {
   rugReportFor(
     mint: string,
-    opts?: { creator?: string | null; createdAt?: number | null; dev?: DevRecord; creatorLookup?: boolean },
+    opts?: { creator?: string | null; createdAt?: number | null; dev?: DevRecord; creatorLookup?: boolean; buyCoin?: boolean },
   ): Promise<RugIntel | null>;
-  oddsFor(mint: string, opts?: { creator?: string | null; createdAt?: number | null }): Promise<OddsReport | null>;
+  oddsFor(mint: string, opts?: { creator?: string | null; createdAt?: number | null; buyCoin?: boolean }): Promise<OddsReport | null>;
 }
 
 /** The creator record every row already carries, for free, from Jupiter's
@@ -471,7 +512,7 @@ async function rugReportSafe(
   mint: string,
   creator: string | null,
   createdAt: number | null = null,
-  opts: { dev?: DevRecord; creatorLookup?: boolean } = {},
+  opts: { dev?: DevRecord; creatorLookup?: boolean; buyCoin?: boolean } = {},
 ): Promise<RugIntel | null> {
   if (!usable('pumpswap')) return null;
   try {
@@ -487,12 +528,12 @@ async function rugReportSafe(
  * Graduation odds for a pump launch, from launchIntel. Guarded the same way:
  * a missing or throwing `oddsFor` is "no odds", never a broken panel.
  */
-async function oddsSafe(mint: string, creator: string | null, createdAt: number | null = null): Promise<OddsReport | null> {
+async function oddsSafe(mint: string, creator: string | null, createdAt: number | null = null, opts: { buyCoin?: boolean } = {}): Promise<OddsReport | null> {
   if (!usable('pumpswap')) return null;
   try {
     const api = li as unknown as Partial<RugIntelApi>;
     if (typeof api.oddsFor !== 'function') return null;
-    return (await api.oddsFor(mint, { creator, createdAt })) ?? null;
+    return (await api.oddsFor(mint, { creator, createdAt, ...opts })) ?? null;
   } catch {
     return null;
   }
@@ -765,9 +806,12 @@ async function attachRugReports(rows: TokenSummary[]): Promise<void> {
       const oldEnoughForOdds = r.createdAt !== null && (now - r.createdAt) / 1000 >= ODDS_ATTACH_MIN_AGE_S;
       const [x, odds] = await Promise.all([
         // A LIST row: its creator record is Jupiter's, already on the row,
-        // and no per-row `/coins?creator=` may be bought on top of it.
-        rugReportSafe(r.mint, r.creator, r.createdAt, { dev: devRecordOf(r), creatorLookup: false }),
-        oldEnoughForOdds ? oddsSafe(r.mint, r.creator, r.createdAt) : Promise.resolve(null),
+        // and no per-row `/coins?creator=` may be bought on top of it — nor,
+        // since 2026-09-20, the coin record itself (`buyCoin: false`): a row
+        // from the feed has its record on the chain, read in the column's
+        // own batch, and a list of forty must never buy forty records.
+        rugReportSafe(r.mint, r.creator, r.createdAt, { dev: devRecordOf(r), creatorLookup: false, buyCoin: false }),
+        oldEnoughForOdds ? oddsSafe(r.mint, r.creator, r.createdAt, { buyCoin: false }) : Promise.resolve(null),
       ]);
       if (x) {
         r.rug = x.rug;
@@ -776,7 +820,11 @@ async function attachRugReports(rows: TokenSummary[]): Promise<void> {
       r.odds = odds;
     }
   };
-  const all = Promise.all(Array.from({ length: 3 }, worker)).then(() => undefined);
+  // Two workers, not three (2026-09-20): three concurrent seeks of two or
+  // three pages each burst the swap-api at ~3 requests a second inside the
+  // budget, and it answered 429 (parking itself for a minute, badges gone).
+  // The memo carries what a pass did not reach to the next one.
+  const all = Promise.all(Array.from({ length: 2 }, worker)).then(() => undefined);
   let timer: ReturnType<typeof setTimeout> | null = null;
   const budget = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, RUG_ATTACH_BUDGET_MS);
@@ -790,7 +838,10 @@ async function attachRugReports(rows: TokenSummary[]): Promise<void> {
 /** Enrich a set of pump.fun rows with Jupiter's aggregate data in one call. */
 async function enrichWithJupiter(rows: TokenSummary[]): Promise<TokenSummary[]> {
   if (!usable('jupiter') || !rows.length) return rows;
-  const byMint = await jup.byMints(rows.map((r) => r.mint));
+  // Decoration (image, holders, volume, audit) accepts a 45 s memory and
+  // skips mints Jupiter did not know a minute ago — see jupiter.byMints.
+  // This was one batch per column per pass at the 8 s per-mint TTL.
+  const byMint = await jup.byMints(rows.map((r) => r.mint), { enrich: true });
   return rows.map((r) => {
     const j = byMint.get(r.mint);
     return j ? merge(r, jup.toSummary(j)) : r;
@@ -820,6 +871,30 @@ export async function discover(
   // SOL price first: the pump rows price their curve's real SOL with it.
   const solUsd = usable('jupiter') ? await jup.solUsd() : null;
 
+  // The providers this pass takes ROWS from — what a park banner may name.
+  // Decoration (Jupiter's per-row facts, Shield, the rug rules) is not
+  // recorded: a badge that lags is not a stale column.
+  const asked: ProviderId[] = [];
+  const ask = <T>(id: ProviderId, load: () => Promise<T>, empty: T): Promise<T> => {
+    if (!usable(id)) return Promise.resolve(empty);
+    asked.push(id);
+    return load();
+  };
+  // With the scanner running, the feed IS the pump source: every create,
+  // every trade on every curve and every migration reaches the engine
+  // sub-second and free (engine/liveCurves.ts, liveLaunches). pump.fun's
+  // list routes are then asked only to BOOTSTRAP a column the feed has not
+  // filled yet (the first minute or two after the scanner starts), and never
+  // once the feed carries half the column on its own. Scanner stopped: the
+  // lists are the only pump source, exactly as before.
+  const live = c.scannerRunning?.() === true;
+  // …and never to bootstrap from a provider that is PARKED right now: the
+  // request would be refused locally, the column would carry the park's
+  // banner for nothing, and the feed fills the column within a minute or
+  // two anyway (measured 2026-09-20: pump.fun asked three times at start-up,
+  // three 429s, banner on all three columns until the books filled).
+  const bootstrapWanted = (liveCount: number): boolean => !live || (liveCount < Math.ceil(n / 2) && cooldownRemainingMs('pumpfun') === 0);
+
   let rows: TokenSummary[] = [];
 
   switch (column) {
@@ -843,11 +918,12 @@ export async function discover(
       // else — measured, 0 of 20 were LaunchLab or Boop. The per-dex listing
       // is volume-ranked, which for a slow rail is the better answer anyway:
       // it surfaces the launches people are actually trading.
+      const launches = c.liveLaunches(n * 2);
       const [pump, recent, llFresh, boopFresh] = await Promise.all([
-        usable('pumpfun') ? pf.latest(n) : Promise.resolve([]),
-        usable('jupiter') ? jup.recent(n) : Promise.resolve([]),
-        usable('geckoterminal') ? gt.poolsForDex('raydium-launchlab', 1) : Promise.resolve([]),
-        usable('geckoterminal') ? gt.poolsForDex('boop-fun', 1) : Promise.resolve([]),
+        bootstrapWanted(launches.length) ? ask('pumpfun', () => pf.latest(n), [] as pf.PumpCoin[]) : Promise.resolve([] as pf.PumpCoin[]),
+        ask('jupiter', () => jup.recent(n), [] as jup.JupToken[]),
+        ask('geckoterminal', () => gt.poolsForDex('raydium-launchlab', 1), [] as gt.NewPool[]),
+        ask('geckoterminal', () => gt.poolsForDex('boop-fun', 1), [] as gt.NewPool[]),
       ]);
       const byMint = new Map<string, TokenSummary>();
 
@@ -924,7 +1000,7 @@ export async function discover(
       //
       // The age limit is the column's own: a launch the scanner saw six
       // hours ago is not new, whatever the tape still remembers about it.
-      mergeLiveLaunches(byMint, c.liveLaunches(n * 2), solUsd, NEW_MAX_AGE_MS);
+      mergeLiveLaunches(byMint, launches, solUsd, NEW_MAX_AGE_MS);
       for (const t of recent) {
         const s = jup.toSummary(t);
         byMint.set(t.id, byMint.has(t.id) ? merge(byMint.get(t.id) as TokenSummary, s) : s);
@@ -957,8 +1033,14 @@ export async function discover(
       //   Meteora DBC — candidate pools from GeckoTerminal's `meteora-dbc`
       //   dex, with EXACT progress read from the pool and config accounts.
       // Both give real percentages. Nothing here is estimated.
-      const [pump, curvePools, llPools, boopPools] = await Promise.all([
-        usable('pumpfun') ? pf.graduating(n) : Promise.resolve([]),
+      // The feed's own book first: every incomplete curve traded in the
+      // last fifteen minutes, most progressed first. Their exact reserves,
+      // real SOL, name and creator come from ONE batched chain read
+      // (pumpChain), which is also what prices them — nothing here is a
+      // provider's copy.
+      const liveCurves = live ? (c.liveCurves?.(n) ?? []) : [];
+      const [pump, curvePools, llPools, boopPools, liveCoins] = await Promise.all([
+        bootstrapWanted(liveCurves.length) ? ask('pumpfun', () => pf.graduating(n), [] as pf.PumpCoin[]) : Promise.resolve([] as pf.PumpCoin[]),
         // Per-DEX listing, NOT new_pools: a DBC pool only shows up in
         // new_pools once it has already migrated, so that source can never
         // contain a token that is about to graduate.
@@ -969,18 +1051,23 @@ export async function discover(
         // ONE page. Two pages doubled the GeckoTerminal spend and the free
         // tier 429s well before its documented 30/min — which starved the
         // token chart, a far more valuable use of the same budget.
-        usable('geckoterminal') ? gt.poolsForDex('meteora-dbc', 1) : Promise.resolve([]),
+        ask('geckoterminal', () => gt.poolsForDex('meteora-dbc', 1), [] as gt.NewPool[]),
         // Raydium LaunchLab — the rail behind letsbonk.fun, and the third
         // launch venue this column covers. Same treatment as DBC: candidates
         // from GeckoTerminal, EXACT progress read from the pool account.
-        usable('geckoterminal') ? gt.poolsForDex('raydium-launchlab', 1) : Promise.resolve([]),
+        ask('geckoterminal', () => gt.poolsForDex('raydium-launchlab', 1), [] as gt.NewPool[]),
         // Boop runs its own curve program. Its pool is a PDA of the mint, so
         // this only needs the candidate MINTS from GeckoTerminal.
-        usable('geckoterminal') ? gt.poolsForDex('boop-fun', 1) : Promise.resolve([]),
+        ask('geckoterminal', () => gt.poolsForDex('boop-fun', 1), [] as gt.NewPool[]),
+        liveCurves.length ? pumpChain.readMany(c.httpUrl(), liveCurves.map((x) => x.mint)).catch(() => new Map<string, pumpChain.PumpChainCoin | null>()) : Promise.resolve(new Map<string, pumpChain.PumpChainCoin | null>()),
       ]);
 
       const byMint = new Map<string, TokenSummary>();
-      for (const co of pump) byMint.set(co.mint, pf.toSummary(co, solUsd));
+      for (const lc of liveCurves) {
+        const row = liveCurveRow(lc, liveCoins.get(lc.mint) ?? null, c, solUsd);
+        if (row) byMint.set(lc.mint, row);
+      }
+      for (const co of pump) if (!byMint.has(co.mint)) byMint.set(co.mint, pf.toSummary(co, solUsd));
 
       const launchLabPools = llPools.filter((p) => p.address);
       if (launchLabPools.length) {
@@ -1071,13 +1158,28 @@ export async function discover(
       // migration seen as a brand-new AMM pool. A new pool on an AMM (rather
       // than on a launch curve) is exactly what graduating produces, whoever
       // the launchpad was.
-      const [pump, fresh] = await Promise.all([
-        usable('pumpfun') ? pf.migrated(n) : Promise.resolve([]),
-        usable('geckoterminal') ? gt.newPools(1) : Promise.resolve([]),
+      // The feed's own book first: every pump migration this session saw,
+      // newest first. Priced and named by one batched chain read of the
+      // canonical PumpSwap pool and its vaults (pumpChain).
+      const liveMigs = live ? (c.liveMigrations?.(n) ?? []) : [];
+      const [pump, fresh, migCoins] = await Promise.all([
+        bootstrapWanted(liveMigs.length) ? ask('pumpfun', () => pf.migrated(n), [] as pf.PumpCoin[]) : Promise.resolve([] as pf.PumpCoin[]),
+        ask('geckoterminal', () => gt.newPools(1), [] as gt.NewPool[]),
+        liveMigs.length ? pumpChain.readMany(c.httpUrl(), liveMigs.map((x) => x.mint)).catch(() => new Map<string, pumpChain.PumpChainCoin | null>()) : Promise.resolve(new Map<string, pumpChain.PumpChainCoin | null>()),
       ]);
 
       const byMint = new Map<string, TokenSummary>();
-      for (const co of pump) byMint.set(co.mint, pf.toSummary(co, solUsd));
+      for (const m of liveMigs) {
+        const row = liveMigrationRow(m, migCoins.get(m.mint) ?? null, c, solUsd);
+        if (row) byMint.set(m.mint, row);
+      }
+      for (const co of pump) if (!byMint.has(co.mint)) byMint.set(co.mint, pf.toSummary(co, solUsd));
+
+      // Our own observation next: Raydium pools the engine saw created,
+      // seconds ahead of any indexer and free (shared/raydium.ts). Same age
+      // window as the New column — a pool from yesterday is not a migration
+      // this column should lead with.
+      mergeLivePools(byMint, c.livePools(n * 2), solUsd, 24 * 60 * 60_000);
 
       // Non-pump migrations go in FIRST so the pump feed cannot fill the
       // whole quota and starve every other launchpad out of the column —
@@ -1118,8 +1220,8 @@ export async function discover(
       // Traded volume finds what is moving; organic score filters out the
       // wash-traded half of it. Union, organic first.
       const [traded, organic] = await Promise.all([
-        jup.topTraded(win, n),
-        jup.topOrganic(win, Math.ceil(n / 2)),
+        ask('jupiter', () => jup.topTraded(win, n), [] as jup.JupToken[]),
+        ask('jupiter', () => jup.topOrganic(win, Math.ceil(n / 2)), [] as jup.JupToken[]),
       ]);
       const byMint = new Map<string, TokenSummary>();
       for (const t of organic) byMint.set(t.id, jup.toSummary(t));
@@ -1131,6 +1233,8 @@ export async function discover(
       break;
     }
   }
+
+  askedByColumn.set(column, [...new Set(asked)]);
 
   // Shield is one batched call; the rug rules get a bounded slice of time
   // and the memo carries the rest to the next refresh.
@@ -1144,6 +1248,74 @@ export async function discover(
   }
   return rows;
 }
+
+/**
+ * A Graduating row from the feed's book. The chain read carries the exact
+ * reserves, real SOL, name, creator, decimals and supply; when it did not
+ * answer (RPC hiccup) the trade event's own reserves still price the row and
+ * state its progress — with no name, which the card renders as the mint,
+ * rather than no row. A curve the chain says is complete is not graduating.
+ */
+function liveCurveRow(lc: LiveCurve, coin: pumpChain.PumpChainCoin | null, c: TerminalContext, solUsd: number | null): TokenSummary | null {
+  if (coin?.curve.complete) return null;
+  const launch = c.liveLaunch?.(lc.mint) ?? null;
+  let row: TokenSummary;
+  if (coin) {
+    row = pumpChain.toSummary(coin, solUsd);
+  } else {
+    row = emptySummary(lc.mint);
+    row.launchpad = 'pumpfun';
+    row.dexId = 'pumpfun-curve';
+    row.creator = lc.creator;
+    row.priceSol = lc.vTok > 0n ? Number(lc.vSol) / 1e9 / (Number(lc.vTok) / 1e6) : null;
+    row.priceUsd = row.priceSol !== null && solUsd ? row.priceSol * solUsd : null;
+    row.totalSupply = PUMP_TOTAL_SUPPLY;
+    row.circSupply = PUMP_TOTAL_SUPPLY;
+    if (row.priceUsd !== null) {
+      row.marketCapUsd = row.priceUsd * PUMP_TOTAL_SUPPLY;
+      row.fdvUsd = row.marketCapUsd;
+    }
+    row.bondingCurvePct = lc.progressPct;
+    row.sources = { price: 'engine', marketCap: row.marketCapUsd !== null ? 'derived' : undefined } as TokenSummary['sources'];
+    row.fetchedAt = lc.lastTradeAt;
+  }
+  if (launch) {
+    if (!row.name) row.name = launch.name;
+    if (!row.symbol) row.symbol = launch.symbol;
+    if (row.creator === null) row.creator = launch.creator;
+    if (row.createdAt === null) row.createdAt = launch.detectedAt;
+  }
+  return row;
+}
+
+/**
+ * A Migrated row from the feed's book. Priced on the canonical PumpSwap
+ * pool by the chain read; `createdAt` is the MIGRATION moment, which is what
+ * this column sorts by (the GeckoTerminal rows use their pool's creation
+ * the same way). A migration whose pool the chain could not read still
+ * lists — named if the feed tracked its launch — with no price claimed.
+ */
+function liveMigrationRow(m: LiveMigration, coin: pumpChain.PumpChainCoin | null, c: TerminalContext, solUsd: number | null): TokenSummary | null {
+  const launch = c.liveLaunch?.(m.mint) ?? null;
+  const row = coin ? pumpChain.toSummary(coin, solUsd) : emptySummary(m.mint);
+  if (!coin) {
+    row.launchpad = 'pumpfun';
+    row.dexId = 'pumpswap';
+    row.poolAddress = m.pool;
+    row.poolQuoteMint = WSOL_MINT_ADDRESS;
+    row.bondingCurvePct = 100;
+    row.fetchedAt = m.detectedAt;
+  }
+  if (launch) {
+    if (!row.name) row.name = launch.name;
+    if (!row.symbol) row.symbol = launch.symbol;
+    if (row.creator === null) row.creator = launch.creator;
+  }
+  row.createdAt = m.detectedAt;
+  return row;
+}
+
+const WSOL_MINT_ADDRESS = 'So11111111111111111111111111111111111111112';
 
 /** Apply filters main-side so the renderer never sees rows it will drop. */
 export function filterRows(rows: TokenSummary[], filters: DiscoverFilters | null): TokenSummary[] {
@@ -1204,7 +1376,18 @@ export async function freshSummary(mint: string, maxAgeMs = SUMMARY_TTL_MS * 3):
 }
 
 export async function summary(mint: string): Promise<TokenSummary> {
-  const hit = await memo<TokenSummary>(`market:summary:${mint}`, SUMMARY_TTL_MS, () => buildSummary(mint));
+  return summaryWith(mint, { identity: true });
+}
+
+/** What a build may spend on. `identity: false` is the batch paths' rule:
+ *  never a per-mint pump.fun record, only what the chain and the batched
+ *  routes give — see summaryMany. */
+interface BuildOptions {
+  identity: boolean;
+}
+
+async function summaryWith(mint: string, build: BuildOptions): Promise<TokenSummary> {
+  const hit = await memo<TokenSummary>(`market:summary:${mint}`, SUMMARY_TTL_MS, () => buildSummary(mint, build));
   // A mint no provider can price is remembered as such for five minutes —
   // ONLY read by callers that opt in (`summaryMany(…, { skipUnpriceable })`,
   // the portfolio's off-path naming). The trade path never sees the marker.
@@ -1238,16 +1421,20 @@ export async function summaryMany(
   if (!unique.length) return out;
 
   const lanes = Math.max(1, Math.min(concurrency, unique.length));
+  const httpUrl = ctx?.httpUrl() ?? '';
   for (let start = 0; start < unique.length; start += WARM_CHUNK) {
     const chunk = unique.slice(start, start + WARM_CHUNK);
     const cold = chunk.filter((m) => summaryIfCached(m) === null);
     if (cold.length) {
       // Everything that HAS a batch route, batched, immediately before the
-      // assembly that consumes it — Jupiter's rows and Shield verdicts, and
-      // DexScreener's pairs 30 at a time. Each writes the very per-mint
-      // cache `buildSummary` reads, so the assembly below makes no request
-      // for any of the three.
+      // assembly that consumes it — the chain's curve/mint/metadata reads
+      // (thirty-three mints per RPC call), Jupiter's rows and Shield
+      // verdicts, and DexScreener's pairs 30 at a time. Each writes the very
+      // per-mint cache `buildSummary` reads, so the assembly below makes no
+      // request for any of the four.
+      const pumpCold = httpUrl ? cold.filter(pumpChain.looksLikePumpMint) : [];
       await Promise.all([
+        pumpCold.length ? pumpChain.readMany(httpUrl, pumpCold) : Promise.resolve(null),
         usable('jupiter') ? jup.byMints(cold, opts) : Promise.resolve(null),
         usable('jupiter') ? jup.shield(cold, opts) : Promise.resolve(null),
         usable('dexscreener') ? ds.tokenInfoMany(cold, opts) : Promise.resolve(null),
@@ -1258,7 +1445,10 @@ export async function summaryMany(
         for (let i = lane; i < chunk.length; i += lanes) {
           const m = chunk[i];
           try {
-            out.set(m, await summary(m));
+            // A batch row never buys pump's identity record — a list of
+            // sixty holdings asking pump.fun sixty times is the storm this
+            // path used to be. Whatever identity is already cached is used.
+            out.set(m, await summaryWith(m, { identity: false }));
           } catch {
             /* an unpriced mint is simply absent — the caller says so */
           }
@@ -1341,21 +1531,49 @@ export function parkedProviders(): ProviderId[] {
   return (Object.keys(PROVIDER_META) as ProviderId[]).filter((id) => cooldownRemainingMs(id) > 0);
 }
 
-async function buildSummary(mint: string): Promise<TokenSummary> {
+async function buildSummary(mint: string, build: BuildOptions = { identity: true }): Promise<TokenSummary> {
   const c = need();
   let s = emptySummary(mint);
 
+  // The chain FIRST, and in parallel with the providers. For a pump coin one
+  // derived-account batch states the price, the reserves, the progress, the
+  // creator, the decimals and supply, and the name — authoritative, fresh to
+  // the slot, and on an RPC budget this app is nowhere near. It is merged
+  // before any provider so those fields WIN; the providers fill what the
+  // chain cannot know (image, socials, creation time, holders, volume).
+  // Before 2026-09-20 every one of these builds bought pump.fun's coin
+  // record, and that route's 429s kept the provider parked around the clock.
+  const pumpMint = pumpChain.looksLikePumpMint(mint);
+  const chainRead = pumpMint ? pumpChain.read(c.httpUrl(), mint).catch(() => null) : Promise.resolve(null);
+  const fromLive = (solUsd: number | null): void => {
+    const row = c.liveLaunch?.(mint) ?? null;
+    if (row) s = merge(s, summaryFromLaunch(row, solUsd));
+  };
+
   let solUsd: number | null = null;
   if (c.data().networkDataEnabled) {
-    const [jupRows, pump, dsInfo, shieldMap, sol] = await Promise.all([
+    // Identity — image, socials, creation time, pump's flags — is the ONLY
+    // thing still asked of pump.fun here, on a ten-minute memo, and only
+    // for a build a person is looking at (never a batch row).
+    const wantIdentity = usable('pumpfun') && pumpMint;
+    const [jupRows, pump, dsInfo, shieldMap, sol, chain] = await Promise.all([
       usable('jupiter') ? jup.search(mint) : Promise.resolve([]),
-      usable('pumpfun') && mint.endsWith('pump') ? pf.coin(mint) : Promise.resolve(null),
+      wantIdentity ? (build.identity ? pf.coinIdentity(mint) : Promise.resolve(pf.coinIdentityIfCached(mint))) : Promise.resolve(null),
       usable('dexscreener') ? ds.tokenInfo(mint) : Promise.resolve(null),
       usable('jupiter') ? jup.shield([mint]) : Promise.resolve(null),
       usable('jupiter') ? jup.solUsd() : Promise.resolve(null),
+      chainRead,
     ]);
     solUsd = sol;
 
+    if (chain) {
+      s = merge(s, pumpChain.toSummary(chain, solUsd));
+      // A graduated coin's PumpSwap pool is how AMM swaps reach the tape;
+      // registered from the chain's own answer, so the 1s chart works after
+      // graduation whether or not DexScreener has indexed the pool yet.
+      if (chain.curve.complete && s.poolAddress) c.registerPool(s.poolAddress, mint);
+    }
+    fromLive(solUsd);
     const jupHit = jupRows.find((t) => t.id === mint);
     if (jupHit) s = merge(s, jup.toSummary(jupHit));
     if (pump) s = merge(s, pf.toSummary(pump, solUsd));
@@ -1384,9 +1602,19 @@ async function buildSummary(mint: string): Promise<TokenSummary> {
         if (p.dexId.toLowerCase().includes('pump')) c.registerPool(p.address, mint);
       }
     }
+  } else {
+    // Network data off: the chain and this session's own tape are the whole
+    // answer, which for a pump coin is a real price rather than nothing.
+    const chain = await chainRead;
+    if (chain) {
+      s = merge(s, pumpChain.toSummary(chain, null));
+      if (chain.curve.complete && s.poolAddress) c.registerPool(s.poolAddress, mint);
+    }
+    fromLive(null);
   }
 
-  // The chain overrides everything it can answer.
+  // The chain overrides everything it can answer. (For a pump coin this is
+  // a cache hit: the reader above seeded the mint's facts from the batch.)
   const facts = await onchain.mintFacts(c.httpUrl(), mint);
   if (facts.checked && facts.uiSupply !== null) {
     s.totalSupply = facts.uiSupply;
@@ -2246,6 +2474,17 @@ export async function watch(mint: string): Promise<void> {
       c.watchLaunchLabPool(mint, s.decimals, s.poolAddress);
       return;
     }
+    // A Raydium AMM v4 / CPMM pool — a graduated LaunchLab token, or a coin
+    // that listed there directly. The label only picks what to try first:
+    // the engine confirms the pool by its OWNER, and the DBC path below
+    // hands a Raydium-owned pool to the same watcher when a provider
+    // labelled it as something else entirely.
+    const dexId = (s.dexId ?? '').toLowerCase();
+    const looksRaydium = dexId.includes('raydium') && !dexId.includes('launchlab');
+    if (looksRaydium) {
+      c.watchRaydiumPool(mint, s.poolAddress);
+      return;
+    }
     c.watchDbcPool(mint, s.decimals, s.poolAddress);
   } catch {
     /* the token page still works without a live tape */
@@ -2260,6 +2499,7 @@ export function unwatch(mint: string): void {
     c.unwatchDbcPool(mint);
     c.unwatchLaunchLabPool(mint);
     c.unwatchBoop(mint);
+    c.unwatchRaydiumPool(mint);
   } catch {
     /* context not attached — nothing to stop */
   }

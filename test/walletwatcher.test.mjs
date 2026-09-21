@@ -73,6 +73,8 @@ const rpcMethodOf = (init) => {
     return undefined;
   }
 };
+/** The params of the last getTransaction the watcher sent. */
+let lastTxParams = null;
 globalThis.fetch = async (_url, init) => {
   const reply = (result) => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ jsonrpc: '2.0', result }) });
   if (rpcMethodOf(init) === 'getSignaturesForAddress') {
@@ -80,6 +82,12 @@ globalThis.fetch = async (_url, init) => {
     return reply(sigList);
   }
   fetches += 1;
+  try {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    lastTxParams = (Array.isArray(body) ? body[0] : body)?.params?.[1] ?? null;
+  } catch {
+    lastTxParams = null;
+  }
   return reply(BUY_TX);
 };
 
@@ -129,6 +137,11 @@ const notification = (sub, sig) =>
   assert.ok(Math.abs(swaps[0].swap.sol - 0.6) < 1e-12);
   assert.equal(swaps[0].swap.tokens, 1000);
   assert.equal(fetches, 1, 'the transaction was read once');
+  // Transaction v1 (SIMD-0385) is live on mainnet since 2026-09-15. A read
+  // that only accepts v0 is refused (-32015) for every v1 transaction a
+  // leader makes — which was "That trade was not copied" on every one of
+  // them (user report 2026-09-20).
+  assert.equal(lastTxParams?.maxSupportedTransactionVersion, 1, `the read accepts transaction v1 — sent ${JSON.stringify(lastTxParams)}`);
   assert.equal(typeof swaps[0].tradeAt, 'number', 'and carries WHEN THEY TRADED, from the block');
   assert.ok(Math.abs(swaps[0].tradeAt - BUY_TX.blockTime * 1000) < 1000);
   assert.equal(sigCalls, 0, 'the first subscribe of a session has no gap behind it to fill');

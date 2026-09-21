@@ -59,7 +59,7 @@ const TRANSLATIONS = LOCALES.filter((l) => l.id !== 'en');
 
 {
   // Interpolation itself, including the case that must NOT blank out.
-  assert.equal(t('en', 'waiver.hold', { amount: '1,000,000' }), 'Hold 1,000,000 $KRYPTO to remove this fee');
+  assert.equal(t('en', 'waiver.hold', { amount: '1,000,000' }), 'Hold 1,000,000 $KRYPTO to halve this fee');
   assert.ok(t('zh-CN', 'waiver.hold', { amount: '1,000,000' }).includes('1,000,000'), 'the amount survives translation');
   // A missing value leaves the placeholder visible rather than printing a gap
   // where a number belongs.

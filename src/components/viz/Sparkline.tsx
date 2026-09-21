@@ -8,6 +8,7 @@ export function Sparkline({
   height = 28,
   stroke,
   positive,
+  floorSpan,
 }: {
   data: number[];
   width?: number;
@@ -16,6 +17,15 @@ export function Sparkline({
   stroke?: string;
   /** When set, overrides hue with PnL polarity (emerald/rose). */
   positive?: boolean;
+  /**
+   * Smallest vertical range the box may show, as a fraction of the FIRST
+   * value. Without it the line is scaled to its own min and max, so a series
+   * that wiggles by 0.3 % fills the whole height and reads like a rocket —
+   * which is what a runner row looked like while its market cap bounced
+   * around a thousand dollars (user report, 2026-09-19). With 0.5, a ±5 %
+   * wiggle is a nearly flat line and a doubling still fills the box.
+   */
+  floorSpan?: number;
 }) {
   const { rgb } = useAccent();
   const hue = stroke ?? rgb();
@@ -27,8 +37,16 @@ export function Sparkline({
     );
   }
   const color = positive === undefined ? hue : positive ? '#22C55E' : '#EF4444';
-  const min = Math.min(...data);
-  const max = Math.max(...data);
+  let min = Math.min(...data);
+  let max = Math.max(...data);
+  if (floorSpan && floorSpan > 0 && data[0] > 0) {
+    const need = data[0] * floorSpan;
+    if (max - min < need) {
+      const mid = (max + min) / 2;
+      min = mid - need / 2;
+      max = mid + need / 2;
+    }
+  }
   const span = max - min || 1;
   const pad = 3;
   const pts = data.map((v, i) => {

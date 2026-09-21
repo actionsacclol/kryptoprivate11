@@ -1,5 +1,7 @@
 import { forwardRef, memo, useEffect, useImperativeHandle, useRef } from 'react';
 import { accent } from '../../state/theme';
+import { monoFont, surfaceMuted, surfaceText } from '../../state/skin';
+import { useSkin } from '../../state/useSkin';
 import {
   ColorType,
   CrosshairMode,
@@ -99,6 +101,14 @@ const KryptChartInner = forwardRef<KryptChartHandle, KryptChartProps>(function K
   const lastDataIdRef = useRef<Candle[] | null>(null);
   const lastModeRef = useRef<'price' | 'mcap' | null>(null);
 
+  // The height is applied, never re-created for: this effect used to depend
+  // on `height`, so a panel being resized (a ResizeObserver feeding the prop
+  // on every pointer move) tore the chart down and rebuilt it — new canvases,
+  // a full setData, a refit — dozens of times a second, and the user's pan
+  // and zoom went with each one (2026-09-20).
+  const heightRef = useRef(height);
+  heightRef.current = height;
+
   // Create once. Re-creating on every data change would reset the user's pan
   // and zoom on every poll, which makes the chart unusable while it updates.
   useEffect(() => {
@@ -106,16 +116,18 @@ const KryptChartInner = forwardRef<KryptChartHandle, KryptChartProps>(function K
     if (!box) return;
 
     const chart = createChart(box, {
-      height,
+      height: heightRef.current,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#8C92AB',
-        fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+        // The look's own muted colour and mono face — a canvas cannot read
+        // the variables, so they are read for it (src/state/skin.ts).
+        textColor: surfaceMuted(),
+        fontFamily: monoFont(),
         fontSize: 10,
       },
       grid: {
-        vertLines: { color: 'rgba(240,237,226,0.04)' },
-        horzLines: { color: 'rgba(240,237,226,0.04)' },
+        vertLines: { color: surfaceText(0.04) },
+        horzLines: { color: surfaceText(0.04) },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
@@ -123,16 +135,29 @@ const KryptChartInner = forwardRef<KryptChartHandle, KryptChartProps>(function K
         horzLine: { color: accent(0.5), width: 1, style: LineStyle.Dashed, labelBackgroundColor: accent(0.85) },
       },
       rightPriceScale: {
-        borderColor: 'rgba(240,237,226,0.08)',
+        borderColor: surfaceText(0.08),
         scaleMargins: { top: 0.08, bottom: 0.26 },
       },
       timeScale: {
-        borderColor: 'rgba(240,237,226,0.08)',
+        borderColor: surfaceText(0.08),
         timeVisible: true,
         secondsVisible: true,
         rightOffset: 4,
       },
-      handleScale: { axisPressedMouseMove: { time: true, price: true } },
+      // Interaction, spelled out (2026-09-20). Drag pans, wheel zooms about
+      // the cursor, pinch zooms, an axis drag scales it and a double-click
+      // on an axis resets it. Kinetic scroll on the MOUSE is the one that is
+      // off by default: a drag that stops dead on release feels stuck next
+      // to every other chart a trader uses, and a flick to the history is
+      // how people actually move around a tape.
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: { time: true, price: true },
+        axisDoubleClickReset: { time: true, price: true },
+      },
+      kineticScroll: { mouse: true, touch: true },
     });
 
     const candleSeries = chart.addCandlestickSeries({
@@ -176,7 +201,25 @@ const KryptChartInner = forwardRef<KryptChartHandle, KryptChartProps>(function K
       candleRef.current = null;
       volumeRef.current = null;
     };
+  }, []);
+
+  // A new height is a resize of the same chart: the series, the pan and the
+  // zoom all stay.
+  useEffect(() => {
+    chartRef.current?.applyOptions({ height });
   }, [height]);
+
+  // A look change re-inks the axes, the grid and the scale borders: the
+  // chart is a canvas and cannot follow the variables itself (2026-09-20).
+  const skin = useSkin();
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      layout: { textColor: surfaceMuted(), fontFamily: monoFont() },
+      grid: { vertLines: { color: surfaceText(0.04) }, horzLines: { color: surfaceText(0.04) } },
+      rightPriceScale: { borderColor: surfaceText(0.08) },
+      timeScale: { borderColor: surfaceText(0.08) },
+    });
+  }, [skin]);
 
   /** Push one raw bar to both series, multiplied for the current mode.
    *  try/catch: the chart can be disposed between a schedule and the call,

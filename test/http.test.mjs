@@ -292,15 +292,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   assert.equal(jupiterKeyed(), false);
   const keyless = providerLimits('jupiter');
   assert.equal(keyless.host, 'lite-api.jup.ag', 'no key keeps the host the app uses today');
-  assert.equal(keyless.gapMs, 120);
-  assert.deepEqual(keyless.window, { n: 500, ms: 60_000 }, 'the window is the gap ceiling — Jupiter had none at all');
+  // 2026-09-20: lite-api 429'd at ~46 calls/min under 8/s bursts; probed
+  // fine at 2/s. The gap allows those bursts and the window holds the minute.
+  assert.equal(keyless.gapMs, 500, 'two a second, the burst the host tolerates');
+  assert.deepEqual(keyless.window, { n: 50, ms: 60_000 }, 'the minute ceiling, under the ~60 the host serves');
 
   setJupiterApiKey('  jup_test_key  ');
   assert.equal(jupiterKeyed(), true, 'the key is trimmed, not rejected for the spaces around it');
   const keyed = providerLimits('jupiter');
   assert.equal(keyed.host, 'api.jup.ag', 'a key moves off the retiring endpoint');
   assert.equal(keyed.gapMs, 1_000, 'and onto its documented 1 request/second');
-  assert.deepEqual(keyed.window, { n: 60, ms: 60_000 }, 'the window followed the host — 8 rps there is an instant park');
+  assert.deepEqual(keyed.window, { n: 55, ms: 60_000 }, 'the window followed the host — under its documented 60 a minute');
 
   // No other provider moved.
   assert.equal(providerLimits('geckoterminal').host, 'api.geckoterminal.com');

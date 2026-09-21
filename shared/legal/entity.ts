@@ -67,10 +67,18 @@ export const LIABILITY_CAP_USD = 100;
 // clickwrap points - the sanctions/eligibility representation, and that the
 // documents are English-only. Material, so it re-prompts everyone, which is
 // the point: the old acceptance hashed text that did not contain them.
-export const TERMS_VERSION = '2026-09-18.1';
+// 2026-09-20: the Links panel shows a token's own X, website and launchpad
+// pages INSIDE the software (privacy section 4). A new flow of the user's
+// requests and cookies to third parties they did not choose one by one is
+// material, so it re-prompts.
+// Same day, .2: for a token someone opens, the software now fetches its
+// Telegram link's public preview (t.me) and its website domain's registry
+// record (RDAP, via data.iana.org). New hosts receive requests, so it
+// re-prompts.
+export const TERMS_VERSION = '2026-09-20.2';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '18 September 2026';
+export const TERMS_EFFECTIVE_DATE = '20 September 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

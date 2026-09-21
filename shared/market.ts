@@ -74,6 +74,10 @@ export interface ProviderStatus {
   cooldownIsQuota?: boolean;
   /** Calls waiting in its queue right now. */
   queued: number;
+  /** Requests per route this session, most-called first (2026-09-20) —
+   *  which pages and pollers are spending this provider's budget. Absent
+   *  on telemetry built before it existed. */
+  routes?: Array<{ route: string; calls: number }>;
   /**
    * How much of this provider's per-minute budget is spent, and the budget.
    *

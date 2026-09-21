@@ -6,11 +6,11 @@
 // screen would be the one place this app pressures instead of informs.
 
 import { useEffect, useState } from 'react';
-import { Check, Coins, ExternalLink } from 'lucide-react';
-import { KRYPTO_TOKEN, KRYPTO_FEE_WAIVER_TOKENS, kryptoDisclosure, kryptoPumpUrl, kryptoTokenLive } from '@shared/krypto';
+import { Check, Coins, ExternalLink, RefreshCw } from 'lucide-react';
+import { KRYPTO_TOKEN, KRYPTO_HOLDER_TOKENS, kryptoDisclosure, kryptoPumpUrl, kryptoTokenLive } from '@shared/krypto';
 import type { TokenSummary } from '@shared/market';
 import { cls } from '../utils/format';
-import { useKryptoWaiver } from '../state/useKryptoWaiver';
+import { refreshKryptoWaiver, useKryptoWaiver } from '../state/useKryptoWaiver';
 
 /** Unknown is an em dash. Never 0. */
 const usd = (v: number | null): string => (v === null ? '—' : `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
@@ -22,11 +22,27 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
   const mint = kryptoTokenLive() ? (KRYPTO_TOKEN.mint as string) : null;
   const [row, setRow] = useState<TokenSummary | null>(null);
   const [failed, setFailed] = useState(false);
-  // What this install holds, and whether that waives Krypt's fee. The SAME
+  // What this install holds, and whether that halves Krypt's fee. The SAME
   // reading the signer uses, shared with every other screen that names the
   // fee — the card, the Trade panel and Settings must never disagree about
   // whether the next trade is free.
   const held = useKryptoWaiver();
+  // The Scan button. Main re-reads the holding every two minutes on its own,
+  // so this exists for the moment right after a buy — a holder who has just
+  // crossed the line should not pay the fee twice more waiting for a timer.
+  // `scanNote` is the button's own outcome and is kept apart from `held`:
+  // the reading is main's and shared with every screen, while the fact that
+  // YOU pressed Scan and what came of it belongs to this card alone.
+  const [scanning, setScanning] = useState(false);
+  const [scanNote, setScanNote] = useState<string | null>(null);
+  const scan = async (): Promise<void> => {
+    if (scanning) return;
+    setScanning(true);
+    setScanNote(null);
+    const why = await refreshKryptoWaiver();
+    setScanning(false);
+    setScanNote(why ? `Scan failed — ${why}.` : 'Scanned just now.');
+  };
 
   useEffect(() => {
     if (!mint) return;
@@ -102,7 +118,7 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
       {failed && <p className="mt-2 text-body text-amber-300/90">Could not read the market for it right now — the numbers above are the last known, or unknown.</p>}
       <p className="mt-3 text-label leading-relaxed text-krypt-muted/80">{kryptoDisclosure()}</p>
 
-      {/* The waiver, last and loud.
+      {/* The holder rate, last and loud.
 
           It is the one thing on this card that is about the READER rather
           than about the token, so it sits under everything else and is the
@@ -111,47 +127,63 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
           app does not turn a banner about its own coin into a trade.
 
           Both states are yellow. The difference is stated in words and in
-          the fill, not in the hue, because "is my fee waived" is a yes/no a
+          the fill, not in the hue, because "is my fee halved" is a yes/no a
           colour alone should not be carrying.
 
           It is NOT gated on a completed balance read any more. The offer is a
-          fact about the product - hold this much, pay no fee - and it is true
+          fact about the product - hold this much, pay half - and it is true
           before anyone has a wallet. Gating it on `held.at > 0` meant a fresh
           install, or anyone whose read had not landed yet, saw nothing at all
           where the one thing this card is for should be (user report,
-          2026-09-18). Only the line about THEIR holding waits for a read. */}
-      {(
-        <button
-          onClick={() => mint && onOpenToken(mint)}
-          className={cls(
-            'mt-3 block w-full rounded-lg border px-4 py-3 text-left transition',
-            held.waived
-              ? 'border-amber-300/70 bg-amber-400/20 hover:bg-amber-400/25'
-              : 'border-amber-300/55 bg-amber-400/[0.12] hover:border-amber-300/80 hover:bg-amber-400/20',
-          )}
-        >
+          2026-09-18). Only the line about THEIR holding waits for a read.
+
+          The Scan button beside the text asks main to re-read every wallet
+          NOW. It is a sibling of the text rather than a child of it because
+          the text is itself a button, and a button inside a button is not
+          HTML. The line under the title reports a read that FAILED before it
+          says "not checked yet": a check that ran and broke is not the same
+          as one that never ran, and only the first is something the user
+          can act on (it used to say "not checked yet" for both, and did so
+          for days while the bridge to main was missing — 2026-09-19). */}
+      <div
+        className={cls(
+          'mt-3 flex items-start gap-3 rounded-lg border px-4 py-3',
+          held.halved ? 'border-amber-300/70 bg-amber-400/20' : 'border-amber-300/55 bg-amber-400/[0.12]',
+        )}
+      >
+        <button onClick={() => onOpenToken(mint)} className="min-w-0 flex-1 text-left transition hover:opacity-90" title="Open the coin">
           <span className="flex items-center gap-2">
-            {held.waived ? <Check className="h-4 w-4 flex-shrink-0 text-amber-300" /> : <Coins className="h-4 w-4 flex-shrink-0 text-amber-300" />}
+            {held.halved ? <Check className="h-4 w-4 flex-shrink-0 text-amber-300" /> : <Coins className="h-4 w-4 flex-shrink-0 text-amber-300" />}
             <span className="text-value font-bold text-amber-300">
-              {held.waived ? `No fee on Krypto Bot — active` : `Use Krypto Bot with no fee`}
+              {held.halved ? `Half fees on Krypto Bot — active` : `Use Krypto Bot at half the fee`}
             </span>
           </span>
           <span className="mt-1 block text-body font-semibold leading-relaxed text-amber-200">
-            Hold {KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in the app and Krypt&rsquo;s
-            0.5% trading fee is waived, on every chain.
+            Hold {KRYPTO_HOLDER_TOKENS.toLocaleString()} ${KRYPTO_TOKEN.symbol} in any wallet in the app and Krypt&rsquo;s
+            0.5% trading fee is halved to 0.25%, on every chain. The referral share halves with it, so whoever sent you here still earns.
           </span>
           <span className="mt-1 block text-label leading-relaxed text-krypt-muted/75">
-            {held.at === 0
-              ? 'Your wallets have not been checked for it yet.'
-              : held.problem
-              ? `Your holding could not be read just now, so the fee is charged as usual — ${held.problem}.`
-              : held.waived
-                ? `You hold ${held.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}${held.usd !== null ? ` (~$${held.usd.toFixed(2)})` : ''} across ${held.wallets} wallet${held.wallets === 1 ? '' : 's'}.`
-                : `You hold ${held.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}${held.usd !== null ? ` (~$${held.usd.toFixed(2)})` : ''} — ${Math.max(0, KRYPTO_FEE_WAIVER_TOKENS - held.tokens).toLocaleString(undefined, { maximumFractionDigits: 0 })} more to go.`}
-            {' '}pump.fun&rsquo;s 1% and the network&rsquo;s own fees are not ours to waive. Tap to open the coin.
+            {held.problem
+              ? `Your holding could not be read, so the fee is charged as usual — ${held.problem}.`
+              : held.at === 0
+                ? 'Your wallets have not been checked for it yet — press Scan to check them now.'
+                : held.halved
+                  ? `You hold ${held.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}${held.usd !== null ? ` (~$${held.usd.toFixed(2)})` : ''} across ${held.wallets} wallet${held.wallets === 1 ? '' : 's'}.`
+                  : `You hold ${held.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}${held.usd !== null ? ` (~$${held.usd.toFixed(2)})` : ''} — ${Math.max(0, KRYPTO_HOLDER_TOKENS - held.tokens).toLocaleString(undefined, { maximumFractionDigits: 0 })} more to go.`}
+            {scanNote ? ` ${scanNote}` : ''}
+            {' '}pump.fun&rsquo;s 1% and the network&rsquo;s own fees are not ours to discount. Tap to open the coin.
           </span>
         </button>
-      )}
+        <button
+          onClick={() => void scan()}
+          disabled={scanning}
+          className="flex flex-shrink-0 items-center gap-1.5 rounded-md border border-amber-300/50 bg-amber-400/15 px-3 py-1.5 text-note font-semibold text-amber-200 transition hover:bg-amber-400/25 disabled:cursor-wait disabled:opacity-60"
+          title={`Check every wallet in the app for $${KRYPTO_TOKEN.symbol} now. The app also re-checks on its own every two minutes.`}
+        >
+          <RefreshCw className={cls('h-3.5 w-3.5', scanning && 'animate-spin')} />
+          {scanning ? 'Scanning…' : 'Scan'}
+        </button>
+      </div>
     </section>
   );
 }

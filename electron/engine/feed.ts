@@ -30,7 +30,7 @@ import WebSocket from 'ws';
 import { PUMP_PROGRAM_ID, type PumpEvent } from './pumpDecoder';
 import type { AmmEvent } from './ammDecoder';
 import { base58Decode } from '../chain/base58';
-import { noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs, parseWireTransaction, resolveAccountKeys, type RawIx } from '../chain/rpcClient';
+import { noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs, parseWireTransaction, resolveAccountKeys, type RawIx, MAX_SUPPORTED_TX_VERSION } from '../chain/rpcClient';
 import type { FeedSocketStatus, FeedState } from '@shared/types';
 
 /** An event decoded from an emit_cpi inner instruction rather than a log. */
@@ -529,7 +529,10 @@ export class BlockFeedSocket extends RpcSocket {
           encoding: 'base64',
           transactionDetails: 'full',
           showRewards: false,
-          maxSupportedTransactionVersion: 0,
+          // A block holding one v1 transaction is refused whole (-32015)
+          // when the subscriber only takes v0 — since 2026-09-15 that was
+          // most blocks. parseWireTransaction reads both formats.
+          maxSupportedTransactionVersion: MAX_SUPPORTED_TX_VERSION,
         },
       ],
     };

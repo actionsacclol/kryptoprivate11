@@ -364,6 +364,12 @@ export function paperToPosition(p: PaperPosition, px: PaperPriceInput | undefine
     firstBuyAt: p.openedAt,
     lastFillAt: p.lastFillAt,
     unreconciledFills: 0,
+    // A paper position is only ever spot × amount — there is no sell quote
+    // for a bag nobody holds — and the panel should say so, the way it does
+    // for a real position with no route: a thin token's spot can be far off
+    // what a sell would return (a paper position reported as a total loss,
+    // 2026-09-19).
+    valueSource: valueSol !== null ? 'spot' : undefined,
     paper: true,
   };
 }

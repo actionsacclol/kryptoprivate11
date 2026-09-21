@@ -22,7 +22,7 @@
 // Nothing here throws, blocks, or touches the sell/exit path. It only reports.
 
 import { FARM_FEE_BPS, FEE_BPS, REFERRAL_SHARE_BPS, TREASURY_ADDRESS, feesEnabled, splitFee } from './fees';
-import { KRYPTO_FEE_WAIVER_TOKENS, waivesFee } from './krypto';
+import { KRYPTO_HOLDER_FEE_SHARE_BPS, KRYPTO_HOLDER_TOKENS, holderFeeBps, holderRateApplies } from './krypto';
 import { resolveTreasury, canonicalTreasury } from './feeIntegrity';
 import { PRESENCE, packIdentity } from './presence';
 import { resolvePresence, canonicalPresence } from './presenceIntegrity';
@@ -66,14 +66,22 @@ export function tamperFlags(): boolean[] {
     FARM_FEE_BPS >= FEE_BPS,
     // 4c. The farm rate reaches the arithmetic: 5 bps of 1 SOL = 500,000.
     splitFee(SOL, false, FARM_FEE_BPS).treasuryLamports !== 500_000,
-    // 4d. The $KRYPTO waiver is still a threshold and not a hole. A build
-    //     where it has been lowered waives the fee for everyone, and one
-    //     where an unknown holding qualifies waives it for anyone willing to
-    //     break a single balance read.
-    KRYPTO_FEE_WAIVER_TOKENS !== 1_000_000,
-    waivesFee(null),
-    waivesFee(KRYPTO_FEE_WAIVER_TOKENS - 1),
-    !waivesFee(KRYPTO_FEE_WAIVER_TOKENS),
+    // 4d. The $KRYPTO holder rate is still a threshold and not a hole. A
+    //     build where it has been lowered discounts everyone, and one where
+    //     an unknown holding qualifies discounts anyone willing to break a
+    //     single balance read.
+    KRYPTO_HOLDER_TOKENS !== 1_000_000,
+    holderRateApplies(null),
+    holderRateApplies(KRYPTO_HOLDER_TOKENS - 1),
+    !holderRateApplies(KRYPTO_HOLDER_TOKENS),
+    // 4e. The holder rate is HALF, not nothing: a build that set the share to
+    //     0 has restored the full waiver and cut every referrer out; one that
+    //     raised it past the full rate charges holders more. And the halved
+    //     fee still reaches the referral arithmetic: 20 % of 25 bps on 1 SOL
+    //     is 500,000 lamports to the referrer.
+    KRYPTO_HOLDER_FEE_SHARE_BPS !== 5000,
+    holderFeeBps(FEE_BPS, true) !== 25,
+    splitFee(SOL, true, holderFeeBps(FEE_BPS, true)).referrerLamports !== 500_000,
     // 5. Fees are still enabled (treasury present and verified).
     !feesEnabled(),
     // 6. The fee arithmetic still produces the right treasury cut.

@@ -198,6 +198,28 @@ export function toSummary(t: JupToken): TokenSummary {
 
 const TTL_LIST = 6_000;
 const TTL_TOKEN = 8_000;
+/**
+ * The slower lists (2026-09-20). `recent` and the two trending lists were
+ * refetched on every 8 s Discover pass — three of the ~seven Jupiter calls
+ * a pass made, against a host that turned out to serve ~60 a minute. The
+ * newest launches are the scanner's business (sub-second, free); Jupiter's
+ * copy of them can be twelve seconds old. Trending is "most traded over a
+ * window of five minutes or more"; fifteen seconds does not change it.
+ */
+export const TTL_RECENT = 12_000;
+export const TTL_TRENDING = 15_000;
+/**
+ * A LIST ROW's facts, remembered longer for the rows a Discover column
+ * decorates with them (image, holders, volume, audit). The 8 s per-mint
+ * memory above serves the token page, whose price may come from here on a
+ * non-pump token and must not be a minute old; a card in a list of forty
+ * can carry a holder count from 45 s ago. Written alongside the short key.
+ */
+export const TTL_ENRICH = 45_000;
+/** A mint Jupiter did not return is not asked again for this long: a coin
+ *  minutes old is not indexed yet, and asking on every pass was one batch
+ *  per column per pass forever. */
+export const TTL_ENRICH_NONE = 60_000;
 
 /**
  * Every row any list or batch returns is also remembered PER MINT, so a
@@ -208,13 +230,57 @@ const TTL_TOKEN = 8_000;
  * twenty seconds — ~180 calls a minute for facts already in hand.
  */
 const tokenKey = (mint: string): string => `jup:tok:${mint}`;
+const enrichKey = (mint: string): string => `jup:enrich:${mint}`;
+const enrichNoneKey = (mint: string): string => `jup:enrich:none:${mint}`;
 
 function rememberTokens(rows: JupToken[]): void {
-  for (const t of rows) if (t?.id) putCache(tokenKey(t.id), t, TTL_TOKEN);
+  for (const t of rows) {
+    if (!t?.id) continue;
+    putCache(tokenKey(t.id), t, TTL_TOKEN);
+    putCache(enrichKey(t.id), t, TTL_ENRICH);
+  }
 }
 
 /** A bare mint address (base58, 32–44 chars) rather than free text. */
 const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/**
+ * Merge the batch requests that arrive close together into ONE.
+ *
+ * Measured 2026-09-20 with route counters: Shield was Jupiter's most-called
+ * route (58 of 141 in four minutes) and the enrichment batch the second
+ * (32), because four Discover columns each asked for their own rows within
+ * a second or two of each other, and each column's batch is a request
+ * however many mints it holds. A column's rows arrive at most this window
+ * later, on a pass that already spends two seconds on the rug rules; the
+ * request count is what matters, and the union costs one.
+ *
+ * The priority lane (the orders poll) never waits here.
+ */
+export const COALESCE_MS = 1_500;
+
+function coalescer<T>(run: (mints: string[]) => Promise<Map<string, T>>): (mints: string[]) => Promise<Map<string, T>> {
+  let pending = new Set<string>();
+  let waiters: Array<{ resolve: (m: Map<string, T>) => void; reject: (e: unknown) => void }> = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return (mints) =>
+    new Promise<Map<string, T>>((resolve, reject) => {
+      for (const m of mints) pending.add(m);
+      waiters.push({ resolve, reject });
+      if (timer) return;
+      timer = setTimeout(() => {
+        const batch = [...pending];
+        const ws = waiters;
+        pending = new Set();
+        waiters = [];
+        timer = null;
+        run(batch).then(
+          (r) => ws.forEach((w) => w.resolve(r)),
+          (e) => ws.forEach((w) => w.reject(e)),
+        );
+      }, COALESCE_MS);
+    });
+}
 
 async function list(path: string, key: string, ttl: number, opts: { priority?: boolean } = {}): Promise<JupToken[]> {
   const hit = await memo<JupToken[]>(key, ttl, async () => {
@@ -228,7 +294,7 @@ async function list(path: string, key: string, ttl: number, opts: { priority?: b
 
 /** Newest mints Jupiter has indexed. Powers the NEW column's non-pump rows. */
 export function recent(limit = 40): Promise<JupToken[]> {
-  return list(`/tokens/v2/recent?limit=${Math.min(100, Math.max(1, limit))}`, `jup:recent:${limit}`, TTL_LIST);
+  return list(`/tokens/v2/recent?limit=${Math.min(100, Math.max(1, limit))}`, `jup:recent:${limit}`, TTL_RECENT);
 }
 
 /** Most-traded over a window. Powers TRENDING. */
@@ -236,7 +302,7 @@ export function topTraded(window: '5m' | '1h' | '6h' | '24h', limit = 40): Promi
   return list(
     `/tokens/v2/toptraded/${window}?limit=${Math.min(100, Math.max(1, limit))}`,
     `jup:toptraded:${window}:${limit}`,
-    TTL_LIST,
+    TTL_TRENDING,
   );
 }
 
@@ -245,7 +311,7 @@ export function topOrganic(window: '5m' | '1h' | '6h' | '24h', limit = 40): Prom
   return list(
     `/tokens/v2/toporganicscore/${window}?limit=${Math.min(100, Math.max(1, limit))}`,
     `jup:toporganic:${window}:${limit}`,
-    TTL_LIST,
+    TTL_TRENDING,
   );
 }
 
@@ -273,16 +339,31 @@ export function search(query: string): Promise<JupToken[]> {
  * answer one set's rows for another set that happened to share its first
  * mint and length.
  */
-export async function byMints(mints: string[], opts: { priority?: boolean } = {}): Promise<Map<string, JupToken>> {
+export async function byMints(mints: string[], opts: { priority?: boolean; enrich?: boolean } = {}): Promise<Map<string, JupToken>> {
   const out = new Map<string, JupToken>();
   const unique = [...new Set(mints.filter(Boolean))];
   const misses: string[] = [];
   for (const m of unique) {
-    const known = cached<JupToken>(tokenKey(m));
+    // Decoration accepts the longer memory, and skips a mint Jupiter did
+    // not know a minute ago; a price path takes only the short one.
+    const known = cached<JupToken>(tokenKey(m)) ?? (opts.enrich ? cached<JupToken>(enrichKey(m)) : null);
     if (known) out.set(m, known);
-    else misses.push(m);
+    else if (!(opts.enrich && cached<boolean>(enrichNoneKey(m)))) misses.push(m);
   }
-  misses.sort();
+  if (!misses.length) return out;
+  // Decoration waits for the merge window; a price path fetches now.
+  const fetched = opts.enrich && !opts.priority ? await enrichBatches(misses) : await fetchBatches(misses, opts);
+  for (const m of misses) {
+    const t = fetched.get(m);
+    if (t) out.set(m, t);
+  }
+  return out;
+}
+
+/** The chunked batch fetch itself: up to 100 mints per request. */
+async function fetchBatches(mints: string[], opts: { priority?: boolean; enrich?: boolean } = {}): Promise<Map<string, JupToken>> {
+  const out = new Map<string, JupToken>();
+  const misses = [...new Set(mints)].sort();
   for (let i = 0; i < misses.length; i += 100) {
     const batch = misses.slice(i, i + 100);
     const rows = await list(
@@ -291,10 +372,20 @@ export async function byMints(mints: string[], opts: { priority?: boolean } = {}
       TTL_TOKEN,
       opts,
     );
-    for (const t of rows) if (t?.id) out.set(t.id, t);
+    const got = new Set<string>();
+    for (const t of rows) {
+      if (!t?.id) continue;
+      out.set(t.id, t);
+      got.add(t.id);
+    }
+    // Only when the route ANSWERED: an empty answer for a batch is "none of
+    // these are indexed", a failed request is nothing at all.
+    if (opts.enrich && rows.length) for (const m of batch) if (!got.has(m)) putCache(enrichNoneKey(m), true, TTL_ENRICH_NONE);
   }
   return out;
 }
+
+const enrichBatches = coalescer<JupToken>((mints) => fetchBatches(mints, { enrich: true }));
 
 /** USD price for arbitrary mints — used for the SOL/USD conversion. */
 export async function prices(mints: string[]): Promise<Map<string, number>> {
@@ -329,7 +420,10 @@ interface ShieldWarning {
   severity?: string;
 }
 
-const TTL_SHIELD = 30_000;
+/** A Shield verdict changes rarely; two minutes on a LIST row (2026-09-20).
+ *  The token page's own security report re-reads the chain for the facts
+ *  that decide a sale; this badge is a warning label, not the gate. */
+export const TTL_SHIELD = 120_000;
 
 /**
  * Jupiter Shield — per-mint warnings, batched up to 100 per call. Verified
@@ -350,7 +444,18 @@ export async function shield(mints: string[], opts: { priority?: boolean } = {})
     if (known) out.set(m, known);
     else misses.push(m);
   }
-  misses.sort();
+  if (!misses.length) return out;
+  const fetched = opts.priority ? await fetchShield(misses, opts) : await shieldBatches(misses);
+  for (const m of misses) {
+    const v = fetched.get(m);
+    if (v) out.set(m, v);
+  }
+  return out;
+}
+
+async function fetchShield(mints: string[], opts: { priority?: boolean } = {}): Promise<Map<string, ShieldVerdict>> {
+  const out = new Map<string, ShieldVerdict>();
+  const misses = [...new Set(mints)].sort();
   for (let i = 0; i < misses.length; i += 100) {
     const batch = misses.slice(i, i + 100);
     const hit = await memo<Record<string, ShieldWarning[]>>(`jup:shield:${batch.join(',')}`, TTL_SHIELD, async () => {
@@ -383,6 +488,8 @@ export async function shield(mints: string[], opts: { priority?: boolean } = {})
   }
   return out;
 }
+
+const shieldBatches = coalescer<ShieldVerdict>((mints) => fetchShield(mints));
 
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 

@@ -52,7 +52,7 @@ export function LiveTrades({
               {t.side === 'buy' ? 'BUY' : 'SELL'}
             </span>
             <span className="w-20 text-white/90">{t.solAmount.toFixed(3)}</span>
-            {/* Raydium LaunchLab trades arrive over a LOG subscription, which
+            {/* Raydium LaunchLab, AMM v4 and CPMM trades arrive over a LOG subscription, which
                 carries no account list — so those ticks genuinely have no
                 trader. Render the unknown as an em dash and drop the link,
                 rather than shipping a button to solscan/account/<nothing>. */}
@@ -67,7 +67,7 @@ export function LiveTrades({
             ) : (
               <span
                 className="flex-1 text-left text-krypt-muted/50"
-                title="This launchpad publishes trades as logs, which carry no trader address"
+                title="This rail publishes trades as logs, which carry no trader address (Raydium LaunchLab, AMM v4 and CPMM)"
               >
                 —
               </span>

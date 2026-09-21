@@ -251,7 +251,13 @@ async function poolListing(network: GtNetwork, key: string, path: string, ttlMs:
         network,
       });
     }
-    return mapped.length ? mapped : null;
+    // An EMPTY page the route answered is an answer, and is cached like any
+    // other; `null` is only for a request that failed. Returning null here
+    // made every empty listing (a quiet dex, a network with no new pools)
+    // a request on every Discover pass — measured 2026-09-20 in the
+    // call-count harness, where the four listings were re-asked each pass
+    // and pushed the columns seconds apart.
+    return mapped;
   });
 }
 
@@ -292,7 +298,13 @@ export async function newPoolsOn(network: GtNetwork, pages = 2): Promise<NewPool
           sells5m: t5?.sells ?? null,
         });
       }
-      return mapped.length ? mapped : null;
+      // An EMPTY page the route answered is an answer, and is cached like any
+    // other; `null` is only for a request that failed. Returning null here
+    // made every empty listing (a quiet dex, a network with no new pools)
+    // a request on every Discover pass — measured 2026-09-20 in the
+    // call-count harness, where the four listings were re-asked each pass
+    // and pushed the columns seconds apart.
+    return mapped;
     });
     if (!rows?.length) break;
     out.push(...rows);
@@ -322,8 +334,23 @@ export function isCurveDex(dexId: string): boolean {
  * One request, cached — the free tier's ~30/min budget is shared with the
  * chart, so this must not be called per row.
  */
+/**
+ * Per-dex memo windows, deliberately UNEQUAL. The three per-dex listings
+ * and `new_pools` are asked together on the first Discover pass, and with
+ * one shared TTL they expired together and were re-asked together: four
+ * requests inside eight seconds every minute, which GeckoTerminal answered
+ * with a 429 on 2026-09-20 at a mere five calls a minute overall — its
+ * limiter is on the burst, not the minute. Staggered, the four spread out
+ * to roughly one every fifteen seconds.
+ */
+const DEX_LISTING_TTL_MS: Record<string, number> = {
+  'raydium-launchlab': 60_000,
+  'boop-fun': 75_000,
+  'meteora-dbc': 90_000,
+};
+
 export async function poolsForDex(dexId: string, page = 1): Promise<NewPool[]> {
-  const hit = await memo<NewPool[]>(`gt:dexpools:${dexId}:${page}`, 60_000, async () => {
+  const hit = await memo<NewPool[]>(`gt:dexpools:${dexId}:${page}`, DEX_LISTING_TTL_MS[dexId] ?? 60_000, async () => {
     const r = await getJson<NewPoolsResponse>(
       'geckoterminal',
       `/api/v2/networks/solana/dexes/${encodeURIComponent(dexId)}/pools?page=${page}`,
@@ -350,7 +377,13 @@ export async function poolsForDex(dexId: string, page = 1): Promise<NewPool[]> {
         sells5m: t5?.sells ?? null,
       });
     }
-    return mapped.length ? mapped : null;
+    // An EMPTY page the route answered is an answer, and is cached like any
+    // other; `null` is only for a request that failed. Returning null here
+    // made every empty listing (a quiet dex, a network with no new pools)
+    // a request on every Discover pass — measured 2026-09-20 in the
+    // call-count harness, where the four listings were re-asked each pass
+    // and pushed the columns seconds apart.
+    return mapped;
   });
   return hit ?? [];
 }

@@ -1,4 +1,4 @@
-// src/panels/layout.ts — where My Layout's panels sit.
+// src/panels/layout.ts — where Widgets's panels sit.
 //
 // This exists because of a real regression: a panel switched ON appeared as a
 // tiny box and stayed one. react-grid-layout falls back to a 1x1 box for any

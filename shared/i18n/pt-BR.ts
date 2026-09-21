@@ -29,10 +29,10 @@ export const ptBR: Catalogue = {
   'nav.execution': 'Execução',
   'nav.backtest': 'Backtest',
   'nav.history': 'Histórico',
-  'nav.rewardPools': 'Pools de recompensa',
+  'nav.guides': 'Guias',
   'nav.walletScout': 'Rastreio de carteiras',
   'nav.launchToken': 'Lançar um token',
-  'nav.myLayout': 'Meu layout',
+  'nav.widgets': 'Widgets',
   'nav.settings': 'Configurações',
   'nav.about': 'Sobre',
   'nav.legal': 'Jurídico',
@@ -82,7 +82,7 @@ export const ptBR: Catalogue = {
   'onboarding.everythingUnderSettings': 'Está tudo em Configurações',
   'onboarding.getStarted': 'Começar',
 
-  'waiver.hold': 'Mantenha {amount} $KRYPTO e esta taxa não é cobrada',
+  'waiver.hold': 'Mantenha {amount} $KRYPTO e esta taxa cai pela metade',
 
   'mode.paper': 'Simulado',
   'mode.live': 'Real',
@@ -104,7 +104,7 @@ export const ptBR: Catalogue = {
   'settings.subtitle': 'Provedores de dados, endpoints RPC, gravação, presença.',
 
   'settings.theme': 'Tema',
-  'settings.themeHint': 'Muda apenas a cor de destaque. O verde de alta, o vermelho de baixa e o dourado do dinheiro continuam iguais.',
+  'settings.themeHint': 'Escolha um visual — fontes, superfícies, cantos, efeitos — e depois uma cor de destaque. O verde de alta, o vermelho de baixa e o dourado do dinheiro continuam iguais.',
   'settings.replay': 'Rever a introdução',
   'settings.replayHint': 'Mostra as telas de primeira execução novamente. Nada é redefinido — suas carteiras, chaves e configurações não são tocadas.',
   'onboarding.appearance': 'Idioma e cor',

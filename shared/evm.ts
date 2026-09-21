@@ -264,10 +264,13 @@ export function evmFeesEnabled(): boolean {
 }
 
 /** Split the fee on a trade of `basisWei` (native in for a buy, native out
- *  for a sell). The referrer's cut comes out of Krypt's share. */
-export function splitEvmFee(basisWei: bigint, hasReferrer: boolean): EvmFeeSplit {
+ *  for a sell). The referrer's cut comes out of Krypt's share. `bps` is the
+ *  rate: the ordinary one unless the caller says otherwise (a $KRYPTO holder
+ *  pays half — shared/krypto.ts), and never MORE than the ordinary one. */
+export function splitEvmFee(basisWei: bigint, hasReferrer: boolean, bps: number = EVM_FEE_BPS): EvmFeeSplit {
   if (!evmFeesEnabled() || basisWei <= 0n) return ZERO_EVM_SPLIT;
-  const total = (basisWei * BigInt(EVM_FEE_BPS)) / 10_000n;
+  const rate = Number.isFinite(bps) && bps > 0 && bps <= EVM_FEE_BPS ? Math.floor(bps) : EVM_FEE_BPS;
+  const total = (basisWei * BigInt(rate)) / 10_000n;
   if (total < EVM_MIN_FEE_WEI) return ZERO_EVM_SPLIT;
   const referrer = hasReferrer ? (total * BigInt(EVM_REFERRAL_SHARE_BPS)) / 10_000n : 0n;
   return { totalWei: total, treasuryWei: total - referrer, referrerWei: referrer };

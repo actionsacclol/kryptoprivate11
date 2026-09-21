@@ -17,6 +17,7 @@ import {
   referralPctLabel,
   feesEnabled,
 } from './.fees.mjs';
+import { holderFeePctLabel } from './.fees.mjs';
 
 let passed = 0;
 function ok(name, fn) {
@@ -49,6 +50,19 @@ ok('a referrer takes 20% of the fee, not 20% of the trade', () => {
   assert.equal(s.totalLamports, 5_000_000, 'the user still pays 0.5% total');
   assert.equal(s.referrerLamports, 1_000_000, '0.1% of the trade');
   assert.equal(s.treasuryLamports, 4_000_000);
+});
+
+ok('a $KRYPTO holder pays half, and the referrer still earns — half', () => {
+  // 25 bps is what shared/krypto.ts hands the signer for a holder.
+  const s = splitFee(SOL, true, 25);
+  assert.equal(s.totalLamports, 2_500_000, '0.25 % of the trade');
+  assert.equal(s.referrerLamports, 500_000, '20 % of the halved fee: 0.05 % of the trade, not zero');
+  assert.equal(s.treasuryLamports, 2_000_000);
+  assert.equal(splitFee(SOL, false, 25).treasuryLamports, 2_500_000);
+  // The rate can only go DOWN from the ordinary one: a caller asking for
+  // more than FEE_BPS gets FEE_BPS, never a surcharge.
+  assert.equal(splitFee(SOL, false, 500).totalLamports, 5_000_000);
+  assert.equal(holderFeePctLabel(), '0.25%');
 });
 
 ok('a referral never costs the user more', () => {

@@ -39,7 +39,9 @@ import {
   type SwapSpeed,
 } from '@shared/swap';
 import * as feeEstimator from './feeEstimator';
-import { activeTreasury, feesEnabled, looksLikeSolAddress, splitFee, treasuryIntegrity } from '@shared/fees';
+import { FEE_BPS, activeTreasury, feesEnabled, looksLikeSolAddress, splitFee, treasuryIntegrity } from '@shared/fees';
+import { holderFeeBps, holderRateApplies } from '@shared/krypto';
+import { usableTokens as kryptoUsableTokens } from './kryptoHolding';
 import * as wallet from '../system/wallet';
 import { logger } from '../system/logger';
 import { buildPairSwap, quoteSellLamports } from './jupiterRoute';
@@ -382,7 +384,10 @@ export async function quote(draft: SwapDraft, deps: SwapDeps): Promise<SwapQuote
   if (!built.ok || !built.outAmount) return { ok: false, message: built.message };
 
   const fee = await feeFor(draft.inputMint, draft.outputMint, inRaw, built.solValueLamports);
-  const split = splitFee(fee.lamports, false);
+  // The same rate the execution below charges: a $KRYPTO holder pays half
+  // (shared/krypto.ts). Found 2026-09-20: this path had never asked about the
+  // holding, so the card said "waived" over a quote that was priced in full.
+  const split = splitFee(fee.lamports, false, holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens())));
   return {
     ok: true,
     message: built.message,
@@ -466,7 +471,7 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
   const treasury = treasuryIntegrity().treasury;
   const referrer = deps.referrer.trim();
   const hasReferrer = looksLikeSolAddress(referrer) && referrer !== treasury && referrer !== owner && !!treasury;
-  const split = treasury && fee.lamports > 0 ? splitFee(fee.lamports, hasReferrer) : { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
+  const split = treasury && fee.lamports > 0 ? splitFee(fee.lamports, hasReferrer, holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens()))) : { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
 
   let tx = built.tx;
   const planned: PlannedTransfer[] = [];

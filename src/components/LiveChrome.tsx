@@ -46,7 +46,7 @@ export const SidebarLive = memo(function SidebarLive({
     if (!settings.evm.bnb.enabled) out.add('walletbnb');
     return out;
   }, [settings.evm.robinhood.enabled, settings.evm.bnb.enabled]);
-  // My Layout's menu is whatever the user pinned, so it is state rather than
+  // Widgets's menu is whatever the user pinned, so it is state rather than
   // a fixed list. Read here — this component already re-renders on its own,
   // away from the root.
   const [pinned, setPinned] = useState<RouteId[]>(loadPinned);

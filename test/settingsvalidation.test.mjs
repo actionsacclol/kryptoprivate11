@@ -267,6 +267,23 @@ console.log('settingsvalidation: all tests passed');
   assert.equal(v({ strategy: { runnerAlerts: { maxPerHour: 12 } } }).ok, true);
   assert.equal(v({ strategy: { runnerAlerts: { minBucket: 'bogus' } } }).ok, false);
   assert.equal(v({ strategy: { runnerAlerts: { minBucket: 'top1' } } }).ok, true);
+  // The user's own runner filters (2026-09-20): bounded, enumerated, and —
+  // the part that bit once — PRESENT in the defaults. The validator drops any
+  // key the defaults lack, and "Skip mixed curves" saved as nothing for a day
+  // because excludeMixed was not there.
+  {
+    const all = { excludeMixed: true, windows: '120', minBuyers: 8, minNetSol: 2.5, minCurvePct: 5, maxCurvePct: 60, skipRepeatDumpers: true };
+    const r = v({ strategy: { runnerAlerts: all } });
+    assert.equal(r.ok, true, r.message);
+    assert.deepEqual(r.patch.strategy.runnerAlerts, all, 'every runner filter survives the validator');
+  }
+  assert.equal(v({ strategy: { runnerAlerts: { windows: 'sometimes' } } }).ok, false, 'window enum');
+  assert.equal(v({ strategy: { runnerAlerts: { minBuyers: -1 } } }).ok, false);
+  assert.equal(v({ strategy: { runnerAlerts: { minBuyers: 2.5 } } }).ok, false, 'whole buyers');
+  assert.equal(v({ strategy: { runnerAlerts: { minNetSol: -0.1 } } }).ok, false);
+  assert.equal(v({ strategy: { runnerAlerts: { minCurvePct: 101 } } }).ok, false);
+  assert.equal(v({ strategy: { runnerAlerts: { maxCurvePct: 100 } } }).ok, true, 'the "no bound" default is on the bound');
+  assert.equal(v({ strategy: { runnerAlerts: { skipRepeatDumpers: 'yes' } } }).ok, false, 'a boolean');
   // Four levels deep — the EVM chains' runner alerts. Until 2026-09-11 the
   // walk stopped one level short and every one of these saved.
   for (const chain of ['robinhood', 'bnb']) {

@@ -99,7 +99,15 @@ field, event and sandbox method and nothing else.
 
 `launchUpdate` reaches a script at most once per 2 s per token; the event
 queue is capped at 50 with launch chatter dropped first. Events for one script
-run one at a time. Three examples ship in the editor (buy strong launches,
+run one at a time. A launch is fully tracked (flow, launch updates) while the
+strategy evaluates it — 15 s by default — and after that only while something
+still needs it: a position holds it, the scanner flagged it as a runner (15 min
+from the flag), or a tape subscription exists (the terminal chart, or the
+script's `bot.subscribe(mint)` / `bot.watch(mint)`). Before 2026-09-20 the
+decision ended the updates outright, so a script subscribed to a flagged
+runner saw price ticks and never another `launchUpdate` (user report). The
+score is fixed at decision time; the flow fields move. `bot.token(mint)` reads
+the same row. Three examples ship in the editor (buy strong launches,
 trailing exit, runner alert to watchlist).
 
 ## Files
@@ -153,3 +161,71 @@ Disarming, the kill switch, or a newer start all cancel a pending retry.
   (feed row, last-known, tape) — a holding the engine never saw priced reads as
   unknown, and a rule on it does not fire.
 - No script-level backtest; paper mode against the live feed is the test.
+
+## Links, security, creator and the AI opinion (2026-09-20)
+
+A user screening runners asked how a script could check the project's X
+account or website. The honest answer was that the terminal never reads
+either — it classifies the link, spots the same account behind several
+launches, and hands the AI public chain facts plus which socials exist —
+and that none of it reached Scripts. Now it does, on the rule that any data
+the app has, a script may have.
+
+**Variables** (scope `market`, Solana only — the EVM host answers cap and
+liquidity and nothing else, and an absent field stays null): the rest of the
+provider summary — `kryptScore`, `bondingCurvePct`, `devHoldingPct`,
+`top10Pct`, `insiderPct`, `bundledPct`, `sniperPct`, `smartHolders`,
+`volume5mUsd`, `buys5m`, `sells5m`, `priceChange5mPct` — and the links:
+`hasTwitter`, `hasWebsite`, `hasTelegram`, `dexPaid`, the URLs `twitter`,
+`website`, `telegram` (never visited by the app), `xLinkKind` (profile · post
+· community · search · other-x · not-x · none), `xHandle`, and `xReuseCount`
+(other launches in view on the same account or post — a farm from outside;
+null when not counted, never 0). "No provider answered for socials" leaves
+every link field null; a provider that answered with no links is a real
+"none" (false / null). `marketFactsFromSummary` in shared/automation.ts is
+the one mapping, so the cached read and the fetched read agree.
+
+**Methods**: `bot.links(mint)` (free — cached facts, the launchpad page and
+the X classification with reuse counts; null until something is cached),
+`bot.security(mint)` (the token page's security report; a round trip, costs
+an action), `bot.creator(mint)` (the creator wallet's pump.fun record; a
+round trip, costs an action), `bot.analyze(mint)` (the AI second opinion;
+spends the user's own key on an uncached call, so: an action, 20 per hour per
+script, cached 10 minutes per token, the slot taken before the await so a
+burst cannot all spend, refused with the reason when AI is off). All four
+are Solana-only; on an EVM script they answer null / reject.
+
+Later the same day, the off-chain face got its numbers — each from a
+source a person could check, none fetched by crawling (see
+docs/links-panel-2026-09-20.md): `xFollowers`, `xFollowing`,
+`xVerified`, `xLikes`, `xReposts`, `xReplies`, `xViews`,
+`xStatsAgeSec` (read off the X page in the Links panel when a person
+opened it there); `tgMembers`, `tgOnline`, `tgKind` (Telegram's public
+preview at t.me, fetched by main when a person or a script asks about the
+token — a private invite shows no count); `domainAgeDays`,
+`domainHostedOn` (the website domain's registry record over RDAP, or the
+shared platform the site sits on); `siteNamesContract`, `siteLinksX`,
+`siteOutboundHosts`, `siteMentionsConnectWallet` (what the website says
+about itself, read off the page in the Links panel). `bot.links(mint)`
+carries the same as `x.stats`, `telegramStats`, `domain` and `site`.
+Every one is null until looked up or read — a script that wants them for a
+coin nobody opened calls `bot.links(mint)` once, which starts the Telegram
+and domain lookups (60 an hour each), and reads them on a later tick.
+
+What is deliberately NOT there: the site's traffic (no free source
+publishes it; a number would be a guess) and any verdict — the variables
+are what the pages say, and the judgement is the script's.
+
+Pinned in test/automation.test.mjs: the fields and their Solana-only scope,
+the summary→facts mapping with X classification, `bot.links` from a summary,
+links free vs security/creator charged vs analyze capped at 20 with the host
+asked exactly 20 times, an AI refusal reaching the script as a reason, and
+the four methods in SCRIPT_METHODS and the API table (the prompt-pack parity
+test covers the docs).
+
+## The page's shape (2026-09-20)
+
+One top bar, three views — My scripts, New, Reference — with the arm switch,
+Save and Delete in a header card above the editor, New on its own view, and
+the AI prompt / bot API / variable guide / examples under Reference. See
+docs/scripts-page-2026-09-20.md.

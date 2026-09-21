@@ -8,6 +8,7 @@ import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
 import { SwitchToPaper } from '../components/SwitchToPaper';
 import { EvmWalletPanel } from '../components/terminal/EvmWalletPanel';
+import { WalletRewards } from '../components/terminal/WalletRewards';
 import { HoldingsSection } from './Positions';
 import { EVM_CHAIN_META, type EvmChainKind } from '@shared/evm';
 import type { LiveState, WalletInfo, WalletSummary } from '@shared/types';
@@ -839,6 +840,10 @@ export function EvmWalletPage({ chain }: { chain: EvmChainKind }) {
       subtitle={`One hot wallet for the EVM chains — the same key is the same address on each. Balances, Paper/Live, holdings and fills below are ${meta.shortName}'s.`}
     >
       <EvmWalletPanel only={chain} />
+      {/* What reward pools on this chain paid this wallet (2026-09-20: moved
+          here from the Rewards page, which became Guides). Nothing is sent
+          until the button is pressed. */}
+      <WalletRewards chain={chain} />
     </Page>
   );
 }

@@ -30,6 +30,7 @@
 //    so `looksAutomated` marks them rather than quietly ranking them.
 
 import type { EvmChainKind } from './evm';
+import { scoreWallet, type WalletFlag, type WalletScore } from './walletScore';
 
 /** Solana plus the EVM chains — the Scout runs one book per chain. */
 export type ScoutChain = 'solana' | EvmChainKind;
@@ -124,6 +125,37 @@ export interface ScoutDay {
   pnl: number;
   /** Native put into positions this day. */
   volume: number;
+  /**
+   * What a FOLLOWER would have got (2026-09-20, shared/walletScore.ts): trips
+   * closed this day where a copy could fill both legs at the lag, how many
+   * closed up, and each one's net return %. Optional because records written
+   * before this existed have none — absent is "not measured", never zero.
+   */
+  fTrips?: number;
+  fWins?: number;
+  fReturns?: number[];
+  /** Trips closed this day a follower could NOT have been inside: the leader
+   *  was out before a fill, or no print ever came to fill at. */
+  unreachable?: number;
+  /** Trips that opened and closed inside COPY_LATENCY_FLOOR (60 s). */
+  fast?: number;
+  /** Trips closed since the follower model existed — the denominator for
+   *  `fast`. Records from before it have none, and read as unmeasured. */
+  measured?: number;
+}
+
+/** One of a wallet's recent closed trips, for the detail drawer. */
+export interface ScoutTrip {
+  mint: string;
+  openedAt: number;
+  closedAt: number;
+  /** Native the wallet put in and took out. */
+  cost: number;
+  pnl: number;
+  holdMs: number;
+  /** The follower's net return on this trip, %, or null with why. */
+  followerReturnPct: number | null;
+  followerNote: 'filled' | 'too-fast' | 'no-entry' | 'no-exit';
 }
 
 export interface ScoutWallet {
@@ -142,6 +174,10 @@ export interface ScoutWallet {
    * whose median hold is two seconds is a bot.
    */
   medianHoldMs: number | null;
+  /** Distinct mints traded (a floor once the record's cap is reached). */
+  distinctMints?: number;
+  /** Newest first, capped. */
+  recentTrips?: ScoutTrip[];
 }
 
 /** A wallet's record over ONE window. Every field is measured. */
@@ -169,17 +205,40 @@ export interface ScoutRow {
    * person clicking a button. Marked, never silently ranked above a human.
    */
   looksAutomated: boolean;
+
+  // ── What a follower would have got (2026-09-20) ────────────────────
+  /** Trips a copy could have mirrored at the lag, both legs filled. */
+  fTrips: number;
+  /** Median follower net return over those, %. Null under five. */
+  fMedianReturnPct: number | null;
+  fWinRatePct: number | null;
+  /** fTrips ÷ judged trips, %, where judged = filled + unreachable (a trip
+   *  still waiting for its exit print is neither). Null when nothing has
+   *  been judged — a record from before the follower model is not 0 %. */
+  reachablePct: number | null;
+  /** Trips judged so far: the denominator behind `reachablePct`. */
+  judgedTrips: number;
+  /** Share of measured trips that opened and closed inside a minute, %. */
+  fastPct: number | null;
+  activeDays: number;
+  distinctMints: number;
+  /** The Copy score, 0..100 — least-bad to follow, never an edge. */
+  copyScore: number | null;
+  flags: WalletFlag[];
 }
 
-export type ScoutSort = 'pnl' | 'returnPct' | 'winRatePct' | 'roundTrips' | 'volume';
+export type ScoutSort = 'copyScore' | 'pnl' | 'returnPct' | 'winRatePct' | 'roundTrips' | 'volume' | 'fMedianReturnPct';
 
 export const SCOUT_SORT_LABEL: Record<ScoutSort, string> = {
-  pnl: 'Profit',
-  returnPct: 'Return %',
-  winRatePct: 'Win rate',
+  copyScore: 'Copy score',
+  fMedianReturnPct: 'Follower return',
+  pnl: 'Their profit',
+  returnPct: 'Their return',
+  winRatePct: 'Their win rate',
   roundTrips: 'Round trips',
   volume: 'Volume',
 };
+export const SCOUT_SORTS: ScoutSort[] = ['copyScore', 'fMedianReturnPct', 'pnl', 'returnPct', 'winRatePct', 'roundTrips', 'volume'];
 
 /**
  * The id a trade is remembered by, so the live feed and a manual scan agree
@@ -224,6 +283,39 @@ export function summarise(w: ScoutWallet, window: ScoutWindow, now = Date.now())
   const pnl = sum((d) => d.pnl);
   const ranked = roundTrips >= MIN_TRIPS_FOR_RANK;
 
+  // The follower's side of the same days.
+  const fTrips = sum((d) => d.fTrips ?? 0);
+  const fWins = sum((d) => d.fWins ?? 0);
+  const fast = sum((d) => d.fast ?? 0);
+  const unreachable = sum((d) => d.unreachable ?? 0);
+  const measured = sum((d) => d.measured ?? 0);
+  const fReturns = days.flatMap((d) => d.fReturns ?? []).sort((a, b) => a - b);
+  const fMedianReturnPct = fTrips >= MIN_TRIPS_FOR_RANK && fReturns.length ? fReturns[Math.floor(fReturns.length / 2)] : null;
+  const fWinRatePct = fTrips >= MIN_TRIPS_FOR_RANK ? (fWins / fTrips) * 100 : null;
+  // Judged = filled or unreachable. A trip waiting for its exit print is
+  // neither, and a record from before the model has none — both are "not
+  // measured", never "0 % reachable".
+  const judgedTrips = fTrips + unreachable;
+  const reachablePct = judgedTrips > 0 ? (fTrips / judgedTrips) * 100 : null;
+  const fastPct = measured > 0 ? Math.min(100, (fast / measured) * 100) : null;
+  const activeDays = days.filter((d) => d.buys + d.sells > 0).length;
+  // 'all' spans the record itself; a one-day window has no span to judge.
+  const windowDays = span === null ? Math.max(1, today - dayOf(w.firstSeen) + 1) : span;
+  const distinctMints = w.distinctMints ?? 0;
+  const automated = looksAutomated(w.medianHoldMs, roundTrips);
+  const scored = scoreWallet({
+    roundTrips,
+    fTrips,
+    fMedianReturnPct,
+    fWinRatePct,
+    reachablePct,
+    judgedTrips,
+    activeDays,
+    windowDays: windowDays >= 3 ? windowDays : null,
+    distinctMints,
+    looksAutomated: automated,
+  });
+
   return {
     chain: w.chain,
     address: w.address,
@@ -242,7 +334,65 @@ export function summarise(w: ScoutWallet, window: ScoutWindow, now = Date.now())
     medianHoldMs: w.medianHoldMs,
     lastSeen: w.lastSeen,
     ranked,
-    looksAutomated: looksAutomated(w.medianHoldMs, roundTrips),
+    looksAutomated: automated,
+    fTrips,
+    fMedianReturnPct,
+    fWinRatePct,
+    reachablePct,
+    judgedTrips,
+    fastPct,
+    activeDays,
+    distinctMints,
+    copyScore: scored.score,
+    flags: scored.flags,
+  };
+}
+
+/** The score with its checks, for a row already summarised — the drawer. */
+export function scoreOfRow(r: ScoutRow, windowDays: number | null): WalletScore {
+  return scoreWallet({
+    roundTrips: r.roundTrips,
+    fTrips: r.fTrips,
+    fMedianReturnPct: r.fMedianReturnPct,
+    fWinRatePct: r.fWinRatePct,
+    reachablePct: r.reachablePct,
+    judgedTrips: r.judgedTrips,
+    activeDays: r.activeDays,
+    windowDays,
+    distinctMints: r.distinctMints,
+    looksAutomated: r.looksAutomated,
+  });
+}
+
+/** An empty row for a saved wallet with no record yet. */
+export function emptyRow(chain: ScoutChain, address: string, window: ScoutWindow): ScoutRow {
+  return {
+    chain,
+    address,
+    window,
+    buys: 0,
+    sells: 0,
+    roundTrips: 0,
+    wins: 0,
+    losses: 0,
+    pnl: 0,
+    volume: 0,
+    returnPct: null,
+    winRatePct: null,
+    medianHoldMs: null,
+    lastSeen: 0,
+    ranked: false,
+    looksAutomated: false,
+    fTrips: 0,
+    fMedianReturnPct: null,
+    fWinRatePct: null,
+    reachablePct: null,
+    judgedTrips: 0,
+    fastPct: null,
+    activeDays: 0,
+    distinctMints: 0,
+    copyScore: null,
+    flags: ['thin'],
   };
 }
 

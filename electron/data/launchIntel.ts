@@ -21,8 +21,9 @@ import { ataFor, TOKEN_2022_PROGRAM, TOKEN_PROGRAM } from '../chain/addresses';
 import { getMultipleAccountsRaw } from '../chain/rpcClient';
 import * as pf from './providers/pumpfun';
 import * as ps from './providers/pumpswap';
-import { cached, memo } from './http';
+import { cached, memo, putCache } from './http';
 import * as onchain from './onchain';
+import * as pumpChain from './pumpChain';
 import {
   analyseLaunch,
   applyBalances,
@@ -172,8 +173,57 @@ interface Located {
  */
 const coinForIntel = pf.coinForIntel;
 
-async function locate(mint: string): Promise<{ located: Located | null; note: string }> {
-  const coin = await coinForIntel(mint);
+/**
+ * How `locate` may find the coin record.
+ *
+ * `buy: false` is the Discover rule (2026-09-20): a list of forty rows must
+ * never buy `/coins/{mint}` one at a time — that was ten pump.fun calls a
+ * pass once the columns' rows came from the feed instead of from a list
+ * whose records were already cached. Without buying, the record is built
+ * from the chain read the column just made (data/pumpChain, still in its
+ * cache) plus the creation time and creator the row already carries. A
+ * single-mint caller (the token page) leaves `buy` alone.
+ */
+interface LocateOpts {
+  buy?: boolean;
+  hint?: { createdAt: number | null; creator: string | null };
+}
+
+const CHAIN_COIN_TTL_MS = 30_000;
+
+/** A pump.fun-shaped record from the chain's own facts. `program: 'pump'`
+ *  is not a guess: a bonding-curve account exists only for a pump launch. */
+function coinFromChain(c: pumpChain.PumpChainCoin, hint: LocateOpts['hint']): pf.PumpCoin {
+  return {
+    mint: c.mint,
+    name: c.name ?? undefined,
+    symbol: c.symbol ?? undefined,
+    creator: c.curve.creator ?? hint?.creator ?? undefined,
+    created_timestamp: hint?.createdAt ?? undefined,
+    complete: c.curve.complete,
+    virtual_sol_reserves: Number(c.curve.vSol),
+    virtual_token_reserves: Number(c.curve.vTok),
+    real_sol_reserves: Number(c.curve.realSol),
+    total_supply: Number(c.supplyRaw),
+    base_decimals: c.decimals,
+    program: 'pump',
+    token_program: c.tokenProgram,
+  };
+}
+
+async function coinFor(mint: string, opts: LocateOpts): Promise<pf.PumpCoin | null> {
+  const known = pf.coinIdentityIfCached(mint) ?? cached<pf.PumpCoin>(`li:chaincoin:${mint}`);
+  if (known) return known;
+  if (opts.buy !== false) return coinForIntel(mint);
+  const chain = pumpChain.readIfCached(mint);
+  if (!chain) return null;
+  const coin = coinFromChain(chain, opts.hint);
+  putCache(`li:chaincoin:${mint}`, coin, CHAIN_COIN_TTL_MS);
+  return coin;
+}
+
+async function locate(mint: string, opts: LocateOpts = {}): Promise<{ located: Located | null; note: string }> {
+  const coin = await coinFor(mint, opts);
   if (!coin) {
     return {
       located: null,
@@ -418,7 +468,7 @@ function priorLaunches(
  */
 export async function rugReportFor(
   mint: string,
-  opts?: { creator?: string | null; createdAt?: number | null; dev?: DevRecord; creatorLookup?: boolean },
+  opts?: { creator?: string | null; createdAt?: number | null; dev?: DevRecord; creatorLookup?: boolean; buyCoin?: boolean },
 ): Promise<{ rug: RugReport | null; volatility: VolatilityNote[]; top3Pct: number | null } | null> {
   // `dev` is the creator record the caller already holds (Jupiter's batched
   // audit block, free on every row). `creatorLookup: false` says "and do NOT
@@ -428,13 +478,14 @@ export async function rugReportFor(
   // leaves it alone and gets both floors.
   const dev = opts?.dev ?? null;
   const lookup = opts?.creatorLookup !== false;
+  const loc: LocateOpts = { buy: opts?.buyCoin !== false, hint: { createdAt: opts?.createdAt ?? null, creator: opts?.creator ?? null } };
   try {
     // A caller that already knows the creation time (every Discover row does)
     // lets the age gate run with NO request at all.
     if (typeof opts?.createdAt === 'number' && Number.isFinite(opts.createdAt)) {
       const ageS = (Date.now() - opts.createdAt) / 1000;
       if (ageS < RUG_WINDOW_S) return { rug: null, volatility: [], top3Pct: null };
-      const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null, dev, lookup));
+      const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null, dev, lookup, loc));
       return r;
     }
     // The rules were measured at +60 s. Judging a 7-second-old launch — when
@@ -442,11 +493,11 @@ export async function rugReportFor(
     // nothing is judged before the window exists (Discover shows no badge
     // rather than a wrong one). `locate` is memoised, so this pre-check is
     // free and, unlike the 90 s memo below, re-asks every refresh until 60 s.
-    const { located } = await locate(mint);
+    const { located } = await locate(mint, loc);
     if (!located) return null;
     const ageS = (Date.now() - located.createdAt) / 1000;
     if (Number.isFinite(ageS) && ageS < RUG_WINDOW_S) return { rug: null, volatility: [], top3Pct: null };
-    const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null, dev, lookup));
+    const r = await memo<RugIntel>(`rug:${mint}`, RUG_TTL_MS, () => buildRug(mint, opts?.creator ?? null, dev, lookup, loc));
     // Launch-window rules describe launches NOT yet graduated; a token that
     // has completed its curve is outside that population. Keep the
     // concentration facts, drop the verdict.
@@ -462,8 +513,9 @@ async function buildRug(
   creatorHint: string | null,
   dev: DevRecord | null,
   lookupCreator: boolean,
+  loc: LocateOpts = {},
 ): Promise<RugIntel | null> {
-  const { located } = await locate(mint);
+  const { located } = await locate(mint, loc);
   if (!located) return null;
   const { coin, createdAt } = located;
   const creator = located.creator ?? creatorHint;
@@ -655,29 +707,30 @@ export function oddsCreateSlot(trades: readonly { slot: number }[], complete: bo
  */
 export async function oddsFor(
   mint: string,
-  opts?: { creator?: string | null; createdAt?: number | null },
+  opts?: { creator?: string | null; createdAt?: number | null; buyCoin?: boolean },
 ): Promise<OddsReport | null> {
+  const loc: LocateOpts = { buy: opts?.buyCoin !== false, hint: { createdAt: opts?.createdAt ?? null, creator: opts?.creator ?? null } };
   try {
     if (typeof opts?.createdAt === 'number' && Number.isFinite(opts.createdAt)) {
       const w = oddsWindowForAge((Date.now() - opts.createdAt) / 1000);
       if (w === null) return null;
-      return await memo<OddsReport | null>(`odds:${w}:${mint}`, RUG_TTL_MS, () => buildOdds(mint, w, opts?.creator ?? null));
+      return await memo<OddsReport | null>(`odds:${w}:${mint}`, RUG_TTL_MS, () => buildOdds(mint, w, opts?.creator ?? null, loc));
     }
-    const { located } = await locate(mint);
+    const { located } = await locate(mint, loc);
     if (!located) return null;
     if (located.coin.complete === true) return null;
     const windowS = oddsWindowForAge((Date.now() - located.createdAt) / 1000);
     if (windowS === null) return null;
     return await memo<OddsReport>(`odds:${windowS}:${mint}`, ODDS_TTL_MS, () =>
-      buildOdds(mint, windowS, opts?.creator ?? null),
+      buildOdds(mint, windowS, opts?.creator ?? null, loc),
     );
   } catch {
     return null;
   }
 }
 
-async function buildOdds(mint: string, windowS: OddsWindow, creatorHint: string | null): Promise<OddsReport | null> {
-  const { located } = await locate(mint);
+async function buildOdds(mint: string, windowS: OddsWindow, creatorHint: string | null, loc: LocateOpts = {}): Promise<OddsReport | null> {
+  const { located } = await locate(mint, loc);
   if (!located) return null;
   const { coin, createdAt } = located;
   const creator = located.creator ?? creatorHint;

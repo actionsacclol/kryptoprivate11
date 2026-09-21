@@ -29,10 +29,10 @@ export const vi: Catalogue = {
   'nav.execution': 'Thực thi',
   'nav.backtest': 'Backtest',
   'nav.history': 'Lịch sử',
-  'nav.rewardPools': 'Quỹ thưởng',
+  'nav.guides': 'Hướng dẫn',
   'nav.walletScout': 'Dò ví',
   'nav.launchToken': 'Phát hành token',
-  'nav.myLayout': 'Bố cục của tôi',
+  'nav.widgets': 'Tiện ích',
   'nav.settings': 'Cài đặt',
   'nav.about': 'Giới thiệu',
   'nav.legal': 'Pháp lý',
@@ -82,7 +82,7 @@ export const vi: Catalogue = {
   'onboarding.everythingUnderSettings': 'Mọi thứ đều nằm trong Cài đặt',
   'onboarding.getStarted': 'Bắt đầu',
 
-  'waiver.hold': 'Giữ {amount} $KRYPTO để được miễn phí này',
+  'waiver.hold': 'Giữ {amount} $KRYPTO để giảm một nửa phí này',
 
   'mode.paper': 'Mô phỏng',
   'mode.live': 'Thật',
@@ -104,7 +104,7 @@ export const vi: Catalogue = {
   'settings.subtitle': 'Nguồn dữ liệu, điểm cuối RPC, ghi hình, trạng thái.',
 
   'settings.theme': 'Giao diện',
-  'settings.themeHint': 'Chỉ thay đổi màu nhấn. Màu xanh cho tăng, đỏ cho giảm và vàng cho mọi thứ liên quan đến tiền vẫn giữ nguyên.',
+  'settings.themeHint': 'Chọn một diện mạo — phông chữ, bề mặt, góc bo, hiệu ứng — rồi chọn màu nhấn. Màu xanh cho tăng, đỏ cho giảm và vàng cho mọi thứ liên quan đến tiền vẫn giữ nguyên.',
   'settings.replay': 'Xem lại hướng dẫn',
   'settings.replayHint': 'Hiển thị lại các màn hình khởi chạy đầu tiên. Không có gì bị đặt lại — ví, khóa và cài đặt của bạn không bị ảnh hưởng.',
   'onboarding.appearance': 'Ngôn ngữ và màu sắc',

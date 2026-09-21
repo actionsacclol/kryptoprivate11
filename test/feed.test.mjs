@@ -323,7 +323,9 @@ const stubPool = () => ({ onNotification: () => {}, onSocketState: () => {}, onS
     encoding: 'base64',
     transactionDetails: 'full',
     showRewards: false,
-    maxSupportedTransactionVersion: 0,
+    // v1 (SIMD-0385) since 2026-09-15: a block holding one v1 transaction is
+    // refused whole to a subscriber that only takes v0.
+    maxSupportedTransactionVersion: 1,
   });
   // -32601 is exactly what Helius free answers: loud, then backoff.
   assert.ok(await waitFor(() => r.subErrors.length === 1));

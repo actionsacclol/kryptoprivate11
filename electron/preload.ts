@@ -68,6 +68,26 @@ const api = {
   backtest: {
     dataset: () => ipcRenderer.invoke('backtest:dataset'),
   },
+  // $KRYPTO: what this install holds of it, and whether that waives Krypt's
+  // fee. A cached reading unless `refresh` is true, which is the Hub card's
+  // Scan button — a user action, never a poll. Until 2026-09-19 this entry
+  // did not exist: main answered the channel and global.d.ts declared it,
+  // but every renderer call threw on `window.krypt.krypto` before reaching
+  // IPC, and the Hub card told holders their wallets were "not checked yet"
+  // while their trades were already going out with the fee waived.
+  krypto: {
+    holding: (refresh?: boolean) => ipcRenderer.invoke('krypto:holding', refresh === true),
+  },
+  links: {
+    /** What the Links panel read off a token's X page — kept in main for the scripts. */
+    setXStats: (mint: string, stats: unknown) => ipcRenderer.invoke('links:xstats:set', mint, stats),
+    xStats: (mint: string) => ipcRenderer.invoke('links:xstats:get', mint),
+    /** Telegram members + the website's registry record, looked up by main from the token's own links. */
+    intel: (mint: string, wait = true) => ipcRenderer.invoke('links:intel:get', mint, wait),
+    /** What the Links panel read off the token's own website — kept in main for the scripts. */
+    setSiteRead: (mint: string, read: unknown) => ipcRenderer.invoke('links:site:set', mint, read),
+    siteRead: (mint: string) => ipcRenderer.invoke('links:site:get', mint),
+  },
   rpc: {
     credits: () => ipcRenderer.invoke('rpc:credits'),
     health: () => ipcRenderer.invoke('rpc:health'),
@@ -204,6 +224,7 @@ const api = {
     scan: (chain: string, hours: number) => ipcRenderer.invoke('scout:scan', chain, hours),
     scanStatus: (chain: string) => ipcRenderer.invoke('scout:scanStatus', chain),
     scanCancel: (chain: string) => ipcRenderer.invoke('scout:scanCancel', chain),
+    detail: (chain: string, address: string) => ipcRenderer.invoke('scout:detail', chain, address),
     clear: (chain: string) => ipcRenderer.invoke('scout:clear', chain),
   },
 

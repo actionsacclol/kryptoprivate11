@@ -12,6 +12,14 @@ import { ataFor, bondingCurveFor, bondingCurveV2For, creatorVaultFor, userVolume
   const sys = base58Decode('11111111111111111111111111111111');
   assert.equal(sys.length, 32, 'system program decodes to exactly 32 bytes');
   assert.ok(sys.every((b) => b === 0), 'all zero');
+  // Leading zeros ENCODE too (2026-09-20): the all-zero key came out as
+  // thirty-three ones, so a pool whose coin creator is the system program
+  // never matched the '111…1' constant and re-derived from a 33-byte seed.
+  assert.equal(base58Encode(sys), '11111111111111111111111111111111', 'and encodes back to exactly 32 ones');
+  assert.equal(base58Encode(new Uint8Array([0])), '1');
+  assert.equal(base58Encode(new Uint8Array([0, 0, 1])), '112');
+  assert.equal(base58Encode(new Uint8Array([0, 255])), '15Q');
+  assert.equal(base58Encode(new Uint8Array(0)), '');
   for (const a of [
     '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',
     'So11111111111111111111111111111111111111112',

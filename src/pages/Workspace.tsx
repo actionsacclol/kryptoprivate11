@@ -1,4 +1,4 @@
-// My Layout — the one page the user arranges themselves.
+// Widgets — the one page the user arranges themselves.
 //
 // Everywhere else in this app decides what you see. Here you pick the panels
 // and drag them where you want them, and the arrangement is remembered.
@@ -252,7 +252,7 @@ export function Workspace({ openToken }: { openToken?: (mint: string, chain?: Ch
     <div className="px-6 py-5">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold text-white">My Layout</h1>
+          <h1 className="text-lg font-semibold text-white">Widgets</h1>
           <p className="text-note text-krypt-muted">Pick your panels and drag them where you want. Saved on this machine.</p>
         </div>
 
@@ -305,7 +305,7 @@ export function Workspace({ openToken }: { openToken?: (mint: string, chain?: Ch
           {open === 'pages' && (
             <Picker anchor={pagesBtn.current} panelRef={panelRef} title="Pages in your sidebar" onClose={() => setOpen(null)}>
               <p className="px-2 pb-1 text-body leading-snug text-krypt-muted">
-                Any page from any workspace. Pinned pages appear in the menu on the left while you are in My Layout, and opening one keeps you here.
+                Any page from any workspace. Pinned pages appear in the menu on the left while you are on Widgets, and opening one keeps you here.
               </p>
               {groups.map((g) => (
                 <div key={g.title} className="mt-1">

@@ -55,6 +55,8 @@ const EQUITY_CAP = 900; // ~15 min at 1 point/sec
 export interface EquityPoint {
   t: number;
   v: number;
+  /** Which series this point belongs to: the live wallet change or the paper book. */
+  live: boolean;
 }
 
 interface AppState {
@@ -162,16 +164,28 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     });
     const off = window.krypt.engine.onEvent((ev) => {
       switch (ev.kind) {
-        case 'status':
+        case 'status': {
           gotLive.status = true;
           setStatus(ev.status);
-          if (ev.status.running) {
+          // The series follows the mode: while live, the wallet's change
+          // since the session began (the Observatory's headline, pushed on
+          // every fill and balance read, scanner running or not); otherwise
+          // the paper book's realized while the scanner runs. A mode flip
+          // restarts the series so a paper curve is never joined to a live
+          // one. It used to be the paper line whatever the mode, so a live
+          // session in profit read "Session realised 0.0000" (user report
+          // 2026-09-20).
+          const live = ev.status.liveActive;
+          const v = live ? ev.status.liveRealizedPnlSol : ev.status.running ? ev.status.realizedPnlSol : null;
+          if (typeof v === 'number') {
             setEquity((cur) => {
-              const next = [...cur, { t: Date.now(), v: ev.status.realizedPnlSol }];
+              const base = cur.length && cur[cur.length - 1].live !== live ? [] : cur;
+              const next = [...base, { t: Date.now(), v, live }];
               return next.length > EQUITY_CAP ? next.slice(next.length - EQUITY_CAP) : next;
             });
           }
           break;
+        }
         case 'launch':
         case 'launchUpdate':
           gotLive.launches = true;

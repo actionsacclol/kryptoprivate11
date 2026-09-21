@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as copy from './.copytrade.mjs';
-import { COPY_LATENCY_FLOOR_MS, MIN_TRIPS_FOR_RANK, TOO_FAST_FLAG_PCT, copySize, defaultConfig, emptyLeaderStats, leaderTooFast, leaderWinRate, rankLeaders, validateConfig, winRate } from './.copyshared.mjs';
+import { describeConfig, COPY_LATENCY_FLOOR_MS, FOMO_WALLET, MIN_TRIPS_FOR_RANK, SIMPLE_MAX_SOL, SIMPLE_SIZES, TOO_FAST_FLAG_PCT, chainForAddress, copySize, defaultConfig, emptyLeaderStats, leaderTooFast, leaderWinRate, ownExitsOf, rankLeaders, simpleConfig, validateConfig, winRate } from './.copyshared.mjs';
 
 let passed = 0;
 const cases = [];
@@ -95,6 +95,7 @@ function makeHost(over = {}) {
       return over.buyFill;
     };
   }
+  if (over.host) Object.assign(host, over.host);
   if (over.buyBlockedReason !== undefined) host.buyBlockedReason = () => over.buyBlockedReason;
   if (over.maxLiveSol !== undefined) host.maxLiveSol = () => over.maxLiveSol;
   if (over.leaderHolding !== undefined) {
@@ -2029,6 +2030,442 @@ test('a corrupt pendingExits list does not stop the configs loading', async () =
   copy.attach(makeHost({ priceSol: 0.001 }).host);
   assert.equal(copy.all().length, 1, 'the configs still loaded');
   assert.deepEqual(copy.resumePendingExits(), { fired: 0, expired: 0 });
+});
+
+
+// ── Reverse copying (2026-09-20) ──────────────────────────────────────
+//
+// The contrarian read of the same feed: their SELL is our entry, their BUY
+// is our exit, and because a leader rarely buys the same coin back the
+// position closes on its own terms — take-profit, stop-loss, max hold —
+// judged on the price ticks `markToMarket` already receives. Everything
+// else is the copy path: filters, limits, delay, staleness, paper honesty,
+// the 100 % mirrored sell. Pinned here.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('reverse: their sell opens our position, at the price after the delay; their buy alone opens nothing', async () => {
+  const h = setup({ priceSol: 0.0015 });
+  save({ direction: 'reverse', delayMs: 5 });
+  copy.onWalletTrade(trade({ isBuy: true, priceSol: 0.001, signature: 'rb0' }));
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.filter((t) => t.state === 'open').length, 0, 'a reverse config does not buy when they buy');
+  copy.onWalletTrade(trade({ isBuy: false, sol: 0.8, priceSol: 0.001, soldFraction: 1, signature: 'rs1' }));
+  await sleep(60);
+  const open = copy.snapshot().recent.find((t) => t.state === 'open');
+  assert.ok(open, 'their sell opened our position');
+  assert.equal(open.direction, 'reverse');
+  assert.equal(open.entryPriceSol, 0.0015, 'filled at the tape after the delay, not at their sell price');
+  assert.equal(open.theirSol, 0.8, 'sized off what they sold for');
+  assert.equal(h.calls.buys.length, 0, 'paper: nothing was bought');
+});
+
+test('reverse: the same sell delivered twice opens once', async () => {
+  setup({ priceSol: 0.001 });
+  save({ direction: 'reverse', delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs2' }));
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs2' }));
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.filter((t) => t.state === 'open').length, 1);
+});
+
+test('reverse: their buy-back closes it in full, and the slice says why', async () => {
+  setup({ priceSol: 0.001 });
+  save({ direction: 'reverse', delayMs: 0, sizing: 'fixed', sizeValue: 1, maxTradeSol: 1 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs3' }));
+  await sleep(30);
+  copy.onWalletTrade(trade({ isBuy: true, sol: 1, priceSol: 0.002, signature: 'rb3' }));
+  await sleep(40);
+  const snap = copy.snapshot();
+  const parent = snap.recent.find((t) => t.kind !== 'exit' && t.direction === 'reverse');
+  const slice = snap.recent.find((t) => t.kind === 'exit');
+  assert.ok(slice, 'an exit slice was booked');
+  assert.equal(parent.state, 'closed');
+  assert.equal(slice.soldPct, 100, 'their buy-back is the thesis being wrong: all of it goes');
+  assert.equal(slice.reason, 'they bought back — reverse exit');
+  // Entry 0.001, exit 0.002, 1.5 % a side: 1 × (2 × 0.985 − 1.015) = +0.955
+  assert.ok(Math.abs(slice.pnlSol - 0.955) < 1e-9, `net of both sides: ${slice.pnlSol}`);
+});
+
+test('reverse: take-profit, stop-loss and max hold each close it without the leader', async () => {
+  // Take-profit at the default +25 %.
+  setup({ priceSol: 0.001 });
+  save({ direction: 'reverse', delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs4' }));
+  await sleep(30);
+  copy.markToMarket(MINT, 0.00124);
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, '+24 % is under the take-profit');
+  copy.markToMarket(MINT, 0.00126);
+  await sleep(40);
+  let slice = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.ok(slice, 'the take-profit fired');
+  assert.match(slice.reason, /take-profit \+25%/);
+  assert.equal(slice.exitPriceSol, 0.00126, 'at the tick that crossed it');
+  copy.markToMarket(MINT, 0.0013);
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 1, 'a closed position is not exited again');
+
+  // Stop-loss at a configured −10 %.
+  setup({ priceSol: 0.001 });
+  save({ direction: 'reverse', delayMs: 0, exitStopLossPct: 10 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs5' }));
+  await sleep(30);
+  copy.markToMarket(MINT, 0.00089);
+  await sleep(40);
+  slice = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.ok(slice, 'the stop-loss fired');
+  assert.match(slice.reason, /stop-loss −10%/);
+
+  // Max hold at a configured 30 minutes, judged by the tick's clock.
+  setup({ priceSol: 0.001 });
+  save({ direction: 'reverse', delayMs: 0, exitMaxHoldMin: 30 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs6' }));
+  await sleep(30);
+  copy.markToMarket(MINT, 0.001, undefined, Date.now() + 29 * 60_000);
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, '29 minutes is not 30');
+  copy.markToMarket(MINT, 0.001, undefined, Date.now() + 31 * 60_000);
+  await sleep(40);
+  slice = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.ok(slice, 'the max hold fired');
+  assert.match(slice.reason, /max hold 30 min/);
+});
+
+test('reverse: a paused config neither enters nor exits — the same rule as a copy', async () => {
+  setup({ priceSol: 0.001 });
+  save({ direction: 'reverse', delayMs: 0 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs7' }));
+  await sleep(30);
+  const c = copy.all()[0];
+  copy.upsert({ ...c, enabled: false });
+  copy.markToMarket(MINT, 0.002);
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, 'paused: the position is held, as a paused copy holds through a leader sell');
+});
+
+test('reverse: live entries buy through the host and live exits sell 100 % through it', async () => {
+  const h = setup({ priceSol: 0.001 });
+  save({ direction: 'reverse', mode: 'live', delayMs: 0, sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.001, soldFraction: 1, signature: 'rs8' }));
+  await sleep(40);
+  assert.equal(h.calls.buys.length, 1, 'their sell bought for real');
+  assert.equal(h.calls.buys[0].sol, 0.05);
+  assert.ok(h.calls.toasts.some((t) => /^Reversed /.test(t.message)), 'and said so as a reverse, not a copy');
+  copy.markToMarket(MINT, 0.0013);
+  await sleep(60);
+  assert.equal(h.calls.sells.length, 1, 'the take-profit sold for real');
+  assert.equal(h.calls.sells[0].pct, 100);
+});
+
+test('reverse: validation, defaults and the description', () => {
+  assert.equal(validateConfig(cfg({ direction: 'reverse' })).ok, true);
+  assert.equal(validateConfig(cfg({ direction: 'sideways' })).ok, false);
+  assert.equal(validateConfig(cfg({ direction: 'reverse', exitStopLossPct: 99 })).ok, false);
+  assert.equal(validateConfig(cfg({ direction: 'reverse', exitTakeProfitPct: 0 })).ok, false);
+  assert.equal(validateConfig(cfg({ direction: 'reverse', exitMaxHoldMin: 5_000 })).ok, false);
+  assert.equal(validateConfig(cfg({ direction: 'copy', exitStopLossPct: 99 })).ok, false, 'a copy may set its own exits too, within the same bounds');
+  assert.equal(validateConfig(cfg({ direction: 'copy', exitStopLossPct: 10 })).ok, true);
+  const d = defaultConfig(WALLET, 'x', 'solana', 'reverse');
+  assert.equal(d.direction, 'reverse');
+  assert.equal(d.mode, 'paper', 'reverse starts on paper like everything else');
+  assert.equal(d.enabled, false);
+  assert.match(describeConfig({ ...cfg({ direction: 'reverse' }), id: 'r', createdAt: 0 }), /buy when they sell.*\+25%.*−20%.*30 min/);
+  assert.match(describeConfig({ ...cfg(), id: 'c', createdAt: 0 }), /^Paper-copy /);
+});
+
+// ── FOMO copying (2026-09-20) ─────────────────────────────────────────
+//
+// A crowd, not a wallet: K distinct wallets from a source set buying the
+// same coin inside a window is the entry; the crowd leaving is one exit,
+// the config's own take-profit / stop-loss / max hold the others. The
+// trades arrive either through onWalletTrade (followed wallets) or through
+// noteCrowdTrade straight from the firehose, and both must count once.
+// Measured, convergence made outcomes WORSE (docs/wallet-convergence-
+// 2026-09-14.md) — so paper first, and the form says so. Pinned here.
+
+const CROWD = [
+  'Crowd111111111111111111111111111111111111A',
+  'Crowd111111111111111111111111111111111111B',
+  'Crowd111111111111111111111111111111111111C',
+  'Crowd111111111111111111111111111111111111D',
+];
+const fomoCfg = (over = {}) => ({ ...defaultConfig('', 'Crowd', 'solana', 'fomo'), enabled: true, ...over });
+const saveFomo = (over = {}) => {
+  const c = fomoCfg(over);
+  const r = copy.upsert(c);
+  if (!r.ok) return r;
+  const made = copy.all().find((x) => x.wallet === FOMO_WALLET && x.label === c.label);
+  if (made && c.enabled && !made.enabled) return copy.upsert({ ...c, id: made.id });
+  return r;
+};
+const crowdBuy = (i, over = {}) => copy.noteCrowdTrade(trade({ wallet: CROWD[i], signature: `cb${i}-${Math.random()}`, ...over }));
+const setupCrowd = (over = {}, hostOver = {}) =>
+  setup({
+    priceSol: 0.001,
+    host: { scoutSaved: () => CROWD.slice(0, 3), trackedWallets: () => [CROWD[3]], scoutTop: (_c, n) => CROWD.slice(0, n), ...hostOver },
+    ...over,
+  });
+
+test('fomo: three of the saved wallets buying inside the window opens one position, named after the crowd', async () => {
+  const h = setupCrowd();
+  saveFomo({ fomoSource: 'saved', fomoMinWallets: 3, fomoWindowSec: 60, delayMs: 0 });
+  const t0 = Date.now();
+  crowdBuy(0, { at: t0 });
+  crowdBuy(1, { at: t0 + 1_000 });
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.length, 0, 'two wallets are not a crowd of three');
+  crowdBuy(2, { at: t0 + 2_000 });
+  await sleep(60);
+  const rows = copy.snapshot().recent;
+  assert.equal(rows.filter((t) => t.state === 'open').length, 1, 'the third wallet fired exactly one entry');
+  const open = rows.find((t) => t.state === 'open');
+  assert.equal(open.direction, 'fomo');
+  assert.equal(open.wallet, FOMO_WALLET, 'the row belongs to the crowd, not to a wallet');
+  assert.deepEqual([...open.triggeredBy].sort(), CROWD.slice(0, 3).sort(), 'the record names who triggered it');
+  assert.equal(open.entryPriceSol, 0.001, 'filled at the tape, like any paper copy');
+  assert.equal(h.calls.buys.length, 0, 'paper: nothing was bought');
+  // A fourth buy of the same coin by another member is not a second entry.
+  copy.noteCrowdTrade(trade({ wallet: CROWD[3], at: t0 + 3_000 }));
+  crowdBuy(0, { at: t0 + 4_000 });
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.filter((t) => t.state === 'open').length, 1, 'once per coin while the position is open');
+});
+
+test('fomo: the same wallet buying three times is one wallet, and buys outside the window do not count', async () => {
+  setupCrowd();
+  saveFomo({ fomoSource: 'saved', fomoMinWallets: 3, fomoWindowSec: 60, delayMs: 0 });
+  const t0 = Date.now();
+  crowdBuy(0, { at: t0 });
+  crowdBuy(0, { at: t0 + 500 });
+  crowdBuy(0, { at: t0 + 1_000 });
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.length, 0, 'one wallet, three buys: not a crowd');
+  crowdBuy(1, { at: t0 + 2_000 });
+  // The first wallet's latest buy is now 60.5 s old — outside the 60 s
+  // window — while the second wallet's is 59.5 s old and still inside.
+  crowdBuy(2, { at: t0 + 61_500 });
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.length, 0, 'a stale buy fell out of the window');
+  crowdBuy(0, { at: t0 + 61_900 });
+  await sleep(60);
+  assert.equal(copy.snapshot().recent.filter((t) => t.state === 'open').length, 1, 'three inside the window is a crowd');
+});
+
+test('fomo: a wallet outside the source set is ignored, and the source is the one configured', async () => {
+  setupCrowd();
+  // Source = the ONE tracked wallet: three saved wallets buying is nothing to it.
+  saveFomo({ fomoSource: 'tracked', fomoMinWallets: 2, fomoWindowSec: 60, delayMs: 0 });
+  const t0 = Date.now();
+  crowdBuy(0, { at: t0 });
+  crowdBuy(1, { at: t0 + 1_000 });
+  crowdBuy(2, { at: t0 + 2_000 });
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.length, 0, 'saved wallets are not the tracked set');
+  assert.equal(copy.crowdWants('solana', CROWD[0]), false, 'the engine is told not to bother');
+  assert.equal(copy.crowdWants('solana', CROWD[3]), true, 'the tracked wallet is wanted');
+  assert.equal(copy.crowdWants('solana', CROWD[3].toLowerCase()), true, 'case does not matter: the Scout keys lower-case');
+  // Top N takes the first n of the ranked list.
+  copy._reset();
+  setupCrowd();
+  saveFomo({ fomoSource: 'top', fomoTopN: 2, fomoMinWallets: 2, fomoWindowSec: 60, delayMs: 0 });
+  crowdBuy(2, { at: t0 });
+  crowdBuy(3, { at: t0 + 1_000 });
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.length, 0, 'third and fourth are outside the top 2');
+  crowdBuy(0, { at: t0 + 2_000 });
+  crowdBuy(1, { at: t0 + 3_000 });
+  await sleep(60);
+  assert.equal(copy.snapshot().recent.filter((t) => t.state === 'open').length, 1, 'the top two converging fires');
+});
+
+test('fomo: the followed source is the enabled copy configs, and a followed wallet counts once through onWalletTrade', async () => {
+  setupCrowd();
+  save({ wallet: CROWD[0], delayMs: 0 });
+  save({ wallet: CROWD[1], label: 'Two', delayMs: 0 });
+  saveFomo({ fomoSource: 'followed', fomoMinWallets: 2, fomoWindowSec: 60, delayMs: 0 });
+  assert.deepEqual([...copy.activeWallets('solana')].sort(), [CROWD[0], CROWD[1]].sort(), 'the FOMO config is not a followed wallet');
+  const t0 = Date.now();
+  // The engine delivers a followed wallet's trade through onWalletTrade AND
+  // may deliver it through noteCrowdTrade off the firehose; the crowd must
+  // still see one wallet.
+  copy.onWalletTrade(trade({ wallet: CROWD[0], at: t0, signature: 'f0' }));
+  copy.noteCrowdTrade(trade({ wallet: CROWD[0], at: t0, signature: 'f0' }));
+  await sleep(40);
+  const fomoRows = () => copy.snapshot().recent.filter((t) => t.direction === 'fomo');
+  assert.equal(fomoRows().length, 0, 'one followed wallet, heard twice, is one wallet');
+  copy.onWalletTrade(trade({ wallet: CROWD[1], at: t0 + 1_000, signature: 'f1' }));
+  await sleep(60);
+  assert.equal(fomoRows().filter((t) => t.state === 'open').length, 1, 'two followed wallets converging fires the crowd');
+  assert.equal(copy.snapshot().recent.filter((t) => t.direction === 'copy' && t.state === 'open').length, 2, 'and the two plain copies opened as before');
+  assert.ok(!Object.keys(copy.snapshot().leaders).includes(FOMO_WALLET), 'the crowd is not a leader on the board');
+});
+
+test('fomo: half the crowd selling closes the position with the reason on the slice', async () => {
+  setupCrowd();
+  saveFomo({ fomoSource: 'saved', fomoMinWallets: 3, fomoWindowSec: 60, fomoCrowdExitPct: 50, delayMs: 0, sizing: 'fixed', sizeValue: 1, maxTradeSol: 1 });
+  const t0 = Date.now();
+  crowdBuy(0, { at: t0 });
+  crowdBuy(1, { at: t0 + 1_000 });
+  crowdBuy(2, { at: t0 + 2_000 });
+  await sleep(60);
+  assert.equal(copy.snapshot().recent.filter((t) => t.state === 'open').length, 1);
+  copy.noteCrowdTrade(trade({ wallet: CROWD[0], isBuy: false, sol: 0.5, priceSol: 0.0012, soldFraction: 1, at: t0 + 10_000 }));
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, '1 of 3 is 33 %, under 50 %');
+  copy.noteCrowdTrade(trade({ wallet: CROWD[3], isBuy: false, sol: 0.5, priceSol: 0.0012, soldFraction: 1, at: t0 + 11_000 }));
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, 'a wallet that did not trigger it does not count toward leaving');
+  copy.noteCrowdTrade(trade({ wallet: CROWD[1], isBuy: false, sol: 0.5, priceSol: 0.0012, soldFraction: 1, at: t0 + 12_000 }));
+  await sleep(60);
+  const slice = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.ok(slice, '2 of 3 sold: the crowd left');
+  assert.match(slice.reason, /the crowd left — 2 of 3 sold/);
+  assert.equal(slice.exitPriceSol, 0.0012);
+  const parent = copy.snapshot().recent.find((t) => t.kind !== 'exit' && t.direction === 'fomo');
+  assert.equal(parent.state, 'closed');
+  // Entry 0.001, exit 0.0012, 1.5 % a side: 1 × (1.2 × 0.985 − 1.015) = +0.167
+  assert.ok(Math.abs(slice.pnlSol - 0.167) < 1e-9, `+20 % gross net of both sides: ${slice.pnlSol}`);
+});
+
+test('fomo: its own take-profit and stop-loss close it too, and a copy config may now set its own', async () => {
+  setupCrowd();
+  saveFomo({ fomoSource: 'saved', fomoMinWallets: 2, fomoWindowSec: 60, delayMs: 0 });
+  const t0 = Date.now();
+  crowdBuy(0, { at: t0 });
+  crowdBuy(1, { at: t0 + 1_000 });
+  await sleep(60);
+  copy.markToMarket(MINT, 0.00124);
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, '+24 % is under the default take-profit');
+  copy.markToMarket(MINT, 0.00126);
+  await sleep(40);
+  let slice = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.ok(slice, 'the take-profit fired');
+  assert.match(slice.reason, /take-profit \+25% \(fomo\)/);
+
+  // A plain copy with a stop-loss of its own, on top of the leader's sells.
+  setup({ priceSol: 0.001 });
+  save({ delayMs: 0, exitStopLossPct: 10 });
+  copy.onWalletTrade(trade({ signature: 'cx1' }));
+  await sleep(30);
+  copy.markToMarket(MINT, 0.00095);
+  await sleep(30);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, '−5 % is under a 10 % stop');
+  copy.markToMarket(MINT, 0.00089);
+  await sleep(40);
+  slice = copy.snapshot().recent.find((t) => t.kind === 'exit');
+  assert.ok(slice, 'a copy with its own stop-loss exits without the leader');
+  assert.match(slice.reason, /stop-loss −10% \(copy\)/);
+  // And a copy WITHOUT exits set keeps the old behaviour: nothing but the leader closes it.
+  setup({ priceSol: 0.001 });
+  save({ delayMs: 0 });
+  copy.onWalletTrade(trade({ signature: 'cx2' }));
+  await sleep(30);
+  copy.markToMarket(MINT, 0.0001);
+  copy.markToMarket(MINT, 0.01, undefined, Date.now() + 600 * 60_000);
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, 'a copy has no exits of its own unless asked');
+  assert.deepEqual(ownExitsOf(cfg()), { takeProfitPct: null, stopLossPct: null, maxHoldMin: null });
+});
+
+test('fomo: a paused config hears nothing, and a source the host cannot answer is an empty crowd', async () => {
+  setupCrowd();
+  saveFomo({ fomoSource: 'saved', fomoMinWallets: 2, fomoWindowSec: 60, delayMs: 0, enabled: false });
+  const t0 = Date.now();
+  crowdBuy(0, { at: t0 });
+  crowdBuy(1, { at: t0 + 1_000 });
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.length, 0, 'paused: no entry');
+  assert.equal(copy.crowdWants('solana', CROWD[0]), false, 'and the engine is told not to bother');
+  // No scoutSaved on the host at all.
+  setup({ priceSol: 0.001 });
+  saveFomo({ fomoSource: 'saved', fomoMinWallets: 2, fomoWindowSec: 60, delayMs: 0 });
+  crowdBuy(0, { at: t0 });
+  crowdBuy(1, { at: t0 + 1_000 });
+  await sleep(40);
+  assert.equal(copy.snapshot().recent.length, 0, 'an unanswerable source never fires');
+  assert.equal(copy.snapshot().crowd?.[copy.all()[0].id]?.wallets, 0, 'and the snapshot says the crowd is empty');
+});
+
+test('fomo: live entries buy through the host once and the crowd exit sells 100 % through it', async () => {
+  const h = setupCrowd();
+  saveFomo({ fomoSource: 'saved', fomoMinWallets: 2, fomoWindowSec: 60, mode: 'live', delayMs: 0, sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+  const t0 = Date.now();
+  crowdBuy(0, { at: t0 });
+  crowdBuy(1, { at: t0 + 1_000 });
+  await sleep(80);
+  assert.equal(h.calls.buys.length, 1, 'the crowd bought once through the host');
+  assert.equal(h.calls.buys[0].sol, 0.05);
+  assert.ok(h.calls.toasts.some((t) => /^FOMO /.test(t.message)), 'and said so as FOMO');
+  copy.noteCrowdTrade(trade({ wallet: CROWD[0], isBuy: false, sol: 0.5, priceSol: 0.0012, soldFraction: 1, at: t0 + 10_000 }));
+  await sleep(80);
+  assert.equal(h.calls.sells.length, 1, '1 of 2 is 50 %: the crowd exit sold for real');
+  assert.equal(h.calls.sells[0].pct, 100);
+});
+
+test('fomo: validation, defaults, the snapshot and the description', () => {
+  assert.equal(validateConfig(fomoCfg()).ok, true);
+  assert.equal(validateConfig(fomoCfg({ chain: 'bnb' })).ok, false, 'Solana only');
+  assert.equal(validateConfig(fomoCfg({ wallet: WALLET })).ok, false, 'a crowd is not an address');
+  assert.equal(validateConfig(fomoCfg({ fomoMinWallets: 1 })).ok, false, 'one wallet is a copy, not a crowd');
+  assert.equal(validateConfig(fomoCfg({ fomoMinWallets: 51 })).ok, false);
+  assert.equal(validateConfig(fomoCfg({ fomoWindowSec: 5 })).ok, false);
+  assert.equal(validateConfig(fomoCfg({ fomoTopN: 1 })).ok, false);
+  assert.equal(validateConfig(fomoCfg({ fomoCrowdExitPct: 0 })).ok, false);
+  assert.equal(validateConfig(fomoCfg({ fomoSource: 'everyone' })).ok, false);
+  const d = defaultConfig('', 'x', 'solana', 'fomo');
+  assert.equal(d.direction, 'fomo');
+  assert.equal(d.wallet, FOMO_WALLET);
+  assert.equal(d.mode, 'paper', 'FOMO starts on paper like everything else');
+  assert.equal(d.enabled, false);
+  assert.deepEqual([d.fomoSource, d.fomoMinWallets, d.fomoWindowSec, d.fomoTopN, d.fomoCrowdExitPct], ['followed', 3, 180, 25, 50]);
+  assert.deepEqual(ownExitsOf(d), { takeProfitPct: 25, stopLossPct: 20, maxHoldMin: 30 });
+  assert.match(describeConfig({ ...fomoCfg(), id: 'f', createdAt: 0 }), /^Paper-FOMO Crowd: buy when 3 of followed wallets buy the same coin within 180 s.*\+25%.*−20%.*30 min or when 50% of them have sold/);
+  setupCrowd();
+  saveFomo({ fomoSource: 'saved' });
+  const snap = copy.snapshot();
+  const id = copy.all()[0].id;
+  assert.deepEqual(snap.crowd?.[id], { source: 'saved', wallets: 3 }, 'the snapshot tells the page how big the crowd is');
+});
+
+// ── Copy Simple (2026-09-20) ──────────────────────────────────────────
+
+test('copy simple: the address shape picks the chain, and nothing else passes', () => {
+  assert.equal(chainForAddress(WALLET), 'solana');
+  assert.equal(chainForAddress(`  ${WALLET}  `), 'solana', 'whitespace is forgiven');
+  assert.equal(chainForAddress('0x' + 'ab'.repeat(20)), 'evm');
+  assert.equal(chainForAddress('Whale111111111111111111111111111111111111'), null, 'a lowercase L is not base58');
+  assert.equal(chainForAddress('0x1234'), null);
+  assert.equal(chainForAddress(''), null);
+});
+
+test('copy simple: three answers make a valid, paper, switched-on config with derived limits', () => {
+  for (const size of SIMPLE_SIZES) {
+    const c = simpleConfig(WALLET, 'Whale', 'solana', size);
+    assert.equal(validateConfig(c).ok, true, `size ${size} validates`);
+    assert.equal(c.mode, 'paper');
+    assert.equal(c.enabled, true, 'a paper follow has nothing to arm');
+    assert.equal(c.direction, 'copy');
+    assert.equal(c.sizing, 'fixed');
+    assert.equal(c.sizeValue, size);
+    assert.equal(c.maxTradeSol, size, 'the cap is the size');
+    assert.ok(Math.abs(c.dailyLossLimitSol - size * 10) < 1e-9, 'ten trades of loss a day');
+    assert.equal(c.copySells, true);
+  }
+  const evm = simpleConfig('0x' + 'ab'.repeat(20), '', 'bnb', 0.1);
+  assert.equal(validateConfig(evm).ok, true);
+  assert.equal(evm.chain, 'bnb');
+  // Clamps: too much goes to the page's ceiling, nonsense to the second offered size.
+  assert.equal(simpleConfig(WALLET, '', 'solana', 40).sizeValue, SIMPLE_MAX_SOL);
+  assert.equal(simpleConfig(WALLET, '', 'solana', NaN).sizeValue, SIMPLE_SIZES[1]);
+  assert.equal(simpleConfig(WALLET, '', 'solana', -1).sizeValue, SIMPLE_SIZES[1]);
+  assert.equal(simpleConfig(WALLET, '', 'solana', 0.0001).sizeValue, 0.001);
+  assert.equal(validateConfig(simpleConfig(WALLET, '', 'solana', 40)).ok, true, 'the clamped config still validates');
+  // Everything the simple page did not ask is the ordinary default.
+  const d = defaultConfig(WALLET, 'Whale');
+  const c = simpleConfig(WALLET, 'Whale', 'solana', 0.1);
+  for (const k of ['delayMs', 'maxSlippagePct', 'minLiquidityUsd', 'onlyPumpfun', 'dailyTradeLimit']) assert.deepEqual(c[k], d[k], `${k} is the default`);
 });
 
 await run();

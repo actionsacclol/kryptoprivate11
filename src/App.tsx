@@ -54,10 +54,11 @@ const Launches = lazy(() => ROUTE_LOADERS.launches().then((m) => ({ default: m.L
 const Positions = lazy(() => ROUTE_LOADERS.paper().then((m) => ({ default: m.Positions })));
 const PortfolioPage = lazy(() => ROUTE_LOADERS.positions().then((m) => ({ default: m.PortfolioPage })));
 const WalletsPage = lazy(() => ROUTE_LOADERS.wallets().then((m) => ({ default: m.WalletsPage })));
+const CopySimplePage = lazy(() => ROUTE_LOADERS.copysimple().then((m) => ({ default: m.CopySimplePage })));
 const Execution = lazy(() => ROUTE_LOADERS.execution().then((m) => ({ default: m.Execution })));
 const History = lazy(() => ROUTE_LOADERS.history().then((m) => ({ default: m.History })));
 const Backtest = lazy(() => ROUTE_LOADERS.backtest().then((m) => ({ default: m.Backtest })));
-const RewardsPage = lazy(() => ROUTE_LOADERS.rewards().then((m) => ({ default: m.RewardsPage })));
+const GuidesPage = lazy(() => ROUTE_LOADERS.guides().then((m) => ({ default: m.GuidesPage })));
 const FarmingPage = lazy(() => ROUTE_LOADERS.farming().then((m) => ({ default: m.FarmingPage })));
 const WalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.WalletPage })));
 const EvmWalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.EvmWalletPage })));
@@ -129,7 +130,7 @@ export default function App() {
     // `extraRoutes` means: listed here on purpose, owned elsewhere. Without
     // this, clicking "Sol Wallet" in the Terminal sidebar threw you into
     // Wallet Utilities, and the whole extraRoutes mechanism was inert.
-    // My Layout's pins count as "listed here" too, or clicking a pinned page
+    // Widgets's pins count as "listed here" too, or clicking a pinned page
     // would throw you into that page's home workspace and lose the menu you
     // built. One localStorage read per navigation, in a click handler.
     setWorkspace((cur) => (routesFor(cur).includes(r) || (cur === 'layout' && loadPinned().includes(r)) ? cur : workspaceOf(r)));
@@ -393,12 +394,13 @@ export default function App() {
                   {route === 'positions' && <PortfolioPage onOpenToken={openToken} />}
                   {route === 'paper' && <Positions />}
                   {route === 'legal' && <LegalPage />}
+                  {route === 'copysimple' && <CopySimplePage onOpenAdvanced={() => navigate('wallets')} onOpenScout={() => navigate('scout')} />}
                   {route === 'wallets' && <WalletsPage />}
                   {route === 'scripts' && <ScriptsPage />}
                   {route === 'execution' && <Execution />}
                   {route === 'history' && <History />}
                   {route === 'backtest' && <Backtest />}
-                  {route === 'rewards' && <RewardsPage />}
+                  {route === 'guides' && <GuidesPage />}
                   {route === 'farming' && <FarmingPage />}
                   {route === 'workspace' && <WorkspacePage openToken={openToken} />}
                   {route === 'scout' && <ScoutPage />}

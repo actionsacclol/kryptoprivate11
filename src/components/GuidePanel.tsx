@@ -162,7 +162,7 @@ const GUIDES: Guide[] = [
     title: 'When something is wrong',
     summary: 'Logs, crashes, and getting unstuck',
     body: [
-      'The Grimoire page is the live log. About has buttons for the logs and crash folders, which is what to send if you report something.',
+      'The Console page is the live log. About has buttons for the logs and crash folders, which is what to send if you report something.',
       [
         'A trade failing with an unreadable error: check the wallet has SOL for fees first.',
         'Orders paused after a restart: that is deliberate. Review and resume them.',

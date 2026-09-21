@@ -6,6 +6,7 @@ import { useModal } from '../state/ModalProvider';
 import { Sparkline } from '../components/viz/Sparkline';
 import type { LaunchRow } from '@shared/types';
 import { cls, fmtAgo, fmtPrice, shortAddr } from '../utils/format';
+import { useRunnerScores } from '../state/useRunnerScores';
 
 const PHASE_TONE: Record<LaunchRow['phase'], 'neutral' | 'success' | 'warn' | 'danger' | 'gradient'> = {
   detected: 'neutral',
@@ -183,6 +184,8 @@ export function Launches({ onOpenToken }: { onOpenToken?: (mint: string) => void
   const [open, setOpen] = useState<string | null>(null);
   // Stable, so the memo above holds across pushes.
   const onToggle = useCallback((mint: string) => setOpen((cur) => (cur === mint ? null : mint)), []);
+  // Krypt scores for the flags shown below, shared with the Runners tab's cache.
+  const runnerScores = useRunnerScores(runners.slice(0, 20).map((r) => r.mint), 0);
 
   return (
     <Page
@@ -210,6 +213,10 @@ export function Launches({ onOpenToken }: { onOpenToken?: (mint: string) => void
                   </div>
                   <div className="text-body text-krypt-muted mt-0.5">
                     <span className="text-arc-gold">{r.observedPct.toFixed(0)} % of this bucket graduated</span> (base {r.basePct.toFixed(1)} %, n={r.n}) · curve {r.curvePct.toFixed(0)} % · {r.uniqueBuyers} buyers · +{r.netInflowSol.toFixed(2)} SOL net
+                    {' · '}
+                    <span title="Krypt score, the token page's. A flag is minutes old, so the providers may not score it yet.">
+                      Krypt {runnerScores[r.mint] === undefined ? '…' : runnerScores[r.mint] === null ? '—' : `${runnerScores[r.mint]}/100`}
+                    </span>
                   </div>
                 </div>
                 <button

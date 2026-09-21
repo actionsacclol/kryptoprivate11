@@ -37,7 +37,13 @@ export function base58Encode(buf: Uint8Array): string {
     if (buf[b] === 0) OUT_CODES[n++] = ALPHABET_CODES[0];
     else break;
   }
-  for (let i = digitsLen - 1; i >= 0; i--) OUT_CODES[n++] = ALPHABET_CODES[DIGITS[i]];
+  // An all-zero input is ONLY its leading-zero ones: the value part is empty.
+  // Without this the seed digit `0` was emitted too, so the system program
+  // (32 zero bytes) came out as THIRTY-THREE ones — never equal to the
+  // '111…1' constant it was compared with, and a 33-byte seed when derived
+  // from again (found 2026-09-20 parsing a v1 transaction's static keys).
+  const allZero = digitsLen === 1 && DIGITS[0] === 0;
+  if (!allZero) for (let i = digitsLen - 1; i >= 0; i--) OUT_CODES[n++] = ALPHABET_CODES[DIGITS[i]];
   return String.fromCharCode(...OUT_CODES.subarray(0, n));
 }
 

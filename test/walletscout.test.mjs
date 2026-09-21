@@ -230,4 +230,138 @@ const wallet = (days, over = {}) => ({
   ok('a saved wallet survives the cap');
 }
 
+
+// ── The follower's side (2026-09-20, shared/walletScore.ts) ─────────────
+//
+// A copy fills at the FIRST PRINT on the mint at or after the leader's trade
+// plus the lag — never at the leader's own price. Every trade on a mint, by
+// anyone, is a print. Pinned: a print inside the lag does not fill; the first
+// one past it does; a leader out before any fill is an unreachable trip; the
+// exit fills the same way; the day bucket carries the follower figures; the
+// row's copy figures and score come out of them; and it all survives a save.
+
+{
+  scout._reset();
+  const L = 'Leader11111111111111111111111111111111111111';
+  const O = 'Other111111111111111111111111111111111111111';
+  const T0 = NOW - 600_000;
+  // Promote the leader (three sightings) on unrelated mints first.
+  for (let i = 0; i < 3; i++) scout.note('solana', L, 'warm' + i, true, 0.1, 1000, T0 - 100_000 + i);
+  // Leader buys M at price 0.001 (1 SOL for 1000 tokens).
+  scout.note('solana', L, 'M', true, 1, 1000, T0);
+  // A print 1 s later — inside the 2 s lag — must NOT fill the follower.
+  scout.note('solana', O, 'M', true, 1.1, 1000, T0 + 1_000);
+  // The first print at/after the lag fills at ITS price: 1.2 per 1000.
+  scout.note('solana', O, 'M', true, 1.2, 1000, T0 + 2_500);
+  // Leader sells everything 5 minutes later for 2 SOL (their pnl +1).
+  scout.note('solana', L, 'M', false, 2, 1000, T0 + 300_000);
+  // The follower's exit: first print >= 2 s after the leader's sell, at 1.8 per 1000.
+  scout.note('solana', O, 'M', false, 1.8, 1000, T0 + 302_500);
+
+  const w = scout.wallets('solana').find((x) => x.address === L.toLowerCase());
+  const d = w.days.find((x) => x.roundTrips === 1);
+  assert.ok(d, 'the leader closed one trip');
+  assert.equal(d.fTrips, 1, 'the follower could mirror it');
+  assert.equal(d.fReturns.length, 1);
+  // entry 0.0012, exit 0.0018, 1.5 % each side: (1.8 x 0.985) / (1.2 x 1.015) - 1 = +45.57 %
+  assert.ok(Math.abs(d.fReturns[0] - 45.57) < 0.2, `follower return from the two prints, net: ${d.fReturns[0]}`);
+  assert.equal(d.fWins, 1);
+  assert.equal(d.unreachable ?? 0, 0);
+  assert.equal(w.recentTrips.length, 1);
+  assert.equal(w.recentTrips[0].followerNote, 'filled');
+  assert.ok(Math.abs(w.recentTrips[0].pnl - 1) < 1e-9, "the leader's own pnl on the trip");
+  assert.equal(w.recentTrips[0].holdMs, 300_000);
+  // PROMOTE_AFTER = 3: the first two sightings never reach a book, so of the
+  // three warm-up mints only the third is on record — plus M.
+  assert.equal(w.distinctMints, 2, 'the promoting warm-up mint and M');
+  ok("a follower fills at the first print after the lag on both legs, never at the leader's price");
+}
+
+{
+  scout._reset();
+  const L = 'Sniper1111111111111111111111111111111111111';
+  const T0 = NOW - 600_000;
+  for (let i = 0; i < 3; i++) scout.note('solana', L, 'warm' + i, true, 0.1, 1000, T0 - 100_000 + i);
+  // In and out inside the lag: no print could have filled a copy.
+  scout.note('solana', L, 'F', true, 1, 1000, T0);
+  scout.note('solana', L, 'F', false, 1.5, 1000, T0 + 900);
+  // A buy whose only later print is the leader's own sell, 30 s on: the
+  // follower was due at +2 s and that sell IS the first print — so a copy
+  // enters at the leader's exit price and has nothing to exit at until a
+  // later print arrives.
+  scout.note('solana', L, 'G', true, 1, 1000, T0 + 10_000);
+  scout.note('solana', L, 'G', false, 1.5, 1000, T0 + 40_000);
+  const w = scout.wallets('solana').find((x) => x.address === L.toLowerCase());
+  const trips = w.recentTrips;
+  assert.equal(trips.length, 2);
+  const f = trips.find((t) => t.mint === 'F');
+  const g = trips.find((t) => t.mint === 'G');
+  assert.equal(f.followerNote, 'too-fast', 'over before a copy was even due');
+  assert.equal(g.followerNote, 'no-exit', 'entered at the only print there was, waiting for one to exit at');
+  const d = w.days.find((x) => x.roundTrips === 2);
+  assert.equal(d.unreachable, 1, 'the sub-lag trip is unreachable');
+  assert.equal(d.fast, 2, 'both trips closed inside a minute');
+  assert.equal(d.measured, 2);
+  assert.equal(d.fTrips ?? 0, 0, 'nothing is a follower trip until its exit prints');
+  const row = summarise(w, 'day', NOW);
+  assert.equal(row.judgedTrips, 1, 'the pending exit is not judged yet');
+  assert.equal(row.reachablePct, 0, 'of the judged, none was reachable');
+  // A record written before the model: buckets without the follower fields.
+  const legacy = summarise(wallet([day(0, { roundTrips: 12, wins: 6, losses: 6 })]), 'day', NOW);
+  assert.equal(legacy.reachablePct, null, 'not measured — never 0 %');
+  assert.equal(legacy.fastPct, null);
+  assert.equal(legacy.judgedTrips, 0);
+  ok('a leader out before the lag is unreachable; an exit waits for a print');
+}
+
+{
+  scout._reset();
+  const L = 'Consistent11111111111111111111111111111111111';
+  const O = 'Printer11111111111111111111111111111111111111';
+  const T0 = NOW - 3 * 86_400_000;
+  for (let i = 0; i < 3; i++) scout.note('solana', L, 'warm' + i, true, 0.1, 1000, T0 - 100_000 + i);
+  // Six mirrored trips over three days, each one a modest follower loss.
+  for (let i = 0; i < 6; i++) {
+    const t = T0 + i * 12 * 3_600_000;
+    const m = 'c' + i;
+    scout.note('solana', L, m, true, 1, 1000, t);
+    scout.note('solana', O, m, true, 1.02, 1000, t + 2_100);
+    scout.note('solana', L, m, false, 1.05, 1000, t + 120_000);
+    scout.note('solana', O, m, false, 1.0, 1000, t + 122_100);
+  }
+  const w = scout.wallets('solana').find((x) => x.address === L.toLowerCase());
+  const row = summarise(w, 'week', NOW);
+  assert.equal(row.roundTrips, 6);
+  assert.equal(row.fTrips, 6, 'every trip mirrored');
+  assert.equal(row.reachablePct, 100);
+  assert.ok(row.fMedianReturnPct < 0 && row.fMedianReturnPct > -6, `the copy lost the costs: ${row.fMedianReturnPct}`);
+  assert.equal(row.fWinRatePct, 0);
+  assert.ok(row.pnl > 0, 'while the leader made money — the whole point of scoring the follower');
+  assert.equal(typeof row.copyScore, 'number', 'enough trips and checks to score');
+  assert.ok(row.copyScore < 60, `a wallet whose copies all lose is not a good copy: ${row.copyScore}`);
+  assert.equal(row.distinctMints, 7, 'the promoting warm-up mint and the six trip mints');
+  // Six trips twelve hours apart from a noon start touch four calendar days.
+  assert.equal(row.activeDays, 4);
+
+  // Persist and reload: the follower figures, mints and trips survive.
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scout-'));
+  scout.init(dir);
+  scout.persist();
+  scout._reset();
+  scout.init(dir);
+  const back = scout.wallets('solana').find((x) => x.address === L.toLowerCase());
+  assert.ok(back, 'the wallet came back');
+  const again = summarise(back, 'week', NOW);
+  assert.equal(again.fTrips, 6);
+  assert.equal(again.fMedianReturnPct, row.fMedianReturnPct);
+  assert.equal(again.distinctMints, 7, 'named mints saved for a ranked wallet');
+  assert.equal(back.recentTrips.length, 6);
+  assert.equal(again.copyScore, row.copyScore);
+  fs.rmSync(dir, { recursive: true, force: true });
+  ok("the row's copy figures and score come from the buckets, and survive a save");
+}
+
 console.log(`\nwalletscout: ${passed}/${passed} passed`);

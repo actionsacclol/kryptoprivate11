@@ -41,11 +41,16 @@ export const KRYPTO_TOKEN: KryptoToken = {
   chain: 'solana',
 };
 
-// ── The fee waiver (2026-09-16) ───────────────────────────────────────
+// ── The holder rate (2026-09-16 as a waiver; halved 2026-09-20) ───────
 //
 // Hold this much of $KRYPTO, across ANY wallet this install holds keys for,
-// and Krypt's own 0.5 %/side comes off your trades. pump.fun's 1 % and the
-// network's fees are not ours to waive and are untouched.
+// and Krypt's own 0.5 %/side becomes 0.25 %/side on your trades — and the
+// referrer's share halves with it rather than vanishing, so a referral
+// still pays. It was a full waiver for four days; a waived trade paid the
+// referrer 20 % of nothing, which broke the referral programme for exactly
+// the users most likely to be referred (Krypt's call, 2026-09-20).
+// pump.fun's 1 % and the network's fees are not ours to discount and are
+// untouched.
 //
 // Denominated in TOKENS, not dollars. A dollar threshold on a memecoin moves
 // under the holder: the number of tokens it takes changes with every candle,
@@ -55,7 +60,7 @@ export const KRYPTO_TOKEN: KryptoToken = {
 //
 // It also removes a way to be wrong. A dollar rule needs a PRICE, which is a
 // second thing that can be unreadable — and an unreadable price means
-// charging someone who does hold enough. With a token count the waiver rests
+// charging someone who does hold enough. With a token count the rate rests
 // on one balance read and nothing else.
 //
 // 1,000,000 of a 1,000,000,000 supply: 0.1 %.
@@ -65,34 +70,57 @@ export const KRYPTO_TOKEN: KryptoToken = {
 // user, and charging them because of how they organise their keys would be a
 // rule about filing rather than about holding.
 
-export const KRYPTO_FEE_WAIVER_TOKENS = 1_000_000;
+export const KRYPTO_HOLDER_TOKENS = 1_000_000;
 
 /**
- * Does this holding waive the fee?
+ * What a holder pays, as basis points OF THE ORDINARY FEE. 5000 = half: the
+ * 0.5 % fee becomes 0.25 %, and because the referrer's cut is a share of
+ * the fee, it halves with it (0.1 % of the trade → 0.05 %) instead of
+ * disappearing. Pinned by the canary: a build that sets this to 0 has
+ * quietly restored the full waiver — and cut every referrer out.
+ */
+export const KRYPTO_HOLDER_FEE_SHARE_BPS = 5000;
+
+/**
+ * Does this holding earn the holder rate?
  *
  * NULL DOES NOT. An unreadable balance is not "you qualify" — the app cannot
- * see that you do, and a waiver granted on a number it could not read is a
- * fee anyone can avoid by breaking one request. Erring toward charging is
+ * see that you do, and a discount granted on a number it could not read is a
+ * fee anyone can halve by breaking one request. Erring toward charging is
  * the honest direction: a charged trade can be explained and made good, an
  * uncollected fee cannot be recovered.
  */
-export function waivesFee(holdingTokens: number | null): boolean {
-  return typeof holdingTokens === 'number' && Number.isFinite(holdingTokens) && holdingTokens >= KRYPTO_FEE_WAIVER_TOKENS;
+export function holderRateApplies(holdingTokens: number | null): boolean {
+  return typeof holdingTokens === 'number' && Number.isFinite(holdingTokens) && holdingTokens >= KRYPTO_HOLDER_TOKENS;
+}
+
+/**
+ * The fee rate to charge, in basis points of the trade: `baseBps` for
+ * everyone, half of it for a holder. Floored to whole basis points and
+ * never below one for a positive base, so a discount can never round the
+ * fee — or the referrer's share of it — to nothing.
+ */
+export function holderFeeBps(baseBps: number, qualifies: boolean): number {
+  if (!qualifies || !Number.isFinite(baseBps) || baseBps <= 0) return baseBps;
+  return Math.max(1, Math.floor((baseBps * KRYPTO_HOLDER_FEE_SHARE_BPS) / 10_000));
 }
 
 /** What the user is shown: the live holding, and what it would take. */
 export interface KryptoHolding {
   /** Whole tokens across every wallet this install holds keys for. */
   tokens: number;
-  /** USD value — SHOWN, never load-bearing. The waiver is decided by
+  /** USD value — SHOWN, never load-bearing. The holder rate is decided by
    *  `tokens` alone, so an unpriceable token costs a line of display and
    *  never a fee. */
   usd: number | null;
   /** Wallets counted — a user with one wallet should not be told "3 wallets". */
   wallets: number;
-  /** When this was read, ms. Stale is shown as stale, never as fresh. */
+  /** When this was last read successfully, ms. 0 until a read has landed.
+   *  Stale is shown as stale, never as fresh. */
   at: number;
-  /** Why the value is unknown, when it is. */
+  /** Why the value is unknown, when it is — set by a read that ran and
+   *  failed, cleared by the next one that works. Null with `at` 0 means
+   *  "not read yet", which is a different thing from a read that broke. */
   problem: string | null;
 }
 
@@ -124,12 +152,12 @@ export function kryptoDisclosure(): string {
   return (
     `$${KRYPTO_TOKEN.symbol} is issued by Krypt, the maker of this app. Showing it here is not a recommendation to buy, sell or hold it, ` +
     `and nothing in this app is financial advice. Krypt earns pump.fun creator fees on every trade of it.${holding} ` +
-    // The waiver belongs HERE, not only on the banner that advertises it.
+    // The holder rate belongs HERE, not only on the banner that advertises it.
     // This paragraph exists because the app is showing a token its maker has
     // a stake in, and "holding it makes the maker's software cheaper for
     // you" is the most material thing about that stake — stating it beside
     // the fee the maker earns is the whole point of the disclosure.
-    `Holding ${KRYPTO_FEE_WAIVER_TOKENS.toLocaleString()} of it waives Krypt's own trading fee in this app, which means Krypt earns less from you while you hold it and gives you a reason to buy it. ` +
+    `Holding ${KRYPTO_HOLDER_TOKENS.toLocaleString()} of it halves Krypt's own trading fee in this app (and the referral share with it), which means Krypt earns less from you while you hold it and gives you a reason to buy it. ` +
     `It is a memecoin: it can go to zero.`
   );
 }

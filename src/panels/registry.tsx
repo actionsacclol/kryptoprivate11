@@ -12,7 +12,7 @@
 // A widget on a dashboard is read at a glance and acted on without a second
 // look, which makes a confident zero worse here than almost anywhere.
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ChainKind } from '@shared/evm';
 import { useAppState } from '../state/AppStateProvider';
@@ -28,6 +28,16 @@ import { scriptChain, type ScriptSnapshot } from '@shared/automation';
 import { chainOf, leaderTooFast, type CopySnapshot } from '@shared/copytrade';
 import type { Alert } from '@shared/alerts';
 import type { Position } from '@shared/portfolio';
+import { tokenLinks, type TokenLink, type TokenLinkKind } from '@shared/tokenLinks';
+import { describeXStats, fmtCount, validateXStats, xPageKindOf, xStatsReaderScript, type XStats } from '@shared/xStats';
+import { loadXStats, saveXStats } from '../state/useXStats';
+import { loadSiteRead, saveSiteRead } from '../state/useSiteRead';
+import { useLinkIntel } from '../state/useLinkIntel';
+import { describeSiteRead, siteReaderScript, validateSiteRead, type SiteRead } from '@shared/siteRead';
+import { describeTelegram, fmtRegistered } from '@shared/linkIntel';
+import { parseXLink } from '@shared/xLink';
+import { ExternalLink } from 'lucide-react';
+import { GamesBody } from './GamesBody';
 import { cls } from '../utils/format';
 import { newestFirst } from '@shared/callouts';
 import { useCallouts } from '../state/callouts';
@@ -162,17 +172,33 @@ function EngineBody(): ReactNode {
 
 function WalletBody(): ReactNode {
   const { status } = useAppState();
+  // While live, the session's REAL fills (shared/liveSession.ts — the same
+  // ledger the Observatory shows). This panel used to read `liveBuys` /
+  // `liveSells`, which counted the scanner's own trades — gone since
+  // 2026-08-16 — so a session of manual trades read "0 / 0" (user report
+  // 2026-09-20). A paper session shows the paper book instead.
+  const ls = status.liveActive ? status.liveSession ?? null : null;
+  const toneOf = (v: number | null): 'good' | 'bad' | 'muted' => (v === null ? 'muted' : v >= 0 ? 'good' : 'bad');
   return (
     <div className="grid grid-cols-2 gap-3">
       <Stat label="Balance" value={status.walletBalanceSol === null ? '—' : `${status.walletBalanceSol.toFixed(4)}`} />
-      <Stat label="Live buys / sells" value={`${num(status.liveBuys)} / ${num(status.liveSells)}`} />
-      {/* Null when live has not been armed this session. Not zero. */}
-      <Stat
-        label="Live PnL (session)"
-        value={sol(status.liveRealizedPnlSol)}
-        tone={status.liveRealizedPnlSol === null ? 'muted' : status.liveRealizedPnlSol >= 0 ? 'good' : 'bad'}
-      />
-      <Stat label="Paper PnL" value={sol(status.realizedPnlSol)} tone={status.realizedPnlSol >= 0 ? 'good' : 'bad'} />
+      {ls ? (
+        <>
+          <Stat label="Buys / sells (session)" value={`${ls.buys} / ${ls.sells}${ls.pending ? ` · ${ls.pending} settling` : ''}`} />
+          {/* The wallet's change since the session began — every fee and
+              every open bag's cost included. Null until the baseline is read. */}
+          <Stat label="Wallet change (session)" value={sol(status.liveRealizedPnlSol)} tone={toneOf(status.liveRealizedPnlSol)} />
+          {/* Closed round trips only. "—" until one closes: no trip is not
+              a profit of zero. */}
+          <Stat label="Realised (session)" value={sol(ls.realizedSol)} tone={toneOf(ls.realizedSol)} />
+        </>
+      ) : (
+        <>
+          <Stat label="Mode" value={status.liveActive ? 'Live' : 'Paper'} tone="muted" />
+          <Stat label="Paper PnL" value={sol(status.realizedPnlSol)} tone={status.realizedPnlSol >= 0 ? 'good' : 'bad'} />
+          <Stat label="Paper open / closed" value={`${num(status.openPositions)} / ${num(status.closedPositions)}`} />
+        </>
+      )}
     </div>
   );
 }
@@ -559,10 +585,15 @@ function ChartAuto({ candles }: { candles: Candle[] }): ReactNode {
   }, []);
   return (
     <div ref={ref} className="h-full w-full">
-      <KryptChart candles={candles} markers={[]} priceLines={[]} mode="price" supply={null} bucketSec={60} height={h} />
+      {/* Stable empties: a fresh `[]` per render defeated the chart's memo,
+          so every grid re-render (each pointer move of a panel drag) ran the
+          chart's marker and price-line effects for nothing. */}
+      <KryptChart candles={candles} markers={NO_MARKERS} priceLines={NO_LINES} mode="price" supply={null} bucketSec={60} height={h} />
     </div>
   );
 }
+const NO_MARKERS: never[] = [];
+const NO_LINES: never[] = [];
 
 /**
  * The Observatory: what each chain's scanner is actually doing.
@@ -1054,8 +1085,16 @@ function AlertsBody(): ReactNode {
 }
 
 function EquityBody(): ReactNode {
-  const { equity } = useAppState();
-  if (equity.length < 2) return <Empty>Not enough points yet — this fills in while the engine runs.</Empty>;
+  const { equity, status } = useAppState();
+  // The series follows the mode (AppStateProvider): the wallet's change
+  // since the live session began while live, the paper book's realized
+  // otherwise. It used to be the paper line whatever the mode, so a live
+  // session in profit read "Session realised 0.0000" (user report
+  // 2026-09-20).
+  const live = equity.length ? equity[equity.length - 1].live : status.liveActive;
+  if (equity.length < 2) {
+    return <Empty>{live ? 'No points yet — this fills in as the wallet moves.' : 'Not enough points yet — this fills in while the engine runs.'}</Empty>;
+  }
   const vs = equity.map((p) => p.v);
   const min = Math.min(...vs);
   const max = Math.max(...vs);
@@ -1068,7 +1107,7 @@ function EquityBody(): ReactNode {
   return (
     <div className="flex h-full flex-col gap-2">
       <div className="flex items-baseline justify-between">
-        <span className="text-micro uppercase tracking-label text-krypt-muted/70">Session realised</span>
+        <span className="text-micro uppercase tracking-label text-krypt-muted/70">{live ? 'Session PnL (wallet change)' : 'Session realised (paper)'}</span>
         <span className={`font-mono text-sm font-semibold ${last >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>{sol(last)}</span>
       </div>
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="min-h-[40px] w-full flex-1">
@@ -1079,6 +1118,306 @@ function EquityBody(): ReactNode {
         <span>{sol(max)}</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * The open token's own pages, inside the app (2026-09-20). A sandboxed
+ * browser view — Electron's <webview>: its own process and cookie jar, no
+ * preload, no access to anything of ours, enforced in main by
+ * webSecurity.guardWebviews — shows the token's X, website or launchpad page;
+ * clicking another button loads that page in the same box. It follows the
+ * same token the Chart panel does, so opening a coin anywhere fills both.
+ */
+const hostOfUrl = (u: string): string => {
+  try {
+    return new URL(u).hostname.replace(/^www\./, '');
+  } catch {
+    return u;
+  }
+};
+
+/** A page that is the token's own site — not X, not Telegram, not a launchpad, not blank. */
+function isTokenSitePage(url: string): boolean {
+  let h: string;
+  try {
+    h = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return false;
+  }
+  if (!h) return false;
+  if (/(^|\.)(x|twitter)\.com$/.test(h)) return false;
+  if (h === 't.me' || h === 'telegram.me') return false;
+  if (h === 'pump.fun' || h === 'four.meme' || h.endsWith('ponslaunchpad.com')) return false;
+  return true;
+}
+
+function LinksBody(): ReactNode {
+  const [token, setToken] = useState<ChartToken | null>(() => loadChartToken());
+  const [links, setLinks] = useState<TokenLink[] | null>(null);
+  const [active, setActive] = useState<TokenLinkKind | null>(null);
+  /** Where the view actually is — a page may redirect; the line under it says so. */
+  const [current, setCurrent] = useState<string | null>(null);
+  const viewRef = useRef<HTMLElement | null>(null);
+  /** What the view read off the X page this token links, and when. */
+  const [xs, setXs] = useState<{ stats: XStats; readAt: number } | null>(null);
+  const [reading, setReading] = useState(false);
+  /** What the view read off the token's own website, and when. */
+  const [site, setSite] = useState<{ read: SiteRead; readAt: number } | null>(null);
+  /** Telegram members + the domain record, looked up by main for this token. */
+  const intel = useLinkIntel(token?.chain === 'solana' ? token.mint : null);
+  const readSeq = useRef(0);
+  useEffect(() => subscribeChartToken(() => setToken(loadChartToken())), []);
+
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    setLinks(null);
+    setActive(null);
+    setCurrent(null);
+    setXs(loadXStats(token.mint));
+    setSite(loadSiteRead(token.mint));
+    const load = async (): Promise<void> => {
+      try {
+        const r =
+          token.chain === 'solana'
+            ? await window.krypt.market.summary(token.mint)
+            : await window.krypt.evm.summary(token.chain as 'robinhood' | 'bnb', token.mint);
+        if (!alive) return;
+        const s = r.ok && r.data ? r.data : null;
+        const list = tokenLinks(token.chain, token.mint, s?.launchpad ?? null, s?.socials ?? null);
+        // The panel opens on the LAUNCHPAD page (pump.fun, four.meme, Pons)
+        // when the token has one, with X, website and Telegram as the other
+        // buttons — the token header keeps the socials-first order. A new
+        // token resets to that default.
+        const panelOrder = [...list.filter((l) => l.kind === 'launchpad'), ...list.filter((l) => l.kind !== 'launchpad')];
+        setLinks(panelOrder);
+        setActive(panelOrder[0]?.kind ?? null);
+      } catch {
+        if (alive) setLinks([]);
+      }
+    };
+    void load();
+    return () => {
+      alive = false;
+    };
+  }, [token?.mint, token?.chain]);
+
+  // Read the numbers off an X page the view is showing (2026-09-20): a
+  // profile's followers, a post's likes. No API and no extra request — the
+  // page is already rendered for the person looking at it, and the host
+  // asks the view what is on its screen. Three looks, spaced, because X
+  // paints after load; unknown stays unknown. Only ever on x.com pages, only
+  // ever the page a person opened here: nothing is crawled.
+  const readStats = useCallback(async (): Promise<void> => {
+    const el = viewRef.current as (HTMLElement & { executeJavaScript?: (code: string) => Promise<unknown>; getURL?: () => string }) | null;
+    const mint = token?.mint;
+    if (!el || !mint || typeof el.executeJavaScript !== 'function') return;
+    const url = typeof el.getURL === 'function' ? el.getURL() : '';
+    const onX = xPageKindOf(url) !== 'other';
+    // The token's own website (2026-09-20) is read the same way — only the
+    // page a person opened here, only for a Solana token (the record is kept
+    // by mint), never a launchpad, X or Telegram page.
+    const onSite = !onX && token?.chain === 'solana' && isTokenSitePage(url);
+    if (!onX && !onSite) return;
+    const seq = ++readSeq.current;
+    setReading(true);
+    try {
+      if (onX) {
+        for (const wait of [1200, 2500, 4000]) {
+          await new Promise((r) => setTimeout(r, wait));
+          if (seq !== readSeq.current) return;
+          const raw = await el.executeJavaScript(xStatsReaderScript()).catch(() => null);
+          const clean = validateXStats(raw);
+          if (!clean) continue;
+          const got = clean.followers !== null || clean.likes !== null || clean.views !== null;
+          if (got || clean.loginWall) {
+            setXs(saveXStats(mint, clean));
+            void window.krypt.links.setXStats(mint, clean);
+            return;
+          }
+        }
+        return;
+      }
+      // Two looks: site builders paint after load, and an empty first read
+      // is not a fact about the site.
+      for (const wait of [1500, 4000]) {
+        await new Promise((r) => setTimeout(r, wait));
+        if (seq !== readSeq.current) return;
+        const raw = await el.executeJavaScript(siteReaderScript(mint)).catch(() => null);
+        const clean = validateSiteRead(raw);
+        if (!clean) continue;
+        if (clean.wordCount > 0 || wait === 4000) {
+          setSite(saveSiteRead(mint, clean));
+          void window.krypt.links.setSiteRead(mint, clean);
+          return;
+        }
+      }
+    } finally {
+      if (seq === readSeq.current) setReading(false);
+    }
+  }, [token?.mint, token?.chain]);
+  const readStatsRef = useRef(readStats);
+  readStatsRef.current = readStats;
+
+  // The view's own navigation events keep the URL line honest, and a
+  // finished load (or an in-page hop — X is a single-page app) triggers a read.
+  useEffect(() => {
+    const el = viewRef.current;
+    if (!el) return;
+    const onNav = (e: Event): void => {
+      const url = (e as Event & { url?: unknown }).url;
+      if (typeof url === 'string') setCurrent(url);
+      void readStatsRef.current();
+    };
+    const onLoad = (): void => void readStatsRef.current();
+    el.addEventListener('did-navigate', onNav);
+    el.addEventListener('did-navigate-in-page', onNav);
+    el.addEventListener('did-finish-load', onLoad);
+    return () => {
+      el.removeEventListener('did-navigate', onNav);
+      el.removeEventListener('did-navigate-in-page', onNav);
+      el.removeEventListener('did-finish-load', onLoad);
+    };
+  }, [links]);
+
+  if (!token) return <Empty>Open a token and its links appear here — X, website and launchpad page, in this box.</Empty>;
+  const label = token.symbol || `${token.mint.slice(0, 6)}…`;
+  if (!links) return <Empty>Reading {label}’s links…</Empty>;
+  if (!links.length) return <Empty>{label} has no X, website or launchpad page on record.</Empty>;
+  const shown = links.find((l) => l.kind === active) ?? links[0];
+  const where = current ?? shown.url;
+  const tokenX = parseXLink(links.find((l) => l.kind === 'x')?.url ?? null).handle;
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-1">
+        {links.map((l) => (
+          <button
+            key={l.kind + l.url}
+            onClick={() => {
+              setActive(l.kind);
+              setCurrent(l.url);
+            }}
+            title={l.url}
+            className={cls(
+              'panel-action no-drag rounded border px-2 py-0.5 text-micro font-semibold transition',
+              shown.url === l.url ? 'border-krypt-purple/60 bg-krypt-purple/15 text-white' : 'border-white/10 text-krypt-muted hover:text-white',
+            )}
+          >
+            {l.label}
+          </button>
+        ))}
+        <span className="flex-1" />
+        <button
+          onClick={() => void window.krypt.app.openExternal(where)}
+          title="Open this page in your browser"
+          className="panel-action no-drag flex items-center gap-1 text-micro text-krypt-muted hover:text-white"
+        >
+          <ExternalLink className="h-3 w-3" />
+          Browser
+        </button>
+      </div>
+      {/* Said on the panel, every time: a site that LOOKS like part of the
+          app is exactly how a phishing page would present itself. The view
+          cannot see the wallet or the keys, and nothing on it is ours. */}
+      <div className="shrink-0 truncate text-micro text-krypt-muted/70" title={where}>
+        {hostOfUrl(where)} · external site in a sandbox — nothing on it is Krypt; never enter a key or seed phrase
+      </div>
+      <webview
+        ref={viewRef}
+        key={token.mint}
+        src={shown.url}
+        partition="persist:links"
+        className="no-drag min-h-0 flex-1 rounded border border-white/10 bg-black/40"
+        style={{ display: 'flex' }}
+      />
+      {/* The numbers, at the bottom: read off the page above when it is an X
+          profile or post — no API, no extra request, the way a person would
+          read them. The launchpad and website pages have nothing standard
+          to read. X's layout changes without notice; anything it cannot
+          find stays unknown, and the wall is named when X shows it. */}
+      <div
+        className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-label text-krypt-muted"
+        title="Read off the X page the way a person would — no API, no extra request. Shown whichever page is open above. X's layout changes without notice; anything it cannot find stays unknown."
+      >
+        {/* The X numbers, whichever page is open above: the last read stays
+            on the bar while the pump.fun page or the website is showing. */}
+        {!xs ? (
+          <span>{shown.kind === 'x' ? (reading ? 'reading the page…' : 'nothing read off this page yet') : links.some((l) => l.kind === 'x') ? 'open X above to read its numbers' : 'no X link to read'}</span>
+        ) : xs.stats.loginWall ? (
+          <span>{describeXStats(xs.stats)}</span>
+        ) : (
+          <>
+            {xs.stats.handle && <span className="font-semibold text-white/90">@{xs.stats.handle}</span>}
+            {xs.stats.page === 'profile' && (
+              <>
+                <XCell v={fmtCount(xs.stats.followers)} label="followers" />
+                <XCell v={fmtCount(xs.stats.following)} label="following" />
+                {xs.stats.joined && <XCell v={xs.stats.joined} label="joined" />}
+                {xs.stats.verified === true && <span className="text-arc-gold">verified</span>}
+              </>
+            )}
+            {xs.stats.page === 'post' && (
+              <>
+                <XCell v={fmtCount(xs.stats.likes)} label="likes" />
+                <XCell v={fmtCount(xs.stats.reposts)} label="reposts" />
+                <XCell v={fmtCount(xs.stats.replies)} label="replies" />
+                <XCell v={fmtCount(xs.stats.views)} label="views" />
+                <XCell v={fmtCount(xs.stats.bookmarks)} label="bookmarks" />
+              </>
+            )}
+            {xs.stats.page === 'other' && <span>not a profile or a post — nothing to read</span>}
+            <span className="text-krypt-muted/60">read {ago(xs.readAt)} ago</span>
+          </>
+        )}
+        {/* Telegram and the domain, looked up by main (2026-09-20); the
+            site read when the website is the page showing. */}
+        {intel?.telegram && (
+          <span title={intel.telegram.reason ?? intel.telegram.url}>
+            {intel.telegram.preview && intel.telegram.preview.members !== null ? (
+              <XCell v={fmtCount(intel.telegram.preview.members)} label={`Telegram ${intel.telegram.preview.countWord ?? 'members'}`} />
+            ) : intel.telegram.state === 'pending' || intel.telegram.state === 'none' ? (
+              'Telegram: looking up…'
+            ) : (
+              `Telegram: ${intel.telegram.preview ? describeTelegram(intel.telegram.preview) : intel.telegram.reason ?? 'unknown'}`
+            )}
+          </span>
+        )}
+        {intel?.website && (
+          <span title={intel.website.reason ?? intel.website.url}>
+            {intel.website.hostedOn ? (
+              `site on ${intel.website.hostedOn}`
+            ) : intel.website.record?.registeredAt ? (
+              <XCell v={fmtRegistered(intel.website.record.registeredAt)} label="domain registered" />
+            ) : intel.website.state === 'pending' || intel.website.state === 'none' ? (
+              'domain: looking up…'
+            ) : (
+              `domain: ${intel.website.reason ?? 'unknown'}`
+            )}
+          </span>
+        )}
+        {site && shown.kind === 'website' && (
+          <span className="text-krypt-muted/80" title={`Read off the site ${ago(site.readAt)} ago — what the page says, not a verdict`}>
+            {describeSiteRead(site.read, tokenX)}
+          </span>
+        )}
+        <span className="flex-1" />
+        {(shown.kind === 'x' || shown.kind === 'website') && (
+          <button onClick={() => void readStatsRef.current()} className="panel-action no-drag shrink-0 text-krypt-muted hover:text-white" disabled={reading}>
+            {reading ? 'Reading…' : 'Read again'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** One number and its word, for the bar under the view. "—" is unknown. */
+function XCell({ v, label }: { v: string; label: string }): ReactNode {
+  return (
+    <span>
+      <span className="font-mono text-body font-semibold text-white/90">{v}</span> {label}
+    </span>
   );
 }
 
@@ -1095,6 +1434,8 @@ export const PANELS: PanelSpec[] = [
   { id: 'alerts', chainAware: true, title: 'Alerts', blurb: 'Armed alerts and the ones that recently fired.', layout: { x: 9, y: 22, w: 3, h: 6, minW: 3, minH: 4 }, Body: AlertsBody },
   { id: 'observatory', chainAware: true, title: 'Observatory', blurb: 'Each chain’s scanner: watching or not, how far behind, what it has flagged.', layout: { x: 6, y: 14, w: 3, h: 8, minW: 3, minH: 5 }, Body: ObservatoryBody },
   { id: 'chart', HeaderControl: ChartHeaderControl, title: 'Chart', blurb: 'The last token you opened, on a 1-minute chart.', layout: { x: 0, y: 14, w: 6, h: 10, minW: 4, minH: 6 }, Body: ChartBody },
+  { id: 'links', title: 'Links', blurb: 'The open token’s X, website and launchpad page, shown in a box you can switch between.', layout: { x: 6, y: 14, w: 6, h: 10, minW: 4, minH: 6 }, Body: LinksBody },
+  { id: 'games', title: 'Games', blurb: 'Snake, Flappy Crypto, Dino and Tetris — for the wait between candles.', layout: { x: 0, y: 24, w: 4, h: 10, minW: 3, minH: 7 }, Body: GamesBody },
   { id: 'runners', chainAware: true, title: 'Runner alerts', blurb: 'Launches flagged as potential runners this session.', layout: { x: 8, y: 6, w: 4, h: 8, minW: 3, minH: 4 }, Body: RunnersBody },
   { id: 'callouts', chainAware: true, title: 'Callouts', blurb: 'Coins people are publicly calling on pump.fun, and whether the caller holds one.', layout: { x: 4, y: 32, w: 4, h: 8, minW: 3, minH: 4 }, Body: CalloutsBody },
 ];

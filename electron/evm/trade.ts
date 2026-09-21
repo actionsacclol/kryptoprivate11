@@ -73,6 +73,7 @@ import {
   type EvmVenue,
   VENUE_LABEL,
 } from '@shared/evm';
+import { holderFeeBps } from '@shared/krypto';
 import { logger } from '../system/logger';
 
 export interface TradeRequest {
@@ -157,32 +158,35 @@ const lower = (a: string): Address => a.toLowerCase() as Address;
  * may hold several.
  */
 /**
- * Is Krypt's fee waived right now? ($KRYPTO holders — shared/krypto.ts.)
+ * Does the trader earn the holder rate — half of Krypt's fee — right now?
+ * ($KRYPTO holders — shared/krypto.ts.)
  *
  * INJECTED rather than imported: $KRYPTO is a Solana mint and the holding is
  * read by a Solana module, and this file must stay free of that half of the
  * app (it is bundled on its own for the EVM tests, viem and all). Main wires
- * it; unset means "not waived", so a build that forgets is a build that
- * charges — the safe direction.
+ * it; unset means "full rate", so a build that forgets is a build that
+ * charges — the safe direction. A judgement that throws is no discount.
  */
-let feeWaived: () => boolean = () => false;
-export function setFeeWaiver(fn: () => boolean): void {
-  feeWaived = fn;
+let holderRate: () => boolean = () => false;
+export function setHolderRate(fn: () => boolean): void {
+  holderRate = fn;
+}
+function holderNow(): boolean {
+  try {
+    return holderRate() === true;
+  } catch {
+    return false;
+  }
 }
 
 function feePlanFor(basisWei: bigint, referrer: string, owner: Address | null): FeePlan {
   const treasury = activeEvmTreasury();
   if (!isEvmAddress(treasury)) return NO_FEE;
-  // The waiver covers every chain, because the promise is about the person
-  // and not about which rail they happen to be trading on. It is Krypt's own
-  // cut only — the venue's fee and the chain's gas are untouched.
-  try {
-    if (feeWaived()) return NO_FEE;
-  } catch {
-    /* a waiver that cannot be decided is not a waiver */
-  }
+  // The holder rate covers every chain, because the promise is about the
+  // person and not about which rail they happen to be trading on. It is
+  // Krypt's own cut only — the venue's fee and the chain's gas are untouched.
   const ref = usableReferrer(referrer, treasury, owner);
-  const split = splitEvmFee(basisWei, ref !== null);
+  const split = splitEvmFee(basisWei, ref !== null, holderFeeBps(EVM_FEE_BPS, holderNow()));
   if (split.totalWei <= 0n) return NO_FEE;
   return { totalWei: split.totalWei, treasury: lower(treasury), treasuryWei: split.treasuryWei, referrer: ref, referrerWei: split.referrerWei };
 }
@@ -495,7 +499,10 @@ export async function plan(req: TradeRequest, owner: Address | null): Promise<Pl
   // re-derives it (the Solana signer does exactly this).
   const sellRef = usableReferrer(req.referrer, treasury, owner);
   const hasRef = sellRef !== null;
-  const bips = sellFeeBips(EVM_FEE_BPS, EVM_REFERRAL_SHARE_BPS, hasRef, evmFeesEnabled() && isEvmAddress(treasury));
+  // The holder rate applies to sells too. Found 2026-09-20: this path had
+  // never asked, so a holder's EVM sells were charged in full while the
+  // panel said otherwise.
+  const bips = sellFeeBips(holderFeeBps(EVM_FEE_BPS, holderNow()), EVM_REFERRAL_SHARE_BPS, hasRef, evmFeesEnabled() && isEvmAddress(treasury));
   const totalBips = bips.treasuryBips + bips.referrerBips;
   const finishSell = (out: bigint, gas: bigint | null, call: BuiltCall, policy: EvmPolicy, feeAfter: FeePlan, minOut: bigint, approvals: Planned['approvals'], feeWei: bigint): PlanResult => {
     // What the seller RECEIVES: the venue's proceeds less the platform fee.

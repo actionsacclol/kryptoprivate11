@@ -22,6 +22,12 @@ import type { RunnerFlag } from './runners';
 import type { AlertKind } from './alerts';
 import { nativeSymbolOf, type ChainKind } from './evm';
 import type { EvmLaunchWindow, EvmScanLaunch } from './evmScan';
+import { parseXLink, type XLinkKind } from './xLink';
+import { launchpadSite } from './tokenLinks';
+import type { TokenSummary } from './market';
+import type { XStats } from './xStats';
+import { domainAgeDays, type LinkIntelFacts } from './linkIntel';
+import { siteLinksX, type SiteRead } from './siteRead';
 
 // ── Chains ────────────────────────────────────────────────────────────
 //
@@ -56,6 +62,49 @@ export const SOLANA_ONLY_FIELDS: ReadonlySet<RuleField> = new Set<RuleField>([
   'smartBuyerCount',
   'smartEarly',
   'riskFlags',
+  // The provider summary's extras and the links (2026-09-20): the EVM host
+  // answers cap and liquidity only.
+  'kryptScore',
+  'bondingCurvePct',
+  'devHoldingPct',
+  'top10Pct',
+  'insiderPct',
+  'bundledPct',
+  'sniperPct',
+  'smartHolders',
+  'volume5mUsd',
+  'buys5m',
+  'sells5m',
+  'priceChange5mPct',
+  'hasTwitter',
+  'hasWebsite',
+  'hasTelegram',
+  'dexPaid',
+  'twitter',
+  'website',
+  'telegram',
+  'xLinkKind',
+  'xHandle',
+  'xReuseCount',
+  'xFollowers',
+  'xFollowing',
+  'xVerified',
+  'xLikes',
+  'xReposts',
+  'xReplies',
+  'xViews',
+  'xStatsAgeSec',
+  // Telegram's public preview, the website's registry record and what the
+  // site says (2026-09-20): looked up / read for Solana tokens only.
+  'tgMembers',
+  'tgOnline',
+  'tgKind',
+  'domainAgeDays',
+  'domainHostedOn',
+  'siteNamesContract',
+  'siteLinksX',
+  'siteOutboundHosts',
+  'siteMentionsConnectWallet',
   'hardRisk',
   'phase',
   'launchpad',
@@ -232,6 +281,49 @@ export type RuleField =
   | 'holders'
   | 'priceUsd'
   | 'launchpad'
+  // market — the rest of the provider summary (2026-09-20: "any data we can
+  // get, scripts should have"). Solana only: the EVM rails' host answers
+  // cap and liquidity and nothing else, and a null there would be a lie.
+  | 'kryptScore'
+  | 'bondingCurvePct'
+  | 'devHoldingPct'
+  | 'top10Pct'
+  | 'insiderPct'
+  | 'bundledPct'
+  | 'sniperPct'
+  | 'smartHolders'
+  | 'volume5mUsd'
+  | 'buys5m'
+  | 'sells5m'
+  | 'priceChange5mPct'
+  // links — what the token's creator published, and what the X link IS
+  | 'hasTwitter'
+  | 'hasWebsite'
+  | 'hasTelegram'
+  | 'dexPaid'
+  | 'twitter'
+  | 'website'
+  | 'telegram'
+  | 'xLinkKind'
+  | 'xHandle'
+  | 'xReuseCount'
+  | 'xFollowers'
+  | 'xFollowing'
+  | 'xVerified'
+  | 'xLikes'
+  | 'xReposts'
+  | 'xReplies'
+  | 'xViews'
+  | 'xStatsAgeSec'
+  | 'tgMembers'
+  | 'tgOnline'
+  | 'tgKind'
+  | 'domainAgeDays'
+  | 'domainHostedOn'
+  | 'siteNamesContract'
+  | 'siteLinksX'
+  | 'siteOutboundHosts'
+  | 'siteMentionsConnectWallet'
   // runner
   | 'runnerOddsPct'
   // position
@@ -307,6 +399,45 @@ export const RULE_FIELDS: FieldSpec[] = [
   { id: 'holders', label: 'Holders', kind: 'number', scope: 'market', unit: 'wallets', hint: '', nullWhen: 'unknown to the providers' },
   { id: 'priceUsd', label: 'Price (USD)', kind: 'number', scope: 'market', unit: 'USD per token', hint: '', nullWhen: 'unknown to the providers' },
   { id: 'launchpad', label: 'Launchpad', kind: 'text', scope: 'market', unit: 'pumpfun · launchlab · dbc · boop · unknown…', hint: '', nullWhen: 'unknown' },
+  { id: 'kryptScore', label: 'Krypt score (providers)', kind: 'number', scope: 'market', unit: '0–100', hint: 'The token page’s score: liquidity, sellability, the creator’s record, a pump ban', nullWhen: 'the checks have not resolved, or no provider answered' },
+  { id: 'bondingCurvePct', label: 'Bonding curve % (providers)', kind: 'number', scope: 'market', unit: '0–100', hint: '100 = graduated to a DEX', nullWhen: 'unknown to the providers' },
+  { id: 'devHoldingPct', label: 'Dev holding %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'What the creator wallet holds', nullWhen: 'unknown to the providers' },
+  { id: 'top10Pct', label: 'Top 10 holders %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: '', nullWhen: 'unknown to the providers' },
+  { id: 'insiderPct', label: 'Insiders %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'Held by wallets the providers tag as insiders', nullWhen: 'unknown to the providers' },
+  { id: 'bundledPct', label: 'Bundled %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'Bought in the launch bundle', nullWhen: 'unknown to the providers' },
+  { id: 'sniperPct', label: 'Snipers %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: '', nullWhen: 'unknown to the providers' },
+  { id: 'smartHolders', label: 'Smart-money holders', kind: 'number', scope: 'market', unit: 'wallets', hint: 'Per the providers’ smart-money lists', nullWhen: 'unknown to the providers' },
+  { id: 'volume5mUsd', label: 'Volume 5m (USD)', kind: 'number', scope: 'market', unit: 'USD', hint: '', nullWhen: 'no 5-minute window from the providers' },
+  { id: 'buys5m', label: 'Buys 5m', kind: 'number', scope: 'market', unit: 'count', hint: '', nullWhen: 'no 5-minute window from the providers' },
+  { id: 'sells5m', label: 'Sells 5m', kind: 'number', scope: 'market', unit: 'count', hint: '', nullWhen: 'no 5-minute window from the providers' },
+  { id: 'priceChange5mPct', label: 'Price change 5m %', kind: 'number', scope: 'market', unit: 'percent', hint: '', nullWhen: 'no 5-minute window from the providers' },
+  { id: 'hasTwitter', label: 'Has X link', kind: 'boolean', scope: 'market', unit: 'true/false', hint: 'The creator published an X (Twitter) link', nullWhen: 'no provider has answered for socials' },
+  { id: 'hasWebsite', label: 'Has website', kind: 'boolean', scope: 'market', unit: 'true/false', hint: '', nullWhen: 'no provider has answered for socials' },
+  { id: 'hasTelegram', label: 'Has Telegram', kind: 'boolean', scope: 'market', unit: 'true/false', hint: '', nullWhen: 'no provider has answered for socials' },
+  { id: 'dexPaid', label: 'DexScreener paid', kind: 'boolean', scope: 'market', unit: 'true/false', hint: 'Someone paid for the enhanced listing — a weak but real filter', nullWhen: 'no provider has answered for socials' },
+  { id: 'twitter', label: 'X link', kind: 'text', scope: 'market', unit: 'URL', hint: 'As published; the app never visits it', nullWhen: 'none published, or no provider answered' },
+  { id: 'website', label: 'Website', kind: 'text', scope: 'market', unit: 'URL', hint: 'As published; the app never visits it', nullWhen: 'none published, or no provider answered' },
+  { id: 'telegram', label: 'Telegram link', kind: 'text', scope: 'market', unit: 'URL', hint: '', nullWhen: 'none published, or no provider answered' },
+  { id: 'xLinkKind', label: 'X link kind', kind: 'text', scope: 'market', unit: 'profile · post · community · search · other-x · not-x · none', hint: 'What the X link IS — an account, one post, a room, a search. A post is not an account.', nullWhen: 'no provider has answered for socials' },
+  { id: 'xHandle', label: 'X handle', kind: 'text', scope: 'market', unit: 'handle without @', hint: 'The account the X link names', nullWhen: 'the link names no account' },
+  { id: 'xReuseCount', label: 'X link reused by', kind: 'number', scope: 'market', unit: 'other launches', hint: 'Launches the scanner has in view pointing at the SAME account or post — a farm from the outside', nullWhen: 'not counted (no X link, or the scanner is not running)' },
+  { id: 'xFollowers', label: 'X followers (read)', kind: 'number', scope: 'market', unit: 'followers', hint: 'Read off the X profile in the Links panel when someone opened it there — never fetched', nullWhen: 'nobody opened the profile in the Links panel, or the page could not be read' },
+  { id: 'xFollowing', label: 'X following (read)', kind: 'number', scope: 'market', unit: 'accounts', hint: 'Read off the X profile in the Links panel', nullWhen: 'nobody opened the page in the Links panel, or the page did not show it' },
+  { id: 'xVerified', label: 'X verified (read)', kind: 'boolean', scope: 'market', unit: 'true/false', hint: 'The badge on the X profile, as read in the Links panel', nullWhen: 'nobody opened the page in the Links panel, or the page did not show it' },
+  { id: 'xLikes', label: 'X post likes (read)', kind: 'number', scope: 'market', unit: 'likes', hint: 'When the linked X page is a post', nullWhen: 'nobody opened the page in the Links panel, or the page did not show it' },
+  { id: 'xReposts', label: 'X post reposts (read)', kind: 'number', scope: 'market', unit: 'reposts', hint: '', nullWhen: 'nobody opened the page in the Links panel, or the page did not show it' },
+  { id: 'xReplies', label: 'X post replies (read)', kind: 'number', scope: 'market', unit: 'replies', hint: '', nullWhen: 'nobody opened the page in the Links panel, or the page did not show it' },
+  { id: 'xViews', label: 'X post views (read)', kind: 'number', scope: 'market', unit: 'views', hint: '', nullWhen: 'nobody opened the page in the Links panel, or the page did not show it' },
+  { id: 'xStatsAgeSec', label: 'X read age (s)', kind: 'number', scope: 'market', unit: 'seconds', hint: 'How long ago the Links panel read the page — gate on it so a stale number does not decide', nullWhen: 'nobody opened the page in the Links panel' },
+  { id: 'tgMembers', label: 'Telegram members', kind: 'number', scope: 'market', unit: 'members', hint: 'Subscribers (a channel) or members (a group) as Telegram’s public preview page shows anyone — fetched from t.me when a person opened the token or a script asked about it', nullWhen: 'no Telegram link, nobody asked about the token yet, a private invite (Telegram shows no count), or t.me did not answer' },
+  { id: 'tgOnline', label: 'Telegram online', kind: 'number', scope: 'market', unit: 'members', hint: 'Members online right now, as the preview shows for a group', nullWhen: 'a channel (Telegram shows none), or no preview read' },
+  { id: 'tgKind', label: 'Telegram link kind', kind: 'text', scope: 'market', unit: 'channel · group · account · invite · unknown', hint: 'What the Telegram link IS. An account is a person or bot, not a room; a private invite shows no count.', nullWhen: 'no Telegram link, or no preview read' },
+  { id: 'domainAgeDays', label: 'Website domain age (days)', kind: 'number', scope: 'market', unit: 'days', hint: 'Days since the website’s domain was registered, from the registry’s public RDAP record (via data.iana.org) — fetched when a person opened the token or a script asked', nullWhen: 'no website, hosted on a shared platform (see domainHostedOn), the registry publishes no RDAP (.io, .me, .co), or not looked up yet' },
+  { id: 'domainHostedOn', label: 'Website hosted on', kind: 'text', scope: 'market', unit: 'platform', hint: 'The shared platform the site sits on — Vercel, GitHub Pages, Carrd… — when it has no domain of its own', nullWhen: 'the site has its own domain, or no website' },
+  { id: 'siteNamesContract', label: 'Site names the contract', kind: 'boolean', scope: 'market', unit: 'true/false', hint: 'The token’s own website mentions this contract address in its text or links, as read in the Links panel when someone opened it there — a site made for another coin, or for every coin, does not', nullWhen: 'nobody opened the site in the Links panel' },
+  { id: 'siteLinksX', label: 'Site links the token’s X', kind: 'boolean', scope: 'market', unit: 'true/false', hint: 'The website links the same X account the launch published', nullWhen: 'nobody opened the site in the Links panel, or the token has no X account to compare' },
+  { id: 'siteOutboundHosts', label: 'Site outbound hosts', kind: 'number', scope: 'market', unit: 'hosts', hint: 'Distinct other sites the page links to — how much of a site it is', nullWhen: 'nobody opened the site in the Links panel' },
+  { id: 'siteMentionsConnectWallet', label: 'Site asks to connect a wallet', kind: 'boolean', scope: 'market', unit: 'true/false', hint: 'The page text asks visitors to connect a wallet or claim tokens / an airdrop — the words a drainer page uses; the words, not a verdict', nullWhen: 'nobody opened the site in the Links panel' },
   { id: 'runnerOddsPct', label: 'Runner odds %', kind: 'number', scope: 'runner', unit: 'percent', hint: 'Observed graduation rate for the flag bucket', nullWhen: 'not a runner event' },
   { id: 'held', label: 'Held by this script', kind: 'boolean', scope: 'position', unit: 'true/false', hint: 'This script holds the token (in its mode)', nullWhen: 'never' },
   { id: 'pnlPct', label: 'PnL %', kind: 'number', scope: 'position', unit: 'percent', hint: '', nullWhen: 'not held, or the position cannot be priced' },
@@ -541,6 +672,82 @@ export interface MarketFacts {
   launchpad: string | null;
   symbol?: string;
   name?: string;
+  // The rest of the provider summary (2026-09-20). All optional: the EVM
+  // rails' host does not answer them, and an absent field reads as null.
+  kryptScore?: number | null;
+  bondingCurvePct?: number | null;
+  devHoldingPct?: number | null;
+  top10Pct?: number | null;
+  insiderPct?: number | null;
+  bundledPct?: number | null;
+  sniperPct?: number | null;
+  smartHolders?: number | null;
+  volume5mUsd?: number | null;
+  buys5m?: number | null;
+  sells5m?: number | null;
+  priceChange5mPct?: number | null;
+  socials?: { twitter: string | null; website: string | null; telegram: string | null; dexPaid: boolean } | null;
+  /** Other launches in view linking the same X account or post; null = not counted. */
+  xReuseCount?: number | null;
+  /** What the Links panel read off the X page when a person opened it
+   *  there, with when; null until then. Flattened into the x* variables. */
+  xStats?: { stats: XStats; readAt: number } | null;
+  /** Telegram's public preview and the website's registry record, when
+   *  looked up (main does it when a person or a script asks about the token). */
+  linkIntel?: LinkIntelFacts | null;
+  /** What the Links panel read off the token's own website, when a person opened it there. */
+  siteRead?: { read: SiteRead; readAt: number } | null;
+}
+
+/** The token's links, as `bot.links()` hands them to a script. */
+export interface ScriptLinks {
+  twitter: string | null;
+  website: string | null;
+  telegram: string | null;
+  launchpadLabel: string | null;
+  launchpadUrl: string | null;
+  x: {
+    kind: XLinkKind;
+    handle: string | null;
+    postId: string | null;
+    label: string;
+    /** Other launches in view that link the same account / the same post. */
+    accountReuse: number;
+    postReuse: number;
+    /** What the Links panel read off the X page when a person opened it
+     *  there (followers, likes, …); null when nobody has. Never fetched. */
+    stats: XStats | null;
+    statsReadAt: number | null;
+  };
+  /** Telegram's public preview of the linked room; null until looked up. */
+  telegramStats: LinkIntelFacts['telegram'];
+  /** The website's registry record (or the shared platform it sits on); null until looked up. */
+  domain: LinkIntelFacts['domain'];
+  /** What the Links panel read off the website when a person opened it there; null until then. */
+  site: (SiteRead & { readAt: number }) | null;
+}
+
+/** The security report, as `bot.security()` hands it to a script. */
+export interface ScriptSecurity {
+  score: number | null;
+  checksResolved: number;
+  checksTotal: number;
+  checks: Array<{ id: string; label: string; verdict: string; detail: string }>;
+  warnings: string[];
+}
+
+/** The creator's record, as `bot.creator()` hands it to a script. */
+export interface ScriptCreator {
+  address: string;
+  launches: number;
+  graduated: number;
+  graduationRate: number | null;
+  medianAthUsd: number | null;
+  bestAthUsd: number | null;
+  firstLaunchAt: number | null;
+  lastLaunchAt: number | null;
+  /** True when the source paginated out — `launches` is then a floor. */
+  truncated: boolean;
 }
 
 export interface LeaderFacts {
@@ -573,7 +780,7 @@ export interface GlobalFacts {
  * here; unknown is null and a condition on null does not hold. Scripts
  * receive this same object — never an internal one.
  */
-export type RuleContext = { [K in RuleField]: K extends 'riskFlags' ? string[] : K extends 'creatorSold' | 'smartEarly' | 'hardRisk' | 'held' ? boolean | null : K extends 'phase' | 'symbol' | 'name' | 'launchpad' | 'leaderWallet' | 'leaderLabel' | 'leaderSide' | 'orderKind' | 'orderState' | 'alertKind' ? string | null : number | null } & {
+export type RuleContext = { [K in RuleField]: K extends 'riskFlags' ? string[] : K extends 'creatorSold' | 'smartEarly' | 'hardRisk' | 'held' | 'hasTwitter' | 'hasWebsite' | 'hasTelegram' | 'dexPaid' | 'xVerified' | 'siteNamesContract' | 'siteLinksX' | 'siteMentionsConnectWallet' ? boolean | null : K extends 'phase' | 'symbol' | 'name' | 'launchpad' | 'leaderWallet' | 'leaderLabel' | 'leaderSide' | 'orderKind' | 'orderState' | 'alertKind' | 'twitter' | 'website' | 'telegram' | 'xLinkKind' | 'xHandle' | 'tgKind' | 'domainHostedOn' ? string | null : number | null } & {
   mint: string;
   symbol: string;
   name: string;
@@ -699,7 +906,128 @@ export function withMarket(c: RuleContext, m: MarketFacts | null): RuleContext {
   if (c.priceSol === null && num(m.priceSol) !== null && (m.priceSol as number) > 0) c.priceSol = m.priceSol;
   if (!c.symbol && m.symbol) c.symbol = m.symbol;
   if (!c.name && m.name) c.name = m.name;
+  // The rest of the summary: absent (an EVM host) stays null.
+  c.kryptScore = num(m.kryptScore);
+  c.bondingCurvePct = num(m.bondingCurvePct);
+  c.devHoldingPct = num(m.devHoldingPct);
+  c.top10Pct = num(m.top10Pct);
+  c.insiderPct = num(m.insiderPct);
+  c.bundledPct = num(m.bundledPct);
+  c.sniperPct = num(m.sniperPct);
+  c.smartHolders = num(m.smartHolders);
+  c.volume5mUsd = num(m.volume5mUsd);
+  c.buys5m = num(m.buys5m);
+  c.sells5m = num(m.sells5m);
+  c.priceChange5mPct = num(m.priceChange5mPct);
+  // Links. "No provider answered" (socials absent) is unknown, not "none":
+  // every link field stays null. A provider that answered with no links is
+  // a real "none": false and empty.
+  const so = m.socials ?? null;
+  if (so) {
+    c.twitter = so.twitter || null;
+    c.website = so.website || null;
+    c.telegram = so.telegram || null;
+    c.hasTwitter = !!so.twitter;
+    c.hasWebsite = !!so.website;
+    c.hasTelegram = !!so.telegram;
+    c.dexPaid = so.dexPaid === true;
+    const x = parseXLink(so.twitter);
+    c.xLinkKind = x.kind;
+    c.xHandle = x.handle;
+    c.xReuseCount = num(m.xReuseCount);
+  }
+  // The X page, as read in the Links panel: every number the page showed,
+  // and how old the read is. Nothing read = every one null.
+  const xs = m.xStats ?? null;
+  c.xFollowers = xs ? num(xs.stats.followers) : null;
+  c.xFollowing = xs ? num(xs.stats.following) : null;
+  c.xVerified = xs ? xs.stats.verified : null;
+  c.xLikes = xs ? num(xs.stats.likes) : null;
+  c.xReposts = xs ? num(xs.stats.reposts) : null;
+  c.xReplies = xs ? num(xs.stats.replies) : null;
+  c.xViews = xs ? num(xs.stats.views) : null;
+  c.xStatsAgeSec = xs ? Math.max(0, Math.round((Date.now() - xs.readAt) / 1000)) : null;
+  // Telegram's preview and the domain's record, when looked up; the site
+  // read, when a person opened the site. Not looked up / not read = null.
+  const li = m.linkIntel ?? null;
+  c.tgMembers = li?.telegram ? num(li.telegram.members) : null;
+  c.tgOnline = li?.telegram ? num(li.telegram.online) : null;
+  c.tgKind = li?.telegram ? li.telegram.kind : null;
+  c.domainAgeDays = li?.domain ? domainAgeDays(li.domain.registeredAt) : null;
+  c.domainHostedOn = li?.domain ? li.domain.hostedOn : null;
+  const sr = m.siteRead ?? null;
+  c.siteNamesContract = sr ? sr.read.namesContract : null;
+  c.siteLinksX = sr ? siteLinksX(sr.read, c.xHandle) : null;
+  c.siteOutboundHosts = sr ? num(sr.read.outboundHosts) : null;
+  c.siteMentionsConnectWallet = sr ? sr.read.mentionsConnectWallet : null;
   return c;
+}
+
+/**
+ * One provider summary → the facts a script gets. The single place the
+ * mapping lives, so the cached read and the fetched read agree field for
+ * field. `xReuseCount` is the engine's count of other launches in view on
+ * the same X account or post; null when it did not count.
+ */
+export function marketFactsFromSummary(
+  s: TokenSummary,
+  xReuseCount: number | null = null,
+  xStats: { stats: XStats; readAt: number } | null = null,
+  linkIntel: LinkIntelFacts | null = null,
+  siteRead: { read: SiteRead; readAt: number } | null = null,
+): MarketFacts {
+  const win = s.stats['5m'] ?? null;
+  return {
+    priceSol: s.priceSol,
+    priceUsd: s.priceUsd,
+    marketCapUsd: s.marketCapUsd,
+    liquidityUsd: s.liquidityUsd,
+    holders: s.holders,
+    launchpad: s.launchpad ?? null,
+    symbol: s.symbol,
+    name: s.name,
+    kryptScore: s.kryptScore ?? null,
+    bondingCurvePct: s.bondingCurvePct,
+    devHoldingPct: s.devHoldingPct,
+    top10Pct: s.top10Pct,
+    insiderPct: s.insiderPct,
+    bundledPct: s.bundledPct,
+    sniperPct: s.sniperPct,
+    smartHolders: s.smartHolders,
+    volume5mUsd: win?.volumeUsd ?? null,
+    buys5m: win?.buys ?? null,
+    sells5m: win?.sells ?? null,
+    priceChange5mPct: win?.priceChangePct ?? null,
+    socials: { twitter: s.socials.twitter, website: s.socials.website, telegram: s.socials.telegram, dexPaid: s.socials.dexPaid },
+    xReuseCount,
+    xStats,
+    linkIntel,
+    siteRead,
+  };
+}
+
+/** The `bot.links()` answer from a summary plus the engine's reuse count. */
+export function scriptLinksFromSummary(
+  chain: string,
+  s: TokenSummary,
+  reuse: { handle: number; post: number },
+  xStats: { stats: XStats; readAt: number } | null = null,
+  linkIntel: LinkIntelFacts | null = null,
+  siteRead: { read: SiteRead; readAt: number } | null = null,
+): ScriptLinks {
+  const x = parseXLink(s.socials.twitter);
+  const lp = launchpadSite(chain, s.launchpad, s.mint);
+  return {
+    twitter: s.socials.twitter || null,
+    website: s.socials.website || null,
+    telegram: s.socials.telegram || null,
+    launchpadLabel: lp?.label ?? null,
+    launchpadUrl: lp?.url ?? null,
+    x: { kind: x.kind, handle: x.handle, postId: x.postId, label: x.label, accountReuse: reuse.handle, postReuse: reuse.post, stats: xStats?.stats ?? null, statsReadAt: xStats?.readAt ?? null },
+    telegramStats: linkIntel?.telegram ?? null,
+    domain: linkIntel?.domain ?? null,
+    site: siteRead ? { ...siteRead.read, readAt: siteRead.readAt } : null,
+  };
 }
 
 export function withLeader(c: RuleContext, l: LeaderFacts): RuleContext {
@@ -1088,6 +1416,10 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'price', signature: 'await bot.price(mint)', returns: 'number | null', notes: 'SOL per token from what the app already knows. Null when nothing local knows it.', action: false },
   { method: 'token', signature: 'await bot.token(mint)', returns: 'Token | null', notes: 'The same facts a rule sees (see the variable guide), from the launch feed and the cached market data. Null when the app has never seen the token.', action: false },
   { method: 'market', signature: 'await bot.market(mint)', returns: 'Market | null', notes: 'Asks the market providers (a network round trip inside the app): priceSol, priceUsd, marketCapUsd, liquidityUsd, holders, launchpad, symbol, name. Slow — a second or more; not for every tick.', action: false },
+  { method: 'links', signature: 'await bot.links(mint)', returns: 'Links | null', notes: 'The token’s published links and what its X link IS, from cached facts — free, costs no action (the first call for a token starts its Telegram and domain lookups; their answers appear on later calls): {twitter, website, telegram, launchpadLabel, launchpadUrl, x: {kind, handle, postId, label, accountReuse, postReuse, stats, statsReadAt}, telegramStats, domain, site}. stats is what the Links panel read off the X page when a person opened it there — {page, handle, followers, following, joined, verified, likes, reposts, replies, views, bookmarks, loginWall} — else null; nothing is fetched for it. telegramStats is what t.me’s public preview says about the Telegram link — {kind: channel · group · account · invite · unknown, members, countWord, online, title, readAt} — else null (a private invite shows no count). domain is the website’s registry record — {name, registeredAt, registrar, hostedOn, readAt} — hostedOn naming a shared platform (Vercel, GitHub Pages…) when the site has no domain of its own; else null. site is what the Links panel read off the website when a person opened it there — {namesContract, xHandles, telegramLinks, outboundHosts, wordCount, generator, mentionsConnectWallet, readAt} — else null; the app never fetches a token’s website itself. kind is profile · post · community · search · other-x · not-x · none; accountReuse / postReuse count OTHER launches in view on the same account or post. Null when the app has no cached facts for the token (call bot.market first). The app never visits the links. Solana only.', action: false },
+  { method: 'security', signature: 'await bot.security(mint)', returns: 'Security | null', notes: 'The token page’s security report (a round trip inside the app; costs an action like market): {score, checksResolved, checksTotal, checks: [{id, label, verdict, detail}], warnings}. verdict is pass · warn · fail · unknown. Null when it could not be read. Solana only.', action: false },
+  { method: 'creator', signature: 'await bot.creator(mint)', returns: 'Creator | null', notes: 'The creator wallet’s launch record from pump.fun (a round trip; costs an action): {address, launches, graduated, graduationRate, medianAthUsd, bestAthUsd, firstLaunchAt, lastLaunchAt, truncated}. Null when the creator is unknown or the source did not answer. Solana only.', action: false },
+  { method: 'analyze', signature: 'await bot.analyze(mint)', returns: 'Analysis', notes: 'The AI second opinion from the token page: {score, verdict, summary, bullish, bearish, provider, model, at}. It spends YOUR key (Settings → AI) on every uncached call, so it is capped at 20 per hour per script and cached 10 minutes per token, and it counts as an action. Only public on-chain facts about the token are sent — never a wallet or a key. Rejects with the reason when AI is off or capped. Solana only.', action: true },
   { method: 'positions', signature: 'await bot.positions()', returns: 'Position[]', notes: 'Every position THIS SCRIPT opened, in its mode, as the same facts object plus held=true, pnlPct, pnlSol, holdMinutes, drawdownFromPeakPct, costSol. Bags the user opened by hand are not listed and cannot be sold.', action: false },
   { method: 'orders', signature: 'await bot.orders(mint?)', returns: 'Order[]', notes: '{id, mint, symbol, kind, state, triggerBasis, triggerValue, amount}. All orders, or the token’s.', action: false },
   { method: 'runners', signature: 'await bot.runners()', returns: 'Token[]', notes: 'Launches the scanner currently flags as runners.', action: false },
@@ -1109,7 +1441,7 @@ export interface EventSpec {
 
 export const SCRIPT_EVENTS_DOC: EventSpec[] = [
   { event: 'launch', payload: 'Token', when: 'a token was just created and the feed saw it (score usually still null)' },
-  { event: 'launchUpdate', payload: 'Token', when: 'a tracked launch traded; at most once per 2 s per token' },
+  { event: 'launchUpdate', payload: 'Token', when: 'a tracked launch traded; at most once per 2 s per token. Flows while the launch is being evaluated (the first 15 s by default), then only while it is a flagged runner (15 min from the flag), held by a position, or subscribed with bot.subscribe/bot.watch — call bot.subscribe(mint) on a runner you intend to act on and both tick and launchUpdate keep coming; the score is fixed at decision time, the flow fields move' },
   { event: 'runner', payload: 'Token + runnerOddsPct', when: 'the scanner flagged a potential runner' },
   { event: 'position', payload: 'Token + position fields (held=true)', when: 'every ~5 s for each position the script holds, and on every fill' },
   { event: 'tick', payload: 'Token + position fields; priceSol is the tick', when: 'the price moved on a token the script holds, watched or subscribed to; at most once a second per token' },

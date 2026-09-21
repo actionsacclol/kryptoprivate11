@@ -1,4 +1,6 @@
-import { shell, type BrowserWindow } from 'electron';
+import { shell, type BrowserWindow, app } from 'electron';
+import { isEmbeddableUrl } from '@shared/tokenLinks';
+import { logger } from './logger';
 
 /**
  * Content-Security-Policy for the renderer.
@@ -96,3 +98,59 @@ export function guardWebContents(win: BrowserWindow): void {
     }
   });
 }
+
+/**
+ * Embedded browser views — the Links panel's <webview> (2026-09-20).
+ *
+ * A webview is a page the app did not write, shown inside a window that
+ * carries window.krypt. It is safe only because of what it is NOT given:
+ * no preload (so no bridge), no Node, context isolation and the sandbox on,
+ * https only, and its own session partition so its cookies never touch the
+ * app's. Every one of those is set HERE, in main, when the view attaches —
+ * a renderer that asked for more would simply not get it. Popups are denied
+ * and handed to the system browser; downloads and permission prompts
+ * (camera, notifications, …) are refused outright.
+ *
+ * Registered once at startup; `web-contents-created` fires for the guest
+ * too, which is where its own navigation guards go.
+ */
+export function guardWebviews(): void {
+  app.on('web-contents-created', (_e, contents) => {
+    contents.on('will-attach-webview', (event, webPreferences, params) => {
+      delete (webPreferences as { preload?: string }).preload;
+      delete (webPreferences as { preloadURL?: string }).preloadURL;
+      webPreferences.nodeIntegration = false;
+      webPreferences.nodeIntegrationInSubFrames = false;
+      webPreferences.contextIsolation = true;
+      webPreferences.sandbox = true;
+      webPreferences.webSecurity = true;
+      webPreferences.allowRunningInsecureContent = false;
+      webPreferences.experimentalFeatures = false;
+      webPreferences.enableBlinkFeatures = '';
+      if (!isEmbeddableUrl(params.src)) {
+        logger.warn(`webview: refused to attach a view for ${String(params.src).slice(0, 120)}`);
+        event.preventDefault();
+      }
+    });
+    if (contents.getType() !== 'webview') return;
+    contents.setWindowOpenHandler(({ url }) => {
+      if (isEmbeddableUrl(url)) void shell.openExternal(url);
+      return { action: 'deny' };
+    });
+    const onlyHttps = (e: { preventDefault: () => void }, url: string): void => {
+      if (!isEmbeddableUrl(url)) e.preventDefault();
+    };
+    contents.on('will-navigate', onlyHttps);
+    contents.on('will-redirect', onlyHttps);
+    // The guest's session is its own partition; refuse what a page could ask
+    // of the machine. Idempotent per session.
+    const ses = contents.session;
+    if (!guardedSessions.has(ses)) {
+      guardedSessions.add(ses);
+      ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+      ses.setPermissionCheckHandler(() => false);
+      ses.on('will-download', (e) => e.preventDefault());
+    }
+  });
+}
+const guardedSessions = new WeakSet<Electron.Session>();

@@ -16,7 +16,7 @@
 import { BLOCK_FEED_WSS_URLS, DEFAULT_SETTINGS, type AppSettings } from '@shared/types';
 import { evmRpcUrlProblem } from '@shared/evm';
 import { LOCALES } from '@shared/i18n';
-import { THEMES } from '@shared/theme';
+import { SKINS, THEMES } from '@shared/theme';
 import { webhookUrlProblem } from '@shared/webhook';
 
 export interface Validated {
@@ -70,6 +70,13 @@ const BOUNDS: Record<string, { min: number; max: number; int?: boolean }> = {
   'strategy.maxSessionLossSol': { min: 0, max: 1000 },
   'strategy.maxConsecutiveLosses': { min: 1, max: 100, int: true },
   'strategy.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
+  // The user's own runner filters (2026-09-20). 0 means "no floor" for the
+  // counts, and 0–100 is "no bound" for the supply-sold range, so every
+  // default sits on its own bound's edge on purpose.
+  'strategy.runnerAlerts.minBuyers': { min: 0, max: 1000, int: true },
+  'strategy.runnerAlerts.minNetSol': { min: 0, max: 10_000 },
+  'strategy.runnerAlerts.minCurvePct': { min: 0, max: 100 },
+  'strategy.runnerAlerts.maxCurvePct': { min: 0, max: 100 },
   // Per chain, because the chains are separate everywhere else too.
   'evm.robinhood.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
   'evm.bnb.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
@@ -138,10 +145,14 @@ const ENUMS: Record<string, readonly unknown[]> = {
   // An unknown theme matches no CSS block, so the app would render with no
   // accent at all and look broken with nothing to explain it.
   theme: THEMES,
+  // The look, for the same reason: an unknown one would render as Classic
+  // while the setting claimed otherwise.
+  skin: SKINS,
   'execution.feeUrgency': ['normal', 'competitive', 'high', 'emergency'],
   'execution.mevMode': ['off', 'fast', 'private'],
   'execution.jitoTipPercentile': [50, 75, 95],
   'strategy.runnerAlerts.minBucket': ['top1', 'top1_5', 'top5_10'],
+  'strategy.runnerAlerts.windows': ['both', '60', '120'],
   // Buyer-count bucket edges (shared/evmRunners.ts BUYER_BUCKETS). Numbers,
   // not labels: the bucket IS its lower bound, and storing the label would
   // mean two things to keep in step.

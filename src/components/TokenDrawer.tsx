@@ -135,7 +135,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
               </div>
 
               <div>
-                <div className="font-display text-label uppercase tracking-heading text-krypt-muted mb-2">Concentration wards</div>
+                <div className="font-display text-label uppercase tracking-heading text-krypt-muted mb-2">Concentration checks</div>
                 <div className="grid grid-cols-3 gap-2">
                   <SealGauge label="Top holder" share={launch.flow.topHolderTokenShare} dangerAt={0.25} />
                   <SealGauge label="Bundled supply" share={launch.flow.earlyBuyerShare ?? 0} dangerAt={0.45} />

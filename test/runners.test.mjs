@@ -1,6 +1,7 @@
 // Potential-runner alerts: the verdict, the cap, and the honesty of the text.
 import assert from 'node:assert';
-import { ODDS_TAPE_CAP, markCreatorSold, regimeLine, FLAG_FORWARD_LINE, runnerVerdict, RunnerRateLimit, runnerNotification, bucketWithin, DEFAULT_RUNNER_ALERTS, RUNNER_TTL_MS, pruneRunners } from './.runners.mjs';
+import fs from 'node:fs';
+import { ODDS_TAPE_CAP, markCreatorSold, regimeLine, FLAG_FORWARD_LINE, runnerVerdict, RunnerRateLimit, runnerNotification, bucketWithin, DEFAULT_RUNNER_ALERTS, RUNNER_TTL_MS, pruneRunners, windowAllowed, describeRunnerFilters } from './.runners.mjs';
 
 const report = (bucket, observedPct = 18, basePct = 2.2) => ({
   model: '2026-07-27',
@@ -34,6 +35,19 @@ const cfg = { ...DEFAULT_RUNNER_ALERTS };
   assert.equal(runnerVerdict(null, cfg, ctx).flag, false, 'no report, no flag');
   assert.equal(runnerVerdict(report('top1'), { ...cfg, enabled: false }, ctx).flag, false, 'switch off');
   console.log('ok  rug rules and the switch override the odds');
+}
+{
+  // Mixed curves flag by default — they are most flags — and only the
+  // setting skips them; an unknown regime is never treated as mixed.
+  assert.equal(DEFAULT_RUNNER_ALERTS.excludeMixed, false, 'off by default');
+  assert.equal(runnerVerdict({ ...report('top1'), regime: 'mixed' }, cfg, { ...ctx, regime: 'mixed' }).flag, true);
+  const skip = { ...cfg, excludeMixed: true };
+  assert.equal(runnerVerdict({ ...report('top1'), regime: 'mixed' }, skip, { ...ctx, regime: 'mixed' }).flag, false, 'the switch skips a mixed curve');
+  assert.match(runnerVerdict({ ...report('top1'), regime: 'mixed' }, skip, { ...ctx, regime: 'mixed' }).reason, /mixed curve/);
+  assert.equal(runnerVerdict(report('top1'), skip, { ...ctx, regime: 'classic' }).flag, true, 'and keeps a classic one');
+  assert.equal(runnerVerdict(report('top1'), skip, { ...ctx, regime: 'unknown' }).flag, true, 'unknown is not mixed');
+  assert.equal(runnerVerdict(report('top1'), skip, ctx).flag, true, 'no regime given: not mixed');
+  console.log('ok  mixed curves flag unless the setting skips them');
 }
 {
   const rl = new RunnerRateLimit();
@@ -102,4 +116,87 @@ console.log('runners: all tests passed');
   const allFresh = [{ mint: 'a', flaggedAt: now }, { mint: 'b', flaggedAt: now - 1 }];
   assert.equal(pruneRunners(allFresh, now).length, allFresh.length);
   console.log('ok  a flag expires at the TTL and the order survives pruning');
+}
+
+// ── The user's own filters (2026-09-20) ───────────────────────────────
+// Every one is off by default, applies only when the fact is known, and
+// says which setting refused the launch.
+{
+  assert.equal(DEFAULT_RUNNER_ALERTS.windows, 'both');
+  assert.equal(DEFAULT_RUNNER_ALERTS.minBuyers, 0);
+  assert.equal(DEFAULT_RUNNER_ALERTS.minNetSol, 0);
+  assert.equal(DEFAULT_RUNNER_ALERTS.minCurvePct, 0);
+  assert.equal(DEFAULT_RUNNER_ALERTS.maxCurvePct, 100);
+  assert.equal(DEFAULT_RUNNER_ALERTS.skipRepeatDumpers, false);
+  const full = { ...ctx, windowS: 60, uniqueBuyers: 3, netInflowSol: 0.4, curvePct: 2, creatorPriorDumps: 2 };
+  assert.equal(runnerVerdict(report('top1'), cfg, full).flag, true, 'the defaults filter nothing');
+  console.log('ok  the user filters are all off by default');
+}
+{
+  assert.equal(windowAllowed(cfg, 60), true);
+  assert.equal(windowAllowed(cfg, 120), true);
+  assert.equal(windowAllowed({ windows: '60' }, 120), false);
+  assert.equal(windowAllowed({ windows: '120' }, 60), false);
+  assert.equal(windowAllowed({ windows: '120' }, 120), true);
+  assert.equal(windowAllowed({}, 120), true, 'absent = both');
+  const only120 = { ...cfg, windows: '120' };
+  assert.equal(runnerVerdict(report('top1'), only120, { ...ctx, windowS: 60 }).flag, false);
+  assert.match(runnerVerdict(report('top1'), only120, { ...ctx, windowS: 60 }).reason, /\+60 s window is off/);
+  assert.equal(runnerVerdict(report('top1'), only120, { ...ctx, windowS: 120 }).flag, true);
+  assert.equal(runnerVerdict(report('top1'), only120, ctx).flag, true, 'no window given: not a window question');
+  console.log('ok  a judge window the user turned off never flags, and the other still does');
+}
+{
+  const floor = { ...cfg, minBuyers: 8, minNetSol: 2 };
+  assert.equal(runnerVerdict(report('top1'), floor, { ...ctx, uniqueBuyers: 7, netInflowSol: 5 }).flag, false);
+  assert.match(runnerVerdict(report('top1'), floor, { ...ctx, uniqueBuyers: 7, netInflowSol: 5 }).reason, /7 buyers, under the 8 floor/);
+  assert.equal(runnerVerdict(report('top1'), floor, { ...ctx, uniqueBuyers: 8, netInflowSol: 1.99 }).flag, false);
+  assert.match(runnerVerdict(report('top1'), floor, { ...ctx, uniqueBuyers: 8, netInflowSol: 1.99 }).reason, /1\.99 SOL net, under the 2 SOL floor/);
+  assert.equal(runnerVerdict(report('top1'), floor, { ...ctx, uniqueBuyers: 8, netInflowSol: 2 }).flag, true, 'floors are inclusive');
+  assert.equal(runnerVerdict(report('top1'), floor, ctx).flag, true, 'unknown counts are never a reason to hide a launch');
+  console.log('ok  buyer and net-SOL floors refuse thin launches and never unknown ones');
+}
+{
+  const band = { ...cfg, minCurvePct: 5, maxCurvePct: 60 };
+  assert.equal(runnerVerdict(report('top1'), band, { ...ctx, curvePct: 4.9 }).flag, false);
+  assert.equal(runnerVerdict(report('top1'), band, { ...ctx, curvePct: 60.1 }).flag, false);
+  assert.match(runnerVerdict(report('top1'), band, { ...ctx, curvePct: 60.1 }).reason, /outside 5–60 %/);
+  assert.equal(runnerVerdict(report('top1'), band, { ...ctx, curvePct: 5 }).flag, true);
+  assert.equal(runnerVerdict(report('top1'), band, { ...ctx, curvePct: 60 }).flag, true);
+  assert.equal(runnerVerdict(report('top1'), band, ctx).flag, true, 'unknown progress: not refused');
+  console.log('ok  the supply-sold band is inclusive and ignores an unknown');
+}
+{
+  const skip = { ...cfg, skipRepeatDumpers: true };
+  assert.equal(runnerVerdict(report('top1'), skip, { ...ctx, creatorPriorDumps: 1 }).flag, false);
+  assert.match(runnerVerdict(report('top1'), skip, { ...ctx, creatorPriorDumps: 1 }).reason, /creator dumped 1 earlier launch \(/);
+  assert.match(runnerVerdict(report('top1'), skip, { ...ctx, creatorPriorDumps: 3 }).reason, /3 earlier launches/);
+  assert.equal(runnerVerdict(report('top1'), skip, { ...ctx, creatorPriorDumps: 0 }).flag, true, 'no dump on record');
+  assert.equal(runnerVerdict(report('top1'), skip, { ...ctx, creatorPriorDumps: null }).flag, true, 'no record is not a dump');
+  assert.equal(runnerVerdict(report('top1'), cfg, { ...ctx, creatorPriorDumps: 5 }).flag, true, 'off by default');
+  console.log('ok  repeat dumpers are skipped only by choice, and only on a real record');
+}
+{
+  assert.deepEqual(describeRunnerFilters(cfg), [], 'defaults: nothing but the floor');
+  const phrases = describeRunnerFilters({ ...cfg, windows: '60', minBuyers: 8, minNetSol: 2, minCurvePct: 5, maxCurvePct: 60, excludeMixed: true, skipRepeatDumpers: true });
+  assert.deepEqual(phrases, ['+60 s only', '≥ 8 buyers', '≥ 2 SOL net', '5–60 % of supply sold', 'no mixed curves', 'no repeat dumpers']);
+  console.log('ok  the filter summary names each active filter and nothing else');
+}
+{
+  // Where the controls live. The runner-alert tuning moved from the
+  // Strategy page (beside the paper-entry gates, which read as if they
+  // decided the flags) to the Execution page, next to the mayhem filter;
+  // the auto-buy leftovers left the Execution page with it.
+  const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const execution = src('../src/pages/Execution.tsx');
+  const strategy = src('../src/pages/Strategy.tsx');
+  for (const key of ['minBucket', 'windows', 'minBuyers', 'minNetSol', 'minCurvePct', 'maxCurvePct', 'excludeMixed', 'skipRepeatDumpers', 'maxPerHour', 'mayhemFilter']) {
+    assert.ok(execution.includes(key), `Execution page sets ${key}`);
+    assert.ok(!strategy.includes(key), `Strategy page no longer sets ${key}`);
+  }
+  assert.ok(!/Paper send plans|recentPlans|would-be snipe/.test(execution), 'no auto-buy leftovers on the Execution page');
+  assert.ok(/Nothing on this page buys/.test(execution) && /Nothing on this page buys/.test(strategy), 'both pages say so');
+  assert.ok(/Execution page/.test(src('../src/pages/Runners.tsx')), 'the Runners tab points at the Execution page');
+  assert.ok(!/Spellbook|Grimoire/.test(src('../src/components/Sidebar.tsx')), 'plain names in the sidebar');
+  console.log('ok  runner tuning lives on the Execution page and the auto-buy leftovers are gone');
 }

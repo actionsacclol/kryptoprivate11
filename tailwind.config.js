@@ -9,12 +9,20 @@ export default {
       colors: {
         // Parchment white — every text-white / border-white/10 in the app
         // becomes warm engraved bone on the cold void. Deliberate.
-        white: '#F0EDE2',
-        'krypt-black': '#030409',
-        'krypt-void': '#06070F',
-        'krypt-surface': '#12172B',
-        'krypt-panel': '#0A0D1A',
-        'krypt-muted': '#8C92AB',
+        // Since 2026-09-20 these read variables too, so a LOOK can move the
+        // surfaces and the text colour the way a theme moves the accent —
+        // and 1,036 alpha uses (bg-white/5, bg-krypt-panel/80 …) keep
+        // working. Classic's values live in src/index.css under :root.
+        // `black` too: bg-black/30 is the app's standard input and inset
+        // wash, ~180 uses. A dark look leaves the ink at 0 0 0; the light
+        // XP look tints it blue so those washes read as Luna, not soot.
+        black: 'rgb(var(--krypt-ink) / <alpha-value>)',
+        white: 'rgb(var(--krypt-text) / <alpha-value>)',
+        'krypt-black': 'rgb(var(--krypt-black) / <alpha-value>)',
+        'krypt-void': 'rgb(var(--krypt-void) / <alpha-value>)',
+        'krypt-surface': 'rgb(var(--krypt-surface) / <alpha-value>)',
+        'krypt-panel': 'rgb(var(--krypt-panel) / <alpha-value>)',
+        'krypt-muted': 'rgb(var(--krypt-muted) / <alpha-value>)',
         // The ACCENT, and the only part of the palette a theme moves.
         // Channels rather than hex, so `<alpha-value>` keeps every existing
         // `bg-krypt-purple/20` working - 376 uses of krypt-purple alone, and
@@ -26,11 +34,23 @@ export default {
         'arc-gold': '#D9B45B',
         'arc-crimson': '#E5484D',
       },
+      // Fonts read variables so a look can swap all three at once
+      // (src/index.css). Classic: Spline Sans, Cinzel, JetBrains Mono.
       fontFamily: {
-        sans: ['"Spline Sans"', 'system-ui', 'sans-serif'],
-        display: ['Cinzel', 'Georgia', 'serif'],
-        pixel: ['Cinzel', 'Georgia', 'serif'],
-        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+        display: ['var(--font-display)', 'Georgia', 'serif'],
+        pixel: ['var(--font-display)', 'Georgia', 'serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
+      },
+      // Corners read variables so a look can square or soften every corner
+      // at once. Classic's values are Tailwind's own.
+      borderRadius: {
+        sm: 'var(--radius-sm)',
+        DEFAULT: 'var(--radius)',
+        md: 'var(--radius-md)',
+        lg: 'var(--radius-lg)',
+        xl: 'var(--radius-xl)',
+        '2xl': 'var(--radius-2xl)',
       },
       // ── The type scale ────────────────────────────────────────────
       //
@@ -63,7 +83,7 @@ export default {
       },
       boxShadow: {
         'krypt-glow': '0 0 22px rgb(var(--krypt-accent) / 0.28)',
-        'krypt-card': '0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(240, 237, 226, 0.04)',
+        'krypt-card': '0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgb(var(--krypt-text) / 0.04)',
         'gold-glow': '0 0 18px rgba(217, 180, 91, 0.3)',
         'crimson-glow': '0 0 18px rgba(229, 72, 77, 0.35)',
       },

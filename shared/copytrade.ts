@@ -20,6 +20,59 @@ import { type ChainKind } from './evm';
 
 export type CopyMode = 'paper' | 'live';
 
+/**
+ * Which way a config trades against its leader (2026-09-20).
+ *
+ *   copy     buy when they buy, mirror their sells.
+ *   reverse  buy when they SELL, sell when they buy back — and, because a
+ *            leader almost never buys the same coin back, the position has
+ *            its own exits: take-profit, stop-loss and a maximum hold.
+ *
+ * Reverse is the contrarian read of the same feed: the followability study
+ * (docs/wallet-convergence-2026-09-14.md) found leaders' edge is latency
+ * and their exits come early; fading an exit is a bet that the coin keeps
+ * going after they leave. It is a bet, measured nowhere yet, so it starts
+ * on paper like everything else and its scorecard is kept separately.
+ */
+export type CopyDirection = 'copy' | 'reverse' | 'fomo';
+export const DEFAULT_EXIT_TAKE_PROFIT_PCT = 25;
+export const DEFAULT_EXIT_STOP_LOSS_PCT = 20;
+export const DEFAULT_EXIT_MAX_HOLD_MIN = 30;
+
+/**
+ * FOMO copy (2026-09-20): buy when SEVERAL wallets from a set pile into the
+ * same coin inside a window — the crowd, not one leader. The set is one of:
+ *
+ *   followed   every wallet with an enabled copy or reverse config
+ *   saved      the wallets saved on the Scout
+ *   tracked    the tracked-wallet list (labels, alerts)
+ *   top        the Scout's top N by Copy score over the last 7 days
+ *
+ * Measured, this is the pattern the followability study called
+ * "convergence" (docs/wallet-convergence-2026-09-14.md): with 2, 3 and 4
+ * top wallets converging on a coin within minutes, the FOLLOWER's outcome
+ * got worse with every extra wallet — −15 % → −32 % at 60 min, monotone,
+ * both periods. The crowd is late by construction. It ships because it is
+ * asked for by name; it ships on paper, with that number on the form.
+ */
+export type FomoSource = 'followed' | 'saved' | 'tracked' | 'top';
+export const FOMO_SOURCES: FomoSource[] = ['followed', 'saved', 'tracked', 'top'];
+export const FOMO_SOURCE_LABEL: Record<FomoSource, string> = {
+  followed: 'Followed wallets',
+  saved: 'Saved Scout wallets',
+  tracked: 'Tracked wallets',
+  top: 'Top Scout wallets by Copy score',
+};
+export const DEFAULT_FOMO_MIN_WALLETS = 3;
+export const DEFAULT_FOMO_WINDOW_SEC = 180;
+export const DEFAULT_FOMO_TOP_N = 25;
+/** Share of the wallets that triggered an entry that must have SOLD before
+ *  the position follows them out. */
+export const DEFAULT_FOMO_CROWD_EXIT_PCT = 50;
+/** The `wallet` a FOMO config carries: it follows a set, not an address. */
+export const FOMO_WALLET = 'fomo';
+export const isFomo = (c: { direction?: CopyDirection | null }): boolean => c.direction === 'fomo';
+
 export type SizingMode =
   /** Always the same SOL amount, whatever they spent. */
   | 'fixed'
@@ -45,6 +98,29 @@ export interface CopyConfig {
   label: string;
   enabled: boolean;
   mode: CopyMode;
+  /** Absent (every config saved before 2026-09-20) is `copy`. */
+  direction?: CopyDirection;
+  /**
+   * The position's OWN exits — take-profit and stop-loss in percent gross of
+   * entry, hold in minutes — judged on every price tick.
+   *
+   * On a reverse or FOMO config absent means the shipped default, never
+   * "off": those positions have no leader sell to close them, and a bag with
+   * no exit is held until the user notices. On a copy config absent means
+   * off — the leader's sells govern — and a value set is an extra exit on
+   * top of them.
+   */
+  exitTakeProfitPct?: number | null;
+  exitStopLossPct?: number | null;
+  exitMaxHoldMin?: number | null;
+  /** FOMO only: the set watched, how many of them inside how many seconds
+   *  trigger an entry, the N for `top`, and the crowd-exit share. Absent
+   *  means the defaults. */
+  fomoSource?: FomoSource | null;
+  fomoMinWallets?: number | null;
+  fomoWindowSec?: number | null;
+  fomoTopN?: number | null;
+  fomoCrowdExitPct?: number | null;
 
   sizing: SizingMode;
   /** `fixed`: SOL per trade. `proportional`: percent of their size. */
@@ -97,6 +173,49 @@ export interface CopyConfig {
 /** Applied when a config does not carry `maxCopiesPerMinute`. */
 export const DEFAULT_COPIES_PER_MINUTE = 10;
 
+export const directionOf = (c: { direction?: CopyDirection | null }): CopyDirection =>
+  c.direction === 'reverse' ? 'reverse' : c.direction === 'fomo' ? 'fomo' : 'copy';
+
+/**
+ * A config's own exits. Reverse and FOMO fill the defaults in; a copy
+ * config's are off unless set (its leader's sells are its exits). Null =
+ * off for that one exit.
+ */
+export function ownExitsOf(c: Pick<CopyConfig, 'direction' | 'exitTakeProfitPct' | 'exitStopLossPct' | 'exitMaxHoldMin'>): {
+  takeProfitPct: number | null;
+  stopLossPct: number | null;
+  maxHoldMin: number | null;
+} {
+  const d = directionOf(c);
+  const n = (v: number | null | undefined, dflt: number): number | null => {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+    return d === 'copy' ? null : dflt;
+  };
+  return {
+    takeProfitPct: n(c.exitTakeProfitPct, DEFAULT_EXIT_TAKE_PROFIT_PCT),
+    stopLossPct: n(c.exitStopLossPct, DEFAULT_EXIT_STOP_LOSS_PCT),
+    maxHoldMin: n(c.exitMaxHoldMin, DEFAULT_EXIT_MAX_HOLD_MIN),
+  };
+}
+
+/** A FOMO config's crowd rule, defaults filled in. */
+export function fomoRuleOf(c: Pick<CopyConfig, 'fomoSource' | 'fomoMinWallets' | 'fomoWindowSec' | 'fomoTopN' | 'fomoCrowdExitPct'>): {
+  source: FomoSource;
+  minWallets: number;
+  windowSec: number;
+  topN: number;
+  crowdExitPct: number;
+} {
+  const n = (v: number | null | undefined, d: number): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : d);
+  return {
+    source: c.fomoSource && FOMO_SOURCES.includes(c.fomoSource) ? c.fomoSource : 'followed',
+    minWallets: n(c.fomoMinWallets, DEFAULT_FOMO_MIN_WALLETS),
+    windowSec: n(c.fomoWindowSec, DEFAULT_FOMO_WINDOW_SEC),
+    topN: n(c.fomoTopN, DEFAULT_FOMO_TOP_N),
+    crowdExitPct: n(c.fomoCrowdExitPct, DEFAULT_FOMO_CROWD_EXIT_PCT),
+  };
+}
+
 export interface CopyStats {
   configId: string;
   /** Paper and live are scored separately — they are different experiments. */
@@ -140,6 +259,11 @@ export interface CopyTrade {
   state: CopyTradeState;
   /** Why it was skipped, when it was. */
   reason: string | null;
+  /** Absent = a copy. A reverse row was opened by the leader SELLING; a
+   *  FOMO row by a crowd, named in `triggeredBy`. */
+  direction?: CopyDirection;
+  /** FOMO: the wallets whose buys triggered this entry. */
+  triggeredBy?: string[];
   /**
    * `exit` = one sell mirrored from the leader (2026-09-08): a slice of a
    * copy, where `ourSol` is the cost basis of the share sold and `pnlSol`
@@ -256,6 +380,11 @@ export interface CopyWatchStatus {
   lastSwapAt: number | null;
   seen: number;
   swaps: number;
+  /** Seen but never readable from the RPC after every retry — those trades
+   *  were NOT copied (2026-09-20). Absent on status built before it. */
+  unreadable?: number;
+  /** Read, but not a copyable swap (transfers, LP moves, claims). */
+  notSwap?: number;
 }
 
 export interface CopySnapshot {
@@ -275,6 +404,10 @@ export interface CopySnapshot {
    * built before this field still satisfies the type.
    */
   loadFailure?: string | null;
+  /** Per FOMO config (2026-09-20): which set it listens to and how many
+   *  wallets that set holds right now. Zero is an honest zero — a source the
+   *  host cannot answer, or a Scout with nothing saved. */
+  crowd?: Record<string, { source: FomoSource; wallets: number }>;
 }
 
 // ── The leader's own record ───────────────────────────────────────────
@@ -451,12 +584,68 @@ export function rankLeaders(list: LeaderStats[], by: LeaderRankKey): LeaderStats
   });
 }
 
-export function defaultConfig(wallet: string, label: string, chain: ChainKind = 'solana'): Omit<CopyConfig, 'id' | 'createdAt'> {
+// ── Copy Simple (2026-09-20) ──────────────────────────────────────────
+//
+// The simple page asks three things — whose wallet, how much per trade, and
+// which chain when a 0x address does not say — and derives the rest. Same
+// config, same store, same engine as the full page; only the questions are
+// fewer. The derivation is here, not in the page, so a test can pin it and
+// the full page can show exactly what the simple one saved.
+
+/** The per-trade sizes the simple page offers, in the chain's native coin. */
+export const SIMPLE_SIZES = [0.05, 0.1, 0.25, 0.5] as const;
+/** The most the simple page will size a trade at; more needs the full page. */
+export const SIMPLE_MAX_SOL = 5;
+/** Daily loss limit as a multiple of the per-trade size. */
+export const SIMPLE_LOSS_MULTIPLE = 10;
+
+/** What kind of address this is, from its shape alone. Null = neither. */
+export function chainForAddress(address: string): 'solana' | 'evm' | null {
+  const a = address.trim();
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a)) return 'solana';
+  if (/^0x[0-9a-fA-F]{40}$/.test(a)) return 'evm';
+  return null;
+}
+
+/**
+ * The whole config from three answers. Fixed sizing at `perTrade` (clamped
+ * to 0.001–SIMPLE_MAX_SOL; a bad number becomes the second offered size),
+ * the per-trade cap equal to it, a daily loss limit of ten trades' worth,
+ * paper, and switched ON — a paper follow has nothing to arm. Everything
+ * else is `defaultConfig`, so a simple follow reads sensibly on the full page.
+ */
+export function simpleConfig(wallet: string, label: string, chain: ChainKind, perTrade: number): Omit<CopyConfig, 'id' | 'createdAt'> {
+  const wanted = Number.isFinite(perTrade) && perTrade > 0 ? perTrade : SIMPLE_SIZES[1];
+  const size = Math.round(Math.min(SIMPLE_MAX_SOL, Math.max(0.001, wanted)) * 1_000) / 1_000;
+  const base = defaultConfig(wallet.trim(), label.trim(), chain, 'copy');
+  return {
+    ...base,
+    enabled: true,
+    mode: 'paper',
+    sizing: 'fixed',
+    sizeValue: size,
+    maxTradeSol: size,
+    dailyLossLimitSol: Math.round(size * SIMPLE_LOSS_MULTIPLE * 1_000) / 1_000,
+    copySells: true,
+  };
+}
+
+export function defaultConfig(wallet: string, label: string, chain: ChainKind = 'solana', direction: CopyDirection = 'copy'): Omit<CopyConfig, 'id' | 'createdAt'> {
   return {
     chain,
-    wallet,
+    wallet: direction === 'fomo' ? FOMO_WALLET : wallet,
     label,
     enabled: false,
+    direction,
+    // A copy's own exits are off; a reverse's or FOMO's are the defaults.
+    exitTakeProfitPct: direction === 'copy' ? null : DEFAULT_EXIT_TAKE_PROFIT_PCT,
+    exitStopLossPct: direction === 'copy' ? null : DEFAULT_EXIT_STOP_LOSS_PCT,
+    exitMaxHoldMin: direction === 'copy' ? null : DEFAULT_EXIT_MAX_HOLD_MIN,
+    fomoSource: direction === 'fomo' ? 'followed' : null,
+    fomoMinWallets: direction === 'fomo' ? DEFAULT_FOMO_MIN_WALLETS : null,
+    fomoWindowSec: direction === 'fomo' ? DEFAULT_FOMO_WINDOW_SEC : null,
+    fomoTopN: direction === 'fomo' ? DEFAULT_FOMO_TOP_N : null,
+    fomoCrowdExitPct: direction === 'fomo' ? DEFAULT_FOMO_CROWD_EXIT_PCT : null,
     // Paper. Always paper, until the user has a reason not to.
     mode: 'paper',
     sizing: 'fixed',
@@ -481,7 +670,15 @@ export function validateConfig(c: Omit<CopyConfig, 'id' | 'createdAt'>): { ok: b
   // wallet watcher to subscribe on, and `copy:resetStats` has always checked
   // it properly while the save path did not.
   const chain = chainOf(c);
-  if (chain === 'solana') {
+  if (c.direction !== undefined && c.direction !== null && c.direction !== 'copy' && c.direction !== 'reverse' && c.direction !== 'fomo') {
+    return { ok: false, message: 'Direction must be copy, reverse or fomo' };
+  }
+  if (isFomo(c)) {
+    // A crowd, not an address. Solana only: the crowd is heard on the pump
+    // curve feed, and the followed wallets on their own subscriptions.
+    if (chain !== 'solana') return { ok: false, message: 'FOMO copying watches the Solana feeds only' };
+    if (c.wallet !== FOMO_WALLET) return { ok: false, message: 'A FOMO config follows a set of wallets, not an address' };
+  } else if (chain === 'solana') {
     if (!c.wallet || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(c.wallet)) return { ok: false, message: 'Enter a valid wallet address' };
   } else if (!c.wallet || !/^0x[0-9a-fA-F]{40}$/.test(c.wallet)) {
     return { ok: false, message: `Enter a valid 0x address on ${chain === 'robinhood' ? 'Robinhood Chain' : 'BNB Smart Chain'}` };
@@ -511,6 +708,24 @@ export function validateConfig(c: Omit<CopyConfig, 'id' | 'createdAt'>): { ok: b
       return { ok: false, message: 'Copies per minute must be between 1 and 120' };
     }
   }
+  // Own exits: a value that is present must be sane, whatever the direction.
+  const tp = c.exitTakeProfitPct;
+  if (tp !== undefined && tp !== null && (!(tp > 0) || tp > 1_000)) return { ok: false, message: 'Take-profit must be between 1% and 1000%' };
+  const sl = c.exitStopLossPct;
+  if (sl !== undefined && sl !== null && (!(sl > 0) || sl > 95)) return { ok: false, message: 'Stop-loss must be between 1% and 95%' };
+  const hold = c.exitMaxHoldMin;
+  if (hold !== undefined && hold !== null && (!(hold > 0) || hold > 1_440)) return { ok: false, message: 'Max hold must be between 1 and 1440 minutes' };
+  if (isFomo(c)) {
+    if (c.fomoSource !== undefined && c.fomoSource !== null && !FOMO_SOURCES.includes(c.fomoSource)) return { ok: false, message: 'Pick which wallets the crowd is' };
+    const k = c.fomoMinWallets;
+    if (k !== undefined && k !== null && (!(k >= 2) || k > 50)) return { ok: false, message: 'FOMO needs between 2 and 50 wallets to trigger' };
+    const w = c.fomoWindowSec;
+    if (w !== undefined && w !== null && (!(w >= 10) || w > 3_600)) return { ok: false, message: 'FOMO window must be between 10 seconds and an hour' };
+    const n = c.fomoTopN;
+    if (n !== undefined && n !== null && (!(n >= 2) || n > 200)) return { ok: false, message: 'Top N must be between 2 and 200' };
+    const x = c.fomoCrowdExitPct;
+    if (x !== undefined && x !== null && (!(x >= 1) || x > 100)) return { ok: false, message: 'Crowd exit must be between 1% and 100%' };
+  }
   return { ok: true, message: 'ok' };
 }
 
@@ -522,7 +737,17 @@ export function copySize(c: CopyConfig, theirSol: number): number {
 
 export function describeConfig(c: CopyConfig): string {
   const size = c.sizing === 'fixed' ? `${c.sizeValue} SOL` : `${c.sizeValue}% of their size`;
-  return `${c.mode === 'paper' ? 'Paper-copy' : 'COPY'} ${c.label || `${c.wallet.slice(0, 6)}…`} at ${size} (max ${c.maxTradeSol})`;
+  const who = c.label || `${c.wallet.slice(0, 6)}…`;
+  const x = ownExitsOf(c);
+  const exits = `+${x.takeProfitPct ?? '—'}% / −${x.stopLossPct ?? '—'}% / ${x.maxHoldMin ?? '—'} min`;
+  if (directionOf(c) === 'reverse') {
+    return `${c.mode === 'paper' ? 'Paper-reverse' : 'REVERSE'} ${who}: buy when they sell, ${size} (max ${c.maxTradeSol}), out at ${exits} or when they buy back`;
+  }
+  if (directionOf(c) === 'fomo') {
+    const f = fomoRuleOf(c);
+    return `${c.mode === 'paper' ? 'Paper-FOMO' : 'FOMO'} ${c.label || FOMO_SOURCE_LABEL[f.source]}: buy when ${f.minWallets} of ${FOMO_SOURCE_LABEL[f.source].toLowerCase()} buy the same coin within ${f.windowSec} s, ${size} (max ${c.maxTradeSol}), out at ${exits} or when ${f.crowdExitPct}% of them have sold`;
+  }
+  return `${c.mode === 'paper' ? 'Paper-copy' : 'COPY'} ${who} at ${size} (max ${c.maxTradeSol})`;
 }
 
 /** Win rate, or null when nothing has closed yet. */

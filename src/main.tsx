@@ -10,6 +10,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { LiteMotion } from './components/LiteModeHost';
 import { initLite } from './state/liteMode';
 import { initTheme } from './state/theme';
+import { initSkin } from './state/skin';
 
 // Self-hosted fonts (2026-08-16). These were loaded from fonts.googleapis.com,
 // which made "No telemetry" false on every launch — Google saw the IP and
@@ -28,6 +29,24 @@ import '@fontsource/cinzel/latin-700.css';
 import '@fontsource/jetbrains-mono/latin-400.css';
 import '@fontsource/jetbrains-mono/latin-500.css';
 import '@fontsource/jetbrains-mono/latin-600.css';
+// The other looks (2026-09-20), bundled the same way — no remote font
+// request, ever. Futuristic: Orbitron for headings, Rajdhani for text, Share
+// Tech Mono for numbers. Minimal: Inter. Hacker: VT323 headings over Share
+// Tech Mono. Weights are the ones the UI sets and nothing more.
+import '@fontsource/orbitron/latin-400.css';
+import '@fontsource/orbitron/latin-600.css';
+import '@fontsource/rajdhani/latin-400.css';
+import '@fontsource/rajdhani/latin-500.css';
+import '@fontsource/rajdhani/latin-600.css';
+import '@fontsource/share-tech-mono/latin-400.css';
+import '@fontsource/inter/latin-400.css';
+import '@fontsource/inter/latin-500.css';
+import '@fontsource/inter/latin-600.css';
+import '@fontsource/inter/latin-700.css';
+import '@fontsource/vt323/latin-400.css';
+// Retro: the 8px-grid title face. Headings and text use Share Tech Mono —
+// a pixel face at label size turns a C into an O and a B into an 8.
+import '@fontsource/press-start-2p/latin-400.css';
 
 import './index.css';
 
@@ -84,6 +103,7 @@ sessionStorage.removeItem('krypt.bridgeRetryAt');
 // launch while settings are still on their way over IPC.
 initLite();
 initTheme();
+initSkin();
 
 // A popped-out panel loads this same entry with `#panel=<id>`. It keeps every
 // provider — a panel reads the same state it does in the grid, and ipc.ts

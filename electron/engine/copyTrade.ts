@@ -16,6 +16,12 @@ import { type ChainKind } from '@shared/evm';
 import { logger } from '../system/logger';
 import path from 'node:path';
 import {
+  directionOf,
+  ownExitsOf,
+  fomoRuleOf,
+  isFomo,
+  FOMO_SOURCE_LABEL,
+  FOMO_WALLET,
   copySize,
   DEFAULT_COPIES_PER_MINUTE,
   COPY_LATENCY_FLOOR_MS,
@@ -180,6 +186,14 @@ export interface CopyHost {
    * the panel had no way to say so. Null = the host cannot tell.
    */
   leaderFeed?(chain: ChainKind): { running: boolean; lastPollAt: number | null } | null;
+  /**
+   * FOMO crowd sources (2026-09-20): the wallets saved on the Scout, the
+   * tracked-wallet list, and the Scout's top N by Copy score. Absent = an
+   * empty set — a config on a source the host cannot answer never fires.
+   */
+  scoutSaved?(chain: ChainKind): string[];
+  scoutTop?(chain: ChainKind, n: number): string[];
+  trackedWallets?(chain: ChainKind): string[];
 }
 
 let host: CopyHost | null = null;
@@ -300,6 +314,7 @@ const nextId = (p: string): string => {
 // ── Config CRUD ───────────────────────────────────────────────────────
 
 export function upsert(input: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: string }): { ok: boolean; message: string } {
+  forgetCrowdSources();
   if (chainOf(input) !== 'solana') input = { ...input, wallet: input.wallet.trim().toLowerCase() };
   const v = validateConfig(input);
   if (!v.ok) return { ok: false, message: v.message };
@@ -426,7 +441,7 @@ export function all(): CopyConfig[] {
 
 /** Wallets with an enabled config — the engine's watch list. */
 export function activeWallets(chain?: ChainKind): Set<string> {
-  return new Set(configs.filter((c) => c.enabled && (chain === undefined || chainOf(c) === chain)).map((c) => c.wallet));
+  return new Set(configs.filter((c) => c.enabled && !isFomo(c) && (chain === undefined || chainOf(c) === chain)).map((c) => c.wallet));
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────
@@ -459,7 +474,7 @@ export function snapshot(): CopySnapshot {
   const stats: Record<string, CopyStats> = {};
   for (const c of configs) stats[c.id] = statsFor(c);
   const leaderStats: Record<string, LeaderStats> = {};
-  for (const w of new Set(configs.map((c) => c.wallet))) leaderStats[w] = leaderStatsFor(w);
+  for (const w of new Set(configs.filter((c) => !isFomo(c)).map((c) => c.wallet))) leaderStats[w] = leaderStatsFor(w);
   const blocked = host?.liveBlockedReason() ?? null;
   // Solana wallets come from the watcher, one subscription each. An EVM
   // leader is seen through that chain's scanner poll instead, so its status
@@ -480,6 +495,12 @@ export function snapshot(): CopySnapshot {
       swaps: (book?.buys ?? 0) + (book?.sells ?? 0),
     };
   }
+  const crowd: NonNullable<CopySnapshot['crowd']> = {};
+  const now = Date.now();
+  for (const c of configs) {
+    if (!isFomo(c)) continue;
+    crowd[c.id] = { source: fomoRuleOf(c).source, wallets: crowdSourceSet(c, now).size };
+  }
   return {
     configs: all(),
     stats,
@@ -489,6 +510,7 @@ export function snapshot(): CopySnapshot {
     watch,
     leaders: leaderStats,
     loadFailure,
+    crowd,
   };
 }
 
@@ -794,6 +816,12 @@ export interface WalletTrade {
    * rail that cannot date a trade behaves exactly as it did before.
    */
   tradeAt?: number | null;
+  /**
+   * Why a SYNTHETIC exit was raised (2026-09-20): a reverse position's own
+   * take-profit, stop-loss or max hold, or the leader buying back. Carried
+   * onto the exit slice as its reason. A leader's real trade never has one.
+   */
+  note?: string;
 }
 
 /**
@@ -982,7 +1010,9 @@ export function onWalletTrade(t: WalletTrade): void {
   // An EVM address is case-insensitive; a Solana one is not.
   const chain = t.chain ?? 'solana';
   if (chain !== 'solana') t = { ...t, wallet: t.wallet.toLowerCase(), mint: t.mint.toLowerCase() };
-  const matching = configs.filter((c) => c.enabled && chainOf(c) === chain && c.wallet === t.wallet);
+  // The crowd hears every followed wallet's trade too (FOMO, 2026-09-20).
+  noteCrowdTrade(t);
+  const matching = configs.filter((c) => c.enabled && !isFomo(c) && chainOf(c) === chain && c.wallet === t.wallet);
   if (!matching.length) return;
 
   const route: SellRoute = t.isBuy ? (alreadyHandled(t.signature) ? 'drop' : 'new') : routeSell(t);
@@ -1001,6 +1031,19 @@ export function onWalletTrade(t: WalletTrade): void {
   }
 
   for (const c of matching) {
+    if (directionOf(c) === 'reverse') {
+      // Reverse: their SELL is our entry, their BUY is our exit (2026-09-20).
+      // The entry runs through the same filters, limits, delay and staleness
+      // as a copy; the exit through the same mirror as a copied sell, at
+      // 100 % — a leader buying back is the whole thesis being wrong.
+      if (t.isBuy) {
+        if (route === 'new' && c.copySells) queueExit(c, { ...t, isBuy: false, soldFraction: 1, note: 'they bought back — reverse exit' });
+        continue;
+      }
+      if (route !== 'new') continue;
+      void evaluateBuy(c, { ...t, isBuy: true });
+      continue;
+    }
     if (!t.isBuy) {
       if (c.copySells) queueExit(c, t);
       continue;
@@ -1089,7 +1132,7 @@ function parkExit(c: CopyConfig, t: WalletTrade): boolean {
   if (!flight.submitted) staleBuys.add(key);
   host?.log(
     'info',
-    `copy: ${c.label || c.wallet.slice(0, 6)} sold ${t.symbol || t.mint.slice(0, 8)} while our buy was in flight — ` +
+    `copy: ${c.label || c.wallet.slice(0, 6)} ${t.note ? 'bought back' : 'sold'} ${t.symbol || t.mint.slice(0, 8)} while our buy was in flight — ` +
       (flight.submitted ? 'exit queued for the moment it opens' : 'buy abandoned as stale'),
   );
   return true;
@@ -1169,7 +1212,7 @@ function drainPendingExit(c: CopyConfig, mint: string): void {
   queueExit(c, parked);
 }
 
-function queueExit(c: CopyConfig, t: WalletTrade): void {
+function queueExit(c: CopyConfig, t: WalletTrade): Promise<void> {
   const key = `${c.id}:${t.mint}`;
   const prev = exitChains.get(key) ?? Promise.resolve();
   const next = prev.then(() => closeOpen(c, t)).catch((err) => host?.log('error', `copy exit failed: ${(err as Error).message}`));
@@ -1177,6 +1220,7 @@ function queueExit(c: CopyConfig, t: WalletTrade): void {
   void next.then(() => {
     if (exitChains.get(key) === next) exitChains.delete(key);
   });
+  return next;
 }
 
 /** The leader's fraction, clamped to (0, 1]; null when it is not known. An
@@ -1589,7 +1633,7 @@ function applyExit(
     closedAt: t.at,
     pnlSol: pnl,
     state: 'closed',
-    reason: null,
+    reason: t.note ?? null,
     kind: 'exit',
     parentId: x.id,
     soldPct: Math.max(0, Math.min(100, Math.round(fraction * 100))),
@@ -1903,11 +1947,11 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
         rows[0],
         t,
         pct,
-        `not executed — ${who} sold this ${ageText(late)} ago and it only reached this app now. ` +
+        `not executed — ${who} ${t.note ? 'bought this back' : 'sold this'} ${ageText(late)} ago and it only reached this app now. ` +
           'Too old to mirror at today’s price, so nothing was sold. You still hold it.',
       ),
     );
-    h.toast('error', `${what}: ${who} sold it ${ageText(late)} ago — too late to mirror. You still hold it; sell by hand if you want out.`);
+    h.toast('error', `${what}: ${who} ${t.note ? 'bought it back' : 'sold it'} ${ageText(late)} ago — too late to mirror. You still hold it; sell by hand if you want out.`);
     return;
   }
 
@@ -1968,7 +2012,7 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
   if (traded) recorder.record('copy_close', { configId: c.id, mint: t.mint, mode: c.mode, pct, signature });
 }
 
-async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
+async function evaluateBuy(c: CopyConfig, t: WalletTrade, extra: Partial<CopyTrade> = {}): Promise<void> {
   const h = host;
   if (!h) return;
 
@@ -1989,6 +2033,8 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
     pnlSol: null,
     state: 'skipped',
     reason: null,
+    direction: directionOf(c),
+    ...extra,
   };
 
   // An entry the leader made minutes ago is a different trade at a different
@@ -2035,6 +2081,12 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade): Promise<void> {
 function unknownReason(label: string): string {
   return `${label} unknown — the filter you set could not be checked`;
 }
+
+/** The leader's leg that cancels our entry: their sell for a copy, their
+ *  buy-back for a reverse. */
+const oppositeVerb = (c: CopyConfig): string => (directionOf(c) === 'reverse' ? 'bought back' : 'sold');
+/** What the entry is called on its record. */
+const entryNoun = (c: CopyConfig): string => (directionOf(c) === 'fomo' ? 'FOMO entry' : directionOf(c));
 
 async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyHost): Promise<void> {
   // Filters. A rejected copy is RECORDED as skipped with its reason — the
@@ -2098,7 +2150,7 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
     // Paper follows the same rule as live, or the scorecard measures a
     // strategy the live config would never have run.
     if (staleBuys.has(flightKey(c.id, t.mint))) {
-      record({ ...base, reason: 'not executed — they had already sold before this copy was sent' });
+      record({ ...base, reason: `not executed — they had already ${oppositeVerb(c)} before this ${entryNoun(c)} was sent` });
       return;
     }
     const oldPaper = ageOf(t);
@@ -2107,7 +2159,7 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
       return;
     }
     record({ ...base, state: 'open', entryPriceSol: entry });
-    h.log('info', `paper-copy ${c.label || c.wallet.slice(0, 6)}: ${base.ourSol} SOL of ${t.symbol}`);
+    h.log('info', `paper-${directionOf(c)} ${c.label || (isFomo(c) ? 'crowd' : c.wallet.slice(0, 6))}: ${base.ourSol} SOL of ${t.symbol}`);
     recorder.record('copy_open', { configId: c.id, mint: t.mint, mode: 'paper', ourSol: base.ourSol, entry });
     return;
   }
@@ -2134,8 +2186,8 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
   // the leg that lost the money in the 2026-09-13 report.
   const key = flightKey(c.id, t.mint);
   if (staleBuys.has(key)) {
-    record({ ...base, reason: 'not executed — they had already sold before this copy was sent' });
-    h.toast('warn', `Copy skipped — ${c.label || c.wallet.slice(0, 6)} sold ${t.symbol} before your buy went out`);
+    record({ ...base, reason: `not executed — they had already ${oppositeVerb(c)} before this ${entryNoun(c)} was sent` });
+    h.toast('warn', `Copy skipped — ${c.label || c.wallet.slice(0, 6)} ${oppositeVerb(c)} ${t.symbol} before your buy went out`);
     return;
   }
   // Checked again HERE, at the last gate before real money leaves: the token
@@ -2179,7 +2231,7 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
     void noteBuyQuantity(c, row.id, res);
     h.toast(
       unconfirmed ? 'info' : 'success',
-      `Copied ${c.label || c.wallet.slice(0, 6)}: ${spent} SOL of ${t.symbol}${unconfirmed ? ' (unconfirmed)' : ''}`,
+      `${directionOf(c) === 'reverse' ? 'Reversed' : directionOf(c) === 'fomo' ? 'FOMO' : 'Copied'} ${c.label || (isFomo(c) ? 'crowd' : c.wallet.slice(0, 6))}: ${spent} SOL of ${t.symbol}${unconfirmed ? ' (unconfirmed)' : ''}`,
     );
     recorder.record('copy_open', {
       configId: c.id,
@@ -2616,7 +2668,7 @@ export function needsSweep(): boolean {
 }
 
 /** Mark paper positions to market so open PnL is not stale. */
-export function markToMarket(mint: string, priceSol: number, chain?: ChainKind): void {
+export function markToMarket(mint: string, priceSol: number, chain?: ChainKind, now = Date.now()): void {
   if (!(priceSol > 0)) return;
   for (const t of trades) {
     if (t.state !== 'open' || t.mint !== mint || t.entryPriceSol === null) continue;
@@ -2627,10 +2679,218 @@ export function markToMarket(mint: string, priceSol: number, chain?: ChainKind):
     const p = b.positions[mint];
     if (p) p.markPriceSol = priceSol;
   }
+  checkOwnExits(mint, priceSol, chain, now);
+}
+
+// ── Own exits ─────────────────────────────────────────────────────────
+//
+// A reverse position was opened by the leader SELLING, a FOMO position by a
+// crowd, and neither has a leader sell to close it, so the position closes
+// on its own terms: the config's take-profit, stop-loss or maximum hold,
+// judged on every price tick the engine already delivers here (the tape for
+// taped mints, the 12 s orders poll for the rest). A copy config may set
+// them too, on top of the leader's sells. The exit itself is the ordinary
+// mirrored sell of 100 %, queued like any other, so paper and live book it
+// the same way and a second tick cannot fire it twice.
+
+/** `${configId}:${mint}` with an exit in flight. */
+const ownExiting = new Set<string>();
+
+function checkOwnExits(mint: string, priceSol: number, chain: ChainKind | undefined, now: number): void {
+  for (const c of configs) {
+    if (!c.enabled) continue;
+    if (chain !== undefined && chainOf(c) !== chain) continue;
+    const x = ownExitsOf(c);
+    if (x.takeProfitPct === null && x.stopLossPct === null && x.maxHoldMin === null) continue;
+    const key = flightKey(c.id, mint);
+    if (ownExiting.has(key)) continue;
+    const rows = trades.filter(
+      (r) => r.configId === c.id && r.mint === mint && r.state === 'open' && r.kind !== 'exit' && r.entryPriceSol !== null && r.entryPriceSol > 0,
+    );
+    if (!rows.length) continue;
+    const tag = directionOf(c);
+    let why: string | null = null;
+    for (const r of rows) {
+      const movePct = (priceSol / (r.entryPriceSol as number) - 1) * 100;
+      if (x.takeProfitPct !== null && movePct >= x.takeProfitPct) why = `take-profit +${x.takeProfitPct}% (${tag})`;
+      else if (x.stopLossPct !== null && movePct <= -x.stopLossPct) why = `stop-loss −${x.stopLossPct}% (${tag})`;
+      else if (x.maxHoldMin !== null && now - r.at >= x.maxHoldMin * 60_000) why = `max hold ${x.maxHoldMin} min (${tag})`;
+      if (why) break;
+    }
+    if (!why) continue;
+    ownExiting.add(key);
+    const symbol = rows[0].symbol;
+    const synthetic: WalletTrade = { chain: chainOf(c), wallet: c.wallet, mint, symbol, isBuy: false, sol: 0, priceSol, at: now, tradeAt: now, soldFraction: 1, note: why };
+    host?.log('info', `${tag} ${c.label || c.wallet.slice(0, 6)}: ${symbol || mint.slice(0, 8)} — ${why}`);
+    void queueExit(c, synthetic).finally(() => ownExiting.delete(key));
+  }
+}
+
+// ── FOMO: the crowd ───────────────────────────────────────────────────
+//
+// A FOMO config follows a SET of wallets (shared/copytrade.ts FomoSource)
+// and enters when `minWallets` distinct members buy the same coin inside
+// `windowSec`. The set is resolved through the host every 30 s — the Scout's
+// saved and top lists move — and the buys arrive from two places: the
+// followed wallets' own subscriptions (through onWalletTrade) and the pump
+// curve firehose for everyone else (the engine asks `crowdWants` first, so a
+// trade by a wallet no config watches costs a set lookup and nothing more).
+// The entry is a synthetic buy whose `triggeredBy` names the crowd; the
+// crowd's own exits then count: once `crowdExitPct` of those wallets have
+// sold, the position follows them out. Own exits above cover the rest.
+//
+// Measured, convergence made a follower's outcome WORSE with every extra
+// wallet (docs/wallet-convergence-2026-09-14.md). The form says so.
+
+interface CrowdBuy {
+  /** As the chain spells it — the set is lower-cased, the record is not. */
+  wallet: string;
+  at: number;
+  sol: number;
+  priceSol: number;
+  symbol: string;
+}
+/** `${configId}:${mint}` → wallet → its latest buy inside the window. */
+const crowd = new Map<string, Map<string, CrowdBuy>>();
+/** `${configId}:${mint}` → when the crowd last fired an entry. */
+const crowdFired = new Map<string, number>();
+/** row id → the trigger wallets that have sold since. */
+const crowdSold = new Map<string, Set<string>>();
+const CROWD_KEYS_CAP = 5_000;
+const SOURCE_CACHE_MS = 30_000;
+const sourceCache = new Map<string, { at: number; set: Set<string> }>();
+let crowdUnion: { at: number; chain: ChainKind; set: Set<string> } | null = null;
+
+function crowdSourceSet(c: CopyConfig, now: number): Set<string> {
+  const hit = sourceCache.get(c.id);
+  if (hit && now - hit.at < SOURCE_CACHE_MS) return hit.set;
+  const f = fomoRuleOf(c);
+  const chain = chainOf(c);
+  let list: string[] = [];
+  if (f.source === 'followed') list = [...activeWallets(chain)];
+  else if (f.source === 'saved') list = host?.scoutSaved?.(chain) ?? [];
+  else if (f.source === 'tracked') list = host?.trackedWallets?.(chain) ?? [];
+  else list = host?.scoutTop?.(chain, f.topN) ?? [];
+  // Lower-cased: the Scout keys its saved list that way (2026-09-11).
+  const set = new Set(list.filter((w) => typeof w === 'string' && w).map((w) => w.toLowerCase()));
+  sourceCache.set(c.id, { at: now, set });
+  return set;
+}
+
+/** Is any enabled FOMO config on `chain` listening for `wallet`? Cheap: the
+ *  engine asks this for every trade on the firehose. */
+export function crowdWants(chain: ChainKind, wallet: string, now = Date.now()): boolean {
+  if (!crowdUnion || crowdUnion.chain !== chain || now - crowdUnion.at >= SOURCE_CACHE_MS) {
+    const set = new Set<string>();
+    for (const c of configs) {
+      if (!c.enabled || !isFomo(c) || chainOf(c) !== chain) continue;
+      for (const w of crowdSourceSet(c, now)) set.add(w);
+    }
+    crowdUnion = { at: now, chain, set };
+  }
+  return crowdUnion.set.has(wallet.toLowerCase());
+}
+
+/** A source may have changed (a config saved, a wallet saved on the Scout). */
+export function forgetCrowdSources(): void {
+  sourceCache.clear();
+  crowdUnion = null;
+}
+
+function boundCrowd(): void {
+  while (crowd.size > CROWD_KEYS_CAP) {
+    const oldest = crowd.keys().next().value;
+    if (oldest === undefined) break;
+    crowd.delete(oldest);
+  }
+  while (crowdFired.size > CROWD_KEYS_CAP) {
+    const oldest = crowdFired.keys().next().value;
+    if (oldest === undefined) break;
+    crowdFired.delete(oldest);
+  }
+}
+
+/**
+ * One trade by a wallet that may be in a crowd. Buys accumulate per config
+ * and mint inside the window and fire an entry at `minWallets`; sells by
+ * trigger wallets count toward the crowd exit.
+ */
+export function noteCrowdTrade(t: WalletTrade): void {
+  const h = host;
+  if (!h) return;
+  const chain = t.chain ?? 'solana';
+  const now = t.at;
+  for (const c of configs) {
+    if (!c.enabled || !isFomo(c) || chainOf(c) !== chain) continue;
+    if (!crowdSourceSet(c, now).has(t.wallet.toLowerCase())) continue;
+    const f = fomoRuleOf(c);
+    const key = flightKey(c.id, t.mint);
+    if (!t.isBuy) {
+      noteCrowdSell(c, t, f, key);
+      continue;
+    }
+    let m = crowd.get(key);
+    if (!m) {
+      m = new Map();
+      crowd.set(key, m);
+      boundCrowd();
+    }
+    m.set(t.wallet.toLowerCase(), { wallet: t.wallet, at: now, sol: t.sol, priceSol: t.priceSol, symbol: t.symbol });
+    const since = now - f.windowSec * 1_000;
+    for (const [w, b] of m) if (b.at < since) m.delete(w);
+    if (m.size < f.minWallets) continue;
+    // Once per window, and never on top of a position still open.
+    if (now - (crowdFired.get(key) ?? 0) < f.windowSec * 1_000) continue;
+    if (trades.some((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open' && x.kind !== 'exit')) continue;
+    crowdFired.set(key, now);
+    const wallets = [...m.values()].map((b) => b.wallet);
+    const avgSol = [...m.values()].reduce((a, b) => a + b.sol, 0) / m.size;
+    const what = t.symbol || t.mint.slice(0, 8);
+    const synthetic: WalletTrade = {
+      chain,
+      wallet: FOMO_WALLET,
+      mint: t.mint,
+      symbol: t.symbol,
+      isBuy: true,
+      sol: avgSol,
+      priceSol: t.priceSol,
+      at: now,
+      tradeAt: t.tradeAt ?? now,
+    };
+    h.log('info', `fomo ${c.label || 'crowd'}: ${wallets.length} of ${FOMO_SOURCE_LABEL[f.source].toLowerCase()} bought ${what} within ${f.windowSec} s — entering`);
+    void evaluateBuy(c, synthetic, { triggeredBy: wallets });
+  }
+}
+
+function noteCrowdSell(c: CopyConfig, t: WalletTrade, f: ReturnType<typeof fomoRuleOf>, key: string): void {
+  const rows = trades.filter((x) => x.configId === c.id && x.mint === t.mint && x.state === 'open' && x.kind !== 'exit' && Array.isArray(x.triggeredBy) && x.triggeredBy.some((w) => w.toLowerCase() === t.wallet.toLowerCase()));
+  if (!rows.length) return;
+  let fire: string | null = null;
+  for (const r of rows) {
+    let sold = crowdSold.get(r.id);
+    if (!sold) {
+      sold = new Set();
+      crowdSold.set(r.id, sold);
+    }
+    sold.add(t.wallet.toLowerCase());
+    const n = (r.triggeredBy as string[]).length;
+    if (n > 0 && (sold.size / n) * 100 >= f.crowdExitPct) fire = `the crowd left — ${sold.size} of ${n} sold (fomo)`;
+  }
+  if (!fire || ownExiting.has(key)) return;
+  ownExiting.add(key);
+  const synthetic: WalletTrade = { chain: chainOf(c), wallet: c.wallet, mint: t.mint, symbol: t.symbol || rows[0].symbol, isBuy: false, sol: 0, priceSol: t.priceSol, at: t.at, tradeAt: t.tradeAt ?? t.at, soldFraction: 1, note: fire };
+  host?.log('info', `fomo ${c.label || 'crowd'}: ${t.symbol || t.mint.slice(0, 8)} — ${fire}`);
+  void queueExit(c, synthetic).finally(() => ownExiting.delete(key));
 }
 
 /** Test seam. */
 export function _reset(): void {
+  crowd.clear();
+  crowdFired.clear();
+  crowdSold.clear();
+  sourceCache.clear();
+  crowdUnion = null;
+  ownExiting.clear();
   configs = [];
   trades = [];
   leaders = {};

@@ -46,11 +46,11 @@ function ok(name, fn) {
 
 ok('a genuine build trips ZERO canaries', () => {
   // Runs against the REAL compiled constants — this is the false-positive guard.
-  // 12 Solana + attribution canaries, 3 farming-rate canaries, 4 $KRYPTO
-  // fee-waiver canaries, 6 Robinhood Chain fee canaries. The COUNT is pinned
+  // 12 Solana + attribution canaries, 3 farming-rate canaries, 7 $KRYPTO
+  // holder-rate canaries, 6 Robinhood Chain fee canaries. The COUNT is pinned
   // deliberately: a flag silently dropped is a check that stopped running,
   // which looks identical to a check that passes.
-  assert.deepEqual(tamperFlags(), new Array(25).fill(false));
+  assert.deepEqual(tamperFlags(), new Array(28).fill(false));
   assert.equal(tamperCount(), 0);
   assert.equal(isIntact(), true);
 });

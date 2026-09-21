@@ -52,10 +52,10 @@ export const en = {
   'nav.execution': 'Execution',
   'nav.backtest': 'Backtest',
   'nav.history': 'History',
-  'nav.rewardPools': 'Reward Pools',
+  'nav.guides': 'Guides',
   'nav.walletScout': 'Wallet Scout',
   'nav.launchToken': 'Launch a token',
-  'nav.myLayout': 'My Layout',
+  'nav.widgets': 'Widgets',
   'nav.settings': 'Settings',
   'nav.about': 'About',
   'nav.legal': 'Legal',
@@ -125,7 +125,7 @@ export const en = {
 
   // ── appearance + replay ────────────────────────────────────────────
   'settings.theme': 'Theme',
-  'settings.themeHint': 'Changes the accent only. Green for up, red for down and gold for anything about your money stay where they are.',
+  'settings.themeHint': 'Pick a look — fonts, surfaces, corners, effects — then an accent colour. Green for up, red for down and gold for anything about your money stay where they are.',
   'settings.replay': 'Replay the walkthrough',
   'settings.replayHint': 'Shows the first-run screens again. Nothing is reset — your wallets, keys and settings are untouched.',
   'onboarding.appearance': 'Language and colour',
@@ -143,7 +143,7 @@ export const en = {
   // ── the one money line that IS translated ──────────────────────────
   // Not a statement about what happened to anyone's funds — an offer, and one
   // people should be able to read. The amount is interpolated, never rewritten.
-  'waiver.hold': 'Hold {amount} $KRYPTO to remove this fee',
+  'waiver.hold': 'Hold {amount} $KRYPTO to halve this fee',
 } as const;
 
 export type MessageKey = keyof typeof en;

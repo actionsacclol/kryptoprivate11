@@ -20,11 +20,14 @@ import { EVM_CHAIN_META } from '@shared/evm';
 import { defaultConfig } from '@shared/copytrade';
 import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
+import { FLAG_TEXT, WalletDrawer } from '../components/WalletDrawer';
+import { scoreTone } from '@shared/walletScore';
 import {
   MIN_TRIPS_FOR_RANK,
   SCOUT_CHAINS,
   SCOUT_SCAN_HOURS,
   SCOUT_SCAN_HOURS_LABEL,
+  SCOUT_SORTS,
   SCOUT_SORT_LABEL,
   SCOUT_WINDOW_LABEL,
   type ScoutChain,
@@ -44,7 +47,28 @@ const CHAIN_LABEL: Record<ScoutChain, string> = {
 const UNIT: Record<ScoutChain, string> = { solana: 'SOL', robinhood: 'ETH', bnb: 'BNB' };
 
 const WINDOWS: ScoutWindow[] = ['day', 'week', 'month', 'all'];
-const SORTS: ScoutSort[] = ['pnl', 'returnPct', 'winRatePct', 'roundTrips', 'volume'];
+const SORTS: ScoutSort[] = SCOUT_SORTS;
+
+/** The Copy score as a chip. Null is a dash, never a colour. */
+function ScoreChip({ score }: { score: number | null }) {
+  const tone = scoreTone(score);
+  return (
+    <span
+      className={`inline-flex min-w-[2.25rem] justify-center rounded-md border px-1.5 py-0.5 font-mono text-label ${
+        tone === 'good'
+          ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
+          : tone === 'mid'
+            ? 'border-amber-400/30 bg-amber-400/10 text-amber-300'
+            : tone === 'bad'
+              ? 'border-rose-400/30 bg-rose-400/10 text-rose-300'
+              : 'border-white/10 bg-white/5 text-krypt-muted'
+      }`}
+      title={score === null ? `No score: fewer than ${MIN_TRIPS_FOR_RANK} closed trips, or too few checks measured.` : 'Copy score — how a copier would have done, not how they did. Click the row for the checks.'}
+    >
+      {score === null ? '—' : score}
+    </span>
+  );
+}
 
 type Section = 'top' | 'saved';
 
@@ -72,11 +96,11 @@ function scanLine(chain: ScoutChain, s: ScoutScanStatus | null, hours: ScoutScan
     : `Reads the last ${SCOUT_SCAN_HOURS_LABEL[hours]} of curve trades from the chain's RPC, in block chunks. Spends nothing.`;
 }
 
-function Pill<T extends string | number>({ value, current, onPick, label }: { value: T; current: T; onPick: (v: T) => void; label: string }) {
+function Pill<T extends string | number>({ value, current, onPick, label, size = 'md' }: { value: T; current: T; onPick: (v: T) => void; label: string; size?: 'md' | 'lg' }) {
   return (
     <button
       onClick={() => onPick(value)}
-      className={`rounded-lg border px-2.5 py-1 text-body transition ${
+      className={`rounded-lg border transition ${size === 'lg' ? 'flex-1 px-3 py-2 text-body font-medium' : 'px-2.5 py-1 text-body'} ${
         current === value ? 'border-krypt-purple/60 bg-krypt-purple/15 text-white' : 'border-white/10 bg-krypt-panel text-krypt-muted hover:text-white'
       }`}
     >
@@ -90,8 +114,10 @@ export function Scout() {
   const modal = useModal();
   const [chain, setChain] = useState<ScoutChain>('solana');
   const [section, setSection] = useState<Section>('top');
-  const [window_, setWindow] = useState<ScoutWindow>('day');
-  const [sort, setSort] = useState<ScoutSort>('pnl');
+  const [window_, setWindow] = useState<ScoutWindow>('week');
+  const [sort, setSort] = useState<ScoutSort>('copyScore');
+  /** The wallet open in the drawer. */
+  const [detail, setDetail] = useState<string | null>(null);
 
   const [rows, setRows] = useState<ScoutRow[]>([]);
   const [saved, setSaved] = useState<string[]>([]);
@@ -235,11 +261,11 @@ export function Scout() {
    * not appear on the EVM chains rather than appearing and failing.
    */
   const follow = useCallback(
-    async (address: string) => {
-      const cfg = defaultConfig(address, `Scout ${address.slice(0, 4)}…${address.slice(-4)}`);
+    async (address: string, direction: 'copy' | 'reverse' = 'copy') => {
+      const cfg = defaultConfig(address, `Scout ${address.slice(0, 4)}…${address.slice(-4)}`, 'solana', direction);
       const r = await window.krypt.copy.save(cfg);
       if (r.ok) {
-        toast.success('Added to copy trading — paper, and switched off until you arm it.');
+        toast.success(direction === 'reverse' ? 'Added as a REVERSE copy — paper, and switched off until you arm it.' : 'Added to copy trading — paper, and switched off until you arm it.');
         // The row says "Following" from here on; a toast that fades was the
         // only feedback before, which read as the button doing nothing.
         void readFollowed();
@@ -279,7 +305,7 @@ export function Scout() {
   return (
     <div className="flex h-full min-h-0">
       {/* ── left panel ───────────────────────────────────────────────── */}
-      <aside className="w-[200px] shrink-0 border-r border-white/10 bg-krypt-panel/40 px-3 py-4">
+      <aside className="w-[236px] shrink-0 overflow-y-auto border-r border-white/10 bg-krypt-panel/40 px-3 py-4">
         <div className="mb-4 flex items-center gap-2 px-1">
           <Users className="h-4 w-4 text-krypt-pink" />
           <span className="text-value font-semibold text-white">Wallet Scout</span>
@@ -327,10 +353,12 @@ export function Scout() {
         <button
           onClick={() => void toggleCollect()}
           disabled={busy}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-2 py-1.5 text-note text-white/90 transition hover:border-krypt-purple/50 disabled:opacity-50"
+          className={`flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-body font-medium transition disabled:opacity-50 ${
+            collecting ? 'border-white/10 bg-krypt-panel text-white/90 hover:border-rose-400/40' : 'border-krypt-purple/60 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25'
+          }`}
         >
-          {collecting ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-          {collecting === null ? 'Unknown' : collecting ? 'Stop' : 'Start'}
+          {collecting ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+          {collecting === null ? 'Unknown' : collecting ? 'Stop recording' : 'Record live'}
         </button>
         <p className="mt-2 px-1 text-label leading-relaxed text-krypt-muted">
           {collecting === null
@@ -341,20 +369,22 @@ export function Scout() {
         </p>
         {note && <p className="mt-2 px-1 text-label leading-relaxed text-amber-300">{note}</p>}
 
-        <div className="mb-1 mt-4 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Scan</div>
+        <div className="mb-1 mt-4 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Scan the past</div>
         <div className="mb-2 flex gap-1">
           {SCOUT_SCAN_HOURS.map((h) => (
-            <Pill key={h} value={h} current={hours} onPick={setHours} label={SCOUT_SCAN_HOURS_LABEL[h].replace(' hours', 'h').replace(' hour', 'h')} />
+            <Pill key={h} value={h} current={hours} onPick={setHours} size="lg" label={SCOUT_SCAN_HOURS_LABEL[h].replace(' hours', 'h').replace(' hour', 'h')} />
           ))}
         </div>
         <button
           onClick={() => void (scanRunning ? cancelScan() : startScan())}
           disabled={scanBusy}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-krypt-panel px-2 py-1.5 text-note text-white/90 transition hover:border-krypt-purple/50 disabled:opacity-50"
+          className={`flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-body font-medium transition disabled:opacity-50 ${
+            scanRunning ? 'border-white/10 bg-krypt-panel text-white/90 hover:border-rose-400/40' : 'border-krypt-purple/60 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25'
+          }`}
           title={scanRunning ? 'Stop after the current step' : 'Read recent trades into the record now. Spends nothing.'}
         >
-          {scanRunning ? <Square className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
-          {scanRunning ? 'Cancel scan' : 'Scan recent trades'}
+          {scanRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+          {scanRunning ? 'Cancel scan' : `Scan last ${SCOUT_SCAN_HOURS_LABEL[hours]}`}
         </button>
         <p className="mt-2 px-1 text-label leading-relaxed text-krypt-muted">{scanLine(chain, scan, hours)}</p>
         {scan?.message && <p className="mt-1 px-1 text-label leading-relaxed text-amber-300">{scan.message}</p>}
@@ -428,15 +458,22 @@ export function Scout() {
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-white/10">
-            <table className="w-full min-w-[820px] text-note">
+            <table className="w-full min-w-[980px] text-note">
               <thead className="bg-white/[0.03] text-label uppercase tracking-wider text-krypt-muted/70">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Wallet</th>
-                  <th className="px-3 py-2 text-right font-medium">Profit ({UNIT[chain]})</th>
-                  <th className="px-3 py-2 text-right font-medium">Return</th>
-                  <th className="px-3 py-2 text-right font-medium">Win rate</th>
+                  <th className="px-3 py-2 text-center font-medium" title="How a copier would have done mirroring this wallet — not how they did. Click a row for the checks.">
+                    Copy score
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium" title="Median net return per copied trip, both legs filled 2 s after theirs, costs on both sides.">
+                    Copy / trip
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium" title="Trips a copy could have been inside — the rest were over before a follower could land, or had nothing to fill at.">
+                    Reachable
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium">Their profit ({UNIT[chain]})</th>
+                  <th className="px-3 py-2 text-right font-medium">Their win rate</th>
                   <th className="px-3 py-2 text-right font-medium">Trips</th>
-                  <th className="px-3 py-2 text-right font-medium">Volume</th>
                   <th className="px-3 py-2 text-right font-medium">Median hold</th>
                   <th className="px-3 py-2" />
                 </tr>
@@ -445,11 +482,19 @@ export function Scout() {
                 {rows.map((r) => {
                   const isSaved = saved.includes(r.address);
                   return (
-                    <tr key={r.address} className="border-t border-white/5">
+                    <tr
+                      key={r.address}
+                      className="cursor-pointer border-t border-white/5 transition hover:bg-white/[0.03]"
+                      onClick={() => setDetail(r.address)}
+                      data-testid="scout-row"
+                    >
                       <td className="px-3 py-1.5">
                         <span className="font-mono text-white/90">
                           <button
-                            onClick={() => void copyAddress(r.address)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void copyAddress(r.address);
+                            }}
                             className="font-mono transition hover:text-krypt-purple"
                             // The full address in the tooltip as well as on the
                             // clipboard: a truncated string with no way to read
@@ -475,16 +520,34 @@ export function Scout() {
                             thin
                           </span>
                         )}
+                        {r.flags
+                          .filter((f) => f === 'concentrated' || f === 'partial' || f === 'unreachable')
+                          .map((f) => (
+                            <span
+                              key={f}
+                              className={`ml-2 rounded-full border px-1.5 text-micro ${f === 'unreachable' ? 'border-amber-400/30 bg-amber-400/10 text-amber-300' : 'border-white/10 bg-white/5 text-krypt-muted'}`}
+                              title={FLAG_TEXT[f].title}
+                            >
+                              {FLAG_TEXT[f].label}
+                            </span>
+                          ))}
+                      </td>
+                      <td className="px-3 py-1.5 text-center">
+                        <ScoreChip score={r.copyScore} />
+                      </td>
+                      <td className={`px-3 py-1.5 text-right font-mono ${r.fMedianReturnPct === null ? 'text-krypt-muted' : r.fMedianReturnPct >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                        {pct(r.fMedianReturnPct)}
+                      </td>
+                      <td className={`px-3 py-1.5 text-right font-mono ${r.reachablePct !== null && r.reachablePct < 25 ? 'text-amber-300' : 'text-krypt-muted'}`}>
+                        {r.reachablePct === null ? '—' : `${r.fTrips}/${r.judgedTrips}`}
                       </td>
                       <td className={`px-3 py-1.5 text-right font-mono ${r.pnl > 0 ? 'text-emerald-300' : r.pnl < 0 ? 'text-rose-300' : ''}`}>
                         {r.roundTrips === 0 && r.buys + r.sells === 0 ? '—' : amt(r.pnl)}
                       </td>
-                      <td className="px-3 py-1.5 text-right font-mono">{pct(r.returnPct)}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{pct(r.winRatePct)}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{r.roundTrips}</td>
-                      <td className="px-3 py-1.5 text-right font-mono text-krypt-muted">{amt(r.volume)}</td>
                       <td className="px-3 py-1.5 text-right font-mono text-krypt-muted">{hold(r.medianHoldMs)}</td>
-                      <td className="px-3 py-1.5 text-right">
+                      <td className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                         <span className="flex items-center justify-end gap-1.5">
                           <button
                             onClick={() => void toggleSave(r.address)}
@@ -529,10 +592,16 @@ export function Scout() {
 
         <div className="mt-4 space-y-1 text-body leading-relaxed text-krypt-muted">
           <p>
+            <span className="text-white/80">Copy score</span> is how a copier would have done mirroring the wallet — filling 2 s after each of
+            their trades, on both legs, paying costs on both — not how the wallet did. Measured across 9.3 million trades, ranking by
+            what a follower realises beats ranking by the wallet's own profit at every level, and still no group of wallets was
+            profitable to copy: the best lost a little per trade. The score ranks least-bad to follow. It is not an edge.
+          </p>
+          <p>
             Every number here is something that happened. Nothing on this page says a wallet will keep winning — ranking traders by
             past profit picks up luck as readily as skill, and this app has measured that twice before. A wallet with fewer than{' '}
             {MIN_TRIPS_FOR_RANK} closed round trips in the window is marked <span className="text-white/80">thin</span> and is not
-            ranked.
+            ranked. Click a row for the checks behind its score and its recent trips.
           </p>
           <p>
             Profit is realised only: it pairs sells against buys we watched. A sell with no buy behind it is counted but never
@@ -540,6 +609,19 @@ export function Scout() {
           </p>
         </div>
       </div>
+
+      <WalletDrawer
+        chain={chain}
+        address={detail}
+        window={window_}
+        row={detail ? rows.find((r) => r.address === detail) ?? null : null}
+        saved={detail ? saved.includes(detail) : false}
+        following={detail ? followed.includes(detail) : false}
+        onClose={() => setDetail(null)}
+        onToggleSave={(a) => void toggleSave(a)}
+        onFollow={(a, direction) => void follow(a, direction)}
+        onCopyAddress={(a) => void copyAddress(a)}
+      />
     </div>
   );
 }

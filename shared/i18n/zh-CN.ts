@@ -30,10 +30,10 @@ export const zhCN: Catalogue = {
   'nav.execution': '执行',
   'nav.backtest': '回测',
   'nav.history': '历史',
-  'nav.rewardPools': '奖励池',
+  'nav.guides': '指南',
   'nav.walletScout': '钱包追踪',
   'nav.launchToken': '发行代币',
-  'nav.myLayout': '我的布局',
+  'nav.widgets': '小组件',
   'nav.settings': '设置',
   'nav.about': '关于',
   'nav.legal': '法律',
@@ -83,7 +83,7 @@ export const zhCN: Catalogue = {
   'onboarding.everythingUnderSettings': '所有选项都在“设置”中',
   'onboarding.getStarted': '开始使用',
 
-  'waiver.hold': '持有 {amount} $KRYPTO 即可免除此费用',
+  'waiver.hold': '持有 {amount} $KRYPTO 即可将此费用减半',
 
   'mode.paper': '模拟',
   'mode.live': '实盘',
@@ -105,7 +105,7 @@ export const zhCN: Catalogue = {
   'settings.subtitle': '行情数据源、RPC 节点、录制、状态展示。',
 
   'settings.theme': '主题',
-  'settings.themeHint': '仅更改强调色。上涨的绿色、下跌的红色，以及与资金相关的金色均保持不变。',
+  'settings.themeHint': '先选一种外观（字体、面板、圆角、效果），再选强调色。上涨的绿色、下跌的红色，以及与资金相关的金色均保持不变。',
   'settings.replay': '重新查看引导',
   'settings.replayHint': '再次显示首次启动的界面。不会重置任何内容 — 您的钱包、密钥和设置都不受影响。',
   'onboarding.appearance': '语言与配色',

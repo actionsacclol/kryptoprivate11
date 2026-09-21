@@ -5,7 +5,6 @@ import {
   Activity,
   Scale,
   Home,
-  Gift,
   LayoutGrid,
   Compass,
   FlaskConical,
@@ -23,7 +22,8 @@ import {
   Sparkles,
   Telescope,
   BookMarked,
-  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout } from 'lucide-react';
+  BookOpen,
+  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout, UserPlus } from 'lucide-react';
 import { groupsFor, workspaceSpec, type WorkspaceId } from '../workspaces';
 import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
@@ -53,6 +53,7 @@ export type RouteId =
   | 'creator'
   | 'funder'
   | 'orders'
+  | 'copysimple'
   | 'wallets'
   | 'scripts'
   | 'farming'
@@ -70,7 +71,7 @@ export type RouteId =
   | 'walletbnb'
   | 'swap'
   | 'bridge'
-  | 'rewards'
+  | 'guides'
   | 'strategy'
   | 'console'
   | 'settings'
@@ -128,24 +129,27 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   // its own initiative, off someone else's activity rather than your click.
   // It also used to be called "Wallets", one letter from the page holding YOUR
   // keys — a collision that got worse once a single "Wallet" held several.
-  { id: 'wallets', label: 'Copy Trading', i18n: 'nav.copyTrading', hint: "Follow other traders' wallets", icon: Users },
+  // Copy Simple (2026-09-20): the three-question way in. Same store as
+  // Copy Trading, which keeps every control.
+  { id: 'copysimple', label: 'Copy Simple', hint: 'Paste a wallet, pick an amount, follow on paper', icon: UserPlus },
+  { id: 'wallets', label: 'Copy Trading', i18n: 'nav.copyTrading', hint: "Follow other traders' wallets — every control", icon: Users },
   { id: 'scripts', label: 'Scripts', i18n: 'nav.scripts', hint: 'Your own rules and code, under a budget — paper first', icon: Code2 },
   { id: 'farming', label: 'Farming', hint: 'Not built yet — what it would be, and what has to be true first', icon: Sprout },
   { id: 'creator', label: 'Group Wallets', i18n: 'nav.groupWallets', hint: 'Make a group of wallets to fund, warm or trade together', icon: FolderPlus },
   { id: 'funder', label: 'Funder', i18n: 'nav.funder', hint: 'Fund wallets from the active one, by group or individually; collect back', icon: Coins },
   { id: 'launches', label: 'Launches', i18n: 'nav.launches', hint: 'Live launch scanner', icon: Rocket },
-  { id: 'strategy', label: 'Spellbook', hint: 'Strategy settings', icon: BookMarked },
-  { id: 'execution', label: 'Execution', i18n: 'nav.execution', hint: 'Fees, lanes and send plans', icon: Gauge },
+  { id: 'strategy', label: 'Strategy', hint: 'Paper-entry gates and backtest defaults — nothing here buys', icon: BookMarked },
+  { id: 'execution', label: 'Execution', i18n: 'nav.execution', hint: 'What gets flagged as a runner, fees and lanes', icon: Gauge },
   // 'paper' (the old Paper book page) is no longer listed: paper round trips
   // sit on the Trades page beside the real ones, marked, and the wallet
   // holdings it also carried moved to the Wallet page (2026-09-06).
   { id: 'backtest', label: 'Backtest', i18n: 'nav.backtest', icon: FlaskConical },
   { id: 'history', label: 'History', i18n: 'nav.history', icon: HistoryIcon },
-  { id: 'console', label: 'Grimoire', hint: 'Console log', icon: ScrollText },
+  { id: 'console', label: 'Console', hint: 'Live engine log', icon: ScrollText },
 ];
 
-export const REWARDS_ROUTES: RouteSpec[] = [
-  { id: 'rewards', label: 'Reward Pools', i18n: 'nav.rewardPools', hint: 'Published reward rates, and what your wallets are earning', icon: Gift },
+export const GUIDES_ROUTES: RouteSpec[] = [
+  { id: 'guides', label: 'Guides', i18n: 'nav.guides', hint: 'How each part of the app works, in plain words', icon: BookOpen },
 ];
 
 export const SCOUT_ROUTES: RouteSpec[] = [
@@ -157,7 +161,7 @@ export const LAUNCH_ROUTES: RouteSpec[] = [
 ];
 
 export const LAYOUT_ROUTES: RouteSpec[] = [
-  { id: 'workspace', label: 'My Layout', i18n: 'nav.myLayout', hint: 'Panels you choose, arranged how you like', icon: LayoutGrid },
+  { id: 'workspace', label: 'Widgets', i18n: 'nav.widgets', hint: 'Widgets you choose, arranged how you like', icon: LayoutGrid },
 ];
 
 export const SYSTEM_ROUTES: RouteSpec[] = [
@@ -166,7 +170,7 @@ export const SYSTEM_ROUTES: RouteSpec[] = [
   { id: 'legal', label: 'Legal', i18n: 'nav.legal', hint: 'Terms, privacy, risk disclosure', icon: Scale },
 ];
 
-export const ROUTES: RouteSpec[] = [...TERMINAL_ROUTES, ...AUTOMATION_ROUTES, ...REWARDS_ROUTES, ...SCOUT_ROUTES, ...LAUNCH_ROUTES, ...LAYOUT_ROUTES, ...SYSTEM_ROUTES];
+export const ROUTES: RouteSpec[] = [...TERMINAL_ROUTES, ...AUTOMATION_ROUTES, ...GUIDES_ROUTES, ...SCOUT_ROUTES, ...LAUNCH_ROUTES, ...LAYOUT_ROUTES, ...SYSTEM_ROUTES];
 
 function NavButton({
   route,
@@ -259,7 +263,7 @@ export function Sidebar({
   /**
    * Replaces the workspace's own sections entirely.
    *
-   * Used by My Layout, where the menu is whatever the user pinned rather than
+   * Used by Widgets, where the menu is whatever the user pinned rather than
    * a fixed set of pages. Passed in rather than read here so this component
    * stays a pure function of its props.
    */

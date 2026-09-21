@@ -1,4 +1,4 @@
-// The Grimoire — the living record of everything the engine does. Plain
+// The Console — the living record of everything the engine does. Plain
 // monospace lines stay perfectly readable; important events earn a small
 // rune stamp in the margin. Filterable by severity, searchable, and it only
 // follows the tail while you are already at the bottom.
@@ -97,7 +97,7 @@ export function Console() {
 
   return (
     <Page
-      title="Grimoire"
+      title="Console"
       subtitle="The engine's living record — feed state, decisions, warnings."
       actions={
         <div className="flex items-center gap-2">

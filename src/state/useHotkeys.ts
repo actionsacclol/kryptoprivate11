@@ -22,7 +22,10 @@ function isTyping(target: EventTarget | null): boolean {
   if (!el || !el.tagName) return false;
   const tag = el.tagName.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
-  return el.isContentEditable === true;
+  if (el.isContentEditable === true) return true;
+  // A focused play area (the Games panel) owns every key it gets, the way a
+  // text field does: a Space to flap or an arrow to steer is not a trade.
+  return typeof el.closest === 'function' && el.closest('[data-swallows-keys]') !== null;
 }
 
 export function useHotkeys({

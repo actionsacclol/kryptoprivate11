@@ -14,7 +14,7 @@
 
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { THEMES, THEME_META, DEFAULT_THEME, isThemeId } from './.theme.mjs';
+import { THEMES, THEME_META, DEFAULT_THEME, isThemeId, SKINS, SKIN_META, DEFAULT_SKIN, isSkinId } from './.theme.mjs';
 
 let passed = 0;
 const ok = (label) => {
@@ -154,6 +154,87 @@ function accentOf(theme) {
   }
   assert.deepEqual(offenders, [], 'accent literals must read the theme variable:\n  ' + offenders.join('\n  '));
   ok('no hardcoded accent outside the places that are meant to have one');
+}
+
+{
+  // ── Looks (2026-09-20) ───────────────────────────────────────────────
+  // A look moves fonts, surfaces, corners and effects through variables,
+  // never the accent and never a colour that carries meaning. Every look
+  // has a CSS block that defines every variable; the picker's preview is a
+  // literal duplicate of it, pinned here like the accent swatches.
+  const skinBlock = (id) => {
+    const re = new RegExp(`html\\[data-skin='${id}'\\]\\s*\\{([^}]*)\\}`);
+    const m = re.exec(css);
+    assert.ok(m, `index.css has a block for the ${id} look`);
+    const vars = {};
+    for (const line of m[1].split('\n')) {
+      const v = /--([\w-]+):\s*([^;]+);/.exec(line);
+      if (v) vars[v[1]] = v[2].trim();
+    }
+    return vars;
+  };
+  for (const id of SKINS) {
+    const vars = skinBlock(id);
+    for (const need of ['font-display', 'font-sans', 'font-mono', 'krypt-void', 'krypt-panel', 'krypt-surface', 'krypt-text', 'krypt-muted', 'krypt-black', 'krypt-ink', 'radius', 'radius-md', 'radius-lg']) {
+      assert.ok(vars[need], `${id} defines --${need}`);
+    }
+    for (const need of ['krypt-void', 'krypt-panel', 'krypt-surface', 'krypt-text', 'krypt-muted', 'krypt-black', 'krypt-ink']) {
+      assert.match(vars[need], /^\d{1,3} \d{1,3} \d{1,3}$/, `${id} --${need} is space-separated channels, so <alpha-value> works`);
+    }
+    for (const k of Object.keys(vars)) {
+      assert.ok(!/gold|crimson|emerald|rose|accent|indigo|grad-/i.test(k), `${id} must not repaint the accent or a colour that carries meaning (${k})`);
+    }
+    assert.ok(SKIN_META[id]?.label && SKIN_META[id]?.note && SKIN_META[id]?.fonts, `${id} has a label, a note and its fonts for the picker`);
+    const want = { bg: `rgb(${vars['krypt-void']})`, panel: `rgb(${vars['krypt-panel']})`, text: `rgb(${vars['krypt-text']})` };
+    for (const [key, val] of Object.entries(want)) {
+      const re = new RegExp(`${id}:\\s*\\{[^}]*${key}:\\s*'([^']+)'`);
+      const m = re.exec(picker);
+      assert.ok(m, `ThemePicker has a ${key} preview for ${id}`);
+      assert.equal(m[1], val, `${id} ${key} preview matches index.css`);
+    }
+  }
+  assert.ok(isSkinId('hacker') && isSkinId('classic'));
+  assert.ok(!isSkinId('neon') && !isSkinId('') && !isSkinId(null) && !isSkinId(42));
+  assert.ok(SKINS.includes(DEFAULT_SKIN) && DEFAULT_SKIN === 'classic', 'the default look is the one everyone already had');
+  // Tailwind reads the surfaces, the text colour, the fonts and the corners
+  // through variables — that is what lets a look move them without touching
+  // a class. Alpha intact.
+  assert.match(tw, /white:\s*'rgb\(var\(--krypt-text\) \/ <alpha-value>\)'/, 'the text colour reads the variable');
+  assert.match(tw, /black:\s*'rgb\(var\(--krypt-ink\) \/ <alpha-value>\)'/, 'the dark wash reads the variable, so a light look can lift it');
+  // The one light look darkens the meaning colours for contrast on white
+  // — it must never re-assign them: green stays the up colour, red down.
+  const xp = css.slice(css.indexOf("html[data-skin='xp']"));
+  assert.match(xp, /\[class\*='text-emerald-'\]\s*\{\s*color:\s*rgb\(4 120 87\)/, 'XP darkens emerald to a green');
+  assert.match(xp, /\[class\*='text-rose-'\]\s*\{\s*color:\s*rgb\(190 18 60\)/, 'XP darkens rose to a red');
+  assert.match(xp, /\[class\*='text-arc-gold'\]\s*\{\s*color:\s*rgb\(138 109 31\)/, 'XP darkens gold to a gold');
+  assert.match(xp, /color-scheme:\s*light/, 'XP tells the browser it is light');
+  const chart = fs.readFileSync(new URL('../src/components/terminal/KryptChart.tsx', import.meta.url), 'utf8');
+  assert.ok(/surfaceMuted\(\)/.test(chart) && /useSkin\(\)/.test(chart) && !/#8C92AB|240,237,226/.test(chart), 'the chart reads the look’s surfaces and re-inks on a change');
+  for (const t of ['black', 'void', 'surface', 'panel', 'muted']) {
+    assert.match(tw, new RegExp(`'krypt-${t}':\\s*'rgb\\(var\\(--krypt-${t}\\) \\/ <alpha-value>\\)'`), `krypt-${t} reads the variable`);
+  }
+  assert.match(tw, /sans:\s*\['var\(--font-sans\)'/, 'the body font reads the variable');
+  assert.match(tw, /display:\s*\['var\(--font-display\)'/, 'the display font reads the variable');
+  assert.match(tw, /mono:\s*\['var\(--font-mono\)'/, 'the mono font reads the variable');
+  assert.match(tw, /md:\s*'var\(--radius-md\)'/, 'corners read the variable');
+  // No surface literal may come back into the stylesheet.
+  assert.ok(!/#F0EDE2|#06070F|rgba\(240, 237, 226|rgba\(10, 13, 26/.test(css), 'index.css carries no literal surface colour');
+  // Main refuses a look this build does not ship; the store falls back.
+  const validation = fs.readFileSync(new URL('../electron/system/settingsValidation.ts', import.meta.url), 'utf8');
+  assert.ok(/skin: SKINS/.test(validation), 'main refuses an unknown look');
+  const store = fs.readFileSync(new URL('../electron/system/settings-store.ts', import.meta.url), 'utf8');
+  assert.ok(/isSkinId\(loaded\.skin\)/.test(store), 'a saved look this build lacks falls back to classic');
+  // The fonts are bundled, never fetched.
+  const main = fs.readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  for (const f of ['orbitron', 'rajdhani', 'share-tech-mono', 'inter', 'vt323']) assert.ok(main.includes(`@fontsource/${f}/`), `${f} is bundled locally`);
+  // Code only: the comment above the imports names the host the fonts used
+  // to come from, which is the history, not a request.
+  const mainCode = main.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert.ok(!/fonts\.googleapis|fonts\.gstatic/.test(mainCode), 'no remote font request');
+  assert.ok(/initSkin\(\)/.test(main), 'the look is seeded before React mounts');
+  // Both pickers appear together: the look above the accent.
+  assert.ok(picker.indexOf('SKINS.map') < picker.indexOf('THEMES.map'), 'the look is picked before the accent');
+  ok(`all ${SKINS.length} looks define their fonts, surfaces and corners; the previews match; nothing touches the accent or a colour that carries meaning`);
 }
 
 console.log(`\ntheme: ${passed}/${passed} passed`);

@@ -35,6 +35,10 @@ import {
   RULE_FIELDS,
   SCRIPT_API,
   SCRIPT_EVENTS_DOC,
+  emptyContext,
+  withMarket,
+  marketFactsFromSummary,
+  scriptLinksFromSummary,
 } from './.automationshared.mjs';
 import { SCRIPT_METHODS } from './.scriptprotocol.mjs';
 
@@ -138,6 +142,17 @@ function makeHost(over = {}) {
     runners: () => over.runners ?? [],
     leaders: () => [{ wallet: 'Lead', label: 'Sharky', enabled: true, mode: 'paper' }],
     notify: (_t, body) => calls.notifies.push(body),
+    // The rest of what the app knows about a token (2026-09-20). `over`
+    // supplies the answers; analyze counts its calls on `over` so a test can
+    // see how many times the key would have been spent.
+    links: (mint) => over.links?.[mint] ?? null,
+    security: async (mint) => over.security?.[mint] ?? null,
+    creator: async (mint) => over.creator?.[mint] ?? null,
+    analyze: async (mint) => {
+      over.analyzeCalls = (over.analyzeCalls ?? 0) + 1;
+      if (over.analyzeError) throw new Error(over.analyzeError);
+      return over.analysis ?? { score: 61, verdict: 'cautious', summary: 'fine', bullish: ['a'], bearish: ['b'], provider: 'openai', model: 'm', at: Date.now(), mint };
+    },
     log: () => {},
     toast: (level, message) => calls.toasts.push({ level, message }),
     changed: () => {},
@@ -1165,4 +1180,216 @@ async function run() {
   auto._reset();
   console.log(`automation: ${passed}/${cases.length} passed`);
 }
+
+// ── "Any data we can get, scripts should have" (2026-09-20) ────────────
+
+const SUMMARY_EXTRAS = ['kryptScore', 'bondingCurvePct', 'devHoldingPct', 'top10Pct', 'insiderPct', 'bundledPct', 'sniperPct', 'smartHolders', 'volume5mUsd', 'buys5m', 'sells5m', 'priceChange5mPct'];
+const LINK_FIELDS = ['hasTwitter', 'hasWebsite', 'hasTelegram', 'dexPaid', 'twitter', 'website', 'telegram', 'xLinkKind', 'xHandle', 'xReuseCount', 'xFollowers', 'xFollowing', 'xVerified', 'xLikes', 'xReposts', 'xReplies', 'xViews', 'xStatsAgeSec', 'tgMembers', 'tgOnline', 'tgKind', 'domainAgeDays', 'domainHostedOn', 'siteNamesContract', 'siteLinksX', 'siteOutboundHosts', 'siteMentionsConnectWallet'];
+const fakeSummary = (over = {}) => ({
+  mint: MINT,
+  symbol: 'FAKE',
+  name: 'Fake Coin',
+  launchpad: 'pumpfun',
+  priceSol: 0.000001,
+  priceUsd: 0.0002,
+  marketCapUsd: 200_000,
+  liquidityUsd: 40_000,
+  holders: 321,
+  kryptScore: 72,
+  bondingCurvePct: 55,
+  devHoldingPct: 3.5,
+  top10Pct: 22,
+  insiderPct: 8,
+  bundledPct: 12,
+  sniperPct: 4,
+  smartHolders: 2,
+  stats: { '5m': { volumeUsd: 9_000, buys: 40, sells: 12, priceChangePct: 18.5 } },
+  socials: { twitter: 'https://x.com/fakecoin', website: 'https://fake.coin', telegram: null, dexPaid: true },
+  ...over,
+});
+
+test('the variable guide carries the provider extras and the links, on Solana only', () => {
+  for (const id of [...SUMMARY_EXTRAS, ...LINK_FIELDS]) {
+    const f = RULE_FIELDS.find((x) => x.id === id);
+    assert.ok(f, `${id} is a variable`);
+    assert.equal(f.scope, 'market', `${id} is a market fact`);
+    assert.ok(f.nullWhen.length > 0, `${id} says when it is null`);
+    assert.equal(fieldAvailableOn(id, 'solana'), true);
+    assert.equal(fieldAvailableOn(id, 'bnb'), false, `${id} is not offered on an EVM chain — its host does not answer it`);
+  }
+  assert.equal(RULE_FIELDS.find((x) => x.id === 'hasTwitter').kind, 'boolean');
+  assert.equal(RULE_FIELDS.find((x) => x.id === 'xLinkKind').kind, 'text');
+  assert.equal(RULE_FIELDS.find((x) => x.id === 'xReuseCount').kind, 'number');
+});
+
+test('one summary becomes the facts a script sees, links classified, unknowns null', () => {
+  const facts = marketFactsFromSummary(fakeSummary(), 3);
+  const c = withMarket(emptyContext(MINT), facts);
+  assert.equal(c.kryptScore, 72);
+  assert.equal(c.bondingCurvePct, 55);
+  assert.equal(c.devHoldingPct, 3.5);
+  assert.equal(c.top10Pct, 22);
+  assert.equal(c.insiderPct, 8);
+  assert.equal(c.bundledPct, 12);
+  assert.equal(c.sniperPct, 4);
+  assert.equal(c.smartHolders, 2);
+  assert.equal(c.volume5mUsd, 9_000);
+  assert.equal(c.buys5m, 40);
+  assert.equal(c.sells5m, 12);
+  assert.equal(c.priceChange5mPct, 18.5);
+  assert.equal(c.hasTwitter, true);
+  assert.equal(c.hasWebsite, true);
+  assert.equal(c.hasTelegram, false, 'a provider that answered with no Telegram is a real "none"');
+  assert.equal(c.dexPaid, true);
+  assert.equal(c.twitter, 'https://x.com/fakecoin');
+  assert.equal(c.website, 'https://fake.coin');
+  assert.equal(c.telegram, null);
+  assert.equal(c.xLinkKind, 'profile');
+  assert.equal(c.xHandle, 'fakecoin');
+  assert.equal(c.xReuseCount, 3);
+  // A post link is a post, not an account.
+  const post = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary({ socials: { twitter: 'https://x.com/someone/status/1234567890', website: null, telegram: null, dexPaid: false } })));
+  assert.equal(post.xLinkKind, 'post');
+  assert.equal(post.xHandle, 'someone');
+  assert.equal(post.hasWebsite, false);
+  assert.equal(post.xReuseCount, null, 'not counted is null, never 0');
+  // No 5-minute window, no score: null, never 0.
+  const thin = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary({ stats: {}, kryptScore: null })));
+  assert.equal(thin.volume5mUsd, null);
+  assert.equal(thin.kryptScore, null);
+  // An EVM host's facts carry none of this: every one stays null, not false.
+  const evm = withMarket(emptyContext(MINT), { priceSol: 1, priceUsd: null, marketCapUsd: 5, liquidityUsd: 2, holders: null, launchpad: null });
+  for (const id of [...SUMMARY_EXTRAS, ...LINK_FIELDS]) assert.equal(evm[id], null, `${id} is unknown, not a claim`);
+});
+
+test('bot.links answers from cached facts with the launchpad page and the X reuse', () => {
+  const links = scriptLinksFromSummary('solana', fakeSummary(), { handle: 2, post: 0 });
+  assert.equal(links.twitter, 'https://x.com/fakecoin');
+  assert.equal(links.website, 'https://fake.coin');
+  assert.equal(links.telegram, null);
+  assert.equal(links.launchpadLabel, 'pump.fun');
+  assert.equal(links.launchpadUrl, `https://pump.fun/coin/${MINT}`);
+  assert.deepEqual(links.x, { kind: 'profile', handle: 'fakecoin', postId: null, label: links.x.label, accountReuse: 2, postReuse: 0, stats: null, statsReadAt: null });
+  // What the Links panel read off the page rides along when a person opened it there.
+  const read = scriptLinksFromSummary('solana', fakeSummary(), { handle: 0, post: 0 }, { stats: { page: 'profile', handle: 'fakecoin', followers: 12300, following: 40, joined: 'March 2021', verified: false, likes: null, reposts: null, replies: null, views: null, bookmarks: null, loginWall: false, title: 't' }, readAt: 7 });
+  assert.equal(read.x.stats.followers, 12300);
+  assert.equal(read.x.statsReadAt, 7);
+  const profileRead = { stats: { page: 'profile', handle: 'fakecoin', followers: 12300, following: 40, joined: 'March 2021', verified: true, likes: null, reposts: null, replies: null, views: null, bookmarks: null, loginWall: false, title: 't' }, readAt: Date.now() - 90_000 };
+  const withRead = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary(), null, profileRead));
+  assert.equal(withRead.xFollowers, 12300, 'every number the page showed is a rule variable');
+  assert.equal(withRead.xFollowing, 40);
+  assert.equal(withRead.xVerified, true);
+  assert.equal(withRead.xLikes, null, 'a profile has no likes');
+  assert.ok(withRead.xStatsAgeSec >= 89 && withRead.xStatsAgeSec <= 95, `age in seconds (${withRead.xStatsAgeSec})`);
+  const postRead = { stats: { page: 'post', handle: 'fakecoin', followers: null, following: null, joined: null, verified: null, likes: 1203, reposts: 210, replies: 88, views: 45200, bookmarks: 12, loginWall: false, title: 't' }, readAt: Date.now() };
+  const withPost = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary(), null, postRead));
+  assert.equal(withPost.xLikes, 1203);
+  assert.equal(withPost.xReposts, 210);
+  assert.equal(withPost.xReplies, 88);
+  assert.equal(withPost.xViews, 45200);
+  assert.equal(withPost.xFollowers, null, 'a post has no followers');
+  const unread = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary()));
+  for (const id of ['xFollowers', 'xFollowing', 'xVerified', 'xLikes', 'xReposts', 'xReplies', 'xViews', 'xStatsAgeSec']) assert.equal(unread[id], null, `${id}: nobody read it is null, never 0`);
+  const none = scriptLinksFromSummary('solana', fakeSummary({ launchpad: 'unknown', socials: { twitter: null, website: null, telegram: null, dexPaid: false } }), { handle: 0, post: 0 });
+  assert.equal(none.launchpadUrl, null, 'no page the app knows = no link, not a guess');
+  assert.equal(none.x.kind, 'none');
+  // Telegram's preview, the domain record and the site read ride along the
+  // same way (2026-09-20), and every one is null until looked up or read.
+  assert.equal(links.telegramStats, null);
+  assert.equal(links.domain, null);
+  assert.equal(links.site, null);
+  const intel = {
+    telegram: { kind: 'channel', members: 149, countWord: 'subscribers', online: null, title: 'Krypt.cc', readAt: 5 },
+    domain: { name: 'fake.coin', registeredAt: new Date(Date.now() - 400 * 86_400_000).toISOString(), registrar: 'NameCheap, Inc.', hostedOn: null, readAt: 6 },
+  };
+  const siteRead = { read: { url: 'https://fake.coin/', host: 'fake.coin', title: 'Fake', description: null, namesContract: true, xHandles: ['fakecoin'], telegramLinks: [], outboundHosts: 3, wordCount: 120, generator: null, mentionsConnectWallet: false }, readAt: 7 };
+  const full = scriptLinksFromSummary('solana', fakeSummary(), { handle: 0, post: 0 }, null, intel, siteRead);
+  assert.equal(full.telegramStats.members, 149);
+  assert.equal(full.domain.registrar, 'NameCheap, Inc.');
+  assert.equal(full.site.namesContract, true);
+  assert.equal(full.site.readAt, 7);
+  const withIntel = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary(), null, null, intel, siteRead));
+  assert.equal(withIntel.tgMembers, 149);
+  assert.equal(withIntel.tgOnline, null, 'a channel shows no online count: unknown');
+  assert.equal(withIntel.tgKind, 'channel');
+  assert.ok(withIntel.domainAgeDays >= 399 && withIntel.domainAgeDays <= 401, `age in days (${withIntel.domainAgeDays})`);
+  assert.equal(withIntel.domainHostedOn, null);
+  assert.equal(withIntel.siteNamesContract, true);
+  assert.equal(withIntel.siteLinksX, true, 'the site links the token’s own X account');
+  assert.equal(withIntel.siteOutboundHosts, 3);
+  assert.equal(withIntel.siteMentionsConnectWallet, false);
+  const hosted = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary(), null, null, { telegram: null, domain: { name: null, registeredAt: null, registrar: null, hostedOn: 'Vercel', readAt: 1 } }, null));
+  assert.equal(hosted.domainHostedOn, 'Vercel');
+  assert.equal(hosted.domainAgeDays, null, 'a shared platform has no age of the coin’s own');
+  assert.equal(hosted.tgMembers, null);
+  assert.equal(hosted.siteLinksX, null, 'nothing read off the site is unknown, not false');
+  const noX = withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary({ socials: { twitter: null, website: 'https://fake.coin', telegram: null, dexPaid: false } }), null, null, null, siteRead));
+  assert.equal(noX.siteLinksX, null, 'no X link on the token = nothing to compare');
+  assert.equal(noX.siteNamesContract, true);
+});
+
+test('links is free, security and creator cost an action, and analyze is capped per hour', async () => {
+  const over = {
+    links: { [MINT]: { twitter: 'https://x.com/a', website: null, telegram: null, launchpadLabel: 'pump.fun', launchpadUrl: 'https://pump.fun/coin/' + MINT, x: { kind: 'profile', handle: 'a', postId: null, label: 'X account @a', accountReuse: 0, postReuse: 0 } } },
+    security: { [MINT]: { score: 80, checksResolved: 9, checksTotal: 10, checks: [{ id: 'mint', label: 'Mint authority', verdict: 'pass', detail: 'revoked' }], warnings: [] } },
+    creator: { [MINT]: { address: 'Creator1', launches: 7, graduated: 1, graduationRate: 14.3, medianAthUsd: 20_000, bestAthUsd: 90_000, firstLaunchAt: 1, lastLaunchAt: 2, truncated: false } },
+  };
+  const h = setup(over);
+  const s = saved({ ...rulesScript(), budget: { ...rulesScript().budget, maxActionsPerMinute: 30 } });
+  auto.setEnabled(s.id, true);
+  // 35 link reads: none is an action, so none is refused by the 30-a-minute guard.
+  for (let i = 1; i <= 35; i++) auto.onSandboxMessage(s.id, { t: 'call', id: i, method: 'links', args: [MINT] });
+  await tick();
+  const linkReplies = h.calls.replies.filter((r) => r.cid <= 35);
+  assert.equal(linkReplies.length, 35);
+  assert.ok(linkReplies.every((r) => r.ok && r.value?.x?.handle === 'a'), 'every link read answered, free');
+  auto.onSandboxMessage(s.id, { t: 'call', id: 101, method: 'security', args: [MINT] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 102, method: 'creator', args: [MINT] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 103, method: 'links', args: [MINT2] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 104, method: 'security', args: ['not a mint'] });
+  await tick();
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  assert.equal(by(101).value.score, 80);
+  assert.equal(by(101).value.checks[0].verdict, 'pass');
+  assert.equal(by(102).value.launches, 7);
+  assert.equal(by(103).value, null, 'nothing cached for the other mint is null');
+  assert.equal(by(104).ok, false);
+  assert.match(by(104).error, /bad mint/);
+  // analyze: 20 an hour, then refused with the reason — and the host was not asked for the 21st.
+  for (let i = 1; i <= 21; i++) auto.onSandboxMessage(s.id, { t: 'call', id: 200 + i, method: 'analyze', args: [MINT] });
+  await tick();
+  const ok = [];
+  const refused = [];
+  for (let i = 1; i <= 21; i++) (by(200 + i).ok ? ok : refused).push(i);
+  assert.equal(ok.length, 20, `20 analyses answered (got ${ok.length})`);
+  assert.equal(refused.length, 1);
+  assert.match(by(221).error, /20 AI analyses in an hour/);
+  assert.equal(over.analyzeCalls, 20, 'the key was spent exactly 20 times');
+  assert.equal(by(201).value.score, 61);
+});
+
+test('an AI refusal (off, no key, bad reply) reaches the script as the reason, never as a crash', async () => {
+  const over = { analyzeError: 'AI analysis is off, or the key for the selected provider is missing (Settings → AI).' };
+  const h = setup(over);
+  const s = saved(rulesScript());
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'analyze', args: [MINT] });
+  await tick();
+  const r = h.calls.replies.find((x) => x.cid === 1);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /AI analysis is off/);
+});
+
+test('the four new methods are sandbox methods and documented', () => {
+  for (const m of ['links', 'security', 'creator', 'analyze']) {
+    assert.ok(SCRIPT_METHODS.includes(m), `${m} is callable`);
+    const a = SCRIPT_API.find((x) => x.method === m);
+    assert.ok(a, `${m} is documented`);
+    assert.ok(/Solana only/.test(a.notes), `${m} says it is Solana only`);
+  }
+  assert.equal(SCRIPT_API.find((x) => x.method === 'analyze').action, true, 'analyze is an action — it spends');
+  assert.equal(SCRIPT_API.find((x) => x.method === 'links').action, false, 'links is a free read');
+  assert.ok(/never visits/.test(SCRIPT_API.find((x) => x.method === 'links').notes), 'the app never visits the links');
+});
+
 await run();

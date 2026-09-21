@@ -20,7 +20,7 @@
 
 import type { RouteId } from './components/Sidebar';
 
-export type WorkspaceId = 'hub' | 'terminal' | 'automation' | 'engine' | 'wallets' | 'rewards' | 'scout' | 'launch' | 'layout' | 'system';
+export type WorkspaceId = 'hub' | 'terminal' | 'automation' | 'engine' | 'wallets' | 'guides' | 'scout' | 'launch' | 'layout' | 'system';
 
 export interface WorkspaceSpec {
   id: WorkspaceId;
@@ -43,7 +43,7 @@ export interface WorkspaceSpec {
    */
   groups?: Array<{ label: string; routes: RouteId[] }>;
   /** Lucide icon name, resolved by the Hub so this module stays icon-free. */
-  icon: 'compass' | 'users' | 'cpu' | 'wallet' | 'gift' | 'scout' | 'launch' | 'layout' | 'settings' | 'automation';
+  icon: 'compass' | 'users' | 'cpu' | 'wallet' | 'book' | 'scout' | 'launch' | 'layout' | 'settings' | 'automation';
   /** False until the workspace has something worth opening. */
   ready: boolean;
 }
@@ -71,7 +71,10 @@ export const WORKSPACES: WorkspaceSpec[] = [
     // moved here from Main Engine for that reason: it is not part of the
     // scanner, it just happened to be built alongside it.
     blurb: 'Everything that trades without you clicking: followed wallets, your own rules, and farming.',
-    routes: ['wallets', 'scripts', 'farming'],
+    // Copy Simple first (2026-09-20): the three-question follow is the
+    // page a newcomer should land on; Copy Trading beside it has every
+    // control on the same configs.
+    routes: ['copysimple', 'wallets', 'scripts', 'farming'],
     icon: 'automation',
     ready: true,
   },
@@ -97,7 +100,7 @@ export const WORKSPACES: WorkspaceSpec[] = [
   {
     id: 'wallets',
     title: 'Wallet Utilities',
-    blurb: 'Your keys, and the wallet groups you fund, warm and mirror.',
+    blurb: 'Your keys, what reward pools paid them, and the wallet groups you fund and mirror.',
     routes: ['wallet', 'walletrobinhood', 'walletbnb', 'swap', 'bridge', 'creator', 'funder'],
     groups: [
       { label: 'Your wallets', routes: ['wallet', 'walletrobinhood', 'walletbnb'] },
@@ -111,18 +114,16 @@ export const WORKSPACES: WorkspaceSpec[] = [
     ready: true,
   },
   {
-    id: 'rewards',
-    title: 'Rewards',
-    // Deliberately NOT "Airdrop Hunter". Six researchers killed farming on the
-    // arithmetic (docs/airdrop-research-2026-09-09.md): break-even needs a hit
-    // rate above 100% once labour is priced, eligibility rules are published
-    // after the block they measure, and two of our three chains have no
-    // reachable airdrop layer at all. What IS real is the opposite shape — a
-    // published, funded, address-queryable rate you can verify BEFORE acting.
-    // So this workspace states what you are earning; it never chases a maybe.
-    blurb: 'Published reward rates on the pools you can actually verify — no hunting, no guessing.',
-    routes: ['rewards'],
-    icon: 'gift',
+    id: 'guides',
+    title: 'Guides',
+    // Was Rewards (2026-09-09 → 2026-09-20). The reward check — what a pool
+    // paid this wallet, as Merkl reports it — moved onto the Robinhood and
+    // BNB wallet pages, beside the wallet it is about. What replaced it is
+    // the thing the Hub had no tile for: how to use each tile, in plain
+    // words, for someone who has never used a trading app.
+    blurb: 'How each part of the app works, in plain words. Start here if it is your first time.',
+    routes: ['guides'],
+    icon: 'book',
     ready: true,
   },
   {
@@ -154,11 +155,11 @@ export const WORKSPACES: WorkspaceSpec[] = [
   },
   {
     id: 'layout',
-    title: 'My Layout',
+    title: 'Widgets',
     // The one surface the app does not decide for you. Everything on it is a
     // self-contained widget (src/panels/registry.tsx) — panels that need a
     // selected token cannot go here, because a free-form grid has no token.
-    blurb: 'Your own dashboard. Choose the panels, drag them where you want.',
+    blurb: 'Your own screen, made of widgets. Choose them, drag them where you want.',
     routes: ['workspace'],
     icon: 'layout',
     ready: true,

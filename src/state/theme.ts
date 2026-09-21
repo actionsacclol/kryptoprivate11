@@ -16,6 +16,7 @@
 // The identity lives in shared/theme.ts: AppSettings is typed by it and main
 // validates it, and shared/ does not import from src/.
 import { DEFAULT_THEME, isThemeId, type ThemeId } from '@shared/theme';
+import { cssColour } from './skin';
 
 export { THEMES, THEME_META, DEFAULT_THEME, isThemeId, type ThemeId } from '@shared/theme';
 
@@ -132,10 +133,11 @@ export function accentChannels(): string {
   }
 }
 
-/** A colour string for canvas, SVG or a chart library. `alpha` omitted = solid. */
+/** A colour string for canvas, SVG or a chart library. `alpha` omitted = solid.
+ *  Comma form: lightweight-charts cannot parse `rgb(r g b / a)` (see
+ *  `cssColour` in skin.ts — the chart's crosshair is painted with this). */
 export function accent(alpha?: number): string {
-  const ch = accentChannels();
-  return alpha === undefined ? `rgb(${ch})` : `rgb(${ch} / ${alpha})`;
+  return cssColour(accentChannels(), alpha);
 }
 
 /** The soft accent, same rules. */
@@ -149,7 +151,7 @@ export function accentSoft(alpha?: number): string {
   } catch {
     /* default stands */
   }
-  return alpha === undefined ? `rgb(${ch})` : `rgb(${ch} / ${alpha})`;
+  return cssColour(ch, alpha);
 }
 
 /** Accent as `#rrggbb`, for the few consumers that will not parse rgb() -

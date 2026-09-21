@@ -25,6 +25,7 @@
 // everything, place and cancel advanced orders, apply an order template,
 // create alerts, watch/unwatch, notify, log, and turn itself off.
 
+import type { AiAnalysis } from '@shared/ai';
 import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../system/logger';
@@ -52,6 +53,9 @@ import {
   RULE_ACTIONS,
   type LeaderFacts,
   type MarketFacts,
+  type ScriptLinks,
+  type ScriptSecurity,
+  type ScriptCreator,
   type RuleAction,
   type RuleContext,
   type ScriptLogLine,
@@ -129,6 +133,16 @@ export interface AutomationHost {
   marketCached(mint: string, chain?: ChainKind): MarketFacts | null;
   /** Provider facts, fetched — a round trip. */
   market(mint: string, chain?: ChainKind): Promise<MarketFacts | null>;
+  /** The token's links and what its X link is, from cached facts — free.
+   *  Null when nothing is cached. Solana only. */
+  links(mint: string, chain?: ChainKind): ScriptLinks | null;
+  /** The token page's security report — a round trip. Solana only. */
+  security(mint: string, chain?: ChainKind): Promise<ScriptSecurity | null>;
+  /** The creator's launch record — a round trip. Solana only. */
+  creator(mint: string, chain?: ChainKind): Promise<ScriptCreator | null>;
+  /** The AI second opinion. Spends the user's own key on an uncached call;
+   *  throws with the reason when AI is off. Solana only. */
+  analyze(mint: string, chain?: ChainKind): Promise<AiAnalysis>;
   /** Open positions in a mode. */
   positions(mode: ScriptMode, chain?: ChainKind): Promise<ScriptPosition[]>;
   wallet(chain?: ChainKind): { sol: number | null; address: string | null };
@@ -157,6 +171,11 @@ export interface AutomationHost {
   };
 }
 
+/** AI analyses a script may run per rolling hour — each uncached one spends
+ *  the user's own key. Fixed rather than a budget field: the point is that
+ *  a runaway script cannot raise its own ceiling. */
+const AI_ANALYSES_PER_HOUR = 20;
+
 interface Runtime {
   dayKey: string;
   buysToday: number;
@@ -169,6 +188,8 @@ interface Runtime {
   lastFireAt: Map<string, number>;
   /** Timestamps of actions in the last minute. */
   actions: number[];
+  /** Timestamps of AI analyses in the last hour — they spend the user's key. */
+  analyses: number[];
   /** Positions this script opened (or placed a limit buy for): mint → cost. */
   opened: Map<string, { costSol: number; at: number }>;
   /** Mints the script asked to stream ticks for. */
@@ -380,6 +401,7 @@ function freshRuntime(): Runtime {
     firedMints: new Set(),
     lastFireAt: new Map(),
     actions: [],
+    analyses: [],
     opened: new Map(),
     subscribed: new Set(),
     kv: {},
@@ -1411,6 +1433,48 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         // its 429 parks. It costs an action like anything else does.
         if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `market: over ${s.budget.maxActionsPerMinute} actions in a minute`);
         return answer(true, await h.market(mint, scriptChain(s)));
+      }
+      case 'links': {
+        // Cached facts only — no request, no action charged.
+        const [mint] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'links: bad mint');
+        return answer(true, h.links(mint, scriptChain(s)));
+      }
+      case 'security': {
+        const [mint] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'security: bad mint');
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `security: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.security(mint, scriptChain(s)));
+      }
+      case 'creator': {
+        const [mint] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'creator: bad mint');
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `creator: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.creator(mint, scriptChain(s)));
+      }
+      case 'analyze': {
+        // The one read that spends the user's own money: their AI key, per
+        // uncached call. Rate-limited as an action AND capped per hour, so a
+        // script that asks on every launch cannot run a bill up unnoticed.
+        const [mint] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'analyze: bad mint');
+        const rt = rtFor(s);
+        const now = Date.now();
+        if (rateLimited(s, rt, now)) return answer(false, undefined, `analyze: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        rt.analyses = rt.analyses.filter((t) => now - t < 3_600_000);
+        if (rt.analyses.length >= AI_ANALYSES_PER_HOUR) return answer(false, undefined, `analyze: over ${AI_ANALYSES_PER_HOUR} AI analyses in an hour (it spends your key)`);
+        // The slot is taken BEFORE the await: twenty-one calls fired in one
+        // tick would otherwise all see an empty hour and all spend. A call
+        // the host refuses (AI off, no key) gives its slot back.
+        rt.analyses.push(now);
+        try {
+          const a = await h.analyze(mint, scriptChain(s));
+          return answer(true, a);
+        } catch (err) {
+          const i = rt.analyses.indexOf(now);
+          if (i >= 0) rt.analyses.splice(i, 1);
+          return answer(false, undefined, `analyze: ${(err as Error).message}`);
+        }
       }
       case 'positions': {
         const now = Date.now();

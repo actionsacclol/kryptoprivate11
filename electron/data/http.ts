@@ -187,6 +187,8 @@ interface Stats {
   lastError: string | null;
   lastCallAt: number | null;
   samples: number[];
+  /** route key → requests, capped at ROUTE_ROWS_CAP distinct routes. */
+  routes: Map<string, number>;
 }
 
 const stats = new Map<HttpProviderId, Stats>();
@@ -194,7 +196,7 @@ const stats = new Map<HttpProviderId, Stats>();
 function statsFor(id: HttpProviderId): Stats {
   let s = stats.get(id);
   if (!s) {
-    s = { calls: 0, errors: 0, lastError: null, lastCallAt: null, samples: [] };
+    s = { calls: 0, errors: 0, lastError: null, lastCallAt: null, samples: [], routes: new Map() };
     stats.set(id, s);
   }
   return s;
@@ -206,6 +208,37 @@ export interface ProviderTelemetry {
   lastError: string | null;
   lastCallAt: number | null;
   latencyMs: number | null;
+  /** Requests per route this session, most-called first — what is actually
+   *  spending the budget. Dynamic path segments are collapsed. */
+  routes: Array<{ route: string; calls: number }>;
+}
+
+/**
+ * A request's path with its variable parts collapsed, so forty token pages
+ * are one row: base58 keys (32–44 chars) and long hex become `:key`, bare
+ * numbers `:n`, and the query string is dropped except for the route's own
+ * name where a Jupiter list is told apart by it (`/tokens/v2/search`
+ * carries `query=` for both a single mint and a batch — the batch is
+ * marked by its commas).
+ */
+export function routeKey(url: URL): string {
+  const path = url.pathname
+    .split('/')
+    .map((seg) => (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(seg) || /^0x[0-9a-fA-F]{20,}$/.test(seg) || /^[0-9a-fA-F]{32,}$/.test(seg) ? ':key' : /^\d+$/.test(seg) ? ':n' : seg))
+    .join('/');
+  const q = url.searchParams;
+  if (path.endsWith('/tokens/v2/search')) return q.get('query')?.includes(',') ? `${path}?batch` : `${path}?one`;
+  if (q.has('sort')) return `${path}?sort=${q.get('sort')}`;
+  return path;
+}
+
+const ROUTE_ROWS_CAP = 64;
+
+function noteRoute(s: Stats, url: URL): void {
+  const key = routeKey(url);
+  const cur = s.routes.get(key);
+  if (cur !== undefined) s.routes.set(key, cur + 1);
+  else if (s.routes.size < ROUTE_ROWS_CAP) s.routes.set(key, 1);
 }
 
 export function telemetry(id: HttpProviderId): ProviderTelemetry {
@@ -217,6 +250,7 @@ export function telemetry(id: HttpProviderId): ProviderTelemetry {
     lastError: s.lastError,
     lastCallAt: s.lastCallAt,
     latencyMs: sorted.length ? Math.round(sorted[Math.floor(sorted.length / 2)]) : null,
+    routes: [...s.routes.entries()].map(([route, calls]) => ({ route, calls })).sort((a, b) => b.calls - a.calls),
   };
 }
 
@@ -353,11 +387,23 @@ const LANE_GROUP: Record<string, string> = {
   'pumpfun:callout': 'pumpfun:poll',
 };
 
-/** Keyless: today's lite-api pace, unchanged — it is measurably un-throttled
- *  and Jupiter answers with `x-ratelimit-*`, which softParkFromHeaders
- *  already follows. Keyed: api.jup.ag documents 1 request/second. */
-const JUPITER_GAP_KEYLESS = 120;
+/**
+ * Keyless: lite-api is NOT un-throttled any more. Measured 2026-09-20 on
+ * the Discover page: the 120 ms gap let a pass burst eight requests a second
+ * and the host answered 429 at ~46 calls a minute (parking Jupiter for 40 s
+ * twice in 150 s, with the New and Trending columns saying so). Probed the
+ * same day: twelve requests at 2/s and six at 1/s all 200. So the gap is
+ * 500 ms — bursts of two a second, which the host tolerates — and the
+ * window below is the honest minute ceiling; without it `60_000 / gap`
+ * would grant 120 a minute, twice what the host serves.
+ * Keyed: api.jup.ag documents 1 request/second.
+ */
+const JUPITER_GAP_KEYLESS = 500;
 const JUPITER_GAP_KEYED = 1_000;
+/** Per minute, both lanes together. lite-api's ceiling is ~60 (no header
+ *  says so; measured by its 429s), api.jup.ag's documented 1 rps is 60. */
+const JUPITER_WINDOW_KEYLESS = 50;
+const JUPITER_WINDOW_KEYED = 55;
 
 /** The gap in force for a provider right now, before slow start. Jupiter's
  *  depends on which host the key selected; every other provider is static. */
@@ -378,7 +424,11 @@ function baseGap(id: HttpProviderId): number {
  * by both lanes and is what actually holds the ceiling.
  */
 function windowLimitFor(key: string): { n: number; ms: number } | undefined {
-  if (key === 'jupiter') return { n: Math.floor(60_000 / baseGap('jupiter')), ms: 60_000 };
+  if (key === 'jupiter') {
+    // The lower of what the gap implies and the host's real ceiling.
+    const implied = Math.floor(60_000 / baseGap('jupiter'));
+    return { n: Math.min(implied, jupiterKey() ? JUPITER_WINDOW_KEYED : JUPITER_WINDOW_KEYLESS), ms: 60_000 };
+  }
   return WINDOW_LIMIT[key];
 }
 
@@ -905,6 +955,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
     const started = Date.now();
     s.calls += 1;
     s.lastCallAt = started;
+    noteRoute(s, url);
     let status: number | null = null;
     try {
       const res = await fetch(url, {
@@ -1056,7 +1107,16 @@ interface Entry {
 }
 
 const cache = new Map<string, Entry>();
-const CACHE_CAP = 600;
+/**
+ * 600 until 2026-09-20, and that was the silent cause of a good share of the
+ * Jupiter spend: four Discover columns of forty rows keep eight to ten keys
+ * per row (the Jupiter row, its longer copy, the Shield verdict, the chain
+ * read, the mint facts, the rug and odds memos, the seek…) — well over a
+ * thousand — so every fill evicted a quarter of the cache and the memos
+ * never survived to the next pass. Each entry is a few kilobytes; five
+ * thousand is a few megabytes, on a desktop.
+ */
+const CACHE_CAP = 5_000;
 
 /**
  * How long an expired entry is kept around after its TTL.

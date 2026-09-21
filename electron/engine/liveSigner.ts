@@ -9,7 +9,8 @@
 import { VersionedTransaction } from '@solana/web3.js';
 import { buildTrade } from './relayer';
 import { buildLocalTrade, invalidateTemplates } from './txBuilder';
-import { waivesFee } from '@shared/krypto';
+import { holderFeeBps, holderRateApplies } from '@shared/krypto';
+import { buildPumpSwapTrade } from './pumpSwapBuilder';
 import { usableTokens as kryptoUsableTokens } from './kryptoHolding';
 import { simulateTransaction, getBalance, getLatestBlockhashInfo, getTokenBalanceRawForMint, getAccountInfo } from '../chain/rpcClient';
 import { isTransportFailureMessage } from '@shared/rpcErrors';
@@ -17,7 +18,7 @@ import { buildJupiterSwap } from './jupiterRoute';
 import { ataFor, TOKEN_2022_PROGRAM } from '../chain/addresses';
 import { parseMintExtensions, mintWarning } from './mintExtensions';
 import { planTips, injectTransfersFit, broadcastAndConfirm, MAX_TX_BYTES, type PlannedTransfer, type TipPlan, type TipExecSettings } from './broadcast';
-import { splitFee, activeTreasury, treasuryIntegrity, feesEnabled, looksLikeSolAddress, type FeeSplit } from '@shared/fees';
+import { FEE_BPS, splitFee, activeTreasury, treasuryIntegrity, feesEnabled, looksLikeSolAddress, type FeeSplit } from '@shared/fees';
 import { explainFeeFailure } from '@shared/exitBudget';
 import * as jitoTips from './jitoTips';
 import { JITO_TIP_ACCOUNTS } from '../chain/tipAccounts';
@@ -259,7 +260,7 @@ export interface TradeTiming {
   /** Building the unsigned transaction — local builder or relayer HTTP. */
   build?: number;
   /** Which source produced the bytes. */
-  buildSource?: 'local' | 'jupiter' | 'relayer';
+  buildSource?: 'local' | 'pumpswap' | 'jupiter' | 'relayer';
   /** Tip-floor fetch + lookup-table reads for tip injection. */
   tips?: number;
   /** Simulation and the pre-balance read, which now run concurrently. */
@@ -370,8 +371,13 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
   // Jupiter (keyless, any DEX the signer allows — graduated pump tokens,
   // Raydium, Meteora, Orca), then the PumpPortal relayer as the last resort.
   // Each failure is kept so the final message can name every reason.
-  const sources: Array<'local' | 'jupiter' | 'relayer'> = canBuildLocally ? ['local', 'jupiter', 'relayer'] : ['jupiter', 'relayer'];
+  // The PumpSwap builder sits between the curve builder and Jupiter: a coin
+  // the curve builder reports as graduated trades on pump-amm, and that
+  // builder needs no third party either. Same gate as the curve builder —
+  // local building on, a sell it can size.
+  const sources: Array<'local' | 'pumpswap' | 'jupiter' | 'relayer'> = canBuildLocally ? ['local', 'pumpswap', 'jupiter', 'relayer'] : ['jupiter', 'relayer'];
   let localFail = '';
+  let pumpSwapFail = '';
   let jupiterFail = '';
   for (const source of sources) {
     let txBytes: Uint8Array | null = null;
@@ -406,6 +412,35 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
       if (!built.ok || !built.tx) {
         localFail = built.message;
         lastFail = { ok: false, stage: 'relayer', message: `local build: ${built.message}`, timing };
+        continue;
+      }
+      txBytes = built.tx;
+      solValueLamports = built.solValueLamports ?? 0;
+      lastValidBlockHeight = built.lastValidBlockHeight;
+    } else if (source === 'pumpswap') {
+      // Only a graduated pump coin has a canonical PumpSwap pool, and the
+      // curve builder has just said whether this is one: "graduated" means
+      // the curve is complete and the coin trades on pump-amm now. Anything
+      // else — a Raydium coin, a mint pump never saw — goes straight to
+      // Jupiter rather than spending a round trip on a pool that cannot exist.
+      if (!p.local || !/graduated/.test(localFail)) continue;
+      const solLamports = p.action === 'buy' && typeof p.amount === 'number' ? BigInt(Math.round(p.amount * LAMPORTS_PER_SOL)) : 0n;
+      const built = await buildPumpSwapTrade({
+        action: p.action,
+        mint: p.mint,
+        owner,
+        solLamports,
+        sellPct: sellPct ?? undefined,
+        slippagePct: p.slippagePct,
+        priorityFeeSol: p.priorityFeeSol,
+        computeUnitLimit: p.local.computeUnitLimit,
+        httpUrl: p.httpUrl,
+      });
+      timing.build = Date.now() - buildStart;
+      timing.buildSource = 'pumpswap';
+      if (!built.ok || !built.tx) {
+        pumpSwapFail = built.message;
+        lastFail = { ok: false, stage: 'relayer', message: `PumpSwap build: ${built.message}`, timing };
         continue;
       }
       txBytes = built.tx;
@@ -487,7 +522,7 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
         // useful one — the relayer 400ing on a bonding curve is expected (pump
         // v2). Surface the local failure rather than hiding it behind the
         // relayer's generic "Bad Request".
-        const whyParts = [localFail ? `local build: ${localFail}` : '', jupiterFail ? `jupiter: ${jupiterFail}` : ''].filter(Boolean);
+        const whyParts = [localFail ? `local build: ${localFail}` : '', pumpSwapFail ? `PumpSwap: ${pumpSwapFail}` : '', jupiterFail ? `jupiter: ${jupiterFail}` : ''].filter(Boolean);
         const localWhy = whyParts.length ? ` | ${whyParts.join(' | ')}` : '';
         // Say what a relayer 400 actually means, because "Bad Request" alone
         // sent a user hunting through settings (2026-09-02). Every route was
@@ -533,6 +568,14 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
 
     const res = await runPipeline(p, owner, txBytes, source, timing, solValueLamports, lastValidBlockHeight);
     if (res.ok) return res;
+    // A PumpSwap build that fails before broadcast hands over to Jupiter with
+    // its reason kept. No template to invalidate: the layout is derived, and
+    // a strike here must not count against the CURVE builder's layout.
+    if (source === 'pumpswap' && (res.stage === 'validate' || res.stage === 'simulate' || res.stage === 'guard')) {
+      pumpSwapFail = res.message;
+      lastFail = { ...res, message: `PumpSwap local tx ${res.stage} failed: ${res.message}`, timing };
+      continue;
+    }
     // A locally built tx that fails BEFORE broadcast usually means the
     // learned template went stale (pump ships breaking changes quarterly) —
     // invalidate it and retry via the relayer. Post-broadcast failures are
@@ -593,7 +636,7 @@ async function runPipeline(
   p: LiveTradeParams,
   owner: string,
   builtTx: Uint8Array,
-  source: 'local' | 'jupiter' | 'relayer',
+  source: 'local' | 'pumpswap' | 'jupiter' | 'relayer',
   timing: TradeTiming,
   solValueLamports: number,
   lastValidBlockHeight?: number,
@@ -640,22 +683,22 @@ async function runPipeline(
   // failure (network / lookup table / size) so real hiccups don't block an entry.
   let requiredFee: { address: string; minLamports: number } | undefined;
   let treasury = '';
-  // $KRYPTO holders trade without Krypt's fee (shared/krypto.ts). Read from
-  // a CACHED holding — never a request — so working out a discount cannot
-  // slow down the trade it discounts. Unknown is not waived: `usableTokens`
-  // returns null on a stale or unreadable reading and `waivesFee` refuses
-  // null, so breaking one RPC read is not a way to trade for free.
+  // $KRYPTO holders pay HALF of Krypt's fee (shared/krypto.ts) — and the
+  // referrer's cut halves with it rather than vanishing, so a referral still
+  // pays (it was a full waiver until 2026-09-20). Read from a CACHED holding
+  // — never a request — so working out a discount cannot slow down the trade
+  // it discounts. Unknown is not a holder: `usableTokens` returns null on a
+  // stale or unreadable reading and `holderRateApplies` refuses null, so
+  // breaking one RPC read is not a way to trade cheaper.
   //
   // Nothing else changes. pump's 1 %, the network fee, the priority fee and
-  // the tips are not ours to waive. The buy-side interlock below is derived
-  // from what is ACTUALLY sent, so a waived trade simply requires nothing —
-  // it does not require zero, which would be a rule a cracked build could
-  // satisfy by sending nothing on every trade.
-  const feeWaived = feesEnabled() && solValueLamports > 0 && waivesFee(kryptoUsableTokens());
-  if (feeWaived) {
-    feeNote = ', fee waived ($KRYPTO holder)';
+  // the tips are not ours to discount. The buy-side interlock below is
+  // derived from what is ACTUALLY sent, so a halved fee is what it requires.
+  const holder = feesEnabled() && solValueLamports > 0 && holderRateApplies(kryptoUsableTokens());
+  if (holder) {
+    feeNote = ', fee halved ($KRYPTO holder)';
   }
-  if (feesEnabled() && !feeWaived && solValueLamports > 0) {
+  if (feesEnabled() && solValueLamports > 0) {
     // Resolve the treasury through the integrity layer, never the raw constant.
     // A cracked build that edited TREASURY_ADDRESS still lands the fee here.
     const integrity = treasuryIntegrity();
@@ -669,7 +712,7 @@ async function runPipeline(
     const hasReferrer =
       looksLikeSolAddress(referrer) && referrer !== treasury && referrer !== owner && !!treasury;
     const split = treasury
-      ? splitFee(solValueLamports, hasReferrer)
+      ? splitFee(solValueLamports, hasReferrer, holderFeeBps(FEE_BPS, holder))
       : { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
     if (split.totalLamports > 0) {
       const wanted = [{ to: treasury, lamports: split.treasuryLamports }];
@@ -970,7 +1013,7 @@ async function runPipeline(
   /** "build 213 · tips 94 · sim 89 · send 640 · total 1036ms" */
   const timingNote = (): string => {
     const parts: string[] = [];
-    if (timing.build !== undefined) parts.push(`build ${timing.build}${timing.buildSource === 'local' ? '·local' : ''}`);
+    if (timing.build !== undefined) parts.push(`build ${timing.build}${timing.buildSource === 'local' ? '·local' : timing.buildSource === 'pumpswap' ? '·pumpswap' : ''}`);
     if (timing.tips !== undefined) parts.push(`tips ${timing.tips}`);
     if (timing.simulate !== undefined) parts.push(`sim ${timing.simulate}`);
     if (timing.sign !== undefined) parts.push(`sign ${timing.sign}`);

@@ -13,7 +13,7 @@ import { resolveRpc, type AppSettings, type EngineEvent, type IpcResult } from '
 import * as rpcProbe from './engine/rpcProbe';
 import * as kryptoHolding from './engine/kryptoHolding';
 import * as evmTrade from './evm/trade';
-import { KRYPTO_FEE_WAIVER_TOKENS } from '@shared/krypto';
+import { KRYPTO_HOLDER_TOKENS } from '@shared/krypto';
 import * as store from './system/settings-store';
 import { validateSettingsPatch } from './system/settingsValidation';
 import type { AiAnalysis } from '@shared/ai';
@@ -30,7 +30,7 @@ import * as walletScout from './engine/walletScout';
 import * as scoutScan from './engine/scoutScan';
 import { sourceFor as scoutSourceFor } from './engine/scoutScanSources';
 import * as evmWallet from './evm/evmWallet';
-import { SCOUT_CHAINS, SCOUT_SCAN_HOURS, rankScout, summarise, type ScoutChain, type ScoutScanHours, type ScoutSort, type ScoutWindow } from '@shared/walletScout';
+import { SCOUT_CHAINS, SCOUT_SCAN_HOURS, SCOUT_SORTS, emptyRow, rankScout, summarise, type ScoutChain, type ScoutScanHours, type ScoutSort, type ScoutWindow } from '@shared/walletScout';
 import * as evmDiscover from './evm/discover';
 import * as merkl from './data/providers/merkl';
 import * as callouts from './data/providers/pumpCallouts';
@@ -97,6 +97,11 @@ import * as creators from './engine/creators';
 import { summarize, backtestDataset } from './engine/history';
 import * as watchlist from './engine/watchlist';
 import * as market from './data/market';
+import * as xStats from './data/xStats';
+import { validateXStats } from '@shared/xStats';
+import * as linkIntel from './data/linkIntel';
+import * as siteReadStore from './data/siteRead';
+import { validateSiteRead } from '@shared/siteRead';
 import { clearCache } from './data/http';
 import { clearImageCache, setEnabled as setImagesEnabled } from './data/images';
 import {
@@ -109,7 +114,7 @@ import {
 import { TRIGGER_BASES, validateOrder, type NewOrderRequest, type TriggerBasis } from '@shared/orders';
 import { validateAlert, type NewAlertRequest } from '@shared/alerts';
 import { toCsv } from '@shared/portfolio';
-import { validateConfig, type CopyConfig } from '@shared/copytrade';
+import { validateConfig, type CopyConfig, FOMO_WALLET, type FomoSource } from '@shared/copytrade';
 import * as automation from './engine/automation';
 import { MAX_ACTIONS, MAX_CONDITIONS, type RuleAction, type RuleCondition, type RuleSet } from '@shared/automation';
 
@@ -850,11 +855,51 @@ export function registerIpc(): void {
 
   // What this install holds of $KRYPTO, and whether that waives Krypt's fee.
   // A cached reading, the same one the signer uses — the two must never be
-  // able to disagree, or the app would show "waived" and charge anyway.
+  // able to disagree, or the app would show "halved" and charge in full.
+  // What the Links panel read off a token's X page (2026-09-20). The renderer
+  // is the only writer, after a PERSON opened the page in the panel's browser
+  // view; main never fetches an X page. The guest's reply is untrusted text
+  // and is validated into a bounded record here, or refused.
+  ipcMain.handle('links:xstats:set', (_e, mint: unknown, stats: unknown) => {
+    if (!isMint(mint)) return fail('Invalid mint address');
+    const clean = validateXStats(stats);
+    if (!clean) return fail('Not a readable X page record');
+    const rec = xStats.set(mint, clean);
+    return ok('kept', { stats: rec.stats, readAt: rec.readAt });
+  });
+  ipcMain.handle('links:xstats:get', (_e, mint: unknown) => {
+    if (!isMint(mint)) return fail('Invalid mint address');
+    return ok('ok', xStats.get(mint));
+  });
+  // Telegram members and the website's registry record for a token's links
+  // (2026-09-20): main derives the links from its own facts — the renderer
+  // sends the mint and nothing else — and asks t.me and the registry, never
+  // the token's site. wait = a person is looking: fetch now and answer.
+  ipcMain.handle('links:intel:get', async (_e, mint: unknown, wait: unknown) => {
+    if (!isMint(mint)) return fail('Invalid mint address');
+    try {
+      return ok('ok', await linkIntel.intel(mint, wait === true));
+    } catch (err) {
+      return fail(`Lookup failed: ${(err as Error).message}`);
+    }
+  });
+  // What the Links panel read off the token's own website — the X read's contract.
+  ipcMain.handle('links:site:set', (_e, mint: unknown, read: unknown) => {
+    if (!isMint(mint)) return fail('Invalid mint address');
+    const clean = validateSiteRead(read);
+    if (!clean) return fail('Not a readable website record');
+    const rec = siteReadStore.set(mint, clean);
+    return ok('kept', { read: rec.read, readAt: rec.readAt });
+  });
+  ipcMain.handle('links:site:get', (_e, mint: unknown) => {
+    if (!isMint(mint)) return fail('Invalid mint address');
+    return ok('ok', siteReadStore.get(mint));
+  });
+
   ipcMain.handle('krypto:holding', async (_e, refresh: unknown) => {
     if (refresh === true) await kryptoHolding.refresh();
     const h = kryptoHolding.current();
-    return ok('ok', { ...h, waived: kryptoHolding.feeWaived(), thresholdTokens: KRYPTO_FEE_WAIVER_TOKENS });
+    return ok('ok', { ...h, halved: kryptoHolding.holderRateApplies(), thresholdTokens: KRYPTO_HOLDER_TOKENS });
   });
 
   ipcMain.handle('rpc:credits', () => ok('ok', heliusBudget.current()));
@@ -951,9 +996,7 @@ export function registerIpc(): void {
   ipcMain.handle('scout:top', (_e, chain: unknown, window: unknown, sort: unknown, limit: unknown) => {
     if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
     const w = (['day', 'week', 'month', 'all'] as ScoutWindow[]).includes(window as ScoutWindow) ? (window as ScoutWindow) : 'day';
-    const by = (['pnl', 'returnPct', 'winRatePct', 'roundTrips', 'volume'] as ScoutSort[]).includes(sort as ScoutSort)
-      ? (sort as ScoutSort)
-      : 'pnl';
+    const by = SCOUT_SORTS.includes(sort as ScoutSort) ? (sort as ScoutSort) : 'copyScore';
     const cap = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(200, Math.floor(limit))) : 50;
     const rows = walletScout.wallets(chain as ScoutChain).map((x) => summarise(x, w));
     // A wallet that did nothing in the window is not a row — it is absence.
@@ -974,28 +1017,20 @@ export function registerIpc(): void {
     const known = new Map(walletScout.wallets(chain as ScoutChain).map((x) => [x.address, x]));
     const rows = [...marks].map((address) => {
       const rec = known.get(address);
-      return rec
-        ? summarise(rec, w)
-        : {
-            chain: chain as ScoutChain,
-            address,
-            window: w,
-            buys: 0,
-            sells: 0,
-            roundTrips: 0,
-            wins: 0,
-            losses: 0,
-            pnl: 0,
-            volume: 0,
-            returnPct: null,
-            winRatePct: null,
-            medianHoldMs: null,
-            lastSeen: 0,
-            ranked: false,
-            looksAutomated: false,
-          };
+      return rec ? summarise(rec, w) : emptyRow(chain as ScoutChain, address, w);
     });
     return ok('ok', { rows, saved: [...marks] });
+  });
+
+  // One wallet's whole record — every day bucket, its recent trips, whether it
+  // is saved — for the detail drawer. The renderer windows and scores it with
+  // the same shared functions the board uses, so the two cannot disagree.
+  ipcMain.handle('scout:detail', (_e, chain: unknown, address: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    if (typeof address !== 'string' || !address) return fail('No wallet given');
+    const key = address.toLowerCase();
+    const rec = walletScout.wallets(chain as ScoutChain).find((x) => x.address === key) ?? null;
+    return ok('ok', { wallet: rec, saved: walletScout.isSaved(chain as ScoutChain, key) });
   });
 
   ipcMain.handle('scout:save', (_e, chain: unknown, address: unknown, on: unknown) => {
@@ -2454,7 +2489,7 @@ export function registerIpc(): void {
   // rail's summary, and the gate is the chain's own arm switch.
   // The $KRYPTO fee waiver covers the EVM rails too. Injected here because
   // `evm/trade.ts` is kept free of the Solana half of the app.
-  evmTrade.setFeeWaiver(() => kryptoHolding.feeWaived());
+  evmTrade.setHolderRate(() => kryptoHolding.holderRateApplies());
 
   getEngine().setEvmCopy({
     buy: async (chain, token, amountNative, walletId) => {
@@ -2557,8 +2592,10 @@ export function registerIpc(): void {
     // shared/copytrade.ts so the renderer's form and this handler cannot
     // disagree about what an address is (see the report: validateConfig is
     // the right long-term home).
-    const walletAddr = String(r.wallet ?? '').trim();
-    if (copyChain === 'solana' ? !isAddress(walletAddr) : !isEvmAddress(walletAddr)) return fail(`Enter a valid wallet address for ${copyChain === 'solana' ? 'Solana' : EVM_CHAIN_META[copyChain].name}`);
+    const fomo = r.direction === 'fomo';
+    const walletAddr = fomo ? FOMO_WALLET : String(r.wallet ?? '').trim();
+    // A FOMO config follows a set of wallets, not an address (2026-09-20).
+    if (!fomo && (copyChain === 'solana' ? !isAddress(walletAddr) : !isEvmAddress(walletAddr))) return fail(`Enter a valid wallet address for ${copyChain === 'solana' ? 'Solana' : EVM_CHAIN_META[copyChain].name}`);
     const clean = {
       id: typeof r.id === 'string' && r.id ? r.id : undefined,
       // Both of these were checked above and then left out of the rebuild,
@@ -2592,6 +2629,18 @@ export function registerIpc(): void {
       // value that is present is validated, never coerced to one.
       maxCopiesPerMinute:
         r.maxCopiesPerMinute === undefined || r.maxCopiesPerMinute === null ? null : Number(r.maxCopiesPerMinute),
+      // Reverse copying (2026-09-20): the direction, and the position's own
+      // exits. Absent stays null — the engine reads that as the default.
+      direction: r.direction === 'reverse' ? ('reverse' as const) : r.direction === 'fomo' ? ('fomo' as const) : ('copy' as const),
+      exitTakeProfitPct: r.exitTakeProfitPct === undefined || r.exitTakeProfitPct === null ? null : Number(r.exitTakeProfitPct),
+      exitStopLossPct: r.exitStopLossPct === undefined || r.exitStopLossPct === null ? null : Number(r.exitStopLossPct),
+      exitMaxHoldMin: r.exitMaxHoldMin === undefined || r.exitMaxHoldMin === null ? null : Number(r.exitMaxHoldMin),
+      // FOMO (2026-09-20): the crowd rule. Absent stays null — the defaults.
+      fomoSource: r.fomoSource === undefined || r.fomoSource === null ? null : (String(r.fomoSource) as FomoSource),
+      fomoMinWallets: r.fomoMinWallets === undefined || r.fomoMinWallets === null ? null : Number(r.fomoMinWallets),
+      fomoWindowSec: r.fomoWindowSec === undefined || r.fomoWindowSec === null ? null : Number(r.fomoWindowSec),
+      fomoTopN: r.fomoTopN === undefined || r.fomoTopN === null ? null : Number(r.fomoTopN),
+      fomoCrowdExitPct: r.fomoCrowdExitPct === undefined || r.fomoCrowdExitPct === null ? null : Number(r.fomoCrowdExitPct),
     };
     const v = validateConfig(clean);
     if (!v.ok) return fail(v.message);

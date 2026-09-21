@@ -598,6 +598,18 @@ export async function primeBlockhash(httpUrl: string): Promise<void> {
   }
 }
 
+/** The blockhash a build compiles with: the prewarmed one while it is
+ *  fresh, else one fetched now. Shared with the PumpSwap builder so both
+ *  ride the same prewarm heartbeat. Null when the RPC would not answer. */
+export async function recentBlockhash(httpUrl: string): Promise<{ value: string; lastValidBlockHeight: number } | null> {
+  if (!cachedBlockhash || Date.now() - cachedBlockhash.at > BLOCKHASH_TTL_MS) {
+    const bh = await getLatestBlockhashInfo(httpUrl);
+    if (!bh.ok || !bh.data) return null;
+    cachedBlockhash = { value: bh.data.blockhash, lastValidBlockHeight: bh.data.lastValidBlockHeight, at: Date.now() };
+  }
+  return { value: cachedBlockhash.value, lastValidBlockHeight: cachedBlockhash.lastValidBlockHeight };
+}
+
 /** A mint's owning token program never changes, so it is read once per
  *  process. Bounded: a session touches at most a few hundred mints. */
 const mintOwnerCache = new Map<string, string>();

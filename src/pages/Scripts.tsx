@@ -1,13 +1,20 @@
 // Scripts — the user's own automation: rules built without code, or a
 // JavaScript script, each under its own budget, paper first.
 //
-// The page is a list on the left and one script's editor on the right.
+// Three views under one top bar (2026-09-20, user: "the turn-on-live button
+// is at the bottom of a script, scripts and new scripts live in the same
+// area, it's cluttered"):
+//   • My scripts — the list on the left, one script's editor on the right,
+//     with the arm switch, Save and Delete in a header card ABOVE the
+//     editor, where the eye lands first;
+//   • New — pick a chain, then a rule (no code) or a script (JavaScript);
+//   • Reference — the AI prompt, the bot API, every variable, the examples.
 // Nothing here executes anything: every save goes through validation in
 // main, every action a script takes is checked there against its budget,
 // and arming a script is a separate click from saving it.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Clipboard, Code2, ListChecks, Play, Plus, Power, Trash2 } from 'lucide-react';
+import { AlertTriangle, BookOpen, Clipboard, Code2, ListChecks, Play, Plus, Power, Trash2 } from 'lucide-react';
 import { nativeSymbolOf, type ChainKind } from '@shared/evm';
 import {
   ALERT_KINDS,
@@ -71,6 +78,40 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+type View = 'scripts' | 'new' | 'reference';
+type RefTab = 'prompt' | 'api' | 'vars' | 'examples';
+
+const VIEWS: Array<[View, string, typeof ListChecks]> = [
+  ['scripts', 'My scripts', ListChecks],
+  ['new', 'New', Plus],
+  ['reference', 'Reference', BookOpen],
+];
+
+const CHAINS = ['solana', 'robinhood', 'bnb'] as const;
+const chainName = (ch: ChainKind): string => (ch === 'solana' ? 'Solana' : ch === 'bnb' ? 'BNB' : 'Robinhood');
+
+/** The chain tabs, shared by the list, the New view and the variable guide. */
+function ChainTabs({ value, onChange, counts }: { value: ChainKind; onChange: (ch: ChainKind) => void; counts?: Record<ChainKind, number> }) {
+  return (
+    <div className="flex rounded-lg border border-white/10 overflow-hidden">
+      {CHAINS.map((ch) => (
+        <button
+          key={ch}
+          onClick={() => onChange(ch)}
+          title={chainLabel(ch)}
+          className={cls(
+            'flex-1 px-2 py-2 text-body font-semibold transition flex items-center justify-center gap-1.5',
+            value === ch ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
+          )}
+        >
+          {chainName(ch)}
+          {counts && counts[ch] > 0 && <span className="text-label text-krypt-muted/70">{counts[ch]}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ScriptsPage() {
   const toast = useToast();
   const modal = useModal();
@@ -79,6 +120,8 @@ export function ScriptsPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
+  const [view, setView] = useState<View>('scripts');
+  const [refTab, setRefTab] = useState<RefTab>('prompt');
 
   const load = useCallback(async () => {
     const r = await window.krypt.automation.list();
@@ -104,7 +147,7 @@ export function ScriptsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id, current?.updatedAt]);
 
-  // The arm switch acts on the SAVED script, while every control above it
+  // The arm switch acts on the SAVED script, while every control below it
   // edits the draft. Arming while they disagree is how a script gets armed at
   // a size the screen is not showing — or worse, flipped to live in the editor
   // and armed with no live confirmation, because the saved copy still says
@@ -137,9 +180,23 @@ export function ScriptsPage() {
     if (current) setTab(scriptChain(current));
   }, [current]);
 
-  const startNew = (kind: 'rules' | 'code'): void => {
+  const startNew = (kind: 'rules' | 'code', chain: ChainKind = tab): void => {
     setSelected(null);
-    setDraft({ ...defaultScript(kind, tab) });
+    setTab(chain);
+    setDraft({ ...defaultScript(kind, chain) });
+    setView('scripts');
+  };
+
+  /** An example from Reference becomes a new code draft on the current chain. */
+  const useExample = (ex: { name: string; code: string }): void => {
+    setSelected(null);
+    setDraft({ ...defaultScript('code', tab), name: ex.name, code: ex.code });
+    setView('scripts');
+  };
+
+  const openReference = (t: RefTab): void => {
+    setRefTab(t);
+    setView('reference');
   };
 
   const save = async (): Promise<void> => {
@@ -216,9 +273,31 @@ export function ScriptsPage() {
   };
 
   const liveEnabled = settings.execution.liveEnabled;
+  const currentStats: ScriptStats | undefined = current && snap ? snap.stats[current.id] : undefined;
 
   return (
-    <Page title="Scripts" subtitle="Your own rules and code, each under a budget. Paper first; live is a separate, confirmed switch.">
+    <Page
+      title="Scripts"
+      subtitle="Your own rules and code, each under a budget. Paper first; live is a separate, confirmed switch."
+      actions={
+        <div className="flex rounded-lg border border-white/10 overflow-hidden" role="tablist" aria-label="Scripts views">
+          {VIEWS.map(([id, label, Icon]) => (
+            <button
+              key={id}
+              role="tab"
+              aria-selected={view === id}
+              onClick={() => setView(id)}
+              className={cls(
+                'px-3 py-1.5 text-body font-semibold transition flex items-center gap-1.5',
+                view === id ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" /> {label}
+            </button>
+          ))}
+        </div>
+      }
+    >
       {snap?.killSwitch && (
         <Card className="mb-4 border-rose-500/40 bg-rose-500/10 text-xs text-rose-200 flex items-center justify-between gap-3">
           <span className="flex items-center gap-2">
@@ -229,254 +308,431 @@ export function ScriptsPage() {
           </GhostButton>
         </Card>
       )}
-      <div className="grid lg:grid-cols-[320px_1fr] gap-4 items-start">
-        {/* List */}
-        <div className="space-y-3">
-          {/* One tab per chain. A script can only see and spend the money of
-              the chain it is on, so the chain is picked BEFORE the script
-              exists rather than found later inside its editor. */}
-          <div className="flex rounded-lg border border-white/10 overflow-hidden">
-            {(['solana', 'robinhood', 'bnb'] as const).map((ch) => (
-              <button
-                key={ch}
-                onClick={() => setTab(ch)}
-                title={chainLabel(ch)}
-                className={cls(
-                  'flex-1 px-2 py-2 text-body font-semibold transition flex items-center justify-center gap-1.5',
-                  tab === ch ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
-                )}
-              >
-                {ch === 'solana' ? 'Solana' : ch === 'bnb' ? 'BNB' : 'Robinhood'}
-                {chainCounts[ch] > 0 && <span className="text-label text-krypt-muted/70">{chainCounts[ch]}</span>}
-              </button>
-            ))}
-          </div>
-          {/* A live script on this chain that the chain cannot execute. The
-              page used to show only Solana's reason, so an unarmed EVM rail
-              looked like a page with nothing wrong on it. */}
-          {(() => {
-            const why = snap?.blockedByChain?.[tab] ?? null;
-            if (!why || !shown.some((s) => s.mode === 'live' && s.enabled)) return null;
-            return (
-              <div className="rounded-lg border border-arc-gold/35 bg-arc-gold/10 px-3 py-2 flex items-start gap-2">
-                <AlertTriangle className="h-3.5 w-3.5 text-arc-gold flex-shrink-0 mt-0.5" />
-                <p className="text-label text-arc-gold/90">
-                  A live script here is armed but {chainLabel(tab)} cannot execute — {why}.
-                </p>
+
+      {view === 'new' && (
+        <div className="max-w-3xl space-y-4">
+          <Card className="space-y-3">
+            <div className="text-label uppercase tracking-label text-krypt-muted">Which chain</div>
+            <ChainTabs value={tab} onChange={setTab} counts={chainCounts} />
+            <p className="text-body text-krypt-muted">A script watches and trades on one chain, in that chain’s own coin ({nativeSymbolOf(tab)}). Both kinds start in paper mode, off.</p>
+          </Card>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Card className="space-y-3 border-krypt-purple/25">
+              <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                <ListChecks className="h-4 w-4 text-krypt-purple" /> A rule — no code
               </div>
-            );
-          })()}
-          <div className="flex gap-2">
-            <PrimaryButton onClick={() => startNew('rules')} className="flex-1 !py-2 text-xs">
-              <ListChecks className="h-3.5 w-3.5" /> New rule
-            </PrimaryButton>
-            <GhostButton onClick={() => startNew('code')} className="flex-1 !py-2 text-xs">
-              <Code2 className="h-3.5 w-3.5" /> New script
+              <p className="text-body text-krypt-muted">When this happens, if these hold, do that. Three dropdowns; every fact a rule can see is under Reference → Variables.</p>
+              <PrimaryButton onClick={() => startNew('rules')} className="!py-2 text-xs">
+                <Plus className="h-3.5 w-3.5" /> Start a rule on {chainName(tab)}
+              </PrimaryButton>
+            </Card>
+            <Card className="space-y-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                <Code2 className="h-4 w-4 text-krypt-purple" /> A script — JavaScript
+              </div>
+              <p className="text-body text-krypt-muted">A few lines in a sandbox with no network, no files and no keys. Copy the AI prompt under Reference, paste it into any assistant, describe what you want, paste the result back.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <PrimaryButton onClick={() => startNew('code')} className="!py-2 text-xs">
+                  <Plus className="h-3.5 w-3.5" /> Start a script on {chainName(tab)}
+                </PrimaryButton>
+                <GhostButton onClick={() => openReference('examples')} className="!py-2 text-xs">
+                  <BookOpen className="h-3.5 w-3.5" /> Start from an example
+                </GhostButton>
+              </div>
+            </Card>
+          </div>
+        </div>
+      )}
+
+      {view === 'reference' && (
+        <ReferenceView
+          tab={refTab}
+          setTab={setRefTab}
+          chain={draft ? scriptChain(draft) : tab}
+          onUseExample={useExample}
+        />
+      )}
+
+      {view === 'scripts' && (
+        <div className="grid lg:grid-cols-[300px_1fr] gap-4 items-start">
+          {/* The list: one tab per chain. A script can only see and spend the
+              money of the chain it is on, so the chain is picked BEFORE the
+              script exists rather than found later inside its editor. */}
+          <div className="space-y-3">
+            <ChainTabs value={tab} onChange={setTab} counts={chainCounts} />
+            {/* A live script on this chain that the chain cannot execute. The
+                page used to show only Solana's reason, so an unarmed EVM rail
+                looked like a page with nothing wrong on it. */}
+            {(() => {
+              const why = snap?.blockedByChain?.[tab] ?? null;
+              if (!why || !shown.some((s) => s.mode === 'live' && s.enabled)) return null;
+              return (
+                <div className="rounded-lg border border-arc-gold/35 bg-arc-gold/10 px-3 py-2 flex items-start gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 text-arc-gold flex-shrink-0 mt-0.5" />
+                  <p className="text-label text-arc-gold/90">
+                    A live script here is armed but {chainLabel(tab)} cannot execute — {why}.
+                  </p>
+                </div>
+              );
+            })()}
+            <Card padded={false} className="divide-y divide-white/5">
+              {!snap ? (
+                <div className="p-4 text-xs text-krypt-muted">Loading…</div>
+              ) : shown.length === 0 ? (
+                <div className="p-4 text-xs text-krypt-muted space-y-2">
+                  <p>
+                    {snap.scripts.length === 0
+                      ? 'No scripts yet. A rule is three dropdowns; a script is a few lines of JavaScript. Both start in paper mode.'
+                      : `No scripts on ${chainLabel(tab)} yet — the ones you have are on another tab. A new one here trades ${nativeSymbolOf(tab)}.`}
+                  </p>
+                  <button onClick={() => setView('new')} className="underline text-krypt-muted hover:text-white">
+                    Make one
+                  </button>
+                </div>
+              ) : (
+                shown.map((s) => {
+                  const st: ScriptStats | undefined = snap.stats[s.id];
+                  const coin = nativeSymbolOf(scriptChain(s));
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() => setSelected(s.id)}
+                      className={cls('w-full text-left px-4 py-3 hover:bg-white/[0.04] transition', selected === s.id && 'bg-krypt-purple/10')}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-white truncate">{s.name}</span>
+                        <span className="flex items-center gap-1.5 flex-shrink-0">
+                          <Badge tone={s.mode === 'live' ? 'danger' : 'neutral'}>{s.mode}</Badge>
+                          <Badge tone={s.enabled ? 'success' : 'neutral'}>{s.enabled ? (s.kind === 'code' && st && !st.running ? 'starting' : 'on') : 'off'}</Badge>
+                        </span>
+                      </div>
+                      <div className="mt-1 text-body text-krypt-muted truncate">{s.kind === 'rules' ? describeRules(s.rules, scriptChain(s)) : `script · ${s.code.split('\n').length} lines`}</div>
+                      {st && (
+                        <div className="mt-1 text-label font-mono text-krypt-muted/70">
+                          today {st.buysToday}b/{st.sellsToday}s · {st.realizedSolToday >= 0 ? '+' : ''}
+                          {st.realizedSolToday.toFixed(3)} {coin} · open {st.openCount}
+                          {st.errorsInARow > 0 && <span className="text-rose-300"> · {st.errorsInARow} errors</span>}
+                        </div>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </Card>
+            <GhostButton onClick={() => setView('new')} className="w-full !py-2 text-xs">
+              <Plus className="h-3.5 w-3.5" /> New rule or script
             </GhostButton>
+            {snap && snap.scripts.length > 0 && !snap.killSwitch && (
+              <GhostButton destructive onClick={() => void killSwitch(true)} className="w-full !py-2 text-xs">
+                <Power className="h-3.5 w-3.5" /> Kill switch — stop every script
+              </GhostButton>
+            )}
           </div>
-          <Card padded={false} className="divide-y divide-white/5">
-            {!snap ? (
-              <div className="p-4 text-xs text-krypt-muted">Loading…</div>
-            ) : shown.length === 0 ? (
-              <div className="p-4 text-xs text-krypt-muted">
-                {snap.scripts.length === 0
-                  ? 'No scripts yet. A rule is three dropdowns; a script is a few lines of JavaScript. Both start in paper mode.'
-                  : `No scripts on ${chainLabel(tab)} yet — the ones you have are on another tab. A new one here trades ${nativeSymbolOf(tab)}.`}
-              </div>
+
+          {/* Editor */}
+          <div className="space-y-4">
+            {!draft ? (
+              <Card className="text-xs text-krypt-muted">
+                Pick a script on the left, or{' '}
+                <button onClick={() => setView('new')} className="underline hover:text-white">
+                  make a new one
+                </button>
+                .
+              </Card>
             ) : (
-              shown.map((s) => {
-                const st: ScriptStats | undefined = snap.stats[s.id];
-                const coin = nativeSymbolOf(scriptChain(s));
-                return (
-                  <button
-                    key={s.id}
-                    onClick={() => setSelected(s.id)}
-                    className={cls('w-full text-left px-4 py-3 hover:bg-white/[0.04] transition', selected === s.id && 'bg-krypt-purple/10')}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-semibold text-white truncate">{s.name}</span>
-                      <span className="flex items-center gap-1.5 flex-shrink-0">
-                        <Badge tone={s.mode === 'live' ? 'danger' : 'neutral'}>{s.mode}</Badge>
-                        <Badge tone={s.enabled ? 'success' : 'neutral'}>{s.enabled ? (s.kind === 'code' && st && !st.running ? 'starting' : 'on') : 'off'}</Badge>
+              <>
+                {/* The controls first: name, what it is, and the arm switch,
+                    Save and Delete — at the TOP, where they used to sit under
+                    the whole editor. */}
+                <Card className="space-y-2 border-krypt-purple/25">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <input
+                      value={draft.name}
+                      onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                      className={cls(inputCls, 'max-w-xs !text-sm font-semibold')}
+                      placeholder="Name this script"
+                      aria-label="Script name"
+                    />
+                    <Badge tone={draft.kind === 'code' ? 'gradient' : 'neutral'}>{draft.kind === 'rules' ? 'rule' : 'script'}</Badge>
+                    <Badge>{chainName(scriptChain(draft))}</Badge>
+                    <Badge tone={draft.mode === 'live' ? 'danger' : 'neutral'}>{draft.mode}</Badge>
+                    <span className="flex-1" />
+                    {current && (
+                      <Switch
+                        checked={current.enabled}
+                        disabled={dirty}
+                        onChange={(v) => void toggle(current, v)}
+                        label={current.enabled ? 'On' : 'Off'}
+                        description={dirty ? 'Unsaved — save before arming' : current.enabled ? `Running in ${current.mode} mode` : 'Enable to start'}
+                      />
+                    )}
+                    <PrimaryButton onClick={() => void save()} disabled={busy} className="!py-2 text-xs">
+                      {busy ? 'Saving…' : draft.id ? 'Save changes' : 'Save (paper, off)'}
+                    </PrimaryButton>
+                    {current && (
+                      <GhostButton destructive onClick={() => void removeScript(current)} className="!py-2 text-xs">
+                        <Trash2 className="h-3.5 w-3.5" /> Delete
+                      </GhostButton>
+                    )}
+                  </div>
+                  {currentStats && (
+                    <div className="text-label font-mono text-krypt-muted/70">
+                      last run {fmtAgo(currentStats.lastRunAt)} · today {currentStats.buysToday} buys, {currentStats.sellsToday} sells,{' '}
+                      {currentStats.realizedSolToday >= 0 ? '+' : ''}
+                      {currentStats.realizedSolToday.toFixed(4)} {nativeSymbolOf(scriptChain(draft))} realised · {currentStats.openCount} open
+                      {currentStats.lastError ? <span className="text-rose-300"> · last error: {currentStats.lastError}</span> : null}
+                    </div>
+                  )}
+                  {dirty && <p className="text-label text-amber-200/90">Unsaved changes. Arming waits for a save; saving a live script restarts it with the new settings.</p>}
+                </Card>
+
+                <Card className="space-y-3">
+                  <div className="grid grid-cols-[auto_auto_auto] gap-3 items-end">
+                    <Field label="Kind">
+                      <div className="flex rounded-md border border-white/10 overflow-hidden">
+                        {(['rules', 'code'] as const).map((k) => (
+                          <button
+                            key={k}
+                            onClick={() => setDraft({ ...draft, kind: k, code: k === 'code' && !draft.code ? SCRIPT_EXAMPLES[0].code : draft.code })}
+                            className={cls('px-3 py-1.5 text-body font-semibold transition', draft.kind === k ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white')}
+                          >
+                            {k === 'rules' ? 'Rules' : 'Code'}
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+                    <Field label="Chain" hint="A script watches and trades on one chain">
+                      <div className="flex rounded-md border border-white/10 overflow-hidden">
+                        {CHAINS.map((ch) => (
+                          <button
+                            key={ch}
+                            onClick={() => {
+                              if (scriptChain(draft) === ch) return;
+                              // Conditions and actions the new chain cannot supply are
+                              // DROPPED rather than carried over dead: an unknown fact
+                              // never satisfies a rule, so keeping them would leave a
+                              // rule that looks armed and can never fire.
+                              const rules = {
+                                ...draft.rules,
+                                // A trigger the new chain never fires would leave the rule
+                                // armed and silent, so it falls back to one that does.
+                                trigger: triggerAvailableOn(draft.rules.trigger, ch) ? draft.rules.trigger : 'launch_update',
+                                conditions: draft.rules.conditions.filter((c) => fieldAvailableOn(c.field, ch)),
+                                actions: draft.rules.actions.filter((a) => actionAvailableOn(a.type, ch)),
+                              };
+                              setDraft({ ...draft, chain: ch, rules });
+                            }}
+                            className={cls(
+                              'px-2.5 py-1.5 text-body font-semibold transition',
+                              scriptChain(draft) === ch ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
+                            )}
+                          >
+                            {chainName(ch)}
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+                    <Field label="Mode">
+                      <div className="flex rounded-md border border-white/10 overflow-hidden">
+                        {(['paper', 'live'] as const).map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => setDraft({ ...draft, mode: m })}
+                            className={cls('px-3 py-1.5 text-body font-semibold transition', draft.mode === m ? (m === 'live' ? 'bg-rose-500/30 text-white' : 'bg-krypt-purple/25 text-white') : 'text-krypt-muted hover:text-white')}
+                          >
+                            {m === 'paper' ? 'Paper' : 'Live'}
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+                  </div>
+                  {scriptChain(draft) !== 'solana' && (
+                    <div className="text-body text-krypt-muted flex items-start gap-2">
+                      <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-krypt-warn" />
+                      <span>
+                        On {chainLabel(scriptChain(draft))} a script sees only what that chain&rsquo;s scanner measures — buyers, buys,
+                        sells, curve progress, whether the creator sold, and money only when the curve is quoted in the chain&rsquo;s own
+                        coin. There is no Krypt score, no risk flags and no holder or creator history, so those conditions are not
+                        offered, and advanced orders and alerts are Solana-only. Paper works: the fill is modelled from the chain&rsquo;s
+                        quoted price with the same fees a real buy pays, and refuses rather than inventing one when no price is known.
                       </span>
                     </div>
-                    <div className="mt-1 text-body text-krypt-muted truncate">{s.kind === 'rules' ? describeRules(s.rules, scriptChain(s)) : `script · ${s.code.split('\n').length} lines`}</div>
-                    {st && (
-                      <div className="mt-1 text-label font-mono text-krypt-muted/70">
-                        today {st.buysToday}b/{st.sellsToday}s · {st.realizedSolToday >= 0 ? '+' : ''}
-                        {st.realizedSolToday.toFixed(3)} {coin} · open {st.openCount}
-                        {st.errorsInARow > 0 && <span className="text-rose-300"> · {st.errorsInARow} errors</span>}
-                      </div>
-                    )}
-                  </button>
-                );
-              })
-            )}
-          </Card>
-          {snap && snap.scripts.length > 0 && !snap.killSwitch && (
-            <GhostButton destructive onClick={() => void killSwitch(true)} className="w-full !py-2 text-xs">
-              <Power className="h-3.5 w-3.5" /> Kill switch — stop every script
-            </GhostButton>
-          )}
-        </div>
-
-        {/* Editor */}
-        <div className="space-y-4">
-          {!draft ? (
-            <Card className="text-xs text-krypt-muted">Pick a script on the left, or make a new one.</Card>
-          ) : (
-            <>
-              <Card className="space-y-3 border-krypt-purple/25">
-                <div className="grid grid-cols-[1fr_auto_auto] gap-3 items-end">
-                  <Field label="Name">
-                    <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className={inputCls} placeholder="Buy strong launches" />
-                  </Field>
-                  <Field label="Kind">
-                    <div className="flex rounded-md border border-white/10 overflow-hidden">
-                      {(['rules', 'code'] as const).map((k) => (
-                        <button
-                          key={k}
-                          onClick={() => setDraft({ ...draft, kind: k, code: k === 'code' && !draft.code ? SCRIPT_EXAMPLES[0].code : draft.code })}
-                          className={cls('px-3 py-1.5 text-body font-semibold transition', draft.kind === k ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white')}
-                        >
-                          {k === 'rules' ? 'Rules' : 'Code'}
-                        </button>
-                      ))}
-                    </div>
-                  </Field>
-                  <Field label="Chain" hint="A script watches and trades on one chain">
-                    <div className="flex rounded-md border border-white/10 overflow-hidden">
-                      {(['solana', 'robinhood', 'bnb'] as const).map((ch) => (
-                        <button
-                          key={ch}
-                          onClick={() => {
-                            if (scriptChain(draft) === ch) return;
-                            // Conditions and actions the new chain cannot supply are
-                            // DROPPED rather than carried over dead: an unknown fact
-                            // never satisfies a rule, so keeping them would leave a
-                            // rule that looks armed and can never fire.
-                            const rules = {
-                              ...draft.rules,
-                              // A trigger the new chain never fires would leave the rule
-                              // armed and silent, so it falls back to one that does.
-                              trigger: triggerAvailableOn(draft.rules.trigger, ch) ? draft.rules.trigger : 'launch_update',
-                              conditions: draft.rules.conditions.filter((c) => fieldAvailableOn(c.field, ch)),
-                              actions: draft.rules.actions.filter((a) => actionAvailableOn(a.type, ch)),
-                            };
-                            setDraft({ ...draft, chain: ch, rules });
-                          }}
-                          className={cls(
-                            'px-2.5 py-1.5 text-body font-semibold transition',
-                            scriptChain(draft) === ch ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
-                          )}
-                        >
-                          {ch === 'solana' ? 'Solana' : ch === 'bnb' ? 'BNB' : 'Robinhood'}
-                        </button>
-                      ))}
-                    </div>
-                  </Field>
-                  <Field label="Mode">
-                    <div className="flex rounded-md border border-white/10 overflow-hidden">
-                      {(['paper', 'live'] as const).map((m) => (
-                        <button
-                          key={m}
-                          onClick={() => setDraft({ ...draft, mode: m })}
-                          className={cls('px-3 py-1.5 text-body font-semibold transition', draft.mode === m ? (m === 'live' ? 'bg-rose-500/30 text-white' : 'bg-krypt-purple/25 text-white') : 'text-krypt-muted hover:text-white')}
-                        >
-                          {m === 'paper' ? 'Paper' : 'Live'}
-                        </button>
-                      ))}
-                    </div>
-                  </Field>
-                </div>
-                {scriptChain(draft) !== 'solana' && (
-                  <div className="text-body text-krypt-muted flex items-start gap-2">
-                    <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-krypt-warn" />
-                    <span>
-                      On {chainLabel(scriptChain(draft))} a script sees only what that chain&rsquo;s scanner measures — buyers, buys,
-                      sells, curve progress, whether the creator sold, and money only when the curve is quoted in the chain&rsquo;s own
-                      coin. There is no Krypt score, no risk flags and no holder or creator history, so those conditions are not
-                      offered, and advanced orders and alerts are Solana-only. Paper works: the fill is modelled from the chain&rsquo;s
-                      quoted price with the same fees a real buy pays, and refuses rather than inventing one when no price is known.
-                    </span>
-                  </div>
-                )}
-                {draft.mode === 'live' && (
-                  <div className="text-body text-rose-200/90 flex items-center gap-2">
-                    <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
-                    {/* Saving disarms only on the paper → live TRANSITION. A script
-                        already saved as live keeps its arming and restarts with the
-                        new code the moment you save, which is the opposite of what
-                        the old sentence promised. */}
-                    {current?.mode === 'live'
-                      ? current.enabled
-                        ? 'This script is armed and live. Saving restarts it immediately with the new code — it stays armed.'
-                        : nativeText('Live spends real SOL on its own. This script is already saved as live; arming is a separate confirmed switch.', scriptChain(draft))
-                      : nativeText('Live spends real SOL on its own. Saving as live disarms the script; arming is a separate confirmed switch.', scriptChain(draft))}
-                    {!liveEnabled && ' Live execution is off in Settings, so a live script would refuse every trade until it is on.'}
-                  </div>
-                )}
-                {draft.mode === 'paper' && draft.kind === 'rules' && draft.rules.actions.some((a) => ['stop_loss', 'take_profit', 'trailing_stop', 'limit_buy', 'limit_sell', 'apply_template'].includes(a.type)) && (
-                  <div className="text-body text-amber-200/90">Advanced orders execute for real, so a paper script records them on its log without placing them. Switch the script to live to place them.</div>
-                )}
-
-                {/* Budget */}
-                <div className="grid grid-cols-5 gap-3">
-                  <Field label="Max per trade" hint={nativeSymbolOf(scriptChain(draft))}>
-                    <input type="number" step="0.01" value={draft.budget.maxSolPerTrade} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxSolPerTrade: Number(e.target.value) } })} className={inputCls} />
-                  </Field>
-                  <Field label="Buys per day">
-                    <input type="number" value={draft.budget.maxBuysPerDay} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxBuysPerDay: Number(e.target.value) } })} className={inputCls} />
-                  </Field>
-                  <Field label="Daily loss stop" hint={nativeSymbolOf(scriptChain(draft))}>
-                    <input type="number" step="0.01" value={draft.budget.maxLossSolPerDay} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxLossSolPerDay: Number(e.target.value) } })} className={inputCls} />
-                  </Field>
-                  <Field label="Open positions">
-                    <input type="number" value={draft.budget.maxOpenPositions} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxOpenPositions: Number(e.target.value) } })} className={inputCls} />
-                  </Field>
-                  <Field label="Actions / min">
-                    <input type="number" value={draft.budget.maxActionsPerMinute} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxActionsPerMinute: Number(e.target.value) } })} className={inputCls} />
-                  </Field>
-                </div>
-                <div className="text-body text-krypt-muted">
-                  Every action a script takes is checked against this budget in the app, not in the script. A buy over the cap is refused, not shrunk. Past the daily loss stop the script turns itself off.
-                  {' '}
-                  <button className="underline text-krypt-muted hover:text-white" onClick={() => setDraft({ ...draft, budget: { ...DEFAULT_BUDGET } })}>
-                    Reset to defaults
-                  </button>
-                </div>
-              </Card>
-
-              {draft.kind === 'rules' ? <RulesEditor draft={draft} setDraft={setDraft} templates={snap?.templates ?? []} /> : <CodeEditor draft={draft} setDraft={setDraft} />}
-
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <PrimaryButton onClick={() => void save()} disabled={busy} className="!py-2 text-xs">
-                    {busy ? 'Saving…' : draft.id ? 'Save changes' : 'Save (paper, off)'}
-                  </PrimaryButton>
-                  {current && (
-                    <Switch
-                      checked={current.enabled}
-                      disabled={dirty}
-                      onChange={(v) => void toggle(current, v)}
-                      label={current.enabled ? 'On' : 'Off'}
-                      description={dirty ? 'Unsaved settings — save before arming' : current.enabled ? `Running in ${current.mode} mode` : 'Enable to start'}
-                    />
                   )}
-                </div>
-                {current && (
-                  <GhostButton destructive onClick={() => void removeScript(current)} className="!py-2 text-xs">
-                    <Trash2 className="h-3.5 w-3.5" /> Delete
-                  </GhostButton>
-                )}
-              </div>
+                  {draft.mode === 'live' && (
+                    <div className="text-body text-rose-200/90 flex items-center gap-2">
+                      <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                      {/* Saving disarms only on the paper → live TRANSITION. A script
+                          already saved as live keeps its arming and restarts with the
+                          new code the moment you save, which is the opposite of what
+                          the old sentence promised. */}
+                      {current?.mode === 'live'
+                        ? current.enabled
+                          ? 'This script is armed and live. Saving restarts it immediately with the new code — it stays armed.'
+                          : nativeText('Live spends real SOL on its own. This script is already saved as live; arming is a separate confirmed switch.', scriptChain(draft))
+                        : nativeText('Live spends real SOL on its own. Saving as live disarms the script; arming is a separate confirmed switch.', scriptChain(draft))}
+                      {!liveEnabled && ' Live execution is off in Settings, so a live script would refuse every trade until it is on.'}
+                    </div>
+                  )}
+                  {draft.mode === 'paper' && draft.kind === 'rules' && draft.rules.actions.some((a) => ['stop_loss', 'take_profit', 'trailing_stop', 'limit_buy', 'limit_sell', 'apply_template'].includes(a.type)) && (
+                    <div className="text-body text-amber-200/90">Advanced orders execute for real, so a paper script records them on its log without placing them. Switch the script to live to place them.</div>
+                  )}
 
-              {current && snap && <ScriptLog lines={snap.logs[current.id] ?? []} stats={snap.stats[current.id]} coin={nativeSymbolOf(scriptChain(current))} />}
-            </>
-          )}
+                  {/* Budget */}
+                  <div className="grid grid-cols-5 gap-3">
+                    <Field label="Max per trade" hint={nativeSymbolOf(scriptChain(draft))}>
+                      <input type="number" step="0.01" value={draft.budget.maxSolPerTrade} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxSolPerTrade: Number(e.target.value) } })} className={inputCls} />
+                    </Field>
+                    <Field label="Buys per day">
+                      <input type="number" value={draft.budget.maxBuysPerDay} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxBuysPerDay: Number(e.target.value) } })} className={inputCls} />
+                    </Field>
+                    <Field label="Daily loss stop" hint={nativeSymbolOf(scriptChain(draft))}>
+                      <input type="number" step="0.01" value={draft.budget.maxLossSolPerDay} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxLossSolPerDay: Number(e.target.value) } })} className={inputCls} />
+                    </Field>
+                    <Field label="Open positions">
+                      <input type="number" value={draft.budget.maxOpenPositions} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxOpenPositions: Number(e.target.value) } })} className={inputCls} />
+                    </Field>
+                    <Field label="Actions / min">
+                      <input type="number" value={draft.budget.maxActionsPerMinute} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxActionsPerMinute: Number(e.target.value) } })} className={inputCls} />
+                    </Field>
+                  </div>
+                  <div className="text-body text-krypt-muted">
+                    Every action a script takes is checked against this budget in the app, not in the script. A buy over the cap is refused, not shrunk. Past the daily loss stop the script turns itself off.
+                    {' '}
+                    <button className="underline text-krypt-muted hover:text-white" onClick={() => setDraft({ ...draft, budget: { ...DEFAULT_BUDGET } })}>
+                      Reset to defaults
+                    </button>
+                  </div>
+                </Card>
+
+                {draft.kind === 'rules' ? (
+                  <RulesEditor draft={draft} setDraft={setDraft} templates={snap?.templates ?? []} />
+                ) : (
+                  <CodeEditor draft={draft} setDraft={setDraft} onReference={openReference} />
+                )}
+
+                {current && snap && <ScriptLog lines={snap.logs[current.id] ?? []} stats={snap.stats[current.id]} coin={nativeSymbolOf(scriptChain(current))} />}
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </Page>
+  );
+}
+
+// ── Reference ─────────────────────────────────────────────────────────
+//
+// Everything a person reads rather than edits: the AI prompt, the bot API,
+// the variable guide and the examples. It used to hang off the code editor
+// as side panels; a script is written once and read up on often, so it has
+// its own view.
+
+const REF_TABS: Array<[RefTab, string]> = [
+  ['prompt', 'AI prompt'],
+  ['api', 'Bot API'],
+  ['vars', 'Variables'],
+  ['examples', 'Examples'],
+];
+
+function ReferenceView({ tab, setTab, chain, onUseExample }: { tab: RefTab; setTab: (t: RefTab) => void; chain: ChainKind; onUseExample: (ex: { name: string; code: string }) => void }) {
+  const toast = useToast();
+  const [guideChain, setGuideChain] = useState<ChainKind>(chain);
+  const copyPrompt = async (): Promise<void> => {
+    const ok = await copyText(aiPromptPack());
+    if (ok) toast.success('AI prompt copied — paste it into any assistant, then describe what you want the script to do.');
+    else toast.error('Could not reach the clipboard');
+  };
+  const copyGuide = async (): Promise<void> => {
+    const ok = await copyText(fieldGuideText());
+    toast[ok ? 'success' : 'error'](ok ? 'Variable guide copied' : 'Could not reach the clipboard');
+  };
+  const copyApi = async (): Promise<void> => {
+    const ok = await copyText(SCRIPT_API_DOC);
+    toast[ok ? 'success' : 'error'](ok ? 'Bot API copied' : 'Could not reach the clipboard');
+  };
+  return (
+    <div className="space-y-4">
+      <div className="flex rounded-lg border border-white/10 overflow-hidden w-fit" role="tablist" aria-label="Reference sections">
+        {REF_TABS.map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => setTab(id)}
+            className={cls('px-3 py-1.5 text-body font-semibold transition', tab === id ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white')}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'prompt' && (
+        <Card className="space-y-3 max-w-3xl">
+          <div className="text-sm font-semibold text-white">Let an assistant write the script</div>
+          <p className="text-body text-krypt-muted">
+            The prompt carries the whole bot API, every variable with when it is null, the events, the budget rules and the sandbox’s limits — everything an assistant needs to write a script that runs here first time. Copy it, paste it into any assistant, describe what you want in plain words, then paste the script it gives you into a new script’s editor and save.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <PrimaryButton onClick={() => void copyPrompt()} className="!py-2 text-xs">
+              <Clipboard className="h-3.5 w-3.5" /> Copy AI prompt
+            </PrimaryButton>
+            <GhostButton onClick={() => void copyGuide()} className="!py-2 text-xs">
+              Copy variable guide only
+            </GhostButton>
+            <GhostButton onClick={() => void copyApi()} className="!py-2 text-xs">
+              Copy bot API only
+            </GhostButton>
+          </div>
+          <p className="text-label text-krypt-muted/70">Unknown facts are null, never zero — a script that treats null as 0 buys on nothing. The prompt says so; a good assistant will guard for it.</p>
+        </Card>
+      )}
+
+      {tab === 'api' && (
+        <Card className="overflow-auto">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-label uppercase tracking-label text-krypt-muted">The bot API — what a script can ask the app to do, and what it gets back</div>
+            <GhostButton onClick={() => void copyApi()} className="!py-0.5 !px-2 text-body">
+              Copy
+            </GhostButton>
+          </div>
+          <pre className="font-mono text-body leading-5 text-krypt-muted whitespace-pre-wrap">{SCRIPT_API_DOC}</pre>
+        </Card>
+      )}
+
+      {tab === 'vars' && (
+        <Card className="overflow-auto space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-label uppercase tracking-label text-krypt-muted">Variable guide — every field a script or rule can see, and when it is null</div>
+            <div className="flex items-center gap-2">
+              <div className="w-64">
+                <ChainTabs value={guideChain} onChange={setGuideChain} />
+              </div>
+              <GhostButton onClick={() => void copyGuide()} className="!py-0.5 !px-2 text-body">
+                Copy
+              </GhostButton>
+            </div>
+          </div>
+          <VariableGuide guideChain={guideChain} />
+        </Card>
+      )}
+
+      {tab === 'examples' && (
+        <Card padded={false} className="divide-y divide-white/5 max-w-3xl">
+          {SCRIPT_EXAMPLES.map((ex) => (
+            <div key={ex.name} className="px-4 py-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-white">{ex.name}</div>
+                <div className="text-body text-krypt-muted">{ex.description}</div>
+                <div className="mt-1 text-label font-mono text-krypt-muted/60">{ex.code.split('\n').length} lines</div>
+              </div>
+              <GhostButton onClick={() => onUseExample(ex)} className="!py-1 !px-3 text-xs flex-shrink-0">
+                <Code2 className="h-3.5 w-3.5" /> Use it
+              </GhostButton>
+            </div>
+          ))}
+        </Card>
+      )}
+    </div>
   );
 }
 
@@ -744,81 +1000,57 @@ function ActionParams({ a, set, templates, chain }: { a: RuleAction; set: (a: Ru
 
 // ── Code editor ───────────────────────────────────────────────────────
 
-function CodeEditor({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft) => void }) {
+function CodeEditor({ draft, setDraft, onReference }: { draft: Draft; setDraft: (d: Draft) => void; onReference: (t: RefTab) => void }) {
   const toast = useToast();
-  const [panel, setPanel] = useState<'api' | 'vars' | 'off'>('api');
   const copyPrompt = async (): Promise<void> => {
     const ok = await copyText(aiPromptPack());
     if (ok) toast.success('AI prompt copied — paste it into any assistant, then describe what you want the script to do.');
     else toast.error('Could not reach the clipboard');
-  };
-  const copyGuide = async (): Promise<void> => {
-    const ok = await copyText(fieldGuideText());
-    toast[ok ? 'success' : 'error'](ok ? 'Variable guide copied' : 'Could not reach the clipboard');
   };
   return (
     <Section
       title="Script"
       description="JavaScript, run in a sandbox with no network, no files and no keys. It can only ask the app to act, and the app checks every ask against the budget above."
     >
-      <div className={cls('grid gap-3', panel !== 'off' ? 'lg:grid-cols-[1fr_380px]' : '')}>
-        <Card className="space-y-2">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <select
-              className={selectCls}
-              value=""
-              onChange={(e) => {
-                const ex = SCRIPT_EXAMPLES.find((x) => x.name === e.target.value);
-                if (ex) setDraft({ ...draft, code: ex.code, name: draft.name === 'New script' ? ex.name : draft.name });
-              }}
-            >
-              <option value="">Insert an example…</option>
-              {SCRIPT_EXAMPLES.map((ex) => (
-                <option key={ex.name} value={ex.name}>
-                  {ex.name} — {ex.description}
-                </option>
-              ))}
-            </select>
-            <div className="flex items-center gap-2">
-              <PrimaryButton onClick={() => void copyPrompt()} className="!py-1 !px-3 text-xs">
-                <Clipboard className="h-3.5 w-3.5" /> Copy AI prompt
-              </PrimaryButton>
-              <GhostButton onClick={() => setPanel(panel === 'api' ? 'off' : 'api')} className="!py-1 !px-2 text-xs">
-                API
-              </GhostButton>
-              <GhostButton onClick={() => setPanel(panel === 'vars' ? 'off' : 'vars')} className="!py-1 !px-2 text-xs">
-                Variables
-              </GhostButton>
-            </div>
+      <Card className="space-y-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <select
+            className={selectCls}
+            value=""
+            onChange={(e) => {
+              const ex = SCRIPT_EXAMPLES.find((x) => x.name === e.target.value);
+              if (ex) setDraft({ ...draft, code: ex.code, name: draft.name === 'New script' ? ex.name : draft.name });
+            }}
+          >
+            <option value="">Insert an example…</option>
+            {SCRIPT_EXAMPLES.map((ex) => (
+              <option key={ex.name} value={ex.name}>
+                {ex.name} — {ex.description}
+              </option>
+            ))}
+          </select>
+          <div className="flex items-center gap-2">
+            <PrimaryButton onClick={() => void copyPrompt()} className="!py-1 !px-3 text-xs">
+              <Clipboard className="h-3.5 w-3.5" /> Copy AI prompt
+            </PrimaryButton>
+            <GhostButton onClick={() => onReference('api')} className="!py-1 !px-2 text-xs">
+              <BookOpen className="h-3.5 w-3.5" /> API
+            </GhostButton>
+            <GhostButton onClick={() => onReference('vars')} className="!py-1 !px-2 text-xs">
+              Variables
+            </GhostButton>
           </div>
-          <textarea
-            value={draft.code}
-            onChange={(e) => setDraft({ ...draft, code: e.target.value })}
-            spellCheck={false}
-            className={cls(inputCls, 'font-mono text-note leading-5 min-h-[380px] resize-y')}
-          />
-          <div className="text-body text-krypt-muted flex items-center gap-2">
-            <Play className="h-3 w-3" /> Save, then switch it on. A handler that runs past 3 s is killed; five errors in a row turn the script off. Unknown facts are null, never zero.
-          </div>
-        </Card>
-        {panel === 'api' && (
-          <Card className="overflow-auto max-h-[560px]">
-            <div className="text-label uppercase tracking-label text-krypt-muted mb-2">The bot API</div>
-            <pre className="font-mono text-body leading-5 text-krypt-muted whitespace-pre-wrap">{SCRIPT_API_DOC}</pre>
-          </Card>
-        )}
-        {panel === 'vars' && (
-          <Card className="overflow-auto max-h-[560px]">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-label uppercase tracking-label text-krypt-muted">Variable guide — every field a script or rule can see</div>
-              <GhostButton onClick={() => void copyGuide()} className="!py-0.5 !px-2 text-body">
-                Copy
-              </GhostButton>
-            </div>
-            <VariableGuide guideChain={scriptChain(draft)} />
-          </Card>
-        )}
-      </div>
+        </div>
+        <textarea
+          value={draft.code}
+          onChange={(e) => setDraft({ ...draft, code: e.target.value })}
+          spellCheck={false}
+          className={cls(inputCls, 'font-mono text-note leading-5 min-h-[380px] resize-y')}
+        />
+        <div className="text-body text-krypt-muted flex items-center gap-2">
+          <Play className="h-3 w-3" /> Save, then switch it on at the top. A handler that runs past 3 s is killed; five errors in a row turn the script off. Unknown facts are null, never zero.
+        </div>
+      </Card>
     </Section>
   );
 }
