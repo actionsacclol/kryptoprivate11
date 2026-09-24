@@ -276,12 +276,24 @@ export function splitEvmFee(basisWei: bigint, hasReferrer: boolean, bps: number 
   return { totalWei: total, treasuryWei: total - referrer, referrerWei: referrer };
 }
 
-/** Why an EVM referrer address is unusable, or null when fine. */
-export function evmReferralProblem(addr: string, ctx: { self: string | null }): string | null {
+/**
+ * Why an EVM referrer address is unusable, or null when fine.
+ *
+ * `self` is the wallet in front of you; `alsoMine` is every other address you
+ * sign with. Both matter because the referrer is shared across EVM chains
+ * while the wallets are not (a wallet belongs to the page that made it), so
+ * naming your BNB wallet while looking at the Robinhood page is a
+ * self-referral the trade path refuses and this check used to miss.
+ */
+export function evmReferralProblem(
+  addr: string,
+  ctx: { self: string | null; alsoMine?: Array<string | null> },
+): string | null {
   const a = (addr ?? '').trim();
   if (!a) return null;
   if (!isEvmAddress(a)) return 'Not an EVM address (expect 0x + 40 hex characters)';
-  if (ctx.self && a.toLowerCase() === ctx.self.toLowerCase()) return 'You cannot refer yourself';
+  const mine = [ctx.self, ...(ctx.alsoMine ?? [])];
+  if (mine.some((m) => m && a.toLowerCase() === m.toLowerCase())) return 'You cannot refer yourself';
   if (evmFeesEnabled() && a.toLowerCase() === activeEvmTreasury().toLowerCase()) return 'That is the treasury address';
   return null;
 }

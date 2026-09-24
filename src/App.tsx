@@ -45,6 +45,9 @@ const RunnersPage = lazy(() => ROUTE_LOADERS.runners().then((m) => ({ default: m
 const WirePage = lazy(() => ROUTE_LOADERS.wire().then((m) => ({ default: m.WirePage })));
 const CreatorPage = lazy(() => ROUTE_LOADERS.creator().then((m) => ({ default: m.CreatorPage })));
 const FunderPage = lazy(() => ROUTE_LOADERS.funder().then((m) => ({ default: m.FunderPage })));
+const CopierPage = lazy(() => ROUTE_LOADERS.copier().then((m) => ({ default: m.CreatorPage })));
+const AutoCalloutPage = lazy(() => ROUTE_LOADERS.autocallout().then((m) => ({ default: m.AutoCalloutPage })));
+const PumpAccountsPage = lazy(() => ROUTE_LOADERS.pumpaccounts().then((m) => ({ default: m.PumpAccountsPage })));
 const ScriptsPage = lazy(() => ROUTE_LOADERS.scripts().then((m) => ({ default: m.ScriptsPage })));
 const OrdersPage = lazy(() => ROUTE_LOADERS.orders().then((m) => ({ default: m.OrdersPage })));
 const TradesPage = lazy(() => ROUTE_LOADERS.trades().then((m) => ({ default: m.TradesPage })));
@@ -60,6 +63,7 @@ const History = lazy(() => ROUTE_LOADERS.history().then((m) => ({ default: m.His
 const Backtest = lazy(() => ROUTE_LOADERS.backtest().then((m) => ({ default: m.Backtest })));
 const GuidesPage = lazy(() => ROUTE_LOADERS.guides().then((m) => ({ default: m.GuidesPage })));
 const FarmingPage = lazy(() => ROUTE_LOADERS.farming().then((m) => ({ default: m.FarmingPage })));
+const AiConnectionPage = lazy(() => ROUTE_LOADERS.mcp().then((m) => ({ default: m.AiConnectionPage })));
 const WalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.WalletPage })));
 const EvmWalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.EvmWalletPage })));
 const Strategy = lazy(() => ROUTE_LOADERS.strategy().then((m) => ({ default: m.Strategy })));
@@ -385,6 +389,9 @@ export default function App() {
                   {route === 'wire' && <WirePage onOpenToken={openToken} />}
                   {route === 'creator' && <CreatorPage onOpenToken={openToken} />}
                   {route === 'funder' && <FunderPage onOpenToken={openToken} />}
+                  {route === 'copier' && <CopierPage onOpenToken={openToken} />}
+                  {route === 'autocallout' && <AutoCalloutPage />}
+                  {route === 'pumpaccounts' && <PumpAccountsPage />}
                   {route === 'trades' && <TradesPage onOpenToken={openToken} />}
                   {route === 'orders' && <OrdersPage onOpenToken={openToken} />}
                   {route === 'dashboard' && <Dashboard onNavigate={navigate} />}
@@ -402,6 +409,7 @@ export default function App() {
                   {route === 'backtest' && <Backtest />}
                   {route === 'guides' && <GuidesPage />}
                   {route === 'farming' && <FarmingPage />}
+                  {route === 'mcp' && <AiConnectionPage />}
                   {route === 'workspace' && <WorkspacePage openToken={openToken} />}
                   {route === 'scout' && <ScoutPage />}
                   {route === 'launch' && <LaunchPage />}
@@ -412,7 +420,7 @@ export default function App() {
                   {route === 'walletbnb' && <EvmWalletPage chain="bnb" />}
                   {route === 'strategy' && <Strategy />}
                   {route === 'console' && <Console />}
-                  {route === 'settings' && <SettingsPage />}
+                  {route === 'settings' && <SettingsPage onNavigate={navigate} />}
                   {route === 'about' && <About />}
                 </div>
               </Suspense>

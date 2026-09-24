@@ -24,7 +24,7 @@ order, and recorded on the script's log with its reason when refused.
 | A live buy is also capped by `execution.maxLiveSol` and blocked by the same reasons as an order | `act()` via `liveBlockedReason` / `buyBlockedReason` |
 | An unknown fact never satisfies a rule | `conditionHolds` |
 | A start that STALLS is retried 3 times with backoff, not disarmed; a script whose body throws is disarmed at once | `automation.ts` `startCode` |
-| Five errors in a row disable a code script; a handler past 3 s is killed | `automation.ts` + `scriptSandbox.ts` watchdog — the deadline is cleared by the RENDERER answering a liveness probe, never by a `done` the page could forge |
+| Five errors in a row disable a code script; a handler is checked at 3 s and killed if stuck, 30 s hard ceiling (since 09-21) | `automation.ts` + `scriptSandbox.ts` watchdog — the deadline is cleared by the RENDERER answering a liveness probe, never by a `done` the page could forge |
 | Kill switch: everything off, nothing enables until lifted | `setKillSwitch`, re-read after every await and again before the buy |
 | A script may only sell what IT opened; `held` and `bot.positions()` mean this script's positions | `act()` sell / sell_all / order, `ctxFor`, `pollPositions` |
 | One action at a time per script, so N events in a tick cannot each read the same pre-buy counters | `act()` per-script chain |

@@ -87,3 +87,187 @@ export function publicTokenUrl(chain: ChainKind, mint: string): string | null {
   const meta = EVM_CHAIN_META[chain];
   return meta ? `${meta.explorer}/token/${mint}` : null;
 }
+
+// ─── An embed a SCRIPT asks to post ──────────────────────────────────
+//
+// `bot.discord(inputName, embed)`. The script names one of its own `webhook`
+// settings, never a URL — main resolves the URL from the answers the user
+// typed into the script's form, so a script cannot aim a post anywhere the
+// user did not paste. What the script supplies is only the embed, and that is
+// rebuilt here field by field to Discord's own limits: anything unknown is
+// dropped, every string is capped, and only https links survive. Mentions are
+// always off (the payload sets allowed_mentions), so a coin called @everyone
+// cannot ping a server.
+
+export interface ScriptEmbed {
+  title?: string;
+  description?: string;
+  url?: string;
+  color?: number;
+  fields?: Array<{ name: string; value: string; inline?: boolean }>;
+  thumbnail?: { url: string };
+  image?: { url: string };
+  footer?: { text: string };
+  author?: { name: string; url?: string; icon_url?: string };
+  timestamp: string;
+}
+
+/** Discord's own caps, a little under where it matters. */
+export const EMBED_LIMITS = { title: 256, description: 1800, fields: 10, fieldName: 256, fieldValue: 1024, footer: 200 } as const;
+
+const httpsUrl = (raw: unknown): string | null => {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s || s.length > 500) return null;
+  try {
+    return new URL(s).protocol === 'https:' ? s : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Discord's nested shape ({url}, {text}) or the bare string, never an object's toString. */
+const inner = (v: unknown, key: string): unknown =>
+  typeof v === 'string' ? v : typeof v === 'object' && v !== null ? (v as Record<string, unknown>)[key] : undefined;
+
+const cap = (raw: unknown, n: number): string => {
+  const s = typeof raw === 'string' ? raw : raw === null || raw === undefined ? '' : String(raw);
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+};
+
+/**
+ * The embed as it will be sent, or why there is nothing to send.
+ *
+ * `label` is appended to the footer so a channel reader can always tell a
+ * script posted it and which one; `paper` marks a rehearsal as one.
+ */
+export function scriptEmbed(
+  raw: unknown,
+  label: string,
+  paper: boolean,
+): { embed: ScriptEmbed } | { error: string } {
+  const o = (typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+  const title = cap(o.title, EMBED_LIMITS.title).trim();
+  const description = cap(o.description, EMBED_LIMITS.description).trim();
+  const fields = (Array.isArray(o.fields) ? o.fields : [])
+    .slice(0, 50)
+    .map((f) => (typeof f === 'object' && f !== null ? (f as Record<string, unknown>) : {}))
+    .map((f) => ({
+      name: cap(f.name, EMBED_LIMITS.fieldName).trim(),
+      value: cap(f.value, EMBED_LIMITS.fieldValue).trim(),
+      inline: f.inline === true,
+    }))
+    // Discord refuses the whole post over one empty field name or value.
+    .filter((f) => f.name && f.value)
+    .slice(0, EMBED_LIMITS.fields);
+  if (!title && !description && fields.length === 0) return { error: 'nothing to post — give the embed a title, description or fields' };
+
+  const color = Number(o.color);
+  const url = httpsUrl(o.url);
+  const thumb = httpsUrl(inner(o.thumbnail, 'url'));
+  const image = httpsUrl(inner(o.image, 'url'));
+  const footerIn = cap(inner(o.footer, 'text'), EMBED_LIMITS.footer - 60).trim();
+  const authorIn = (typeof o.author === 'object' && o.author !== null ? o.author : {}) as Record<string, unknown>;
+  const authorName = cap(typeof o.author === 'string' ? o.author : authorIn.name, 256).trim();
+  const authorUrl = httpsUrl(authorIn.url);
+  const authorIcon = httpsUrl(authorIn.icon_url ?? authorIn.iconUrl);
+  const tag = `${paper ? 'PAPER · ' : ''}Krypto Bot script: ${cap(label, 40)}`;
+
+  return {
+    embed: {
+      ...(title ? { title } : {}),
+      ...(description ? { description } : {}),
+      ...(url ? { url } : {}),
+      ...(Number.isInteger(color) && color >= 0 && color <= 0xffffff ? { color } : {}),
+      ...(fields.length ? { fields } : {}),
+      ...(thumb ? { thumbnail: { url: thumb } } : {}),
+      ...(image ? { image: { url: image } } : {}),
+      ...(authorName ? { author: { name: authorName, ...(authorUrl ? { url: authorUrl } : {}), ...(authorIcon ? { icon_url: authorIcon } : {}) } } : {}),
+      footer: { text: footerIn ? `${footerIn} · ${tag}` : tag },
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
+// ─── The callout embed ───────────────────────────────────────────────
+//
+// The Auto-callout page's Discord post (asked 09-23): the same layout the
+// scorenow script posts its calls in, so both read as one thing in a channel.
+// Built here, from facts main already holds, and shaped to Discord's limits
+// by scriptEmbed's rules. Unknown numbers render as an em dash, never 0.
+
+export const KRYPT_BOT_URL = 'https://krypt.cc/bot';
+
+export interface CalloutEmbedFacts {
+  mint: string;
+  name: string | null;
+  symbol: string | null;
+  /** The text that went out. */
+  thesis: string;
+  /** The callout's public pump.fun page; null when pump did not say its id. */
+  link: string | null;
+  mcUsd: number | null;
+  holders: number | null;
+  buyers: number | null;
+  curvePct: number | null;
+  imageUrl: string | null;
+  /** The Send-test button: says so in the title and the text. */
+  test?: boolean;
+}
+
+const usd = (n: number | null): string =>
+  n === null || !Number.isFinite(n)
+    ? '—'
+    : n >= 1e6
+      ? `$${(n / 1e6).toFixed(2)}M`
+      : n >= 1e3
+        ? `$${(n / 1e3).toFixed(1)}k`
+        : `$${Math.round(n)}`;
+
+const count = (n: number | null): string =>
+  n === null || !Number.isFinite(n) ? '—' : Math.round(n).toLocaleString('en-US');
+
+export function calloutEmbed(f: CalloutEmbedFacts): ScriptEmbed {
+  const coinPage = `https://pump.fun/coin/${f.mint}`;
+  const who =
+    f.name && f.symbol ? `${f.name} ($${f.symbol})` : f.name || (f.symbol ? `$${f.symbol}` : `${f.mint.slice(0, 8)}…`);
+  const raw = {
+    author: { name: 'Krypto Bot · new call', url: KRYPT_BOT_URL },
+    title: `${f.test ? '🧪 TEST — ' : ''}📣 ${who}`,
+    url: f.link ?? coinPage,
+    description: [
+      `> ${f.thesis}`,
+      '',
+      f.link ? `**[→ Open the callout on pump.fun](${f.link})**` : null,
+      '',
+      '*Not financial advice.*',
+      f.test ? '*This is a test post: no call was made.*' : null,
+    ]
+      .filter((x) => x !== null)
+      .join('\n'),
+    color: 0x22c55e,
+    thumbnail: f.imageUrl ? { url: f.imageUrl } : undefined,
+    fields: [
+      { name: 'Market cap', value: usd(f.mcUsd), inline: true },
+      { name: 'Holders', value: count(f.holders), inline: true },
+      { name: 'Buyers', value: count(f.buyers), inline: true },
+      { name: 'Curve', value: f.curvePct === null || !Number.isFinite(f.curvePct) ? '—' : `${Math.round(f.curvePct)}%`, inline: true },
+      {
+        name: 'Links',
+        value: [
+          f.link ? `[Callout](${f.link})` : null,
+          `[DexScreener](https://dexscreener.com/solana/${f.mint})`,
+          `[Krypto Bot](${KRYPT_BOT_URL})`,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        inline: false,
+      },
+    ],
+  };
+  const built = scriptEmbed(raw, 'auto-callout', false);
+  // Never empty (a title is always set), so the error branch cannot happen;
+  // the footer is ours, not a script's, so it is set after.
+  const embed = 'embed' in built ? built.embed : { title: raw.title, timestamp: new Date().toISOString() };
+  return { ...embed, footer: { text: 'krypt.cc/bot · Krypto Bot auto-callout' } };
+}

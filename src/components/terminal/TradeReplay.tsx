@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { accent } from '../../state/theme';
-import { Image as ImageIcon, Loader2, Play, RotateCcw, Sparkles, Video, X } from 'lucide-react';
+import { Image as ImageIcon, Loader2, Play, RotateCcw, Sparkles, Video, Volume2, VolumeX, X } from 'lucide-react';
 import type { Candle, CandleInterval, CandleSeries } from '@shared/market';
 import type { IpcResult } from '@shared/types';
 import type { ClosedTrade } from '@shared/portfolio';
@@ -24,6 +24,8 @@ import { cls } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
 import { GifPicker } from './GifPicker';
 import { dataUrlType, decodeAnimation, frameAt, type GifAnimation } from './gifFrames';
+import { isVideoFile, loadVideoBackground, VIDEO_MAX_BYTES, type VideoBackground } from './videoBackground';
+import { bestMime, recordCanvas } from './cardRecord';
 import { replayLayout } from './replayLayout';
 import {
   REPLAY_CANDLE_LIMIT,
@@ -89,7 +91,6 @@ export function TradeReplay({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
   const startedAtRef = useRef<number>(0);
-  const recorderRef = useRef<MediaRecorder | null>(null);
 
   const [shape, setShape] = useState<Shape>('wide');
   const [speed, setSpeed] = useState<Speed>(1);
@@ -110,10 +111,24 @@ export function TradeReplay({
   const [bgAnim, setBgAnim] = useState<GifAnimation | null>(null);
   const bgAnimRef = useRef<GifAnimation | null>(null);
   bgAnimRef.current = bgAnim;
+  /** A video background, drawn straight from the element and — the point of
+   *  it — recorded with its sound. */
+  const [bgVideo, setBgVideo] = useState<VideoBackground | null>(null);
+  const bgVideoRef = useRef<VideoBackground | null>(null);
+  bgVideoRef.current = bgVideo;
+  const [previewSound, setPreviewSound] = useState(false);
+  const [loadingVideo, setLoadingVideo] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const useBackground = useCallback(
     (dataUrl: string) => {
+      // One background at a time: an image or GIF replaces a video in place,
+      // or both would be set and the draw would keep showing the video.
+      setBgVideo((prev) => {
+        prev?.close();
+        return null;
+      });
+      setPreviewSound(false);
       // Try the animated path first; a still is the fallback, not the plan,
       // and when it happens the user is told why rather than left wondering
       // whether the GIF was animated at all.
@@ -141,10 +156,56 @@ export function TradeReplay({
       return null;
     });
     setBgImage(null);
+    setBgVideo((prev) => {
+      prev?.close();
+      return null;
+    });
+    setPreviewSound(false);
   }, []);
+
+  /** A video the user picked. Unlike the card, the replay does not remember
+   *  it between openings: a replay is made about one trade, then closed. */
+  const useVideoFile = useCallback(
+    async (file: File): Promise<void> => {
+      if (file.size > VIDEO_MAX_BYTES) {
+        toast.error(`That video is ${(file.size / 1e6).toFixed(0)} MB — the limit is ${VIDEO_MAX_BYTES / 1e6} MB`);
+        return;
+      }
+      setLoadingVideo(true);
+      const url = URL.createObjectURL(file);
+      try {
+        const res = await loadVideoBackground(url);
+        if (!res.ok) {
+          URL.revokeObjectURL(url);
+          toast.error(`Could not use that video — ${res.reason}`);
+          return;
+        }
+        setBgAnim((prev) => {
+          prev?.close();
+          return null;
+        });
+        setBgImage(null);
+        setBgVideo((prev) => {
+          prev?.close();
+          return res.video;
+        });
+        if (!res.video.hasAudio) toast.info('That clip has no sound — the replay will be silent');
+      } finally {
+        setLoadingVideo(false);
+      }
+    },
+    [toast],
+  );
+
+  // The speaker branch only. The recording tap is separate and always on, so
+  // a quiet preview still records with sound. See videoBackground.ts.
+  useEffect(() => {
+    bgVideo?.setAudible(previewSound);
+  }, [bgVideo, previewSound]);
 
   // Frames hold GPU memory; give them back when the panel closes.
   useEffect(() => () => bgAnimRef.current?.close(), []);
+  useEffect(() => () => bgVideoRef.current?.close(), []);
 
   // ── Load the window this trade lived in ────────────────────────────
   useEffect(() => {
@@ -269,9 +330,16 @@ export function TradeReplay({
       // The animated background, at the frame this moment of the replay
       // lands on. Because the canvas is what gets recorded, the exported
       // video animates too.
-      const bgSource = bgAnim ? frameAt(bgAnim, elapsedMs) : bgImage;
-      const bgW = bgAnim ? bgAnim.width : bgImage?.width ?? 0;
-      const bgH = bgAnim ? bgAnim.height : bgImage?.height ?? 0;
+      // A playing <video> is a CanvasImageSource already, so it needs none of
+      // the GIF's decoding — and because the canvas is what gets recorded,
+      // copying it here is what puts it in the exported file.
+      const bgSource: CanvasImageSource | null = bgVideo
+        ? bgVideo.el
+        : bgAnim
+          ? frameAt(bgAnim, elapsedMs)
+          : bgImage;
+      const bgW = bgVideo ? bgVideo.width : bgAnim ? bgAnim.width : bgImage?.width ?? 0;
+      const bgH = bgVideo ? bgVideo.height : bgAnim ? bgAnim.height : bgImage?.height ?? 0;
       if (bgSource && bgW > 0 && bgH > 0) {
         const scale = Math.max(W / bgW, H / bgH);
         const dw = bgW * scale;
@@ -458,61 +526,46 @@ export function TradeReplay({
   useEffect(() => stop, [stop]);
 
   // ── Record the canvas straight to a file ───────────────────────────
-  const record = (): void => {
+  //
+  // The recording ends when the PLAYBACK ends, not on a timer, so the shared
+  // recorder is handed a stop to call. With a video background its sound
+  // rides along; with a GIF or nothing, the file is silent.
+  const record = async (): Promise<void> => {
     const canvas = canvasRef.current;
     if (!canvas || !candles || candles.length < 2 || recording) return;
-    let stream: MediaStream;
-    try {
-      stream = canvas.captureStream(60);
-    } catch (e) {
-      toast.error(`This build cannot record the canvas: ${(e as Error).message}. Play it and screen-record instead.`);
-      return;
-    }
-    const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
-    const mime = types.find((m) => MediaRecorder.isTypeSupported?.(m));
-    if (!mime) {
-      toast.error('No video encoder is available here. Play it and screen-record instead.');
-      return;
-    }
-    const chunks: BlobPart[] = [];
-    let rec: MediaRecorder;
-    try {
-      rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
-    } catch (e) {
-      toast.error(`Recorder failed to start: ${(e as Error).message}`);
-      return;
-    }
-    recorderRef.current = rec;
-    rec.ondataavailable = (e) => {
-      if (e.data.size) chunks.push(e.data);
-    };
-    rec.onstop = () => {
-      recorderRef.current = null;
-      setRecording(false);
-      const blob = new Blob(chunks, { type: 'video/webm' });
-      if (!blob.size) {
-        toast.error('The recording came back empty.');
-        return;
-      }
-      const a = document.createElement('a');
-      a.download = `krypt-${(trade.symbol || 'trade').toLowerCase()}-replay.webm`;
-      a.href = URL.createObjectURL(blob);
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
-      toast.success('Replay saved as WebM — drop it straight into any editor');
-    };
     setRecording(true);
-    rec.start();
-    play(() => {
-      // A beat after the last frame so the result is not clipped.
-      setTimeout(() => {
+    try {
+      if (bgVideo) {
         try {
-          rec.stop();
+          bgVideo.el.currentTime = 0;
+          await bgVideo.el.play();
         } catch {
-          setRecording(false);
+          /* a background that will not seek still records from where it is */
         }
-      }, 250);
-    });
+      }
+      const made = await recordCanvas({
+        canvas,
+        fps: 60,
+        // A ceiling, not the length: play() below is what ends it.
+        durationMs: 180_000,
+        audioFrom: bgVideo?.stream ?? null,
+        videoBitsPerSecond: 8_000_000,
+        onStart: (stop) => {
+          play(() => {
+            // A beat after the last frame so the result is not clipped.
+            setTimeout(stop, 250);
+          });
+        },
+      });
+      const name = `krypt-${(trade.symbol || 'trade').toLowerCase()}-replay`;
+      const r = await window.krypt.card.saveFile(name, made.bytes, made.ext);
+      if (r.ok) toast.success(`${r.message}${made.withAudio ? ' — with sound' : ''}`);
+      else if (!/cancelled/i.test(r.message)) toast.error(r.message);
+    } catch (err) {
+      toast.error(`Could not record the replay: ${(err as Error).message}. Play it and screen-record instead.`);
+    } finally {
+      setRecording(false);
+    }
   };
 
   const { w, h } = SHAPES[shape];
@@ -569,13 +622,24 @@ export function TradeReplay({
           </button>
           <button
             onClick={() => fileRef.current?.click()}
-            title="Use your own image behind the chart"
-            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
+            title="Use your own image or video behind the chart"
+            disabled={loadingVideo}
+            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white disabled:opacity-50"
           >
-            <ImageIcon className="h-3.5 w-3.5" />
+            {loadingVideo ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
             Upload
           </button>
-          {(bgImage || bgAnim) && (
+          {bgVideo?.hasAudio && (
+            <button
+              onClick={() => setPreviewSound((v) => !v)}
+              title={previewSound ? 'Mute the preview (the saved video keeps its sound)' : 'Hear the background'}
+              className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
+            >
+              {previewSound ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+              {previewSound ? 'Sound' : 'Muted'}
+            </button>
+          )}
+          {(bgImage || bgAnim || bgVideo) && (
             <button
               onClick={clearBackground}
               title="Back to the plain background"
@@ -587,12 +651,18 @@ export function TradeReplay({
           <input
             ref={fileRef}
             type="file"
-            accept="image/*"
+            accept="image/*,video/mp4,video/webm,video/quicktime,video/x-matroska"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = '';
               if (!file) return;
+              // A video plays from the file itself; only an image goes the
+              // data-URL route, which a 40 MB clip could not survive.
+              if (isVideoFile(file)) {
+                void useVideoFile(file);
+                return;
+              }
               const reader = new FileReader();
               reader.onload = () => {
                 if (typeof reader.result === 'string') useBackground(reader.result);
@@ -614,7 +684,32 @@ export function TradeReplay({
             {problem}
           </div>
         ) : (
-          <canvas ref={canvasRef} width={w} height={h} className="w-full rounded-lg border border-white/10 bg-black" />
+          <canvas
+            ref={canvasRef}
+            width={w}
+            height={h}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const file = e.dataTransfer.files?.[0];
+              if (!file) return;
+              if (isVideoFile(file)) {
+                void useVideoFile(file);
+                return;
+              }
+              if (!file.type.startsWith('image/')) {
+                toast.error('Drop an image or a video file');
+                return;
+              }
+              const reader = new FileReader();
+              reader.onload = () => {
+                if (typeof reader.result === 'string') useBackground(reader.result);
+              };
+              reader.readAsDataURL(file);
+            }}
+            title="Drop an image or a video here to use it as the background"
+            className="w-full rounded-lg border border-white/10 bg-black"
+          />
         )}
 
         {!loading && !problem && path === 'illustrative' && (
@@ -644,8 +739,8 @@ export function TradeReplay({
               {playing ? 'Stop' : 'Play'}
             </button>
             <button
-              onClick={record}
-              disabled={recording || playing}
+              onClick={() => void record()}
+              disabled={recording || playing || !bestMime()}
               className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
             >
               {recording ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
@@ -654,7 +749,9 @@ export function TradeReplay({
             <span className="text-body leading-relaxed text-krypt-muted">
               {recording
                 ? 'Recording the animation — it saves when the replay ends.'
-                : 'Saves a WebM at the chosen shape.'}
+                : !bestMime()
+                  ? 'This build has no video encoder — play it and screen-record instead.'
+                  : `Saves ${bestMime()?.ext === 'mp4' ? 'an MP4' : 'a WebM'} at the chosen shape${bgVideo?.hasAudio ? ', with the background’s sound' : ''}.`}
             </span>
           </div>
         )}

@@ -276,3 +276,58 @@ export interface LaunchOutcome {
    */
   buyFailed?: string;
 }
+
+// ── The watermark ─────────────────────────────────────────────────────
+//
+// Every coin launched from this app carries a line at the end of its
+// description saying where it was made. It goes into the metadata JSON that
+// the mint points at, so it travels with the token rather than living in our
+// own records: anyone reading the coin anywhere sees it.
+//
+// It is NOT hidden. The form shows the description exactly as it will be
+// written, watermark included, and the character budget below is what is
+// left for the user's own words. A watermark someone discovers after the
+// fact, on a token that exists forever under their name, is the kind of
+// surprise this app does not do.
+
+export const LAUNCH_WATERMARK = 'Launched with krypt.cc/bot';
+
+/** Separator between the user's words and the line: a new line, so it stands
+ *  on its own under the description (asked 09-22). */
+const WATERMARK_SEP = '\n';
+
+/** The mark this app used before. A draft stamped with it is re-stamped with
+ *  the current one rather than carrying both. */
+const LEGACY_LAUNCH_MARKS = ['Launched using krypt.cc/tools/krypto'];
+
+/**
+ * The description as it will actually be written.
+ *
+ * Idempotent: a description that already ends with the watermark is returned
+ * unchanged, so re-running the metadata step — or editing a draft that was
+ * already stamped — never stacks two copies.
+ */
+export function withWatermark(description: string): string {
+  let body = (description ?? '').trim();
+  for (const old of LEGACY_LAUNCH_MARKS) if (body.endsWith(old)) body = body.slice(0, -old.length).trim();
+  if (!body) return LAUNCH_WATERMARK;
+  // Already stamped, whatever whitespace separates it.
+  if (body.endsWith(LAUNCH_WATERMARK)) return body;
+  return `${body}${WATERMARK_SEP}${LAUNCH_WATERMARK}`;
+}
+
+/** Whether this text already carries the watermark. */
+export function hasWatermark(description: string): boolean {
+  // Coins launched under the old mark keep it forever; they are still ours.
+  const d = (description ?? '').trim();
+  return [LAUNCH_WATERMARK, ...LEGACY_LAUNCH_MARKS].some((m) => d.endsWith(m));
+}
+
+/**
+ * How many characters are left for the user's own words.
+ *
+ * The watermark counts against pump's limit like any other text, so the form
+ * counts down from this rather than from MAX_DESCRIPTION — otherwise someone
+ * fills 500 characters and the stamped version is refused.
+ */
+export const DESCRIPTION_BUDGET = MAX_DESCRIPTION - (LAUNCH_WATERMARK.length + WATERMARK_SEP.length);

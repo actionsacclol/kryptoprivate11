@@ -14,8 +14,8 @@
 // trades; a page about records that could neither turn the feed on nor go and
 // fetch any was a page that looked broken until the feed had run for a day.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Bookmark, BookmarkCheck, Loader2, Play, Search, Square, Trash2, Trophy, Users } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Bookmark, BookmarkCheck, Check, Loader2, Play, Plus, Search, SlidersHorizontal, Square, Trash2, Trophy, Users } from 'lucide-react';
 import { EVM_CHAIN_META } from '@shared/evm';
 import { defaultConfig } from '@shared/copytrade';
 import { useToast } from '../state/ToastProvider';
@@ -27,10 +27,20 @@ import {
   SCOUT_CHAINS,
   SCOUT_SCAN_HOURS,
   SCOUT_SCAN_HOURS_LABEL,
+  SOLANA_SCAN_GAP_MS,
+  SOLANA_SCAN_MAX_PAGES,
+  SOLANA_SCAN_MAX_TOKENS,
   SCOUT_SORTS,
   SCOUT_SORT_LABEL,
   SCOUT_WINDOW_LABEL,
+  SCOUT_FILTERS,
+  SCOUT_FILTER_TEXT,
+  applyScoutFilters,
+  anyScoutFilter,
+  scoutFiltersAllOff,
+  scoutFiltersAllOn,
   type ScoutChain,
+  type ScoutFilter,
   type ScoutRow,
   type ScoutScanHours,
   type ScoutScanStatus,
@@ -92,18 +102,42 @@ function scanLine(chain: ScoutChain, s: ScoutScanStatus | null, hours: ScoutScan
     return `${s.cancelled ? 'Stopped early. ' : ''}Read ${s.read.toLocaleString()} trades: ${s.fed.toLocaleString()} recorded, ${s.duplicates.toLocaleString()} already on record · ${s.calls} calls · ${delta >= 0 ? '+' : '−'}${Math.abs(delta).toLocaleString()} wallets.`;
   }
   return chain === 'solana'
-    ? `Reads the last ${SCOUT_SCAN_HOURS_LABEL[hours]} of trades on the pump.fun tokens Discover is showing — up to 60 tokens, 300 trades each. Other Solana rails have no history route.`
+    ? `Reads the last ${SCOUT_SCAN_HOURS_LABEL[hours]} of trades on the pump.fun tokens Discover is showing — up to ${SOLANA_SCAN_MAX_TOKENS} tokens, ${SOLANA_SCAN_MAX_PAGES * 100} trades each, one request every ${SOLANA_SCAN_GAP_MS / 1000} s because pump.fun blocks faster readers for half a minute. Usually about two minutes. Other Solana rails have no history route.`
     : `Reads the last ${SCOUT_SCAN_HOURS_LABEL[hours]} of curve trades from the chain's RPC, in block chunks. Spends nothing.`;
 }
 
+// Every control on this page is at least 34 px tall and carries a word, not
+// an icon on its own. The page is where a beginner starts, and the previous
+// sizes (py-0.5 row buttons with 12 px icons, py-1 pills) were built for
+// someone who already knew what each one did.
 function Pill<T extends string | number>({ value, current, onPick, label, size = 'md' }: { value: T; current: T; onPick: (v: T) => void; label: string; size?: 'md' | 'lg' }) {
   return (
     <button
       onClick={() => onPick(value)}
-      className={`rounded-lg border transition ${size === 'lg' ? 'flex-1 px-3 py-2 text-body font-medium' : 'px-2.5 py-1 text-body'} ${
-        current === value ? 'border-krypt-purple/60 bg-krypt-purple/15 text-white' : 'border-white/10 bg-krypt-panel text-krypt-muted hover:text-white'
+      className={`rounded-lg border font-medium transition ${size === 'lg' ? 'flex-1 px-3 py-2.5 text-note' : 'px-3 py-2 text-note'} ${
+        current === value ? 'border-krypt-purple/60 bg-krypt-purple/15 text-white' : 'border-white/10 bg-krypt-panel text-krypt-muted hover:border-white/20 hover:text-white'
       }`}
     >
+      {label}
+    </button>
+  );
+}
+
+/** One filter switch: a tick when it is on, and the reason in its tooltip. */
+function FilterChip({ on, label, why, onToggle }: { on: boolean; label: string; why: string; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      title={why}
+      aria-pressed={on}
+      data-testid="scout-filter"
+      className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-note font-medium transition ${
+        on ? 'border-krypt-purple/60 bg-krypt-purple/15 text-white' : 'border-white/10 bg-krypt-panel text-krypt-muted hover:border-white/20 hover:text-white'
+      }`}
+    >
+      <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${on ? 'border-krypt-purple/60 bg-krypt-purple/30' : 'border-white/15'}`}>
+        {on && <Check className="h-3 w-3" />}
+      </span>
       {label}
     </button>
   );
@@ -118,8 +152,26 @@ export function Scout() {
   const [sort, setSort] = useState<ScoutSort>('copyScore');
   /** The wallet open in the drawer. */
   const [detail, setDetail] = useState<string | null>(null);
+  /** Which rows the board hides (2026-09-21). All off: the board shows what
+   *  was recorded until the user says otherwise, and the count line says how
+   *  many are hidden. */
+  const [filters, setFilters] = useState(scoutFiltersAllOff);
+  const filtersOn = anyScoutFilter(filters);
+  const toggleFilter = (k: ScoutFilter): void => setFilters((p) => ({ ...p, [k]: !p[k] }));
+  /** A pasted address to open cold (2026-09-21) — its record if any, else an empty one the drawer can fill from the chain. */
+  const [lookup, setLookup] = useState('');
+  const lookupValid = chain === 'solana' ? /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(lookup.trim()) : /^0x[0-9a-fA-F]{40}$/.test(lookup.trim());
+  const openLookup = (): void => {
+    const a = lookup.trim();
+    if (!lookupValid) {
+      toast.error(chain === 'solana' ? 'Enter a valid Solana wallet address' : 'Enter a valid 0x address');
+      return;
+    }
+    setDetail(chain === 'solana' ? a : a.toLowerCase());
+  };
 
-  const [rows, setRows] = useState<ScoutRow[]>([]);
+  /** Every row the record returned, before the switches above hide any. */
+  const [allRows, setAllRows] = useState<ScoutRow[]>([]);
   const [saved, setSaved] = useState<string[]>([]);
   const [counts, setCounts] = useState<{ tracked: number; watching: number; cap: number } | null>(null);
   const [clearBusy, setClearBusy] = useState(false);
@@ -178,23 +230,33 @@ export function Scout() {
     setLoading(true);
     try {
       const [top, marks] = await Promise.all([
-        window.krypt.scout.top(chain, window_, sort, 50),
+        // The handler ceiling, not fifty. The board hides rows AFTER ranking
+        // (applyScoutFilters below), so a short list plus a filter is a screen
+        // that looks empty while the record is not. Ranking runs over every
+        // wallet either way - the limit only decides how much comes back.
+        window.krypt.scout.top(chain, window_, sort, 200),
         window.krypt.scout.saved(chain, window_),
       ]);
       if (top.ok && top.data) {
         setCounts(top.data.counts);
         setFailure(top.data.failure);
-        if (section === 'top') setRows(top.data.rows);
+        if (section === 'top') setAllRows(top.data.rows);
       }
       if (marks.ok && marks.data) {
         setSaved(marks.data.saved);
-        if (section === 'saved') setRows(marks.data.rows);
+        if (section === 'saved') setAllRows(marks.data.rows);
       }
       await Promise.all([readCollecting(), readScan()]);
     } finally {
       setLoading(false);
     }
   }, [chain, window_, sort, section, readCollecting, readScan]);
+
+  // What the table actually shows: ranked in main, hidden here. Filtering in
+  // the renderer keeps every switch instant and leaves the record untouched —
+  // nothing about what was RECORDED changes when a box is ticked.
+  const rows = useMemo(() => applyScoutFilters(allRows, filters), [allRows, filters]);
+  const hidden = allRows.length - rows.length;
 
   useEffect(() => {
     void load();
@@ -305,7 +367,7 @@ export function Scout() {
   return (
     <div className="flex h-full min-h-0">
       {/* ── left panel ───────────────────────────────────────────────── */}
-      <aside className="w-[236px] shrink-0 overflow-y-auto border-r border-white/10 bg-krypt-panel/40 px-3 py-4">
+      <aside data-testid="scout-panel" className="w-[248px] shrink-0 overflow-y-auto border-r border-white/10 bg-krypt-panel/40 px-3 py-4">
         <div className="mb-4 flex items-center gap-2 px-1">
           <Users className="h-4 w-4 text-krypt-pink" />
           <span className="text-value font-semibold text-white">Wallet Scout</span>
@@ -317,8 +379,8 @@ export function Scout() {
             <button
               key={c}
               onClick={() => setChain(c)}
-              className={`block w-full rounded-lg px-2 py-1.5 text-left text-note transition ${
-                chain === c ? 'bg-krypt-purple/15 text-white' : 'text-krypt-muted hover:bg-white/5 hover:text-white'
+              className={`block w-full rounded-lg border px-3 py-2.5 text-left text-note font-medium transition ${
+                chain === c ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white' : 'border-transparent text-krypt-muted hover:bg-white/5 hover:text-white'
               }`}
             >
               {CHAIN_LABEL[c]}
@@ -327,25 +389,25 @@ export function Scout() {
         </div>
 
         <div className="mb-1 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Lists</div>
-        <div className="mb-4 space-y-0.5">
+        <div className="mb-4 space-y-1">
           <button
             onClick={() => setSection('top')}
-            className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-note transition ${
-              section === 'top' ? 'bg-krypt-purple/15 text-white' : 'text-krypt-muted hover:bg-white/5 hover:text-white'
+            className={`flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left text-note font-medium transition ${
+              section === 'top' ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white' : 'border-transparent text-krypt-muted hover:bg-white/5 hover:text-white'
             }`}
           >
-            <Trophy className="h-3.5 w-3.5" /> Top wallets
+            <Trophy className="h-4 w-4 shrink-0" /> Top wallets
           </button>
           <button
             onClick={() => setSection('saved')}
-            className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-note transition ${
-              section === 'saved' ? 'bg-krypt-purple/15 text-white' : 'text-krypt-muted hover:bg-white/5 hover:text-white'
+            className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-note font-medium transition ${
+              section === 'saved' ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white' : 'border-transparent text-krypt-muted hover:bg-white/5 hover:text-white'
             }`}
           >
-            <span className="flex items-center gap-2">
-              <Bookmark className="h-3.5 w-3.5" /> Saved
+            <span className="flex items-center gap-2.5">
+              <Bookmark className="h-4 w-4 shrink-0" /> Saved
             </span>
-            {saved.length > 0 && <span className="rounded-full border border-white/10 bg-white/5 px-1.5 text-label">{saved.length}</span>}
+            {saved.length > 0 && <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-label">{saved.length}</span>}
           </button>
         </div>
 
@@ -353,8 +415,8 @@ export function Scout() {
         <button
           onClick={() => void toggleCollect()}
           disabled={busy}
-          className={`flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-body font-medium transition disabled:opacity-50 ${
-            collecting ? 'border-white/10 bg-krypt-panel text-white/90 hover:border-rose-400/40' : 'border-krypt-purple/60 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25'
+          className={`flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-3 text-note font-semibold transition disabled:opacity-50 ${
+            collecting ? 'border-white/15 bg-krypt-panel text-white/90 hover:border-rose-400/40' : 'border-krypt-purple/60 bg-krypt-purple/20 text-white hover:bg-krypt-purple/30'
           }`}
         >
           {collecting ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
@@ -369,25 +431,74 @@ export function Scout() {
         </p>
         {note && <p className="mt-2 px-1 text-label leading-relaxed text-amber-300">{note}</p>}
 
-        <div className="mb-1 mt-4 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Scan the past</div>
-        <div className="mb-2 flex gap-1">
-          {SCOUT_SCAN_HOURS.map((h) => (
-            <Pill key={h} value={h} current={hours} onPick={setHours} size="lg" label={SCOUT_SCAN_HOURS_LABEL[h].replace(' hours', 'h').replace(' hour', 'h')} />
-          ))}
-        </div>
-        <button
-          onClick={() => void (scanRunning ? cancelScan() : startScan())}
-          disabled={scanBusy}
-          className={`flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-2 text-body font-medium transition disabled:opacity-50 ${
-            scanRunning ? 'border-white/10 bg-krypt-panel text-white/90 hover:border-rose-400/40' : 'border-krypt-purple/60 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25'
-          }`}
-          title={scanRunning ? 'Stop after the current step' : 'Read recent trades into the record now. Spends nothing.'}
+        <div className="mb-1 mt-4 px-1 text-micro uppercase tracking-label text-krypt-muted/60">Look up a wallet</div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            openLookup();
+          }}
+          className="flex gap-2"
         >
-          {scanRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-          {scanRunning ? 'Cancel scan' : `Scan last ${SCOUT_SCAN_HOURS_LABEL[hours]}`}
-        </button>
-        <p className="mt-2 px-1 text-label leading-relaxed text-krypt-muted">{scanLine(chain, scan, hours)}</p>
-        {scan?.message && <p className="mt-1 px-1 text-label leading-relaxed text-amber-300">{scan.message}</p>}
+          <input
+            value={lookup}
+            onChange={(e) => setLookup(e.target.value)}
+            placeholder="Paste an address"
+            spellCheck={false}
+            className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 font-mono text-note text-white outline-none focus:border-krypt-purple/50"
+            data-testid="scout-lookup"
+          />
+          <button
+            type="submit"
+            disabled={!lookup.trim()}
+            className="rounded-lg border border-white/15 bg-white/5 px-4 py-2.5 text-note font-semibold text-white transition hover:bg-white/10 disabled:opacity-40"
+          >
+            Open
+          </button>
+        </form>
+        <p className="mt-1 px-1 text-nano leading-relaxed text-krypt-muted">
+          Opens its record — or an empty one{chain === 'solana' ? ' you can fill from the chain' : ''}.
+        </p>
+
+        {/* The scan is the button that fills an empty page, and it was the
+            smallest thing on it. It is now a card: a real heading, hour pills
+            that fill the width, a 44 px button, and — since it runs for about
+            two minutes — a bar, because a number that creeps looks stuck and a
+            bar that moves does not. */}
+        <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+          <div className="mb-2 flex items-center gap-2">
+            <Search className="h-4 w-4 text-krypt-purple" />
+            <span className="text-note font-semibold text-white">Scan the past</span>
+          </div>
+          <div className="mb-2 flex gap-1.5">
+            {SCOUT_SCAN_HOURS.map((h) => (
+              <Pill key={h} value={h} current={hours} onPick={setHours} size="lg" label={SCOUT_SCAN_HOURS_LABEL[h].replace(' hours', 'h').replace(' hour', 'h')} />
+            ))}
+          </div>
+          <button
+            onClick={() => void (scanRunning ? cancelScan() : startScan())}
+            disabled={scanBusy}
+            data-testid="scout-scan"
+            className={`flex w-full items-center justify-center gap-2 rounded-lg border px-3 py-3 text-note font-semibold transition disabled:opacity-50 ${
+              scanRunning ? 'border-white/15 bg-krypt-panel text-white/90 hover:border-rose-400/40' : 'border-krypt-purple/60 bg-krypt-purple/20 text-white hover:bg-krypt-purple/30'
+            }`}
+            title={scanRunning ? 'Stop after the current step' : 'Read recent trades into the record now. Spends nothing.'}
+          >
+            {scanRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+            {scanRunning ? 'Stop the scan' : `Scan the last ${SCOUT_SCAN_HOURS_LABEL[hours]}`}
+          </button>
+          {scanRunning && (
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10" title="How far through the scan is">
+              <div
+                className="h-full rounded-full bg-krypt-purple transition-[width] duration-500"
+                // No total yet means no claim about progress: an indeterminate
+                // sliver, not a bar at 100 % that has done nothing.
+                style={{ width: scan && scan.units > 0 ? `${Math.min(100, Math.round((scan.unitsDone / scan.units) * 100))}%` : '8%' }}
+              />
+            </div>
+          )}
+          <p className="mt-2 text-label leading-relaxed text-krypt-muted">{scanLine(chain, scan, hours)}</p>
+          {scan?.message && <p className="mt-1 text-label leading-relaxed text-amber-300">{scan.message}</p>}
+        </div>
 
         {counts && (
           <p className="mt-4 px-1 text-label leading-relaxed text-krypt-muted">
@@ -404,7 +515,7 @@ export function Scout() {
           <button
             onClick={() => void clearTracked()}
             disabled={clearBusy}
-            className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 px-2 py-1.5 text-label text-krypt-muted transition hover:border-rose-400/40 hover:text-rose-200 disabled:opacity-50"
+            className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 px-3 py-2.5 text-label font-medium text-krypt-muted transition hover:border-rose-400/40 hover:text-rose-200 disabled:opacity-50"
             title="Forget every tracked wallet on this chain and start the hunt over. Saved wallets are kept."
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -433,6 +544,35 @@ export function Scout() {
           )}
         </div>
 
+        {/* Filters (2026-09-21). Sorting cannot remove a three-trade record or
+            a bot that was out in six seconds; only a filter can. One button
+            turns on the five that matter, each chip explains itself, and the
+            line underneath always says how many rows are hidden — a board that
+            silently drops most of its rows is worse than one that never
+            filtered. */}
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setFilters(filtersOn ? scoutFiltersAllOff() : scoutFiltersAllOn())}
+            data-testid="scout-worth-a-look"
+            title="Turns on all five filters below: no bots, enough finished trades, trips a copier could have been inside, holds over a minute, and active on several days."
+            className={`flex items-center gap-2 rounded-lg border px-4 py-2 text-note font-semibold transition ${
+              filtersOn ? 'border-krypt-purple/60 bg-krypt-purple/20 text-white' : 'border-krypt-purple/40 bg-krypt-purple/10 text-white hover:bg-krypt-purple/20'
+            }`}
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            {filtersOn ? 'Show everything' : 'Only the ones worth a look'}
+          </button>
+          {SCOUT_FILTERS.map((k) => (
+            <FilterChip key={k} on={filters[k]} label={SCOUT_FILTER_TEXT[k].label} why={SCOUT_FILTER_TEXT[k].why} onToggle={() => toggleFilter(k)} />
+          ))}
+        </div>
+        {filtersOn && (
+          <p className="mb-3 text-note text-krypt-muted">
+            Showing <span className="text-white/90">{rows.length}</span> of {allRows.length} wallet{allRows.length === 1 ? '' : 's'} on record in this window.{' '}
+            {hidden > 0 && `${hidden} hidden by the switches above.`} A wallet whose hold or reachable share was never measured is never hidden.
+          </p>
+        )}
+
         {failure && (
           <p className="mb-3 rounded-lg border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-note text-amber-200">
             History is read-only this session — {failure}
@@ -445,20 +585,34 @@ export function Scout() {
           </div>
         ) : rows.length === 0 ? (
           <div className="rounded-xl border border-dashed border-white/10 bg-krypt-panel/40 py-14 text-center">
+            {/* Filtered everything away is a different problem from an empty
+                record, and telling the user to go and scan when they have
+                3,000 wallets and five switches on would be nonsense. */}
             <p className="text-value text-white/80">
-              {section === 'saved' ? 'No saved wallets on this chain.' : `Nothing recorded for ${CHAIN_LABEL[chain]} in this window.`}
+              {allRows.length > 0
+                ? `No wallet here passes all ${SCOUT_FILTERS.filter((k) => filters[k]).length} of your switches.`
+                : section === 'saved'
+                  ? 'No saved wallets on this chain.'
+                  : `Nothing recorded for ${CHAIN_LABEL[chain]} in this window.`}
             </p>
             <p className="mt-1 text-note text-krypt-muted">
-              {section === 'saved'
-                ? 'Save a wallet from Top wallets and it will be kept here — and never dropped from the records.'
-                : collecting
-                  ? 'Records build as trades arrive. Come back in a few minutes — or press Scan to read the last hours now.'
-                  : 'Press Start on the left to record live, or Scan to read the last hours of trades now.'}
+              {allRows.length > 0
+                ? `${allRows.length} wallet${allRows.length === 1 ? ' is' : 's are'} on record in this window. Turn a switch off, or widen the window.`
+                : section === 'saved'
+                  ? 'Save a wallet from Top wallets and it will be kept here — and never dropped from the records.'
+                  : collecting
+                    ? 'Records build as trades arrive. Come back in a few minutes — or press Scan to read the last hours now.'
+                    : 'Press Record live on the left, or Scan to read the last hours of trades now.'}
             </p>
+            {allRows.length > 0 && (
+              <button onClick={() => setFilters(scoutFiltersAllOff())} className="mt-3 rounded-lg border border-white/15 bg-white/5 px-4 py-2 text-note font-medium text-white transition hover:bg-white/10">
+                Show everything
+              </button>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-white/10">
-            <table className="w-full min-w-[980px] text-note">
+            <table className="w-full min-w-[900px] text-note">
               <thead className="bg-white/[0.03] text-label uppercase tracking-wider text-krypt-muted/70">
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Wallet</th>
@@ -475,7 +629,11 @@ export function Scout() {
                   <th className="px-3 py-2 text-right font-medium">Their win rate</th>
                   <th className="px-3 py-2 text-right font-medium">Trips</th>
                   <th className="px-3 py-2 text-right font-medium">Median hold</th>
-                  <th className="px-3 py-2" />
+                  {/* Pinned to the right edge. The board is nine columns wide
+                      and the panel is not, so Save and Follow — the two things
+                      anyone actually does from this table — used to sit off
+                      screen behind a horizontal scrollbar nobody found. */}
+                  <th className="sticky right-0 border-l border-white/10 bg-krypt-panel px-3 py-2" />
                 </tr>
               </thead>
               <tbody>
@@ -495,7 +653,7 @@ export function Scout() {
                               e.stopPropagation();
                               void copyAddress(r.address);
                             }}
-                            className="font-mono transition hover:text-krypt-purple"
+                            className="-mx-1.5 rounded-md px-1.5 py-1.5 font-mono transition hover:bg-white/5 hover:text-krypt-purple"
                             // The full address in the tooltip as well as on the
                             // clipboard: a truncated string with no way to read
                             // or copy it is a wallet you cannot look up anywhere.
@@ -547,17 +705,22 @@ export function Scout() {
                       <td className="px-3 py-1.5 text-right font-mono">{pct(r.winRatePct)}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{r.roundTrips}</td>
                       <td className="px-3 py-1.5 text-right font-mono text-krypt-muted">{hold(r.medianHoldMs)}</td>
-                      <td className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                        <span className="flex items-center justify-end gap-1.5">
+                      <td className="sticky right-0 border-l border-white/10 bg-krypt-panel px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                        {/* These were a 12 px icon in a 2 px box. They are the
+                            two things a user does from this table, so they are
+                            34 px tall, they say what they do, and they stay on
+                            screen however far the table scrolls. */}
+                        <span className="flex items-center justify-end gap-2">
                           <button
                             onClick={() => void toggleSave(r.address)}
-                            className={`rounded border px-1.5 py-0.5 transition ${
-                              isSaved ? 'border-krypt-purple/50 text-krypt-purple' : 'border-white/10 text-krypt-muted hover:text-white'
+                            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-label font-medium transition ${
+                              isSaved ? 'border-krypt-purple/50 bg-krypt-purple/10 text-krypt-purple' : 'border-white/10 bg-white/5 text-krypt-muted hover:border-white/20 hover:text-white'
                             }`}
-                            title={isSaved ? 'Remove from saved' : 'Save this wallet'}
+                            title={isSaved ? 'Remove from saved — it can be dropped from the records again' : 'Keep this wallet. Saved wallets are never dropped when the record is full.'}
                             aria-label={isSaved ? 'Remove from saved' : 'Save this wallet'}
                           >
-                            {isSaved ? <BookmarkCheck className="h-3 w-3" /> : <Bookmark className="h-3 w-3" />}
+                            {isSaved ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                            {isSaved ? 'Saved' : 'Save'}
                           </button>
                           {chain === 'solana' &&
                             // Following left no mark on the row, so the button
@@ -566,18 +729,18 @@ export function Scout() {
                             // was gone a moment later.
                             (followed.includes(r.address) ? (
                               <span
-                                className="rounded border border-krypt-purple/40 bg-krypt-purple/10 px-2 py-0.5 text-label text-krypt-purple"
+                                className="flex items-center gap-1.5 rounded-lg border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-2 text-label font-medium text-krypt-purple"
                                 title="Already on the Copy Trading page — paper, and switched off until you arm it"
                               >
-                                Following
+                                <Check className="h-4 w-4" /> Following
                               </span>
                             ) : (
                               <button
                                 onClick={() => void follow(r.address)}
-                                className="rounded border border-white/10 bg-white/5 px-2 py-0.5 text-label text-krypt-muted transition hover:text-white"
-                                title="Add to copy trading — paper, and switched off until you arm it"
+                                className="flex items-center gap-1.5 rounded-lg border border-krypt-purple/50 bg-krypt-purple/10 px-3 py-2 text-label font-medium text-white transition hover:bg-krypt-purple/20"
+                                title="Add to copy trading on PAPER — nothing is bought, and it stays switched off until you arm it yourself"
                               >
-                                Follow
+                                <Plus className="h-4 w-4" /> Follow
                               </button>
                             ))}
                         </span>
@@ -614,7 +777,7 @@ export function Scout() {
         chain={chain}
         address={detail}
         window={window_}
-        row={detail ? rows.find((r) => r.address === detail) ?? null : null}
+        row={detail ? allRows.find((r) => r.address === detail) ?? null : null}
         saved={detail ? saved.includes(detail) : false}
         following={detail ? followed.includes(detail) : false}
         onClose={() => setDetail(null)}

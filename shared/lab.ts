@@ -1,5 +1,10 @@
-// Wallet Lab — multi-wallet utilities: fund a group of your own wallets from
-// the active one, and collect back from it.
+// Wallet Lab — multi-wallet utilities: fund your own wallets from the main
+// one, and collect back from them.
+//
+// The Copier (other wallets repeating your manual trades) was removed on
+// 2026-09-22, on the owner's call. Trading from several of your own wallets
+// is now only something a SCRIPT does, one named wallet per call, behind the
+// multi-wallet acknowledgement (shared/multiWallet.ts).
 //
 // Every real transaction still goes through the signer's policy and the trade
 // pipeline (simulation, loss guard, platform fee, confirm socket); nothing

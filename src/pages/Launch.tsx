@@ -18,22 +18,24 @@ import {
   BLOCKER_TEXT,
   LAUNCH_CHAINS,
   MAX_CREATOR_TAX_BPS,
-  MAX_DESCRIPTION,
   MAX_NAME,
   MAX_SYMBOL,
   MIN_DEV_BUY,
   draftProblems,
   emptyDraft,
   launchWalletId,
+  LAUNCH_WATERMARK,
+  DESCRIPTION_BUDGET,
   readiness,
   type LaunchChain,
   type LaunchConfig,
   type LaunchDraft,
 } from '@shared/launch';
 import { useAppState } from '../state/AppStateProvider';
+import { LaunchStats } from '../components/terminal/LaunchStats';
 import { useToast } from '../state/ToastProvider';
 import { cls } from '../utils/format';
-import { Field } from '../components/common';
+import { Empty, Field } from '../components/common';
 
 const CHAIN_LABEL: Record<LaunchChain, string> = { solana: 'Solana', robinhood: 'Robinhood Chain' };
 const VENUE: Record<LaunchChain, string> = { solana: 'pump.fun', robinhood: 'Pons' };
@@ -114,6 +116,7 @@ export function Launch() {
   // the user goes to before ever pressing Launch twice. Per-viewer, in
   // localStorage — the truth is on chain; this is the map to it.
   const [attempts, setAttempts] = useState<LaunchAttempt[]>(() => loadAttempts());
+  const [tab, setTab] = useState<'new' | 'mine' | 'stats'>('new');
   const [busy, setBusy] = useState<'' | 'image' | 'upload' | 'preview' | 'send'>('');
   const [checked, setChecked] = useState<string | null>(null);
   const [created, setCreated] = useState<{ token: string; chain: LaunchChain; note?: string } | null>(null);
@@ -326,10 +329,64 @@ export function Launch() {
         <Rocket className="h-4 w-4 text-krypt-pink" />
         <h1 className="text-lg font-semibold text-white">Launch a token</h1>
       </div>
-      <p className="mb-5 text-note leading-relaxed text-krypt-muted">
+      <p className="mb-4 text-note leading-relaxed text-krypt-muted">
         Create your own token on {LAUNCH_CHAINS.map((c) => CHAIN_LABEL[c]).join(' or ')}. Off by default — while it is off this app
         cannot co-sign a launch at all.
       </p>
+
+      {/* Three tabs: making one, what you have made, and how they are doing.
+          The launches list used to sit at the bottom of the form, below the
+          part nobody scrolls to after their first launch. */}
+      <div className="mb-5 flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.02] p-1">
+        {([
+          ['new', 'Launch'],
+          ['mine', `My launches${attempts.length ? ` (${attempts.length})` : ''}`],
+          ['stats', 'Stats'],
+        ] as const).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setTab(id)}
+            className={cls(
+              'flex-1 rounded-md px-3 py-1.5 text-note font-semibold transition',
+              tab === id ? 'bg-krypt-purple/25 text-white' : 'text-krypt-muted hover:text-white',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'stats' && <LaunchStats attempts={attempts} />}
+
+      {tab === 'mine' && (
+        <div className="space-y-3">
+          <p className="text-body leading-relaxed text-krypt-muted">
+            Kept on this machine — the chain is the record, this is the map to it. A create that timed out may still
+            have landed, so look the transaction up before launching the same coin again.
+          </p>
+          {attempts.length === 0 ? (
+            <Empty title="Nothing launched yet" message="Anything you send from the Launch tab shows up here." />
+          ) : (
+            <div className="space-y-1.5">
+              {attempts.map((a) => (
+                <div key={`${a.at}-${a.hash ?? a.token ?? ''}`} className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-body">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-white/90">
+                      {a.symbol || '(no symbol)'} · {a.chain} · {new Date(a.at).toLocaleString()}
+                    </span>
+                    <span className="text-krypt-muted">{a.outcome}</span>
+                  </div>
+                  {a.token && <div className="mt-1 select-all break-all font-mono text-label text-krypt-muted">token {a.token}</div>}
+                  {a.hash && <div className="select-all break-all font-mono text-label text-krypt-muted">tx {a.hash}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'new' && (
+      <>
 
       {/* ── what this is worth, said once, before the switch ───────────── */}
       <div className="mb-5 rounded-xl border border-amber-400/25 bg-amber-400/[0.07] p-4">
@@ -495,16 +552,28 @@ export function Launch() {
         </div>
 
         <div className="mt-3">
-          <Field label="Description" hint={`${draft.description.length}/${MAX_DESCRIPTION}`}>
+          {/* The budget counts down from what is left AFTER the watermark, not
+              from pump's limit — otherwise someone fills 500 characters and
+              the stamped version is refused at the upload. */}
+          <Field label="Description" hint={`${draft.description.length}/${DESCRIPTION_BUDGET}`}>
             <textarea
               value={draft.description}
-              maxLength={MAX_DESCRIPTION}
+              maxLength={DESCRIPTION_BUDGET}
               rows={2}
               onChange={(e) => set('description', e.target.value)}
               placeholder="What is this?"
               className={cls(inputCls, 'resize-none')}
             />
           </Field>
+          {/* Shown, not hidden: the line goes into the metadata the mint points
+              at, so it travels with the coin wherever anyone reads it. Nobody
+              should find it afterwards on a token that exists forever under
+              their name. */}
+          <p className="mt-1.5 text-label leading-relaxed text-krypt-muted/70">
+            Every coin launched here ends with{' '}
+            <span className="text-krypt-muted">“{LAUNCH_WATERMARK}”</span>. It is written into the token's own
+            metadata, so it travels with the coin.
+          </p>
         </div>
 
         {/* Image + pin. Two steps on purpose: picking a file touches nothing,
@@ -729,6 +798,8 @@ export function Launch() {
           <span className="font-mono">ipfs.io</span> link. That link is what goes into the token, on either chain.
         </p>
       </div>
+      </>
+      )}
     </div>
   );
 }

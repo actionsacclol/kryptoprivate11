@@ -11,7 +11,7 @@
 // Pure: no Electron here, so the harness page and the parser are testable.
 
 export type MainToSandbox =
-  | { t: 'init'; scriptId: string; code: string; chain?: string; nativeSymbol?: string }
+  | { t: 'init'; scriptId: string; code: string; chain?: string; nativeSymbol?: string; inputs?: Record<string, unknown> }
   | { t: 'event'; id: number; name: string; payload: unknown }
   | { t: 'reply'; id: number; ok: boolean; value?: unknown; error?: string };
 
@@ -25,7 +25,19 @@ export type SandboxToMain =
   | { t: 'done'; id: number; ok: boolean; error?: string }
   | { t: 'call'; id: number; method: string; args: unknown[] }
   | { t: 'log'; level: 'info' | 'warn' | 'error'; line: string }
+  /** Numbers a script shows on its widget (bot.stat / bot.stats / bot.clearStats).
+   *  Fire-and-forget like a log line: nothing waits on it. */
+  | { t: 'stats'; values: Record<string, ScriptStatValue>; clear?: boolean }
   | { t: 'error'; line: string };
+
+/** What a script may show as one stat: a number, a short text, yes/no, or
+ *  null for "unknown" (shown as an em dash, never 0). */
+export type ScriptStatValue = number | string | boolean | null;
+/** How many stats one script may show, how long a name and a text value may
+ *  be. A widget, not a database. */
+export const MAX_STAT_KEYS = 24;
+export const MAX_STAT_NAME = 32;
+export const MAX_STAT_TEXT = 80;
 
 /** Methods a script may call. Anything else is refused at the wall. Keep in
  *  step with SCRIPT_API in shared/automation.ts and the harness below. */
@@ -43,6 +55,15 @@ export const SCRIPT_METHODS = [
   'subscribe',
   'unsubscribe',
   'notify',
+  'callout',
+  'pumpAccounts',
+  'wallets',
+  'calloutReply',
+  'discord',
+  'follow',
+  'unfollow',
+  'like',
+  'unlike',
   'price',
   'token',
   'market',
@@ -69,6 +90,16 @@ export type ScriptEvent = (typeof SCRIPT_EVENTS)[number];
 
 /** A handler that has not finished by then is a runaway. */
 export const EVENT_TIMEOUT_MS = 3_000;
+/**
+ * The ceiling a handler cannot be extended past (2026-09-21).
+ *
+ * EVENT_TIMEOUT_MS is when the sandbox is first ASKED whether it is wedged or
+ * merely awaiting something — a responsive handler is given another slice
+ * rather than crashed, because `bot.market()` alone can take a second. This
+ * is where that stops: a handler still going after thirty seconds is a bug
+ * whichever side it is on, and a watchdog that never bites is not one.
+ */
+export const EVENT_HARD_MS = 30_000;
 /** Time for the harness to say `alive`. It is sent by the first statement
  *  that runs in the page, so this only has to cover process start; missing it
  *  means the preload never installed the bridge. */
@@ -122,6 +153,28 @@ export function parseFromSandbox(raw: unknown): SandboxToMain | null {
       const level = m.level === 'warn' || m.level === 'error' ? m.level : 'info';
       if (typeof m.line !== 'string') return null;
       return { t: 'log', level, line: m.line.slice(0, MAX_LOG_LINE) };
+    }
+    case 'stats': {
+      // Untrusted like everything here: names cut, texts cut, anything that is
+      // not a finite number / string / boolean / null dropped, at most
+      // MAX_STAT_KEYS per message. A bad entry is skipped, not the message.
+      const src = m.values;
+      if (typeof src !== 'object' || src === null || Array.isArray(src)) return null;
+      const values: Record<string, ScriptStatValue> = {};
+      let n = 0;
+      for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
+        if (n >= MAX_STAT_KEYS) break;
+        const name = k.trim().slice(0, MAX_STAT_NAME);
+        if (!name) continue;
+        if (typeof v === 'number') {
+          if (!Number.isFinite(v)) continue;
+          values[name] = v;
+        } else if (typeof v === 'string') values[name] = v.slice(0, MAX_STAT_TEXT);
+        else if (typeof v === 'boolean' || v === null) values[name] = v;
+        else continue;
+        n++;
+      }
+      return { t: 'stats', values, clear: m.clear === true ? true : undefined };
     }
     case 'error':
       if (typeof m.line !== 'string') return null;
@@ -177,6 +230,10 @@ export function sandboxPageHtml(): string {
   // differently on paper is not a rehearsal of the live one.
   let chain = 'solana';
   let nativeSymbol = 'SOL';
+  // Answers to whatever the script declared in its @inputs block. Static per
+  // run, like the chain: they ride along with the code so reading one costs
+  // no round trip, and a script cannot change what it was given.
+  let input = {};
 
   const send = (m) => { try { bridge.send(m); } catch (_) {} };
   const str = (v) => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch (_) { return String(v); } };
@@ -205,8 +262,14 @@ export function sandboxPageHtml(): string {
       atHandlers.get(hhmm).push(fn);
       return call('at', [hhmm]);
     },
-    buy: (mint, sol) => call('buy', [mint, sol]),
-    sell: (mint, pct) => call('sell', [mint, pct]),
+    /**
+     * Buy with this chain's trading wallet, or with another of your own —
+     * pass its ADDRESS as the third argument (see bot.wallets).
+     */
+    buy: (mint, sol, wallet) => call('buy', wallet === undefined ? [mint, sol] : [mint, sol, str(wallet)]),
+    sell: (mint, pct, wallet) => call('sell', wallet === undefined ? [mint, pct] : [mint, pct, str(wallet)]),
+    /** Your own wallets: [{address, label, active}]. No keys, ever. */
+    wallets: () => call('wallets', []),
     sellAll: () => call('sellAll', []),
     order: (req) => call('order', [req]),
     cancelOrders: (mint) => call('cancelOrders', [mint]),
@@ -218,8 +281,53 @@ export function sandboxPageHtml(): string {
     subscribe: (mint) => call('subscribe', [mint]),
     unsubscribe: (mint) => call('unsubscribe', [mint]),
     notify: (message) => call('notify', [str(message)]),
+    /**
+     * Post a pump.fun callout. Solana only.
+     *
+     * The third argument is the ADDRESS of one of your own accounts (see
+     * bot.pumpAccounts); left out, the active trading wallet posts. A script
+     * can only ever name an account this app holds a session for — there is
+     * nothing to say here that would post as somebody else.
+     */
+    callout: (mint, text, wallet) => call('callout', [mint, text === undefined ? '' : str(text), wallet === undefined ? '' : str(wallet)]),
+    /** Your signed-in pump.fun accounts: [{address, username, active}]. */
+    pumpAccounts: () => call('pumpAccounts', []),
+    /**
+     * Reply to a callout this account already made on a coin. Solana only.
+     *
+     * A callout is one per coin per account, so this is how one is followed
+     * up as the coin moves. Same third argument as callout.
+     */
+    calloutReply: (mint, text, wallet) => call('calloutReply', [mint, str(text ?? ''), wallet === undefined ? '' : str(wallet)]),
+    /**
+     * Post an embed to Discord. The first argument is the NAME of one of this
+     * script's own "webhook" settings (see @inputs), never a URL — the app
+     * looks the URL up, so a post only goes where you pasted one.
+     * embed: {title, description, url, color, fields:[{name, value, inline}], thumbnail, footer}.
+     */
+    discord: (field, embed) => call('discord', [str(field ?? ''), embed ?? {}]),
+    /**
+     * Follow / unfollow a pump.fun user (a wallet address, a pump user id or a
+     * pump.fun/profile link) as one of your accounts. Solana only. Same third
+     * argument as callout: left out, the trading wallet's account acts.
+     */
+    follow: (user, wallet) => call('follow', [str(user ?? ''), wallet === undefined ? '' : str(wallet)]),
+    unfollow: (user, wallet) => call('unfollow', [str(user ?? ''), wallet === undefined ? '' : str(wallet)]),
+    /** Like / unlike a callout by its id, as one of your accounts. */
+    like: (calloutId, wallet) => call('like', [str(calloutId ?? ''), wallet === undefined ? '' : str(wallet)]),
+    unlike: (calloutId, wallet) => call('unlike', [str(calloutId ?? ''), wallet === undefined ? '' : str(wallet)]),
     log: (...parts) => send({ t: 'log', level: 'info', line: parts.map(str).join(' ') }),
     warn: (...parts) => send({ t: 'log', level: 'warn', line: parts.map(str).join(' ') }),
+    error: (...parts) => send({ t: 'log', level: 'error', line: parts.map(str).join(' ') }),
+    /**
+     * Show a number (or short text) on this script's widget, live — e.g.
+     * bot.stat('Callouts', 12). Same name again replaces it. Nothing waits on
+     * it and it costs no action. bot.stats({...}) sets several at once;
+     * bot.clearStats() empties the widget. null shows as unknown.
+     */
+    stat: (name, value) => send({ t: 'stats', values: { [str(name)]: value === undefined ? null : value } }),
+    stats: (obj) => send({ t: 'stats', values: obj && typeof obj === 'object' ? obj : {} }),
+    clearStats: () => send({ t: 'stats', values: {}, clear: true }),
     price: (mint) => call('price', [mint]),
     token: (mint) => call('token', [mint]),
     market: (mint) => call('market', [mint]),
@@ -236,6 +344,14 @@ export function sandboxPageHtml(): string {
     get chain() { return chain; },
     /** The coin every amount in this script is denominated in: SOL, ETH or BNB. */
     get nativeSymbol() { return nativeSymbol; },
+    /**
+     * The settings this script asked for, as the form answered them.
+     *
+     * Empty when the script declares no @inputs block. Every value is already
+     * in its declared shape, so a range is always two numbers low-to-high and
+     * a lines field is always an array of non-empty strings.
+     */
+    get input() { return input; },
   });
 
   const safeConsole = Object.freeze({
@@ -252,6 +368,7 @@ export function sandboxPageHtml(): string {
       scriptId = m.scriptId;
       if (typeof m.chain === 'string' && m.chain) chain = m.chain;
       if (typeof m.nativeSymbol === 'string' && m.nativeSymbol) nativeSymbol = m.nativeSymbol;
+      if (m.inputs && typeof m.inputs === 'object') input = Object.freeze(m.inputs);
       try {
         // AsyncFunction, not Function: the guide (and the generated AI
         // prompt) promise top-level \`await\`, and a plain Function body

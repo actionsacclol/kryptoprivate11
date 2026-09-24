@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Copy, Download, Image as ImageIcon, Loader2, Sparkles, Video, X } from 'lucide-react';
+import { Copy, Download, Image as ImageIcon, Loader2, Sparkles, Video, Volume2, VolumeX, X } from 'lucide-react';
 import type { ClosedTrade, Position } from '@shared/portfolio';
 import { cls, fmtUsd } from '../../utils/format';
 import { CARD_H, CARD_PAD, CARD_W, cardLayout } from './cardLayout';
 import { GifPicker } from './GifPicker';
 import { dataUrlType, decodeAnimation, frameAt, type GifAnimation } from './gifFrames';
 import { encodeCardGif } from './gifExport';
+import {
+  exportMsFor,
+  isVideoFile,
+  loadVideoBackground,
+  VIDEO_MAX_BYTES,
+  type VideoBackground,
+} from './videoBackground';
+import { bestMime, recordCanvas } from './cardRecord';
 import { useToast } from '../../state/ToastProvider';
 
 // PnL cards (term.txt §15).
@@ -37,6 +45,11 @@ const PAD = CARD_PAD;
  *  remembered, rather than breaking the card. */
 const BG_KEY = 'krypt.cardBackground';
 const BG_MAX_BYTES = 1_500_000;
+
+/** Set when the remembered background is a VIDEO, which lives on disk rather
+ *  than in storage (an mp4 is tens of megabytes). The flag is here so the
+ *  card knows to ask main for it instead of reading BG_KEY. */
+const BG_VIDEO_KEY = 'krypt.cardBackgroundIsVideo';
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
   ctx.beginPath();
@@ -142,6 +155,16 @@ export function PnlCard({
   const [bgAnim, setBgAnim] = useState<GifAnimation | null>(null);
   const bgAnimRef = useRef<GifAnimation | null>(null);
   bgAnimRef.current = bgAnim;
+  /** A video the user picked, playing behind the card. Mutually exclusive
+   *  with the image and the GIF: one background at a time. */
+  const [bgVideo, setBgVideo] = useState<VideoBackground | null>(null);
+  const bgVideoRef = useRef<VideoBackground | null>(null);
+  bgVideoRef.current = bgVideo;
+  /** The preview is silent until asked. A card that starts shouting when it
+   *  opens is the kind of thing people close immediately — the sound is in
+   *  the export either way. */
+  const [previewSound, setPreviewSound] = useState(false);
+  const [loadingVideo, setLoadingVideo] = useState(false);
   const [gifOpen, setGifOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   /** Milliseconds into the background loop; the frame the canvas is on. */
@@ -192,12 +215,119 @@ export function PnlCard({
   }, [bg, toast]);
 
   useEffect(() => () => bgAnimRef.current?.close(), []);
+  useEffect(() => () => bgVideoRef.current?.close(), []);
+
+  // The speaker branch of the audio graph, and only that. The recording tap
+  // is wired separately and unconditionally, so a quiet preview never means a
+  // silent file. See videoBackground.ts.
+  useEffect(() => {
+    bgVideo?.setAudible(previewSound);
+  }, [bgVideo, previewSound]);
+
+  /** Put a loaded video in place of whatever background was there. */
+  const useVideo = useCallback((video: VideoBackground | null): void => {
+    setBgVideo((prev) => {
+      prev?.close();
+      return video;
+    });
+    if (video) {
+      setBgImage(null);
+      setBgAnim((prev) => {
+        prev?.close();
+        return null;
+      });
+      setBg(null);
+    }
+  }, []);
+
+  // The remembered video background, fetched from main on open. An image
+  // background comes from localStorage above; a video is too big for that,
+  // so it lives on disk and arrives as bytes.
+  useEffect(() => {
+    let stored = false;
+    try {
+      stored = localStorage.getItem(BG_VIDEO_KEY) === '1';
+    } catch {
+      stored = false;
+    }
+    if (!stored) return;
+    let live = true;
+    setLoadingVideo(true);
+    void window.krypt.card
+      .loadBackground()
+      .then(async (r) => {
+        if (!live || !r.ok || !r.data) return;
+        // Copied into a buffer of its own: the bytes arrive as a view over
+        // the IPC message, and Blob wants an ArrayBuffer it can keep.
+        const copy = new Uint8Array(r.data.bytes.byteLength);
+        copy.set(r.data.bytes);
+        const url = URL.createObjectURL(new Blob([copy.buffer], { type: r.data.type }));
+        const res = await loadVideoBackground(url);
+        if (!live) {
+          if (res.ok) res.video.close();
+          else URL.revokeObjectURL(url);
+          return;
+        }
+        if (res.ok) useVideo(res.video);
+        else URL.revokeObjectURL(url);
+      })
+      .finally(() => {
+        if (live) setLoadingVideo(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [useVideo]);
+
+  /** A video the user dropped or chose: played from an object URL, and kept
+   *  on disk so it is still here next time. */
+  const pickVideoBackground = async (file: File): Promise<void> => {
+    if (file.size > VIDEO_MAX_BYTES) {
+      toast.error(`That video is ${(file.size / 1e6).toFixed(0)} MB — the limit is ${VIDEO_MAX_BYTES / 1e6} MB`);
+      return;
+    }
+    setLoadingVideo(true);
+    const url = URL.createObjectURL(file);
+    try {
+      const res = await loadVideoBackground(url);
+      if (!res.ok) {
+        URL.revokeObjectURL(url);
+        toast.error(`Could not use that video — ${res.reason}`);
+        return;
+      }
+      useVideo(res.video);
+      if (!res.video.hasAudio) toast.info('That clip has no sound — the card will be silent');
+      // Remember it. A failure here costs the memory, not the background.
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const saved = await window.krypt.card.saveBackground(bytes, file.type);
+        localStorage.setItem(BG_VIDEO_KEY, saved.ok ? '1' : '0');
+        localStorage.removeItem(BG_KEY);
+        if (!saved.ok) toast.warn(`Using it now, but it will not be remembered: ${saved.message}`);
+      } catch {
+        /* storage or disk unavailable — the background still applies now */
+      }
+    } finally {
+      setLoadingVideo(false);
+    }
+  };
 
   const pickBackground = (file: File | null | undefined): void => {
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      toast.error('Pick an image file');
+    if (isVideoFile(file)) {
+      void pickVideoBackground(file);
       return;
+    }
+    if (!file.type.startsWith('image/')) {
+      toast.error('Pick an image or a video file');
+      return;
+    }
+    useVideo(null);
+    try {
+      localStorage.removeItem(BG_VIDEO_KEY);
+      void window.krypt.card.clearBackground();
+    } catch {
+      /* nothing to clean up */
     }
     const reader = new FileReader();
     reader.onload = () => {
@@ -220,11 +350,15 @@ export function PnlCard({
   const clearBackground = (): void => {
     setBg(null);
     setBgImage(null);
+    useVideo(null);
+    setPreviewSound(false);
     try {
       localStorage.removeItem(BG_KEY);
+      localStorage.removeItem(BG_VIDEO_KEY);
     } catch {
       /* nothing to clean up */
     }
+    void window.krypt.card.clearBackground();
   };
 
   const draw = useCallback(() => {
@@ -246,9 +380,16 @@ export function PnlCard({
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
 
-    const bgSource = bgAnim ? frameAt(bgAnim, clockRef.current) : bgImage;
-    const bgW = bgAnim ? bgAnim.width : bgImage?.width ?? 0;
-    const bgH = bgAnim ? bgAnim.height : bgImage?.height ?? 0;
+    // A playing <video> is already a CanvasImageSource, so it needs no
+    // decoding the way a GIF does — copying it every frame is what makes both
+    // the preview and the recording move.
+    const bgSource: CanvasImageSource | null = bgVideo
+      ? bgVideo.el
+      : bgAnim
+        ? frameAt(bgAnim, clockRef.current)
+        : bgImage;
+    const bgW = bgVideo ? bgVideo.width : bgAnim ? bgAnim.width : bgImage?.width ?? 0;
+    const bgH = bgVideo ? bgVideo.height : bgAnim ? bgAnim.height : bgImage?.height ?? 0;
     if (bgSource && bgW > 0 && bgH > 0) {
       // Cover: fill the frame, crop the overflow, never squash the picture.
       const scale = Math.max(W / bgW, H / bgH);
@@ -344,7 +485,7 @@ export function PnlCard({
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
     ctx.shadowOffsetY = 0;
-  }, [subject, style, solUsd, unit, bgImage, bgAnim]);
+  }, [subject, style, solUsd, unit, bgImage, bgAnim, bgVideo]);
 
   useEffect(() => {
     // Fonts may not be ready on first paint; redraw once they are so the
@@ -356,7 +497,7 @@ export function PnlCard({
   // An animated background runs in the preview, so what you see before you
   // save is what the background actually does.
   useEffect(() => {
-    if (!bgAnim) {
+    if (!bgAnim && !bgVideo) {
       clockRef.current = 0;
       return;
     }
@@ -369,55 +510,63 @@ export function PnlCard({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [bgAnim, draw]);
+  }, [bgAnim, bgVideo, draw]);
 
-  /** Record the card while its background loops, for the cases a PNG cannot
-   *  carry. Two loops, bounded, so the file stays small. */
-  const saveVideo = (): void => {
+  /**
+   * Record the card while its background runs, for what a PNG cannot carry.
+   *
+   * With a VIDEO background the clip's audio rides along (the stream was
+   * captured when the video loaded, so muting the preview does not silence
+   * the file). With a GIF there is nothing to hear and the result is a silent
+   * clip, which is what a GIF is.
+   */
+  const makeVideo = async (): Promise<{ bytes: Uint8Array; ext: 'mp4' | 'webm'; withAudio: boolean } | null> => {
     const canvas = canvasRef.current;
-    if (!canvas || !bgAnim || recording) return;
-    let stream: MediaStream;
-    try {
-      stream = canvas.captureStream(30);
-    } catch (e) {
-      toast.error(`This build cannot record the canvas: ${(e as Error).message}`);
-      return;
-    }
-    const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
-    const mime = types.find((m) => MediaRecorder.isTypeSupported?.(m));
-    if (!mime) {
-      toast.error('No video encoder is available here.');
-      return;
-    }
-    const chunks: BlobPart[] = [];
-    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
-    rec.ondataavailable = (e) => {
-      if (e.data.size) chunks.push(e.data);
-    };
-    rec.onstop = () => {
-      setRecording(false);
-      const blob = new Blob(chunks, { type: 'video/webm' });
-      if (!blob.size) {
-        toast.error('The recording came back empty.');
-        return;
-      }
-      const a = document.createElement('a');
-      a.download = `krypt-${viewFor(subject, unit).fileTag}.webm`;
-      a.href = URL.createObjectURL(blob);
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
-      toast.success('Animated card saved as WebM');
-    };
+    if (!canvas || (!bgAnim && !bgVideo) || recording) return null;
     setRecording(true);
-    rec.start();
-    const runMs = Math.min(12_000, Math.max(2_000, bgAnim.durationMs * 2));
-    setTimeout(() => {
-      try {
-        rec.stop();
-      } catch {
-        setRecording(false);
+    try {
+      // One whole pass of a video; two loops of a short GIF, as before.
+      const durationMs = bgVideo
+        ? exportMsFor(bgVideo)
+        : Math.min(12_000, Math.max(2_000, (bgAnim?.durationMs ?? 3_000) * 2));
+      if (bgVideo) {
+        // Start the clip at the beginning so the sound does not open mid-word.
+        try {
+          bgVideo.el.currentTime = 0;
+          await bgVideo.el.play();
+        } catch {
+          /* a background that will not seek still records from where it is */
+        }
       }
-    }, runMs);
+      return await recordCanvas({
+        canvas,
+        fps: 30,
+        durationMs,
+        audioFrom: bgVideo?.stream ?? null,
+        videoBitsPerSecond: 6_000_000,
+      });
+    } catch (err) {
+      toast.error(`Could not record the card: ${(err as Error).message}`);
+      return null;
+    } finally {
+      setRecording(false);
+    }
+  };
+
+  const saveVideo = async (): Promise<void> => {
+    const made = await makeVideo();
+    if (!made) return;
+    const r = await window.krypt.card.saveFile(`krypt-${viewFor(subject, unit).fileTag}`, made.bytes, made.ext);
+    if (r.ok) toast.success(`${r.message}${made.withAudio ? ' — with sound' : ''}`);
+    else if (!/cancelled/i.test(r.message)) toast.error(r.message);
+  };
+
+  const copyVideo = async (): Promise<void> => {
+    const made = await makeVideo();
+    if (!made) return;
+    const r = await window.krypt.card.copyFile(`krypt-${viewFor(subject, unit).fileTag}`, made.bytes, made.ext);
+    if (r.ok) toast.success(r.message);
+    else toast.error(r.message);
   };
 
   const copy = async (): Promise<void> => {
@@ -529,13 +678,25 @@ export function PnlCard({
           </button>
           <button
             onClick={() => fileRef.current?.click()}
-            title="Use your own image behind the card"
-            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
+            title="Use your own image or video behind the card"
+            disabled={loadingVideo}
+            className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white disabled:opacity-50"
           >
-            <ImageIcon className="h-3.5 w-3.5" />
-            {bg ? 'Change' : 'Upload'}
+            {loadingVideo ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ImageIcon className="h-3.5 w-3.5" />}
+            {bg || bgVideo ? 'Change' : 'Upload'}
           </button>
-          {bg && (
+          {/* Only offered when there is something to hear. */}
+          {bgVideo?.hasAudio && (
+            <button
+              onClick={() => setPreviewSound((v) => !v)}
+              title={previewSound ? 'Mute the preview (the saved video keeps its sound)' : 'Hear the background'}
+              className="inline-flex items-center gap-1 rounded-md border border-white/10 px-2 py-1 text-label font-semibold text-krypt-muted transition hover:text-white"
+            >
+              {previewSound ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+              {previewSound ? 'Sound' : 'Muted'}
+            </button>
+          )}
+          {(bg || bgVideo) && (
             <button
               onClick={clearBackground}
               title="Back to the plain card"
@@ -547,7 +708,7 @@ export function PnlCard({
           <input
             ref={fileRef}
             type="file"
-            accept="image/*"
+            accept="image/*,video/mp4,video/webm,video/quicktime,video/x-matroska"
             className="hidden"
             onChange={(e) => {
               pickBackground(e.target.files?.[0]);
@@ -568,7 +729,7 @@ export function PnlCard({
             e.preventDefault();
             pickBackground(e.dataTransfer.files?.[0]);
           }}
-          title="Drop an image here to use it as the background"
+          title="Drop an image or a video here to use it as the background"
           className="w-full rounded-lg border border-white/10"
         />
 
@@ -577,8 +738,14 @@ export function PnlCard({
             onClose={() => setGifOpen(false)}
             onPick={(dataUrl) => {
               // Same path as an uploaded image: bytes in hand, nothing linked.
+              // One background at a time, so a video in place is dropped —
+              // otherwise both would be set and the draw would keep the video
+              // while the UI showed a GIF had been chosen.
+              useVideo(null);
               setBg(dataUrl);
               try {
+                localStorage.removeItem(BG_VIDEO_KEY);
+                void window.krypt.card.clearBackground();
                 if (dataUrl.length <= BG_MAX_BYTES) localStorage.setItem(BG_KEY, dataUrl);
                 else localStorage.removeItem(BG_KEY);
               } catch {
@@ -589,7 +756,30 @@ export function PnlCard({
         )}
 
         <div className="flex flex-wrap items-center gap-2 mt-3">
-          {bgAnim && (
+          {/* A video background exports as a VIDEO, never a GIF: a GIF has no
+              sound and re-encoding a clip into 150 palettised frames is a
+              worse artefact than the thing the user already handed us. */}
+          {bgVideo && (
+            <>
+              <button
+                onClick={() => void copyVideo()}
+                disabled={recording || !bestMime()}
+                className="inline-flex items-center gap-2 rounded-lg border border-krypt-purple/50 bg-krypt-gradient px-4 py-2 text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-60"
+              >
+                {recording ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                {recording ? 'Recording…' : 'Copy video'}
+              </button>
+              <button
+                onClick={() => void saveVideo()}
+                disabled={recording || !bestMime()}
+                className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
+              >
+                {recording ? <Loader2 className="h-4 w-4 animate-spin" /> : <Video className="h-4 w-4" />}
+                Save video
+              </button>
+            </>
+          )}
+          {bgAnim && !bgVideo && (
             <>
               {/* With a moving background the GIF is the primary artefact;
                   the still copy stays available but says what it is. */}
@@ -610,7 +800,7 @@ export function PnlCard({
                 Save GIF
               </button>
               <button
-                onClick={saveVideo}
+                onClick={() => void saveVideo()}
                 disabled={recording}
                 className="inline-flex items-center gap-2 rounded-lg border border-white/12 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50"
               >
@@ -623,13 +813,13 @@ export function PnlCard({
             onClick={() => void copy()}
             className={cls(
               'inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition',
-              bgAnim
+              bgAnim || bgVideo
                 ? 'border border-white/10 bg-white/5 text-white/90 hover:bg-white/10'
                 : 'border border-krypt-purple/50 bg-krypt-gradient hover:brightness-110',
             )}
           >
             <Copy className="h-4 w-4" />
-            {bgAnim ? 'Copy still' : 'Copy image'}
+            {bgAnim || bgVideo ? 'Copy still' : 'Copy image'}
           </button>
           <button
             onClick={download}
@@ -639,8 +829,20 @@ export function PnlCard({
             Save PNG
           </button>
           <p className="text-label text-krypt-muted/60 ml-2 leading-relaxed">
-            Rendered locally. The card is marked <span className="text-white/80">unrealized</span> because the
-            position is still open.
+            Rendered locally.{' '}
+            {subject.kind === 'position' && (
+              <>
+                The card is marked <span className="text-white/80">unrealized</span> because the position is still
+                open.{' '}
+              </>
+            )}
+            {bgVideo && (
+              <>
+                The video saves as {bestMime()?.ext === 'mp4' ? 'an MP4' : 'a WebM'}
+                {bgVideo.hasAudio ? ' with the clip’s sound' : ' (the clip has no sound)'}, up to{' '}
+                {Math.round(exportMsFor(bgVideo) / 1000)}s.
+              </>
+            )}
           </p>
         </div>
       </div>

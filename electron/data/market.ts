@@ -2218,7 +2218,82 @@ function quickSeries(mint: string, interval: CandleInterval, limit: number): Can
       pending: true,
     };
   }
-  return null;
+  // Nothing cached, empty tape (a runner opened for the first time): draw the
+  // one price the app can read with no provider — so the chart is a live
+  // price, not a blank spinner, even when pump.fun has the host parked.
+  return seedSeries(mint, interval, solUsd, supply);
+}
+
+/** Bucket width in seconds for a single seed bar — covers every interval,
+ *  unlike the tape's own map, which stops at 15m. */
+const SEED_BUCKET_SEC: Record<CandleInterval, number> = {
+  '1s': 1,
+  '5s': 5,
+  '15s': 15,
+  '1m': 60,
+  '5m': 300,
+  '15m': 900,
+  '1h': 3_600,
+  '4h': 14_400,
+};
+
+/**
+ * A chart that is never a blank spinner.
+ *
+ * When nothing is cached and the tape is empty — a runner opened for the
+ * first time — the history providers can all be parked at once (pump.fun
+ * throttles an IP hard while a script is posting callouts, and it drags
+ * Birdeye/GeckoTerminal down with it), so the real chart is 20–120 s away.
+ * Rather than sit on "Loading history…", draw the ONE price the app already
+ * holds without asking any of them: the curve price from this session's last
+ * chain read (our own RPC, which pump cannot rate-limit) or the last cached
+ * summary's price. It is a single honest bar at the current price, marked
+ * pending; the live tape fills in behind it as trades arrive, and the
+ * provider walk replaces it when it lands. No price at all → still nothing;
+ * a bar is never invented from a price the app does not have.
+ */
+function seedSeries(
+  mint: string,
+  interval: CandleInterval,
+  solUsd: number | null,
+  supply: number | null,
+): CandleSeries | null {
+  const chain = pumpChain.readIfCached(mint);
+  const sum = cached<TokenSummary>(`market:summary:${mint}`);
+  const priceSol = chain?.priceSol ?? sum?.priceSol ?? null;
+
+  let unit: 'usd' | 'sol';
+  let price: number;
+  let source: DataSource;
+  if (priceSol !== null && solUsd !== null && solUsd > 0) {
+    unit = 'usd';
+    price = priceSol * solUsd;
+    source = chain?.priceSol != null ? 'onchain' : sum?.sources.price ?? 'onchain';
+  } else if (priceSol !== null) {
+    unit = 'sol';
+    price = priceSol;
+    source = chain?.priceSol != null ? 'onchain' : sum?.sources.price ?? 'onchain';
+  } else if (sum?.priceUsd != null && sum.priceUsd > 0) {
+    unit = 'usd';
+    price = sum.priceUsd;
+    source = sum.sources.price ?? 'onchain';
+  } else {
+    return null;
+  }
+  if (!(price > 0)) return null;
+
+  const bucket = SEED_BUCKET_SEC[interval];
+  const time = Math.floor(Date.now() / 1000 / bucket) * bucket;
+  return {
+    mint,
+    interval,
+    unit,
+    candles: [{ time, open: price, high: price, low: price, close: price, volume: 0 }],
+    source,
+    supplyForMcap: supply,
+    note: 'Live price — building the chart from the feed…',
+    pending: true,
+  };
 }
 
 /** How long the fast path waits on a full load when it holds nothing at

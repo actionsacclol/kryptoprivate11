@@ -28,25 +28,41 @@ import * as evmRail from './evm/rail';
 import * as evmScanner from './evm/scanner';
 import * as walletScout from './engine/walletScout';
 import * as scoutScan from './engine/scoutScan';
+import * as walletHistory from './engine/walletHistory';
+import * as mcpServer from './system/mcpServer';
+import * as diagnostics from './system/diagnostics';
+import * as httpLayer from './data/http';
+import * as mcpTools from './engine/mcpTools';
+import { MCP_ACCESS_LEVELS, MCP_PORT_MAX, MCP_PORT_MIN, mcpAddCommand, mcpJsonConfig, type McpAccess } from '@shared/mcp';
 import { sourceFor as scoutSourceFor } from './engine/scoutScanSources';
 import * as evmWallet from './evm/evmWallet';
-import { SCOUT_CHAINS, SCOUT_SCAN_HOURS, SCOUT_SORTS, emptyRow, rankScout, summarise, type ScoutChain, type ScoutScanHours, type ScoutSort, type ScoutWindow } from '@shared/walletScout';
+import { SCOUT_CHAINS, SCOUT_SCAN_HOURS, SCOUT_SORTS, applyScoutFilters, emptyRow, rankScout, scoutFiltersAllOn, summarise, type ScoutChain, type ScoutScanHours, type ScoutSort, type ScoutWindow } from '@shared/walletScout';
 import * as evmDiscover from './evm/discover';
+import * as evmMarket from './evm/market';
 import * as merkl from './data/providers/merkl';
 import * as callouts from './data/providers/pumpCallouts';
+import { REPLY_BUDGET, THESIS_BUDGET } from '@shared/calloutAuto';
+import { nameListProblem } from '@shared/pumpStats';
+
+/** Most accounts one bulk call may touch. A loop in main is still a loop. */
+const MAX_BULK = 40;
+import { looksLikeSolAddress } from '@shared/fees';
 import * as dexMeta from './data/providers/dexscreenerMeta';
 import { clearRpcRejection } from './evm/client';
 import { EVM_CHAINS, EVM_CHAIN_META, isEvmAddress, isEvmChain, type EvmChainKind, type ChainKind } from '@shared/evm';
 import * as launcher from './engine/launcher';
 import type { LaunchDeps } from './engine/launcher';
 import { MAX_DESCRIPTION, MAX_NAME, MAX_SYMBOL, type LaunchDraft } from '@shared/launch';
-import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, uploadLaunchMetadata, type MetadataFields } from './system/launchMeta';
+import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, uploadLaunchMetadata, uploadProfileImage, type MetadataFields } from './system/launchMeta';
 import * as updateCheck from './system/updateCheck';
 import * as pumpFees from './engine/pumpFees';
+import * as pumpAuth from './system/pumpAuth';
+import * as pumpProfile from './system/pumpProfile';
+import * as pumpSocial from './system/pumpSocial';
 import * as swap from './engine/swap';
 import * as bridge from './engine/bridge';
 import type { BridgeDraft } from '@shared/bridge';
-import type { SwapDraft } from '@shared/swap';
+import { WSOL_MINT, type SwapDraft } from '@shared/swap';
 
 /** Chat replies are plain text; a named constant keeps the join sites tidy. */
 const NL = String.fromCharCode(10);
@@ -83,7 +99,7 @@ async function refreshBotCache(engine: SniperEngine): Promise<void> {
     /* keep the previous text rather than replacing it with an error */
   }
 }
-import { logger } from './system/logger';
+import { LOG_FILE, logger } from './system/logger';
 import * as crashGuard from './system/crashGuard';
 import { SniperEngine } from './engine/engine';
 import * as recorder from './engine/recorder';
@@ -114,12 +130,28 @@ import {
 import { TRIGGER_BASES, validateOrder, type NewOrderRequest, type TriggerBasis } from '@shared/orders';
 import { validateAlert, type NewAlertRequest } from '@shared/alerts';
 import { toCsv } from '@shared/portfolio';
-import { validateConfig, type CopyConfig, FOMO_WALLET, type FomoSource } from '@shared/copytrade';
+import { cleanBlocklist, validateConfig, type CopyConfig, FOMO_WALLET, type FomoSource } from '@shared/copytrade';
 import * as automation from './engine/automation';
-import { MAX_ACTIONS, MAX_CONDITIONS, type RuleAction, type RuleCondition, type RuleSet } from '@shared/automation';
+import { MAX_ACTIONS, MAX_CODE_BYTES, MAX_CONDITIONS, type RuleAction, type RuleCondition, type RuleSet } from '@shared/automation';
+import { coerceInputs, parseInputs } from '@shared/scriptInputs';
 
 let engine: SniperEngine | null = null;
 
+
+/**
+ * What a newly signed-in pump account needs before it is fully usable:
+ * `/users/register` (follows and likes are refused without it — see
+ * shared/pumpSocial.ts), then the bio line if the bio is empty. In that order,
+ * because a profile write to an unregistered account is the thing most likely
+ * to be refused.
+ */
+async function settlePumpAccount(walletId: string): Promise<void> {
+  await pumpSocial.ensureRegistered(walletId);
+  // Krypt's referral, inside pump's 24 h window (shared/pumpReferral.ts).
+  // Disclosed in the terms and where accounts are made; not a setting.
+  await pumpSocial.applyReferral(walletId);
+  await pumpProfile.stampEmptyBio(walletId);
+}
 export function getEngine(): SniperEngine {
   if (!engine) {
     engine = new SniperEngine(
@@ -380,6 +412,206 @@ export function registerIpc(): void {
     ok('ok', { logs: logger.logsDir(), crashes: crashGuard.crashDir() }),
   );
 
+  // ── The support bundle (2026-09-21) ───────────────────────────────────
+  //
+  // Until now the only way to report a bug was "open the logs folder and
+  // attach app.log", which asks a user to find a file, know which of two to
+  // send, and understand what is in it. This builds ONE file: the log, the
+  // settings with every key removed, what was switched on, the provider
+  // board, and a list of the profile's files by name and size.
+  //
+  // Nothing is sent anywhere. The app has no telemetry and this does not
+  // change that — it writes a file where the user chooses, and the user
+  // decides what to do with it. `diagnostics.ts` carries the full reasoning
+  // about what is and is not in it.
+
+  /** What is switched on right now, in the words a reader needs. */
+  const bundleState = (): string[] => {
+    const s = store.load();
+    const out: string[] = [];
+    try {
+      const st = getEngine().status();
+      out.push(`trading mode    ${s.execution.liveEnabled ? 'LIVE — real funds' : 'paper'}`);
+      out.push(`scanner         ${st.running ? 'running' : 'stopped'}, feed ${st.feed}`);
+      out.push(`runners flagged ${st.runnersFlagged} this session`);
+    } catch {
+      out.push('engine          could not be read');
+    }
+    try {
+      const copy = getEngine().copySnapshot();
+      const live = copy.configs.filter((c) => c.mode === 'live').length;
+      const armed = copy.configs.filter((c) => c.enabled).length;
+      out.push(`copy trading    ${copy.configs.length} config(s), ${live} live, ${armed} armed${copy.liveBlockedReason ? ` — live blocked: ${copy.liveBlockedReason}` : ''}`);
+    } catch {
+      /* a missing copy snapshot is not worth a line */
+    }
+    try {
+      const scripts = automation.all();
+      out.push(`scripts         ${scripts.length}, ${scripts.filter((x: { enabled: boolean }) => x.enabled).length} armed, ${scripts.filter((x: { mode: string }) => x.mode === 'live').length} live`);
+    } catch {
+      /* same */
+    }
+    try {
+      out.push(`advanced orders ${getEngine().ordersSnapshot().orders.filter((o) => o.state === 'armed').length} armed`);
+    } catch {
+      /* same */
+    }
+    out.push(`wallets         ${wallet.list().length} Solana, ${evmWallet.list('robinhood').length} Robinhood, ${evmWallet.list('bnb').length} BNB`);
+    out.push(`AI connection   ${s.mcp.enabled ? `on, ${s.mcp.access}${mcpServer.isRunning() ? `, listening on ${mcpServer.status().port}` : ', NOT listening'}` : 'off'}`);
+    out.push(`chat bots       telegram ${s.bots.telegram.enabled ? 'on' : 'off'}, discord ${s.bots.discord.enabled ? 'on' : 'off'}, trading ${s.bots.trading.enabled ? 'ON' : 'off'}`);
+    out.push(`market data     ${s.data.networkDataEnabled ? 'on' : 'OFF — charts and prices stop'}`);
+    out.push(`recorder        ${s.recorderEnabled ? 'on' : 'off'}`);
+    return out;
+  };
+
+  /** Every file in the profile, by name and size. Contents are never read. */
+  const bundleFiles = (problems: string[]): diagnostics.BundleFileInfo[] => {
+    const dir = app.getPath('userData');
+    const out: diagnostics.BundleFileInfo[] = [];
+    const walk = (rel: string): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(path.join(dir, rel), { withFileTypes: true });
+      } catch (err) {
+        problems.push(`${rel || 'the profile folder'} could not be listed (${(err as Error).message})`);
+        return;
+      }
+      for (const e of entries) {
+        const name = rel ? `${rel}/${e.name}` : e.name;
+        // Only the app's own state. Chromium's caches are noise and the
+        // wallet key files are never described, not even by size.
+        if (e.isDirectory()) {
+          if (rel === '' && (name === 'logs' || name === 'crashes' || name === 'diagnostics')) walk(name);
+          continue;
+        }
+        if (/wallet-key|secrets|\.enc$/i.test(e.name)) continue;
+        if (!/\.(json|jsonl|log|txt|bak)(\.\d+)?$/i.test(e.name)) continue;
+        try {
+          const st = fs.statSync(path.join(dir, name));
+          out.push({ name, bytes: st.size, modifiedAt: st.mtimeMs });
+        } catch {
+          out.push({ name, bytes: 0, modifiedAt: null });
+        }
+      }
+    };
+    walk('');
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  };
+
+  // `note` is what the user typed in "What went wrong?" — their words, capped,
+  // printed first in the file. Plain text; never a path, never a URL we act on.
+  const buildSupportBundle = (note = ''): { text: string; truncatedBytes: number } => {
+    const problems: string[] = [];
+    const logsDir = logger.logsDir();
+    const logs: Array<{ name: string; text: string }> = [];
+    if (!logsDir) problems.push('the log file is not attached this session, so no log lines are included');
+    else {
+      // Oldest first, so the file reads forwards.
+      for (const name of [`${LOG_FILE}.1`, LOG_FILE]) {
+        try {
+          logs.push({ name, text: fs.readFileSync(path.join(logsDir, name), 'utf8') });
+        } catch (err) {
+          // app.log.1 is simply absent on a fresh install; only say so when
+          // the CURRENT log is the one missing.
+          if (name === LOG_FILE) problems.push(`${name} could not be read (${(err as Error).message})`);
+        }
+      }
+    }
+    const crashDir = crashGuard.crashDir();
+    let crashes: string[] = [];
+    try {
+      crashes = crashDir ? fs.readdirSync(crashDir).filter((f) => f.endsWith('.log')) : [];
+    } catch (err) {
+      problems.push(`the crash folder could not be listed (${(err as Error).message})`);
+    }
+    let providers: Array<{ id: string; host: string; enabled: boolean; usable: boolean; calls: number; errors: number; cooldownMs: number; lastError: string | null }> = [];
+    try {
+      providers = market.providerStatuses().map((p) => ({
+        id: p.id,
+        host: p.host,
+        enabled: p.enabled,
+        usable: p.usable,
+        calls: p.calls,
+        errors: p.errors,
+        cooldownMs: p.cooldownMs,
+        lastError: p.lastError,
+      }));
+    } catch (err) {
+      problems.push(`the provider board could not be read (${(err as Error).message})`);
+    }
+    return diagnostics.buildBundle({
+      now: Date.now(),
+      app: {
+        name: PRODUCT_NAME,
+        version: app.getVersion(),
+        electron: process.versions.electron,
+        node: process.versions.node,
+        chrome: process.versions.chrome,
+        platform: process.platform,
+        arch: process.arch,
+        packaged: app.isPackaged,
+        locale: app.getLocale(),
+      },
+      uptimeMs: Math.round(process.uptime() * 1000),
+      settings: store.load(),
+      state: bundleState(),
+      providers,
+      files: bundleFiles(problems),
+      crashes,
+      logs,
+      problems,
+      note: note.slice(0, diagnostics.NOTE_MAX_CHARS),
+    });
+  };
+  const noteOf = (raw: unknown): string => (typeof raw === 'string' ? raw.slice(0, diagnostics.NOTE_MAX_CHARS) : '');
+
+  /** A preview, so the panel can say how big the file is before writing it. */
+  ipcMain.handle('logs:preview', () => {
+    try {
+      const b = buildSupportBundle();
+      return ok('ok', { bytes: Buffer.byteLength(b.text, 'utf8'), truncatedBytes: b.truncatedBytes, head: b.text.slice(0, 1200) });
+    } catch (err) {
+      return fail(`The support bundle could not be built: ${(err as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('logs:export', async (_e, note: unknown) => {
+    let bundle: { text: string; truncatedBytes: number };
+    try {
+      bundle = buildSupportBundle(noteOf(note));
+    } catch (err) {
+      logger.error(`support bundle failed to build: ${(err as Error).message}`);
+      return fail(`The support bundle could not be built: ${(err as Error).message}`);
+    }
+    const win = BrowserWindow.getFocusedWindow();
+    const res = await dialog.showSaveDialog(win!, {
+      title: 'Save logs to send',
+      defaultPath: path.join(app.getPath('downloads'), diagnostics.bundleName(PRODUCT_NAME, Date.now())),
+      filters: [{ name: 'Text', extensions: ['txt'] }],
+    });
+    if (res.canceled || !res.filePath) return fail('Save cancelled');
+    try {
+      fs.writeFileSync(res.filePath, bundle.text, 'utf8');
+      shell.showItemInFolder(res.filePath);
+      logger.info(`support bundle written to ${path.basename(res.filePath)} (${Math.round(Buffer.byteLength(bundle.text, 'utf8') / 1024)} KB)`);
+      return ok(`Saved ${path.basename(res.filePath)}`, { path: res.filePath, bytes: Buffer.byteLength(bundle.text, 'utf8'), truncatedBytes: bundle.truncatedBytes });
+    } catch (err) {
+      return fail(`Could not write the file: ${(err as Error).message}`);
+    }
+  });
+
+  /** The same bundle on the clipboard, for a user who would rather paste. */
+  ipcMain.handle('logs:copy', (_e, note: unknown) => {
+    try {
+      const b = buildSupportBundle(noteOf(note));
+      clipboard.writeText(b.text);
+      logger.info('support bundle copied to the clipboard');
+      return ok('Copied — paste it wherever you are asking for help', { bytes: Buffer.byteLength(b.text, 'utf8') });
+    } catch (err) {
+      return fail(`The support bundle could not be built: ${(err as Error).message}`);
+    }
+  });
+
   // ── settings ─────────────────────────────────────────────────────
   ipcMain.handle('settings:get', () => ok('ok', store.load()));
 
@@ -405,6 +637,19 @@ export function registerIpc(): void {
           logger.warn(`settings:update tried to set execution.liveEnabled=${asked} — ignored, the Paper/Live switch owns it`);
         }
       }
+      // WHAT CHANGED, not just what was refused (2026-09-21). Support's most
+      // common question is "what is different between the run that worked and
+      // the one that did not", and until now an accepted patch was silent.
+      // Keys only for anything that could carry a secret; values for the
+      // numbers and switches, which are the whole point of the line.
+      const changed = Object.entries(v.patch as Record<string, unknown>).map(([section, block]) => {
+        if (block === null || typeof block !== 'object') return `${section}=${String(block)}`;
+        const fields = Object.entries(block as Record<string, unknown>)
+          .filter(([, val]) => typeof val !== 'object' || val === null)
+          .map(([k, val]) => (/key|token|secret|url|webhook/i.test(k) ? `${k}=<changed>` : `${k}=${String(val).slice(0, 40)}`));
+        return fields.length ? `${section}{${fields.join(', ')}}` : section;
+      });
+      if (changed.length) logger.info(`settings changed: ${changed.join(' · ')}`);
       const next = store.update(v.patch);
       recorder.setEnabled(next.recorderEnabled);
       recorder.setMode(next.recordFirehose ? 'firehose' : 'launch');
@@ -545,9 +790,14 @@ export function registerIpc(): void {
 
   ipcMain.handle('wallet:list', () => ok('ok', wallet.list()));
 
+  // Wallet lifecycle. `select`, `remove`, `setHome` and the withdrawals were
+  // already logged; generate, import and rename were not, so "where did my
+  // wallet go" had a gap exactly where it mattered (2026-09-21). No key, no
+  // secret — the label and the public key, which is public.
   ipcMain.handle('wallet:generate', (_e, label: unknown) => {
     const r = wallet.generate(typeof label === 'string' ? label : '');
     if (r.ok) { syncLiveMode(); refreshScoutOwnership(); }
+    logger.info(r.ok ? `wallet:generate — a new wallet was created (${wallet.list().length} now), active is ${wallet.publicKey()}` : `wallet:generate failed — ${r.message}`);
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
@@ -555,6 +805,13 @@ export function registerIpc(): void {
     if (typeof secret !== 'string') return fail('Invalid key');
     const r = wallet.importSecret(secret, typeof label === 'string' ? label : '');
     if (r.ok) { syncLiveMode(); refreshScoutOwnership(); }
+    // A sign-in-only pump.fun account with this address moves onto the wallet.
+    if (r.ok && r.publicKey) {
+      const held = wallet.list().find((w) => w.publicKey === r.publicKey);
+      if (held) pumpAuth.claimWebSession(r.publicKey, held.id);
+    }
+    // Never the secret, and never its length — only that one arrived.
+    logger.info(r.ok ? `wallet:import — a wallet was imported (${wallet.list().length} now), active is ${wallet.publicKey()}` : `wallet:import failed — ${r.message}`);
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
@@ -586,6 +843,7 @@ export function registerIpc(): void {
     if (typeof id !== 'string' || !id) return fail('Invalid wallet id');
     if (typeof label !== 'string') return fail('Invalid label');
     const r = wallet.rename(id, label);
+    if (r.ok) logger.info(`wallet:rename — ${id.slice(0, 8)}… is now "${label.slice(0, 40)}"`);
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
@@ -710,9 +968,16 @@ export function registerIpc(): void {
     // different one to active, and staying armed across that change is the
     // same hazard `wallet:select` refuses outright.
     getEngine().disarm('no_wallet');
+    // The wallet being removed, resolved BEFORE removal so its pump.fun
+    // session can be cleared too — otherwise an encrypted session for a
+    // wallet that no longer exists is left orphaned in the store.
+    const targetId = typeof id === 'string' && id ? id : wallet.info().id;
     const r = wallet.remove(typeof id === 'string' && id ? id : undefined);
-    if (r.ok) logger.warn(`wallet:remove — active wallet is now ${wallet.publicKey() ?? 'none'}`);
-    if (r.ok) syncLiveMode(); // a promoted wallet re-arms; no wallet stays disarmed
+    if (r.ok) {
+      if (targetId) pumpAuth.signOut(targetId);
+      logger.warn(`wallet:remove — active wallet is now ${wallet.publicKey() ?? 'none'}`);
+      syncLiveMode(); // a promoted wallet re-arms; no wallet stays disarmed
+    }
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
@@ -1067,6 +1332,281 @@ export function registerIpc(): void {
     return ok(asked ? 'Stopping after the current step' : 'No scan running', scoutScan.status(chain as ScoutChain));
   });
 
+  // Read one wallet's recent swaps from the chain into the Scout's record —
+  // for an address the feed never saw (2026-09-21). Solana only: the EVM
+  // Scouts read whole-chain curve logs by block range, and a per-wallet read
+  // there is that scan narrowed, which the scan already covers. Spends
+  // nothing; one job per wallet; the status is polled, never pushed. Reads
+  // on the same endpoint trades use, through rpcClient's budgets.
+  ipcMain.handle('scout:readWallet', (_e, chain: unknown, address: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    if (chain !== 'solana') return fail('Reading a wallet from the chain is Solana only — the Scan reads whole EVM chains by block range');
+    if (!isAddress(address)) return fail('Enter a valid Solana wallet address');
+    const r = walletHistory.start(address, bridgeDeps().httpUrl);
+    return r.ok ? ok(r.message, walletHistory.status(address)) : fail(r.message);
+  });
+
+  ipcMain.handle('scout:readWalletStatus', (_e, chain: unknown, address: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    if (!isAddress(address)) return fail('Invalid wallet');
+    return ok('ok', walletHistory.status(address));
+  });
+
+  ipcMain.handle('scout:readWalletCancel', (_e, chain: unknown, address: unknown) => {
+    if (typeof chain !== 'string' || !SCOUT_CHAINS.includes(chain as ScoutChain)) return fail('Unknown chain');
+    if (!isAddress(address)) return fail('Invalid wallet');
+    const asked = walletHistory.cancel(address);
+    return ok(asked ? 'Stopping after the current batch' : 'No read running', walletHistory.status(address));
+  });
+
+  // The Scout's two long jobs log where everything else does (2026-09-21).
+  // They ran for minutes and spent hundreds of calls in total silence until a
+  // logging audit found it.
+  const toLog = (level: 'info' | 'warn' | 'error', line: string): void =>
+    level === 'error' ? logger.error(line) : level === 'warn' ? logger.warn(line) : logger.info(line);
+  scoutScan.attachLog(toLog);
+  walletHistory.attachLog(toLog);
+  // And the provider layer under everything (2026-09-21): a park is the most
+  // common cause of "no price" and "the chart is empty", and it used to be
+  // visible only in a live panel — a user who closed the app took the
+  // evidence with them.
+  httpLayer.attachLog(toLog);
+
+  // ── The AI connection (MCP, 2026-09-21) ───────────────────────────────
+  //
+  // An agent reaches the app through the same doors its own buttons use.
+  // `mcpTools` owns the meaning of each tool and the budget; `mcpServer`
+  // owns the wire and the loopback / token / Origin guards. This block is
+  // only the wiring between them and the engine — deliberately thin, because
+  // a shortcut taken here would be a shortcut around the pipeline that
+  // charges the fee and enforces the signer's outflow policy.
+  //
+  // Nothing below reaches a setting, a key, a withdrawal or a transaction.
+  mcpTools.attach({
+    access: () => store.load().mcp.access,
+    budget: () => store.load().mcp.budget,
+    // Solana when a call names no chain. The app's top-bar chain is renderer
+    // state and main does not hold it, so there is nothing truer to read —
+    // and a default guessed from settings would be wrong the moment the user
+    // switched tabs. The tool schemas say Solana is the default.
+    defaultChain: () => 'solana',
+    walletInfo: async () => {
+      const info = wallet.info();
+      const s = store.load();
+      return {
+        address: info.publicKey,
+        balanceSol: info.balanceSol,
+        balanceCheckedAt: info.balanceCheckedAt,
+        // The APP's own Paper/Live switch, which is a different thing from
+        // this connection's mode and is worth an agent knowing: a paper
+        // connection on a live app still cannot touch the real book.
+        appMode: s.execution.liveEnabled ? 'live' : 'paper',
+        liveBlockedReason: getEngine().copySnapshot().liveBlockedReason,
+      };
+    },
+    positions: async (paper, chain) => {
+      const p = ((await getEngine().portfolioSummary()) ?? {}) as {
+        positions?: Array<{ chain?: string }>;
+        paper?: { positions?: Array<{ chain?: string }>; realizedPnlSol?: number };
+      };
+      const onChain = <T extends { chain?: string }>(rows: T[]): T[] => rows.filter((r) => (r.chain ?? 'solana') === chain);
+      return paper
+        ? { chain, positions: onChain(p.paper?.positions ?? []), realizedPnlSol: p.paper?.realizedPnlSol ?? 0 }
+        : { chain, positions: onChain(p.positions ?? []) };
+    },
+    token: async (mint, chain) => (chain === 'solana' ? await market.summary(mint) : await evmMarket.summary(chain, mint)),
+    discover: async (list, limit, chain) => (chain === 'solana' ? await market.discover(list, limit) : (await evmDiscover.discover(chain, list, limit)).rows),
+    chart: async (mint, interval, limit) => await market.candlesFast(mint, interval, limit),
+    tokenLinks: async (mint) => getEngine().linksFor(mint, 'solana'),
+    runnerAlerts: async (chain, limit) =>
+      chain === 'solana'
+        ? getEngine().runnersSnapshot().slice(0, limit)
+        : evmScanner.flagged(chain).slice(0, limit),
+    // Null rather than an empty list when pump is not answering: "no callouts"
+    // and "we could not ask" are different answers and the tool says which.
+    callouts: async (limit) => {
+      const rows = await callouts.calloutFeed();
+      return rows ? rows.slice(0, limit) : null;
+    },
+    scoutBoard: async (chain, window, limit, onlyWorthALook) => {
+      const rows = rankScout(
+        walletScout
+          .wallets(chain as ScoutChain)
+          .map((x) => summarise(x, window))
+          .filter((r) => r.buys + r.sells > 0),
+        'copyScore',
+      );
+      const shown = onlyWorthALook ? applyScoutFilters(rows, scoutFiltersAllOn()) : rows;
+      return { onRecord: rows.length, filtered: onlyWorthALook, rows: shown.slice(0, limit) };
+    },
+    scoutWallet: async (address, chain) => {
+      const rec = walletScout.wallets(chain as ScoutChain).find((x) => x.address === address.toLowerCase()) ?? null;
+      return rec ? { wallet: rec, saved: walletScout.isSaved(chain as ScoutChain, address.toLowerCase()) } : null;
+    },
+    copyConfigs: async () => {
+      // The configs and their records, never the whole snapshot: `recent` is
+      // thousands of rows and the agent asked for the setup.
+      const snap = getEngine().copySnapshot();
+      return { configs: snap.configs, stats: snap.stats, liveExecutable: snap.liveExecutable, liveBlockedReason: snap.liveBlockedReason };
+    },
+    orders: async () => getEngine().ordersSnapshot(),
+    trades: async (limit) => getEngine().tradeHistory().slice(0, limit),
+    // `hostBuy` / `hostSell` are the same pair user scripts reach, so the EVM
+    // routing, the paper book and the live rails are one implementation with
+    // two callers rather than two that drift.
+    buy: async (mint, amount, paper, chain) => {
+      const r = await getEngine().hostBuy(mint, amount, paper ? 'paper' : 'live', chain);
+      return { ok: r.ok || r.pending === true, message: r.message };
+    },
+    sell: async (mint, percent, paper, chain) => {
+      const r = await getEngine().hostSell(mint, percent, paper ? 'paper' : 'live', chain);
+      return { ok: r.ok || r.pending === true, message: r.message };
+    },
+    placeOrder: async (req, paper) => {
+      if (paper) return { ok: false, message: 'Advanced orders are live-only. This connection is in paper mode, so nothing was armed.' };
+      const clean: NewOrderRequest = {
+        mint: req.mint,
+        symbol: '',
+        kind: req.kind as NewOrderRequest['kind'],
+        triggerValue: req.triggerValue,
+        triggerBasis: req.triggerBasis as NewOrderRequest['triggerBasis'],
+        amount: req.amount,
+        expiresAt: null,
+      };
+      const v = validateOrder(clean);
+      if (!v.ok) return { ok: false, message: v.message };
+      const r = await getEngine().createOrder(clean);
+      return { ok: r.ok, message: r.message };
+    },
+    cancelOrders: async (mint) => {
+      const open = getEngine().ordersSnapshot().orders.filter((o) => o.mint === mint && o.state === 'armed');
+      let cancelled = 0;
+      for (const o of open) if (getEngine().cancelOrder(o.id).ok) cancelled += 1;
+      return { ok: true, message: cancelled ? `Cancelled ${cancelled} order(s).` : 'No armed orders on that token.', cancelled };
+    },
+    log: (level, line) => (level === 'error' ? logger.error(line) : level === 'warn' ? logger.warn(line) : logger.info(line)),
+  });
+
+  const mcpHost: mcpServer.McpServerHost = {
+    access: () => store.load().mcp.access,
+    token: () => store.load().mcp.token,
+    // EVERY tool call is logged, not just the ones that throw. An agent that
+    // can spend money needs an audit trail, and "what did the AI actually do"
+    // was unanswerable from the log until a logging audit asked (2026-09-21).
+    // Arguments are included because they are the intent — they carry no
+    // secret, by the design in shared/mcp.ts.
+    callTool: async (name, args) => {
+      const started = Date.now();
+      const r = await mcpTools.call(name, args);
+      const keys = Object.keys(args);
+      const shown = keys.length ? ` ${keys.map((k) => `${k}=${String((args as Record<string, unknown>)[k]).slice(0, 44)}`).join(' ')}` : '';
+      toLog(r.ok ? 'info' : 'warn', `AI called ${name}${shown} → ${r.ok ? 'ok' : 'REFUSED'} in ${Date.now() - started}ms${r.ok ? '' : `: ${r.text.slice(0, 160)}`}`);
+      return r;
+    },
+    log: (level, line) => (level === 'error' ? logger.error(line) : level === 'warn' ? logger.warn(line) : logger.info(line)),
+  };
+
+  /**
+   * Bring the listener in line with the settings.
+   *
+   * Called at boot and after every change, so switching the connection off
+   * closes the port rather than leaving it open until a restart. A connection
+   * with no token never listens: an empty bearer would authenticate nothing,
+   * but it would still be an open port.
+   */
+  const syncMcp = async (): Promise<{ ok: boolean; message: string }> => {
+    const m = store.load().mcp;
+    if (!m.enabled || m.access === 'off' || !m.token) {
+      mcpServer.stop();
+      return { ok: true, message: 'The AI connection is off.' };
+    }
+    return await mcpServer.start(mcpHost, m.port);
+  };
+  void syncMcp();
+
+  const mcpPayload = (): Record<string, unknown> => {
+    const m = store.load().mcp;
+    return {
+      settings: m,
+      server: mcpServer.status(),
+      command: m.token ? mcpAddCommand(m.port, m.token) : '',
+      json: m.token ? mcpJsonConfig(m.port, m.token) : '',
+    };
+  };
+
+  ipcMain.handle('mcp:status', () => ok('ok', mcpPayload()));
+
+  ipcMain.handle('mcp:setEnabled', async (_e, on: unknown) => {
+    const want = on === true;
+    const m = store.load().mcp;
+    // Switching it on mints a token when there is none, so the panel never
+    // shows a listener with nothing to authenticate against.
+    store.update({ mcp: { ...m, enabled: want, token: want && !m.token ? mcpServer.newToken() : m.token } });
+    const r = await syncMcp();
+    if (!r.ok) {
+      store.update({ mcp: { ...store.load().mcp, enabled: false } });
+      return fail(r.message);
+    }
+    logger.info(`MCP: the AI connection was switched ${want ? 'on' : 'off'}`);
+    return ok(want ? r.message : 'The AI connection is off.', mcpPayload());
+  });
+
+  /**
+   * The access level, on its own channel.
+   *
+   * Not a settings patch, for the reason `execution.liveEnabled` is not one:
+   * this is the bit that decides whether an agent may spend real funds, and
+   * it should be a deliberate act with a line in the log behind it rather
+   * than a field riding along inside some other panel's save.
+   */
+  ipcMain.handle('mcp:setAccess', async (_e, level: unknown) => {
+    if (typeof level !== 'string' || !MCP_ACCESS_LEVELS.includes(level as McpAccess)) return fail('Unknown access level');
+    store.update({ mcp: { ...store.load().mcp, access: level as McpAccess } });
+    // A level change is a new arrangement: the rolling caps start over rather
+    // than letting a switch to live inherit an hour of paper "spending".
+    mcpTools.resetBudget();
+    await syncMcp();
+    if (level === 'live') logger.warn('MCP: the AI connection was set to LIVE — an agent can now spend real funds within its budget');
+    else logger.info(`MCP: the AI connection was set to ${level}`);
+    const said = level === 'off' ? 'off' : level === 'read' ? 'read only' : level === 'paper' ? 'paper trading' : 'LIVE trading';
+    return ok(`The AI connection is now ${said}.`, mcpPayload());
+  });
+
+  ipcMain.handle('mcp:newToken', async () => {
+    store.update({ mcp: { ...store.load().mcp, token: mcpServer.newToken() } });
+    // Every client holding the old one is refused from here; the listener is
+    // restarted so nothing keeps a connection open under it.
+    mcpServer.stop();
+    await syncMcp();
+    logger.info('MCP: a new token was generated — reconnect any AI client with the new command');
+    return ok('A new token was generated. Reconnect your AI client with the new command.', mcpPayload());
+  });
+
+  ipcMain.handle('mcp:setPort', async (_e, port: unknown) => {
+    const p = Number(port);
+    if (!Number.isInteger(p) || p < MCP_PORT_MIN || p > MCP_PORT_MAX) return fail(`Port must be a whole number between ${MCP_PORT_MIN} and ${MCP_PORT_MAX}`);
+    store.update({ mcp: { ...store.load().mcp, port: p } });
+    const r = await syncMcp();
+    return r.ok ? ok(r.message, mcpPayload()) : fail(r.message);
+  });
+
+  ipcMain.handle('mcp:setBudget', async (_e, raw: unknown) => {
+    if (typeof raw !== 'object' || raw === null) return fail('Invalid budget');
+    const b = raw as Record<string, unknown>;
+    const m = store.load().mcp;
+    const next = {
+      maxBuySol: Number(b.maxBuySol),
+      hourlyCapSol: Number(b.hourlyCapSol),
+      maxTradesPerMinute: Math.round(Number(b.maxTradesPerMinute)),
+    };
+    if (!(next.maxBuySol > 0) || next.maxBuySol > 25) return fail('Max per trade must be between 0 and 25');
+    if (!(next.hourlyCapSol > 0) || next.hourlyCapSol > 100) return fail('The hourly cap must be between 0 and 100');
+    if (next.maxBuySol > next.hourlyCapSol) return fail('Max per trade is above the hourly cap');
+    if (!Number.isInteger(next.maxTradesPerMinute) || next.maxTradesPerMinute < 1 || next.maxTradesPerMinute > 60) return fail('Trades per minute must be between 1 and 60');
+    store.update({ mcp: { ...m, budget: next } });
+    return ok('Saved.', mcpPayload());
+  });
+
   // ── Per-chain Observatory ────────────────────────────────────────────
   // One scanner per chain, isolated. `scan:*` never takes a "current chain":
   // the chain is always an argument, so a Robinhood number cannot be served
@@ -1196,6 +1736,65 @@ export function registerIpc(): void {
     }
   });
 
+  // ── pump.fun callout rewards (2026-09-23) ──────────────────────────
+  //
+  // Rewards arrive as USDC in each account's own wallet. These read what pump
+  // says it paid, accept its reward terms (a button, one account), and turn
+  // that USDC into SOL or send it to the wallet's CONFIRMED withdrawal
+  // address — never anywhere else (see signPolicy 'withdraw-token').
+  ipcMain.handle('calloutRewards:list', async () => {
+    const httpUrl = resolveRpc(store.load().rpc).httpUrl;
+    const { allRewards } = await import('./system/pumpRewards');
+    const { usdcHeld } = await import('./engine/tokenWithdraw');
+    const accounts = await allRewards();
+    const wallets: Array<{ walletId: string; address: string; label: string; usdcRaw: string | null; homeAddress: string | null }> = [];
+    for (const w of wallet.list()) {
+      const held = await usdcHeld(httpUrl, w.publicKey).catch(() => null);
+      wallets.push({ walletId: w.id, address: w.publicKey, label: w.label, usdcRaw: held === null ? null : held.toString(), homeAddress: w.homeAddress ?? null });
+    }
+    return ok('ok', { accounts, wallets });
+  });
+
+  ipcMain.handle('calloutRewards:acceptTerms', async (_e, walletId: unknown) => {
+    if (typeof walletId !== 'string' || !walletId) return fail('Pick an account');
+    const { acceptTerms } = await import('./system/pumpRewards');
+    const r = await acceptTerms(walletId);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+
+  /** All of one wallet's USDC → SOL, through the ordinary swap path. */
+  ipcMain.handle('calloutRewards:swapUsdc', async (_e, walletId: unknown) => {
+    if (typeof walletId !== 'string' || !wallet.publicKeyOf(walletId)) return fail('That is not one of your wallets');
+    const deps = swapDeps();
+    if (!deps.live) return fail('Switch to Live and arm to swap — nothing was sent');
+    const { usdcHeld, USDC_MINT } = await import('./engine/tokenWithdraw');
+    const held = await usdcHeld(deps.httpUrl, wallet.publicKeyOf(walletId)!);
+    if (held === null) return fail('Could not read that wallet’s USDC — nothing was sent');
+    if (held <= 0n) return fail('That wallet holds no USDC');
+    const r = await swap.execute(
+      { chain: 'solana', inputMint: USDC_MINT, outputMint: WSOL_MINT, amount: Number(held) / 1e6, slippagePct: 1, speed: 'normal' },
+      deps,
+      false,
+      walletId,
+    );
+    logger.info(`rewards: swap ${(Number(held) / 1e6).toFixed(2)} USDC → SOL in ${walletId}: ${r.message}`);
+    return r.ok ? ok(r.message, r) : fail(r.message);
+  });
+
+  /** USDC to this wallet's confirmed withdrawal address, and nowhere else. */
+  ipcMain.handle('calloutRewards:withdrawUsdc', async (_e, walletId: unknown, amountUsdc: unknown) => {
+    if (typeof walletId !== 'string' || !wallet.publicKeyOf(walletId)) return fail('That is not one of your wallets');
+    let amountRaw: bigint | 'max';
+    if (amountUsdc === 'max') amountRaw = 'max';
+    else if (typeof amountUsdc === 'number' && Number.isFinite(amountUsdc) && amountUsdc > 0 && amountUsdc < 1e9) amountRaw = BigInt(Math.floor(amountUsdc * 1e6));
+    else return fail('Amount must be a positive number of USDC, or max');
+    const { withdrawUsdc } = await import('./engine/tokenWithdraw');
+    const s = store.load();
+    const r = await withdrawUsdc(s.rpc.execHttpUrl ?? resolveRpc(s.rpc).httpUrl, { walletId, amountRaw });
+    logger.warn(`rewards: USDC withdrawal from ${walletId} to ${r.dest ?? '(no address)'}: ${r.ok ? `sent ${r.amountRaw} base units as ${r.signature}` : r.message}`);
+    return r.ok ? ok(r.message === 'confirmed' ? 'USDC sent to your withdrawal address.' : 'USDC sent — confirmation pending.', r) : fail(r.message);
+  });
+
   ipcMain.handle('swap:execute', async (_e, raw: unknown, simulateOnly: unknown) => {
     const draft = swapDraftOf(raw);
     if (!draft) return fail('That is not a swap');
@@ -1274,10 +1873,13 @@ export function registerIpc(): void {
   const pickedImages = new Map<string, string>();
 
   /** Pick an image off disk. The renderer never names a path; this does. */
-  ipcMain.handle('launch:pickImage', async () => {
+  ipcMain.handle('launch:pickImage', async (_e, purpose: unknown) => {
     const owner = BrowserWindow.getFocusedWindow();
     const res = await dialog.showOpenDialog(owner!, {
-      title: 'Choose your token image',
+      // One of two constant titles, picked by a flag. The renderer cannot
+      // supply the string — a caller-named dialog title is a small thing to
+      // hand a page that should not be writing UI chrome.
+      title: purpose === 'profile' ? 'Choose your pump.fun profile picture' : 'Choose your token image',
       properties: ['openFile'],
       filters: [{ name: 'Images', extensions: [...IMAGE_EXTENSIONS] }],
     });
@@ -1303,6 +1905,54 @@ export function registerIpc(): void {
   });
 
   /** Pin the image and its metadata. Creates nothing on any chain. */
+  /**
+   * How the coins you launched are doing.
+   *
+   * The mints come from the caller, because the record of what this install
+   * launched lives in the renderer — the chain is the truth and that list is
+   * the map to it. Everything here is READ: market cap, holders and price for
+   * each, plus the creator vault, which is per creator wallet rather than per
+   * coin (see pumpFees.ts).
+   *
+   * A number that could not be read comes back NULL, never 0. A creator being
+   * told they have no holders because an RPC hiccuped is the failure worth
+   * avoiding here.
+   */
+  ipcMain.handle('launch:stats', async (_e, mints: unknown) => {
+    const list = Array.isArray(mints)
+      ? [...new Set(mints.filter((m): m is string => typeof m === 'string' && m.length > 0))].slice(0, 40)
+      : [];
+    const s = store.load();
+    const key = s.launch.walletId ? wallet.publicKeyOf(s.launch.walletId) : null;
+    const fees = key ? await pumpFees.readCreatorFees(s.rpc.execHttpUrl ?? s.rpc.httpUrl, key) : null;
+    // `summaryMany` answers a Map keyed by mint. Walking the REQUESTED list
+    // rather than the map's own keys keeps the order the user sees and gives
+    // a row for a mint the providers could not answer for, with nulls in it
+    // — a coin missing from the table would read as one that does not exist.
+    const summaries = list.length ? await market.summaryMany(list, 4) : new Map();
+    const coins = list.map((mint) => {
+      const r = summaries.get(mint);
+      return {
+        mint,
+        name: r?.name || null,
+        symbol: r?.symbol || null,
+        priceUsd: r?.priceUsd ?? null,
+        marketCapUsd: r?.marketCapUsd ?? null,
+        liquidityUsd: r?.liquidityUsd ?? null,
+        holders: r?.holders ?? null,
+      };
+    });
+    return ok('ok', {
+      coins,
+      creatorWallet: key,
+      // Absent when no launch wallet is set — distinct from a vault holding
+      // nothing, which is a real zero.
+      feesLamports: fees && !fees.failure ? fees.balanceLamports : null,
+      claimableLamports: fees && !fees.failure ? fees.claimableLamports : null,
+      feesFailure: fees?.failure ?? null,
+    });
+  });
+
   ipcMain.handle('launch:upload', async (_e, handle: unknown, fields: unknown) => {
     const filePath = typeof handle === 'string' ? pickedImages.get(handle) : undefined;
     if (!filePath) return fail('No image chosen — pick one first');
@@ -1310,10 +1960,16 @@ export function registerIpc(): void {
     const f = fields as Partial<MetadataFields> | null;
     const str = (v: unknown, cap: number): string => (typeof v === 'string' ? v.slice(0, cap) : '');
     // The same caps the form enforces (shared/launch.ts), not looser ones.
+    // The watermark is applied HERE, not taken from the renderer, so every
+    // coin launched from this app carries it whatever the form sent. It is
+    // idempotent, so a description the form already stamped is not doubled.
+    // The form shows the stamped text, so this is a guarantee rather than a
+    // surprise (shared/launch.ts).
+    const { withWatermark } = await import('@shared/launch');
     const r = await uploadLaunchMetadata(filePath, {
       name: str(f?.name, MAX_NAME),
       symbol: str(f?.symbol, MAX_SYMBOL),
-      description: str(f?.description, MAX_DESCRIPTION),
+      description: withWatermark(str(f?.description, MAX_DESCRIPTION)).slice(0, MAX_DESCRIPTION),
       twitter: str(f?.twitter, 300),
       telegram: str(f?.telegram, 300),
       website: str(f?.website, 300),
@@ -1326,6 +1982,309 @@ export function registerIpc(): void {
    * it. The vault is per creator, so one read and one claim cover every coin
    * that wallet ever launched.
    */
+
+  // ── Multi-wallet trading (2026-09-22) ───────────────────────────────
+  //
+  // There is deliberately NO "split this buy across wallets" channel. It was
+  // built and then removed the same day: nothing called it, and a money-
+  // spending handler with no caller is a liability rather than a feature. A
+  // user who wants to trade from several wallets writes a script that names
+  // each one (bot.buy with an address) — one path instead of two.
+  //
+  // `fanoutBuy` and its gate stay in the engine, because the LAUNCHER uses
+  // them for its single-wallet dev buy, and because the gate is the right
+  // defence if a multi-wallet caller is ever added back.
+  //
+  // Recording the acknowledgement. Its WORDING version is stamped here in
+  // main from the shared constant rather than taken from the renderer — a
+  // caller that could name the version could claim consent to wording the
+  // user never saw.
+  ipcMain.handle('multiwallet:accept', async (_e, accept: unknown) => {
+    const { MULTI_WALLET_CONSENT_VERSION } = await import('@shared/multiWallet');
+    const on = accept === true;
+    const next = store.update({
+      multiWallet: on ? { acceptedAt: Date.now(), version: MULTI_WALLET_CONSENT_VERSION } : { acceptedAt: 0, version: '' },
+    });
+    logger.info(`multi-wallet trading ${on ? 'accepted' : 'turned off'}`);
+    return ok(on ? 'Multi-wallet trading is on' : 'Multi-wallet trading is off', next);
+  });
+
+  // ── pump.fun sign-in (2026-09-22) ───────────────────────────────────
+  //
+  // The renderer names a wallet. It cannot supply a message, a timestamp, a
+  // host or a body — all of those are built in main (system/pumpAuth.ts), so
+  // there is no request shape reachable from here. The session token is never
+  // returned over IPC either: `status` carries who is signed in, not what
+  // proves it.
+  ipcMain.handle('pump:status', () => {
+    // Blank or stale usernames are re-read in the background; the page gets
+    // the names on its next status call (pumpAuth.refreshNamesSoon).
+    pumpAuth.refreshNamesSoon();
+    return ok('ok', pumpAuth.status());
+  });
+
+  // The in-app pump.fun web sign-in window was removed 2026-09-23: Google
+  // refuses OAuth in an embedded browser AND in a debug-port Chrome, so it
+  // never worked for the login most people use. Accounts created on pump.fun
+  // (email/social) come in through export-key → importAccount instead, which
+  // signs in via pump's API login — the piece pump says the 25th does not
+  // change. claimWebSession (used by importAccount) stays for a legacy web
+  // session on disk; adoptWebSession is now unreachable — see its note.
+
+  ipcMain.handle('pump:signIn', async (_e, walletId: unknown) => {
+    const id = typeof walletId === 'string' ? walletId : '';
+    if (!id) return fail('Pick a wallet to sign in with');
+    const r = await pumpAuth.signIn(id);
+    // Registered (follows and likes need it) and a bio-less account gets the
+    // "Using krypt.cc/bot" line; not awaited, the sign-in answer does not wait.
+    if (r.ok) void settlePumpAccount(id);
+    return r.ok ? ok(r.message, pumpAuth.status()) : fail(r.message);
+  });
+
+  // No wallet named = sign every account out. One named = just that one, so a
+  // user with three accounts can drop one without losing the others.
+  ipcMain.handle('pump:signOut', (_e, walletId: unknown) => {
+    const id = typeof walletId === 'string' && walletId ? walletId : undefined;
+    const r = pumpAuth.signOut(id);
+    pumpProfile.forgetLookup(id ? wallet.publicKeyOf(id) : null);
+    return ok(r.message, pumpAuth.status());
+  });
+
+  // Follow / unfollow a pump user, like / unlike a callout, as the named
+  // wallet's account. The target is checked against its shape in main
+  // (shared/pumpSocial.ts); nothing here takes a URL or a path.
+  ipcMain.handle('pump:social', async (_e, walletId: unknown, action: unknown, target: unknown) => {
+    const id = typeof walletId === 'string' ? walletId : '';
+    if (!id) return fail('Pick an account');
+    const { SOCIAL_ACTIONS } = await import('@shared/pumpSocial');
+    const act = SOCIAL_ACTIONS.find((a) => a === action);
+    if (!act) return fail('Unknown action');
+    const r = await pumpSocial.act(id, act, target);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+
+
+
+  // ── Accounts that already exist ─────────────────────────────────────
+  //
+  // Whether each named wallet's address already has a pump account, from
+  // pump's PUBLIC profile read. Wallet ids in, never addresses: this is a
+  // question about the user's own wallets, and main knows their addresses.
+  // One after another, because the route allows 30 a minute and a cache sits
+  // in front of it.
+  ipcMain.handle('pump:lookup', async (_e, walletIds: unknown) => {
+    const ids = Array.isArray(walletIds)
+      ? [...new Set(walletIds.filter((x): x is string => typeof x === 'string' && x.length > 0))].slice(0, MAX_BULK)
+      : [];
+    const out: Record<string, import('@shared/pumpProfile').PumpAccountLookup> = {};
+    for (const id of ids) {
+      const address = wallet.publicKeyOf(id);
+      if (address) out[id] = await pumpProfile.lookupAccount(address);
+    }
+    return ok('ok', out);
+  });
+
+  // Bring an existing pump.fun account in: import its key, then sign in.
+  //
+  // pump ties an account to the address, so signing with the key IS logging
+  // in to that account — username, followers and past callouts come with it.
+  // This is wallet:import followed by pump:signIn, done in main so the key is
+  // handled by exactly the same code as any other import (and never logged),
+  // and so a half-done run can say which half landed.
+  ipcMain.handle('pump:importAccount', async (_e, secret: unknown, label: unknown) => {
+    if (typeof secret !== 'string' || !secret.trim()) return fail('Paste the wallet’s private key');
+    const r = wallet.importSecret(secret, typeof label === 'string' ? label : '');
+    logger.info(r.ok ? `pump:importAccount — a wallet was imported (${wallet.list().length} now)` : `pump:importAccount — import failed: ${r.message}`);
+    if (!r.ok || !r.publicKey) return fail(r.message);
+    syncLiveMode();
+    refreshScoutOwnership();
+    const held = wallet.list().find((w) => w.publicKey === r.publicKey);
+    if (!held) return fail('The wallet was imported but could not be found again — sign it in from the list below');
+    const lookup = await pumpProfile.lookupAccount(r.publicKey);
+    // Signed in on pump.fun already (an email account whose key was exported
+    // and imported here): that session becomes this wallet's. A wallet
+    // signature would likely be refused for a linked address anyway.
+    if (pumpAuth.claimWebSession(r.publicKey, held.id)) {
+      return ok('Imported — the pump.fun account you signed in to is now a full account on this wallet', {
+        walletId: held.id, publicKey: r.publicKey, signedIn: true, lookup, status: pumpAuth.status(),
+      });
+    }
+    const signed = await pumpAuth.signIn(held.id);
+    if (signed.ok) void settlePumpAccount(held.id);
+    const result = { walletId: held.id, publicKey: r.publicKey, signedIn: signed.ok, lookup, status: pumpAuth.status() };
+    return signed.ok
+      ? ok(lookup.kind === 'account' ? 'Imported and signed in to the existing account' : 'Imported and signed in', result)
+      : ok(`The wallet was imported, but pump.fun sign-in failed: ${signed.message}`, result);
+  });
+
+  // ── Post one callout, by hand ───────────────────────────────────────
+  //
+  // The proof that the whole chain works: sign-in, the eligibility preflight,
+  // the create call, the watermark. It posts a REAL, PUBLIC callout under the
+  // named wallet's pump account, so it happens only when a person presses the
+  // button — nothing schedules it and nothing retries it.
+  //
+  // The renderer names a wallet, a mint and the words. It cannot name a host,
+  // a route or a body: those are built in main, and the watermark is applied
+  // there too, so this path cannot post an unmarked call either.
+  ipcMain.handle('pump:callout', async (_e, walletId: unknown, mint: unknown, text: unknown) => {
+    const id = typeof walletId === 'string' ? walletId : '';
+    const m = typeof mint === 'string' ? mint.trim() : '';
+    const t = typeof text === 'string' ? text.trim().slice(0, THESIS_BUDGET) : '';
+    if (!id) return fail('Pick the wallet to post as');
+    if (!looksLikeSolAddress(m)) return fail('That does not look like a Solana token address');
+    if (!t) return fail('Write what the callout should say');
+    const { postNow } = await import('./engine/autoCallout');
+    const r = await postNow(id, m, t, { likeOwn: store.load().autoCallout.likeOwn });
+    logger.info(`manual callout on ${m.slice(0, 8)}…: ${r.ok ? 'posted' : `not posted — ${r.message}`}`);
+    // A real call from this page goes to the page's Discord webhook too.
+    const hook = store.load().autoCallout.discordWebhookUrl;
+    if (r.ok && hook) void getEngine().postCalloutToDiscord(hook, m, r.thesis ?? t, r.calloutId ?? null);
+    return r.ok ? ok(r.message, r) : fail(r.message);
+  });
+
+  // The Auto-callout page's "Send test" (2026-09-23). The URL is read from the
+  // store, never taken from the renderer, so this cannot aim a POST anywhere
+  // the user did not save. The coin is only for the sample's numbers and
+  // image: the one typed in the test box, else the newest launch the app has.
+  ipcMain.handle('pump:testCalloutWebhook', async (_e, mint: unknown) => {
+    const hook = store.load().autoCallout.discordWebhookUrl;
+    if (!hook) return fail('Save a Discord webhook first.');
+    const typed = typeof mint === 'string' ? mint.trim() : '';
+    const m = looksLikeSolAddress(typed) ? typed : getEngine().newestLaunchMint();
+    if (!m) return fail('No coin to show in the sample yet — type a token address in the test box below.');
+    const r = await getEngine().postCalloutToDiscord(hook, m, 'This is what your callouts will look like in Discord.', null, true);
+    return r.ok ? ok('Posted — check your Discord channel.') : fail(r.message);
+  });
+
+  // ── Doing it to several accounts at once ────────────────────────────
+  //
+  // Sign-in and profile writes are per account, so the bulk versions are
+  // loops in MAIN rather than the renderer firing N calls: main can space
+  // them, stop at the first thing that looks systemic, and report per wallet.
+  // A page that fired twenty requests itself would also be a page that could
+  // fire two hundred.
+  //
+  // Each result names its wallet. A run where six of eight worked has to be
+  // readable as exactly that — "6/8 done" tells nobody which two to retry.
+  ipcMain.handle('pump:signInMany', async (_e, walletIds: unknown) => {
+    const ids = Array.isArray(walletIds)
+      ? [...new Set(walletIds.filter((x): x is string => typeof x === 'string' && x.length > 0))].slice(0, MAX_BULK)
+      : [];
+    if (ids.length === 0) return fail('Pick at least one wallet');
+    const results: Array<{ walletId: string; ok: boolean; message: string }> = [];
+    for (const id of ids) {
+      const r = await pumpAuth.signIn(id);
+      // Awaited here, unlike the single sign-in: fired all at once, a group
+      // would burst pump's 30-per-120 s profile limit.
+      if (r.ok) await settlePumpAccount(id);
+      results.push({ walletId: id, ok: r.ok, message: r.message });
+    }
+    const done = results.filter((r) => r.ok).length;
+    logger.info(`pump: signed in ${done}/${ids.length} account(s)`);
+    return ok(`${done} of ${ids.length} signed in`, { results, status: pumpAuth.status() });
+  });
+
+  // Usernames from a list, one per account, in the order given. Refused
+  // wholesale if the list repeats a name — pump wants them unique, and half a
+  // rename leaves nobody able to say which half.
+  ipcMain.handle('pump:setUsernames', async (_e, pairs: unknown) => {
+    const list = Array.isArray(pairs) ? pairs.slice(0, MAX_BULK) : [];
+    const jobs: Array<{ walletId: string; username: string }> = [];
+    for (const p of list) {
+      const o = (typeof p === 'object' && p !== null ? p : {}) as Record<string, unknown>;
+      const walletId = typeof o.walletId === 'string' ? o.walletId : '';
+      const username = typeof o.username === 'string' ? o.username.trim() : '';
+      if (walletId && username) jobs.push({ walletId, username });
+    }
+    if (jobs.length === 0) return fail('Nothing to rename');
+    const why = nameListProblem(jobs.map((j) => j.username), jobs.length);
+    if (why) return fail(why);
+    const results: Array<{ walletId: string; ok: boolean; message: string }> = [];
+    for (const j of jobs) {
+      // The username ONLY. Passing bio/profileImage as '' here used to delete
+      // both on every account renamed (fixed 09-22).
+      const r = await pumpProfile.writeProfile(j.walletId, { username: j.username });
+      results.push({ walletId: j.walletId, ok: r.ok, message: r.message });
+    }
+    const done = results.filter((r) => r.ok).length;
+    logger.info(`pump: renamed ${done}/${jobs.length} account(s)`);
+    return ok(`${done} of ${jobs.length} renamed`, { results, status: pumpAuth.status() });
+  });
+
+  // What pump says about this account as a caller. Its route answered 401 to
+  // everyone before there was a session; it has still never been seen
+  // answering, so an unrecognised body says so rather than showing zeroes.
+  ipcMain.handle('pump:callerStats', async (_e, walletId: unknown) => {
+    const id = typeof walletId === 'string' ? walletId : '';
+    if (!id) return fail('Pick a wallet');
+    const r = await pumpProfile.callerStats(id);
+    return 'error' in r ? fail(r.error) : ok('ok', r);
+  });
+
+  // Reply to the callout this wallet already made on a coin. A callout is one
+  // per coin per account, so once it exists this is the only way to add to it
+  // — and a thread that grows beats an edit that rewrites what people read.
+  // The callout's id comes from pump's own preflight, never from here.
+  ipcMain.handle('pump:calloutReply', async (_e, walletId: unknown, mint: unknown, text: unknown) => {
+    const id = typeof walletId === 'string' ? walletId : '';
+    const m = typeof mint === 'string' ? mint.trim() : '';
+    const t = typeof text === 'string' ? text.trim().slice(0, REPLY_BUDGET) : '';
+    if (!id) return fail('Pick the wallet to reply as');
+    if (!looksLikeSolAddress(m)) return fail('That does not look like a Solana token address');
+    if (!t) return fail('Write what the reply should say');
+    const { replyNow } = await import('./engine/autoCallout');
+    const r = await replyNow(id, m, t);
+    logger.info(`callout reply on ${m.slice(0, 8)}…: ${r.ok ? 'posted' : `not posted — ${r.message}`}`);
+    return r.ok ? ok(r.message, r) : fail(r.message);
+  });
+
+  // ── The pump.fun profile: username, bio, picture ────────────────────
+  //
+  // `POST /users`, one field per request, exactly as their own client sends
+  // it (see shared/pumpProfile.ts). Signing in creates the account; this is
+  // what gives it a name and a face.
+  //
+  // The renderer names a wallet and the three text fields. It cannot name a
+  // host, a route or a token, and the picture it sends must already be an
+  // https link — one this app pinned, through the handler below.
+  ipcMain.handle('pump:profile', async (_e, walletId: unknown) => {
+    const id = typeof walletId === 'string' ? walletId : '';
+    if (!id) return fail('Pick a wallet');
+    const r = await pumpProfile.readProfileForEditor(id);
+    // Null is "could not read, and never seen", which is not the same as an
+    // empty profile — the form must not offer to clear fields it never saw.
+    // A cached answer says how old it is (cachedAt).
+    return r ? ok(r.cachedAt ? 'cached' : 'ok', { ...r.profile, cachedAt: r.cachedAt }) : fail('Could not read that account’s profile from pump.fun');
+  });
+
+  ipcMain.handle('pump:setProfile', async (_e, walletId: unknown, draft: unknown) => {
+    const id = typeof walletId === 'string' ? walletId : '';
+    if (!id) return fail('Pick a wallet');
+    const d = (draft && typeof draft === 'object' ? draft : {}) as Record<string, unknown>;
+    // A missing field stays MISSING (undefined = keep what pump holds). Turning
+    // it into '' would read as a deliberate delete.
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+    // Rebuilt field by field. Every field of PumpProfileDraft is named here;
+    // one forgotten is one silently never written.
+    const r = await pumpProfile.writeProfile(id, {
+      username: str(d.username),
+      bio: str(d.bio),
+      profileImage: str(d.profileImage),
+    });
+    return r.ok ? ok(r.message, { ...r, status: pumpAuth.status() }) : fail(r.message);
+  });
+
+  // Pin a picked image and hand back the gateway URL, so `profileImage` has
+  // something to point at. The renderer passes the HANDLE from pickImage, not
+  // a path — it has never seen one.
+  ipcMain.handle('pump:pinImage', async (_e, handle: unknown) => {
+    const file = typeof handle === 'string' ? pickedImages.get(handle) : undefined;
+    if (!file) return fail('Pick an image first.');
+    const r = await uploadProfileImage(file);
+    return 'error' in r ? fail(r.error) : ok('pinned', r);
+  });
+
   ipcMain.handle('launch:fees', async () => {
     const s = store.load();
     const id = s.launch.walletId;
@@ -1373,6 +2332,14 @@ export function registerIpc(): void {
     try {
       const r = await launcher.launch(draft, launchDeps(), false);
       if (r.ok) logger.warn(`launch: created ${r.token ?? '?'} on ${draft.chain}`);
+      // Auto-callout after a Solana launch whose dev buy actually landed
+      // (pump callouts are Solana only, and a call needs the account to hold
+      // the coin). Gated + delayed inside the engine; fire-and-forget.
+      if (r.ok && r.token && draft.chain === 'solana' && !r.buyFailed) {
+        const { launchWalletId } = await import('@shared/launch');
+        const wid = launchWalletId(store.load().launch, 'solana');
+        if (wid) getEngine().calloutAfterLaunch(wid, r.token, draft.devBuy);
+      }
       // A failure still carries the outcome: a hash on a timed-out receipt
       // is the one thing the user needs, and `fail()` would throw it away.
       return r.ok ? ok(r.message, r) : { ok: false, message: r.message, data: r };
@@ -1758,46 +2725,14 @@ export function registerIpc(): void {
     });
   });
 
-  // ── wallet groups (fan-out) ──────────────────────────────────────
-  ipcMain.handle('wallet:groups', () => ok('ok', wallet.groups()));
-  ipcMain.handle('wallet:createGroup', (_e, name: unknown) => {
-    const r = wallet.createGroup(typeof name === 'string' ? name : '');
-    return r.ok ? ok(r.message, wallet.groups()) : fail(r.message);
-  });
-  ipcMain.handle('wallet:renameGroup', (_e, id: unknown, name: unknown) => {
-    if (typeof id !== 'string') return fail('Bad group id');
-    const r = wallet.renameGroup(id, typeof name === 'string' ? name : '');
-    return r.ok ? ok(r.message, wallet.groups()) : fail(r.message);
-  });
-  ipcMain.handle('wallet:deleteGroup', (_e, id: unknown) => {
-    if (typeof id !== 'string') return fail('Bad group id');
-    const r = wallet.deleteGroup(id);
-    return r.ok ? ok(r.message, wallet.groups()) : fail(r.message);
-  });
-  ipcMain.handle('wallet:setGroupMembers', (_e, id: unknown, walletIds: unknown) => {
-    if (typeof id !== 'string') return fail('Bad group id');
-    if (!Array.isArray(walletIds) || walletIds.some((w) => typeof w !== 'string')) return fail('Bad member list');
-    const r = wallet.setGroupMembers(id, walletIds as string[]);
-    return r.ok ? ok(r.message, wallet.groups()) : fail(r.message);
-  });
-
   // ── Wallet Lab ─────────────────────────────────────────────────
-  ipcMain.handle('lab:generateMany', (_e, count: unknown, prefix: unknown, groupId: unknown) => {
+  ipcMain.handle('lab:generateMany', (_e, count: unknown, prefix: unknown) => {
     const n = Number(count);
-    if (!Number.isInteger(n) || n < 1 || n > 20) return fail('Count must be 1–20');
-    if (groupId !== undefined && groupId !== null && groupId !== '' && typeof groupId !== 'string') return fail('Invalid group');
-    const gid = typeof groupId === 'string' && groupId ? groupId : null;
-    if (gid && !wallet.groups().some((g) => g.id === gid)) return fail('No such group');
+    if (!Number.isInteger(n) || n < 1 || n > 15) return fail('Count must be 1–15');
+    // The store stops at ten wallets in all, the main one included, and
+    // says how many it made.
     const r = wallet.generateMany(n, typeof prefix === 'string' ? prefix : '');
     if (r.created > 0) syncLiveMode();
-    if (gid && r.ids.length) {
-      // New wallets join the chosen group straight away — the Group Wallets
-      // flow is "make a group, then fill it".
-      const g = wallet.groups().find((x) => x.id === gid);
-      const members = [...(g?.members.map((m) => m.id) ?? []), ...r.ids];
-      const gr = wallet.setGroupMembers(gid, members);
-      if (!gr.ok) return fail(`${r.message}, but adding them to the group failed: ${gr.message}`);
-    }
     return r.ok ? ok(r.message, wallet.list()) : fail(r.message);
   });
   /** Known keys only, on top of the stored value, on top of the defaults —
@@ -2393,25 +3328,39 @@ export function registerIpc(): void {
   // puts the file itself on the clipboard (Windows and macOS carry file
   // references; Linux falls back to a save). Bytes are validated, the name
   // is ours, and nothing here reads a path from the renderer.
-  const CARD_MAX_BYTES = 25 * 1024 * 1024;
-  const cardBytes = (raw: unknown): Buffer | null => {
-    if (raw instanceof Uint8Array) return raw.byteLength > 0 && raw.byteLength <= CARD_MAX_BYTES ? Buffer.from(raw) : null;
-    if (raw instanceof ArrayBuffer) return raw.byteLength > 0 && raw.byteLength <= CARD_MAX_BYTES ? Buffer.from(raw) : null;
+  // Raised from 25 MB when video export landed (2026-09-21): a 30 s card at
+  // 6 Mbit/s is about 22 MB and was sitting right against the old ceiling.
+  const CARD_MAX_BYTES = 120 * 1024 * 1024;
+  const cardBytes = (raw: unknown, limit = CARD_MAX_BYTES): Buffer | null => {
+    if (raw instanceof Uint8Array) return raw.byteLength > 0 && raw.byteLength <= limit ? Buffer.from(raw) : null;
+    if (raw instanceof ArrayBuffer) return raw.byteLength > 0 && raw.byteLength <= limit ? Buffer.from(raw) : null;
     return null;
   };
-  const cardName = (raw: unknown, ext: 'gif'): string => {
+  /** The kinds of file a card can leave as. The renderer asks for one; an
+   *  unknown value falls back to GIF rather than writing an extension the
+   *  bytes do not match. */
+  type CardKind = 'gif' | 'mp4' | 'webm';
+  const CARD_KINDS: Record<CardKind, { label: string; noun: string }> = {
+    gif: { label: 'GIF', noun: 'Animated GIF' },
+    mp4: { label: 'MP4 video', noun: 'Video' },
+    webm: { label: 'WebM video', noun: 'Video' },
+  };
+  const cardKind = (raw: unknown): CardKind =>
+    raw === 'mp4' || raw === 'webm' || raw === 'gif' ? raw : 'gif';
+  const cardName = (raw: unknown, ext: CardKind): string => {
     const base = typeof raw === 'string' ? raw.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) : '';
     return (base || 'krypt-card') + '.' + ext;
   };
 
-  ipcMain.handle('card:saveFile', async (_e, name: unknown, bytes: unknown) => {
+  ipcMain.handle('card:saveFile', async (_e, name: unknown, bytes: unknown, kind: unknown) => {
     const buf = cardBytes(bytes);
     if (!buf) return fail('Nothing to save');
+    const k = cardKind(kind);
     const win = BrowserWindow.getFocusedWindow();
     const res = await dialog.showSaveDialog(win!, {
-      title: 'Save animated card',
-      defaultPath: path.join(app.getPath('downloads'), cardName(name, 'gif')),
-      filters: [{ name: 'GIF', extensions: ['gif'] }],
+      title: k === 'gif' ? 'Save animated card' : 'Save card video',
+      defaultPath: path.join(app.getPath('downloads'), cardName(name, k)),
+      filters: [{ name: CARD_KINDS[k].label, extensions: [k] }],
     });
     if (res.canceled || !res.filePath) return fail('Save cancelled');
     try {
@@ -2423,14 +3372,16 @@ export function registerIpc(): void {
     }
   });
 
-  ipcMain.handle('card:copyFile', (_e, name: unknown, bytes: unknown) => {
+  ipcMain.handle('card:copyFile', (_e, name: unknown, bytes: unknown, kind: unknown) => {
     const buf = cardBytes(bytes);
     if (!buf) return fail('Nothing to copy');
+    const k = cardKind(kind);
+    const noun = CARD_KINDS[k].noun;
     const dir = path.join(app.getPath('temp'), 'krypto-bot-cards');
     let filePath: string;
     try {
       fs.mkdirSync(dir, { recursive: true });
-      filePath = path.join(dir, cardName(name, 'gif'));
+      filePath = path.join(dir, cardName(name, k));
       fs.writeFileSync(filePath, buf);
     } catch (err) {
       return fail('Could not write the file: ' + (err as Error).message);
@@ -2445,13 +3396,87 @@ export function registerIpc(): void {
       } else {
         // No portable file clipboard on Linux; hand the user the file instead.
         shell.showItemInFolder(filePath);
-        return ok('Animated GIF saved and shown in your file manager — this system has no file clipboard, so drag it in from there.', { path: filePath, clipboard: false });
+        return ok(`${noun} saved and shown in your file manager — this system has no file clipboard, so drag it in from there.`, { path: filePath, clipboard: false });
       }
-      return ok('Animated GIF copied as a file — paste it into Discord, Telegram, Slack or a folder. For X, use Save GIF and upload it.', { path: filePath, clipboard: true });
+      return ok(`${noun} copied as a file — paste it into Discord, Telegram, Slack or a folder. For X, save it and upload the file.`, { path: filePath, clipboard: true });
     } catch (err) {
       shell.showItemInFolder(filePath);
-      return fail('Copy failed (' + (err as Error).message + '); the GIF was saved and shown in your file manager instead.');
+      return fail(`Copy failed (${(err as Error).message}); the ${noun.toLowerCase()} was saved and shown in your file manager instead.`);
     }
+  });
+
+  // ── The remembered card background (2026-09-21) ───────────────────────
+  //
+  // An image background lives in localStorage as a data URL. A VIDEO cannot:
+  // tens of megabytes would blow the storage quota, and the old code's answer
+  // to an oversized background was to silently not remember it. A video the
+  // user picked is kept as one file in userData instead, replaced each time,
+  // and handed back as bytes the renderer turns into an object URL.
+  //
+  // Exactly one file, always our own path — nothing here takes a path from
+  // the renderer, and the only thing stored is what the user chose.
+  const BG_MAX_BYTES = 200 * 1024 * 1024;
+  const BG_TYPES: Record<string, string> = {
+    'video/mp4': 'mp4',
+    'video/webm': 'webm',
+    'video/quicktime': 'mov',
+    'video/x-matroska': 'mkv',
+  };
+  const bgDir = (): string => path.join(app.getPath('userData'), 'card-background');
+  const bgFiles = (): string[] => {
+    try {
+      return fs.readdirSync(bgDir()).filter((f) => f.startsWith('background.'));
+    } catch {
+      return []; // no directory yet is the same as no background
+    }
+  };
+  const clearBackgroundFiles = (): void => {
+    for (const f of bgFiles()) {
+      try {
+        fs.unlinkSync(path.join(bgDir(), f));
+      } catch {
+        /* a file we cannot remove is not worth failing the call over */
+      }
+    }
+  };
+
+  ipcMain.handle('card:saveBackground', (_e, bytes: unknown, type: unknown) => {
+    const mime = typeof type === 'string' ? type.split(';')[0].trim().toLowerCase() : '';
+    const ext = BG_TYPES[mime];
+    if (!ext) return fail('That is not a video format this can keep');
+    const buf = cardBytes(bytes, BG_MAX_BYTES);
+    if (!buf) return fail('That video is empty or larger than 200 MB');
+    try {
+      fs.mkdirSync(bgDir(), { recursive: true });
+      clearBackgroundFiles(); // one background, not a pile of old ones
+      fs.writeFileSync(path.join(bgDir(), `background.${ext}`), buf);
+      return ok('Background saved');
+    } catch (err) {
+      return fail(`Could not keep that background: ${(err as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('card:loadBackground', () => {
+    const [file] = bgFiles();
+    if (!file) return ok('No background', null);
+    const ext = file.slice(file.lastIndexOf('.') + 1);
+    const mime = Object.keys(BG_TYPES).find((m) => BG_TYPES[m] === ext);
+    if (!mime) return ok('No background', null);
+    try {
+      const buf = fs.readFileSync(path.join(bgDir(), file));
+      if (!buf.byteLength) return ok('No background', null);
+      return ok('Background', { bytes: new Uint8Array(buf), type: mime });
+    } catch {
+      // An unreadable file is NOT an empty one, but for a decoration the
+      // honest answer is "there isn't one right now" rather than a failure
+      // that blocks the card from opening.
+      return ok('No background', null);
+    }
+  });
+
+  ipcMain.handle('card:clearBackground', () => {
+    clearBackgroundFiles();
+    return ok('Background cleared');
   });
 
 
@@ -2596,6 +3621,9 @@ export function registerIpc(): void {
     const walletAddr = fomo ? FOMO_WALLET : String(r.wallet ?? '').trim();
     // A FOMO config follows a set of wallets, not an address (2026-09-20).
     if (!fomo && (copyChain === 'solana' ? !isAddress(walletAddr) : !isEvmAddress(walletAddr))) return fail(`Enter a valid wallet address for ${copyChain === 'solana' ? 'Solana' : EVM_CHAIN_META[copyChain].name}`);
+    // Absent or null is OFF for every optional filter; a value present is
+    // carried as a number and validated, never coerced to "off".
+    const optNum = (v: unknown): number | null => (v === undefined || v === null ? null : Number(v));
     const clean = {
       id: typeof r.id === 'string' && r.id ? r.id : undefined,
       // Both of these were checked above and then left out of the rebuild,
@@ -2617,6 +3645,19 @@ export function registerIpc(): void {
       maxMarketCapUsd: r.maxMarketCapUsd === null || r.maxMarketCapUsd === undefined ? null : Number(r.maxMarketCapUsd),
       minKryptScore: r.minKryptScore === null || r.minKryptScore === undefined ? null : Number(r.minKryptScore),
       onlyPumpfun: r.onlyPumpfun === true,
+      // The 2026-09-21 filters (docs/copy-trade-competitors-2026-09-21.md).
+      // Every one of them is READ here because a field this rebuild forgets
+      // is a field that never survives a save (ipccontract.test pins it).
+      minMarketCapUsd: optNum(r.minMarketCapUsd),
+      minLeaderSol: optNum(r.minLeaderSol),
+      maxLeaderSol: optNum(r.maxLeaderSol),
+      minTokenAgeSec: optNum(r.minTokenAgeSec),
+      maxTokenAgeSec: optNum(r.maxTokenAgeSec),
+      maxBuysPerToken: optNum(r.maxBuysPerToken),
+      blockedMints: cleanBlocklist(r.blockedMints),
+      blockedCreators: cleanBlocklist(r.blockedCreators),
+      minLeaderSellPct: optNum(r.minLeaderSellPct),
+      exitTrailingPct: optNum(r.exitTrailingPct),
       delayMs: Number(r.delayMs) || 0,
       maxSlippagePct: Number(r.maxSlippagePct),
       copySells: r.copySells !== false,
@@ -2752,6 +3793,15 @@ export function registerIpc(): void {
       enabled: false, // arming is its own act (automation:setEnabled)
       mode: r.mode === 'live' ? ('live' as const) : ('paper' as const),
       code: typeof r.code === 'string' ? r.code : '',
+      // The answers to whatever the code asks for. Coerced against the
+      // declaration in the code that is being SAVED, not the one on disk, so
+      // editing the block and the answers in one go cannot leave the two
+      // describing different things. A field the renderer forgets is a field
+      // the script silently reads as empty — see the rebuild note above.
+      inputs: coerceInputs(
+        parseInputs(typeof r.code === 'string' ? r.code : '').specs,
+        (typeof r.inputs === 'object' && r.inputs !== null ? r.inputs : {}) as Record<string, unknown>,
+      ),
       rules: {
         trigger: String(rulesIn.trigger ?? 'launch_update') as RuleSet['trigger'],
         conditions,
@@ -2784,6 +3834,30 @@ export function registerIpc(): void {
     if (typeof id !== 'string' || !id) return fail('Invalid id');
     const r = automation.setEnabled(id, enabled === true);
     return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
+  });
+
+  // Open a script file off disk as a NEW DRAFT. Main shows the dialog and
+  // reads the file; the renderer gets the text and a name, never a path, and
+  // nothing is saved or enabled until the person saves it the normal way
+  // (validateScript, paper by default). For scripts kept outside the app,
+  // like the ones in private/scripts that are deliberately not shipped.
+  ipcMain.handle('automation:openFile', async () => {
+    const owner = BrowserWindow.getFocusedWindow();
+    const res = await dialog.showOpenDialog(owner!, {
+      title: 'Open a script',
+      properties: ['openFile'],
+      filters: [{ name: 'Scripts', extensions: ['js', 'mjs', 'txt'] }],
+    });
+    const file = res.canceled ? null : res.filePaths[0] ?? null;
+    if (!file) return ok('cancelled', null);
+    try {
+      const bytes = await readFile(file);
+      if (bytes.length > MAX_CODE_BYTES) return fail(`That file is ${Math.ceil(bytes.length / 1024)} KB; a script can be ${MAX_CODE_BYTES / 1024} KB at most.`);
+      const name = path.basename(file).replace(/\.(m?js|txt)$/i, '').slice(0, 60) || 'Script';
+      return ok('opened', { name, code: bytes.toString('utf8').replace(/\r\n/g, '\n') });
+    } catch (err) {
+      return fail(`Could not read that file: ${safeErr(err)}`);
+    }
   });
 
   ipcMain.handle('automation:killSwitch', (_e, on: unknown) => {

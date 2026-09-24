@@ -79,10 +79,19 @@ export const LIABILITY_CAP_USD = 100;
 // fetched from ipfs.4everland.io and ipfs.filebase.io as well as ipfs.io;
 // cloudflare-ipfs.com, which the policy named, no longer exists. Two new
 // hosts receive requests, so it re-prompts.
-export const TERMS_VERSION = '2026-09-20.3';
+// 2026-09-21.1: the fee section promised a referral share was sent "in the
+// same transaction" with no exceptions. Three real ones exist in the code —
+// a recipient that cannot receive it, a transaction already at its size
+// limit, and an address that is unusable as a referral — so the terms now
+// name them. Nothing about what the user pays changed.
+// 2026-09-22.1: pump.fun accounts were never described — signing in, what
+// pump then publishes under the account (callouts, profile, follows, likes).
+// Same version, before release: every pump account is referred by Krypt's
+// pump.fun account (terms › Fees, the summary's fee point, privacy).
+export const TERMS_VERSION = '2026-09-22.1';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '20 September 2026';
+export const TERMS_EFFECTIVE_DATE = '22 September 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

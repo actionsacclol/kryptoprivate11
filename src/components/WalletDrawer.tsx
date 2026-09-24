@@ -13,12 +13,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Bookmark, BookmarkCheck, Copy, Loader2, X } from 'lucide-react';
+import { Bookmark, BookmarkCheck, Copy, Download, Loader2, X } from 'lucide-react';
 import { EVM_CHAIN_META } from '@shared/evm';
 import {
   MIN_TRIPS_FOR_RANK,
   SCOUT_WINDOW_DAYS,
   SCOUT_WINDOW_LABEL,
+  WALLET_READ_LIMIT,
   dayOf,
   scoreOfRow,
   summarise,
@@ -27,7 +28,18 @@ import {
   type ScoutTrip,
   type ScoutWallet,
   type ScoutWindow,
+  type WalletReadStatus,
 } from '@shared/walletScout';
+
+/** One line on a chain read, running or done. */
+function readLine(r: WalletReadStatus): string {
+  if (r.running) return `${r.read} of ${r.signatures} transactions read · ${r.swaps} swap${r.swaps === 1 ? '' : 's'} · ${r.fed} new`;
+  const parts = [`${r.swaps} swap${r.swaps === 1 ? '' : 's'} in ${r.signatures} transaction${r.signatures === 1 ? '' : 's'}`, `${r.fed} new`];
+  if (r.duplicates) parts.push(`${r.duplicates} already on record`);
+  if (r.unreadable) parts.push(`${r.unreadable} unreadable`);
+  if (r.cancelled) parts.push('stopped early');
+  return parts.join(' · ');
+}
 import { FOLLOWER_COST_PER_SIDE, FOLLOWER_LAG_MS, scoreTone, type WalletCheck, type WalletFlag } from '@shared/walletScore';
 import { cls, fmtAgo } from '../utils/format';
 
@@ -119,6 +131,10 @@ export function WalletDrawer({ chain, address, window: win, row, saved, followin
   const [wallet, setWallet] = useState<ScoutWallet | null>(null);
   const [loading, setLoading] = useState(false);
   const [symbols, setSymbols] = useState<Record<string, string>>({});
+  /** The chain read of this wallet (2026-09-21), null until asked. */
+  const [read, setRead] = useState<WalletReadStatus | null>(null);
+  /** Bumped when a read finishes, so the record is fetched again. */
+  const [refresh, setRefresh] = useState(0);
 
   useEffect(() => {
     if (!address) return;
@@ -133,7 +149,34 @@ export function WalletDrawer({ chain, address, window: win, row, saved, followin
     return () => {
       alive = false;
     };
+  }, [chain, address, refresh]);
+
+  // A read in progress moves every second; when it ends the record is
+  // fetched again. Opening a wallet shows its last read of this session.
+  useEffect(() => {
+    setRead(null);
+    if (!address || chain !== 'solana') return;
+    void window.krypt.scout.readWalletStatus(chain, address).then((r) => {
+      if (r.ok && r.data && r.data.startedAt !== null) setRead(r.data);
+    });
   }, [chain, address]);
+  const reading = read?.running === true;
+  useEffect(() => {
+    if (!reading || !address) return;
+    const id = setInterval(() => {
+      void window.krypt.scout.readWalletStatus(chain, address).then((r) => {
+        if (!r.ok || !r.data) return;
+        setRead(r.data);
+        if (!r.data.running) setRefresh((n) => n + 1);
+      });
+    }, 1_000);
+    return () => clearInterval(id);
+  }, [reading, chain, address]);
+  const startRead = async (): Promise<void> => {
+    if (!address) return;
+    const r = reading ? await window.krypt.scout.readWalletCancel(chain, address) : await window.krypt.scout.readWallet(chain, address);
+    if (r.ok && r.data) setRead(r.data);
+  };
 
   // Names for the recent trips' mints, from the market cache — a batch, and
   // only when the drawer is open. Solana only: the EVM rows are curve addresses.
@@ -249,6 +292,37 @@ export function WalletDrawer({ chain, address, window: win, row, saved, followin
                       First seen {fmtAgo(wallet.firstSeen)} ago · last {fmtAgo(wallet.lastSeen)} ago · {wallet.openCount} open position{wallet.openCount === 1 ? '' : 's'} ({amt(wallet.openCost)} {unit} in, unvalued)
                     </p>
                   )}
+                </section>
+              )}
+
+              {/* Read from the chain (2026-09-21). For an address the feed never
+                  saw: their last transactions decoded into the record. Fills in
+                  what they did; the copy figures still need other wallets'
+                  prints, which only the feed and the scan bring. */}
+              {chain === 'solana' && (
+                <section className="rounded-lg border border-white/10 bg-black/20 px-3 py-2" data-testid="wallet-read">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-label font-semibold text-white/90">Read from the chain</div>
+                      <p className="mt-0.5 text-nano leading-snug text-krypt-muted">
+                        Their last {WALLET_READ_LIMIT} transactions from the last week, decoded into this record. Spends nothing. Fills in what they did; the copy figures still need the feed or a scan to see the coins' other trades.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => void startRead()}
+                      className={cls(
+                        'flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-body transition',
+                        reading ? 'border-white/10 text-white/90 hover:border-rose-400/40' : 'border-krypt-purple/60 bg-krypt-purple/15 text-white hover:bg-krypt-purple/25',
+                      )}
+                      title={reading ? 'Stop after the current batch' : 'Read their recent transactions now'}
+                    >
+                      {reading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                      {reading ? 'Stop' : 'Read now'}
+                    </button>
+                  </div>
+                  {read && <p className="mt-1.5 font-mono text-nano text-krypt-muted">{readLine(read)}</p>}
+                  {read && !read.running && read.message && <p className="mt-1 text-nano text-amber-300">{read.message}</p>}
+                  {!loading && !wallet && !row && !read && <p className="mt-1.5 text-nano text-krypt-muted">Nothing on record for this wallet yet.</p>}
                 </section>
               )}
 

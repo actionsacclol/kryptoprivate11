@@ -147,6 +147,26 @@ export function parsePin(pin: string): { mint: string; chain: ChainKind } {
   return isEvmAddress(pin) ? { mint: pin.toLowerCase(), chain: 'robinhood' } : { mint: pin, chain: 'solana' };
 }
 
+/**
+ * The tokens a chain's wallet currently holds, as watchlist keys, or null
+ * when the balance could not be read. Used to unpin on a sell only once the
+ * coin is actually gone — a null (a failed read) leaves the pin alone.
+ */
+async function heldMints(chain: ChainKind): Promise<Set<string> | null> {
+  try {
+    if (chain === 'solana') {
+      const r = await window.krypt.wallet.holdings();
+      if (!r.ok || !r.data) return null;
+      return new Set(r.data.filter((h) => h.uiAmount > 0).map((h) => pinKey(h.mint)));
+    }
+    const r = await window.krypt.evm.holdings(chain);
+    if (!r.ok || !r.data) return null;
+    return new Set(r.data.filter((h) => h.amount > 0).map((h) => pinKey(h.token, h.chain)));
+  } catch {
+    return null;
+  }
+}
+
 const WATCH_KEY = 'krypt.terminal.watchlist';
 const FILTER_KEY = 'krypt.terminal.filters';
 const HIDE_FLAGGED_KEY = 'krypt.terminal.hideFlagged';
@@ -631,30 +651,56 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      // "Watch what you buy" — a Solana fill pins the bare mint, an EVM fill
-      // pins `chain:address` (fee-leg rows carry requested 0 and are not
-      // buys of anything).
+      // "Watch what you buy" — a buy pins the coin, a sell UNPINS it once the
+      // coin is no longer held. A Solana fill is the bare mint; an EVM fill is
+      // `chain:address` (fee-leg rows carry requested 0 and are not buys of
+      // anything). Both halves are gated on the same watchOnBuy switch, so a
+      // pin you added by hand is never removed by a sell.
       let key: string | null = null;
+      let side: 'buy' | 'sell' | null = null;
+      let fillChain: ChainKind = 'solana';
       if (ev.kind === 'fill') {
-        if (ev.side !== 'buy' || ev.state === 'failed') return;
+        if (ev.state === 'failed') return;
         key = ev.mint;
+        side = ev.side;
       } else if (ev.kind === 'evmFill') {
-        if (ev.fill.side !== 'buy' || ev.state === 'failed' || ev.fill.requested === 0) return;
+        if (ev.state === 'failed' || ev.fill.requested === 0) return;
         key = pinKey(ev.fill.token, ev.fill.chain);
+        side = ev.fill.side;
+        fillChain = ev.fill.chain;
       }
-      if (key === null) return;
+      if (key === null || side === null) return;
       const pin = key;
+      const writeWatch = (next: string[]): void => {
+        try {
+          localStorage.setItem(WATCH_KEY, JSON.stringify(next));
+        } catch {
+          /* non-fatal: the pin is a convenience, not a record */
+        }
+      };
       void window.krypt.settings.get().then((s) => {
         if (!s.ok || !s.data?.watchOnBuy) return;
-        setWatchlist((cur) => {
-          if (cur.includes(pin)) return cur;
-          const next = [pin, ...cur];
-          try {
-            localStorage.setItem(WATCH_KEY, JSON.stringify(next));
-          } catch {
-            /* non-fatal: the pin is a convenience, not a record */
-          }
-          return next;
+        if (side === 'buy') {
+          setWatchlist((cur) => {
+            if (cur.includes(pin)) return cur;
+            const next = [pin, ...cur];
+            writeWatch(next);
+            return next;
+          });
+          return;
+        }
+        // A sell. Only unpin once the wallet no longer holds the coin — a
+        // partial sell (a take-profit that trims, say) keeps it watched. If
+        // the balance cannot be read, the pin is left alone rather than
+        // guessed away.
+        void heldMints(fillChain).then((held) => {
+          if (held === null || held.has(pin)) return;
+          setWatchlist((cur) => {
+            if (!cur.includes(pin)) return cur;
+            const next = cur.filter((m) => m !== pin);
+            writeWatch(next);
+            return next;
+          });
         });
       });
     });

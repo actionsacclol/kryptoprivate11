@@ -1,4 +1,4 @@
-// Funder — SOL from the active wallet to your other wallets, by group or
+// Funder — SOL from the active wallet to your other wallets, all or
 // hand-picked, and back again (2026-09-03). Twelve transfers per transaction
 // on the way out (a bigger set goes in batches, each counted only once it
 // has confirmed); one transaction per wallet on the way back. The signer
@@ -80,6 +80,7 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
 
   // Where a collect lands. '' is the active wallet.
   const [toId, setToId] = useState('');
+  const to = useMemo(() => (toId ? wallets.find((w) => w.id === toId) ?? null : active), [toId, wallets, active]);
 
   const doCollect = async (): Promise<void> => {
     if (busy) return;
@@ -88,8 +89,8 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
     if (collectTooMany) return toast.error(collectTooMany);
     setBusy('collect');
     const yes = await modal.confirm({
-      title: 'Collect back to the active wallet',
-      message: `${ids.length} wallet${ids.length === 1 ? '' : 's'} will each send their spare SOL (everything above rent and fee headroom) to ${active?.label ?? 'the active wallet'}. Tokens they hold are not touched. One transaction per wallet.`,
+      title: `Collect back to ${to?.label ?? 'the active wallet'}`,
+      message: `${ids.length} wallet${ids.length === 1 ? '' : 's'} will each send their spare SOL (everything above rent and fee headroom) to ${to?.label ?? 'the active wallet'}. Tokens they hold are not touched. One transaction per wallet.`,
       confirmLabel: 'Collect',
       destructive: true,
     });
@@ -129,21 +130,9 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
 
       <Section
         title="Fund wallets"
-        description="Transfers from the active wallet to every selected wallet, twelve per transaction. Each target must end up rent-exempt (about 0.0009 SOL) or that transaction reverts; a batch counts only once it has confirmed on chain."
+        description="Transfers from the chosen wallet (the active one unless you pick another) to every selected wallet, twelve per transaction. Each target must end up rent-exempt (about 0.0009 SOL) or that transaction reverts; a batch counts only once it has confirmed on chain."
       >
         <Card>
-          <Row label="From" hint="the wallet the SOL leaves">
-            <select className={selectCls} value={fromId} onChange={(e) => setFromId(e.target.value)}>
-              <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>
-              {wallets
-                .filter((w) => !active || w.id !== active.id)
-                .map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.label} · {w.balanceSol === null ? '—' : fmtSol(w.balanceSol)} SOL
-                  </option>
-                ))}
-            </select>
-          </Row>
           <Row label="From" hint="the wallet the SOL leaves">
             <select className={selectCls} value={fromId} onChange={(e) => setFromId(e.target.value)}>
               <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>
@@ -169,7 +158,7 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
           </div>
           <div className={cls('mt-2 text-body', fundPlan.ok ? 'text-krypt-muted' : 'text-rose-300')}>
             {fundPlan.ok
-              ? `${fundPlan.message} = ${fmtSol(fundPlan.totalLamports / 1e9)} SOL total · source has ${active?.balanceSol != null ? `${active.balanceSol.toFixed(4)} SOL` : 'an unknown balance'}`
+              ? `${fundPlan.message} = ${fmtSol(fundPlan.totalLamports / 1e9)} SOL total · ${from?.label ?? 'source'} has ${from?.balanceSol != null ? `${from.balanceSol.toFixed(4)} SOL` : 'an unknown balance'}`
               : fundPlan.message}
             {armedReason && <span className="block text-arc-gold">{armedReason}</span>}
             {fundTooMany && <span className="block text-arc-gold">{fundTooMany}</span>}
@@ -180,21 +169,9 @@ export function FunderPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: 
 
       <Section
         title="Collect back"
-        description="Each selected wallet sends everything above rent and fee headroom back to the active wallet. Tokens are not touched — sell them first from the token page."
+        description="Each selected wallet sends everything above rent and fee headroom to the chosen wallet (the active one unless you pick another). Tokens are not touched — sell them first from the token page."
       >
         <Card>
-          <Row label="To" hint="the wallet everything above rent lands in">
-            <select className={selectCls} value={toId} onChange={(e) => setToId(e.target.value)}>
-              <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>
-              {wallets
-                .filter((w) => !active || w.id !== active.id)
-                .map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.label}
-                  </option>
-                ))}
-            </select>
-          </Row>
           <Row label="To" hint="the wallet everything above rent lands in">
             <select className={selectCls} value={toId} onChange={(e) => setToId(e.target.value)}>
               <option value="">{active ? `${active.label} (active)` : 'Active wallet'}</option>

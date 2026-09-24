@@ -1,28 +1,41 @@
-// Group Wallets — make a group, then fill it with wallets (2026-09-03).
-// Nothing here moves SOL; it creates keys and groupings. Back up every key
+// Wallet list — your Solana wallets, at most fifteen including the main one
+// (cap raised from 10 on 2026-09-23).
+//
+// This page used to be "Group Wallets": make a group, fill it, and have the
+// group follow your trades. Groups were removed on the owner's call —
+// "grouping feels like bundling" — and so, the same day, was having other
+// wallets automatically copy the main one. What is left is a flat list where
+// each wallet stands on its own: it can be made the main (active) wallet and
+// it can have its own pump.fun account. Trading from several wallets is now
+// only something a script does, one named wallet per call, behind the
+// acknowledgement on the Scripts page.
+//
+// Fifteen wallets is also fifteen pump.fun accounts at most. Existing
+// pump.fun accounts (including ones made on pump.fun with email/Google) are
+// brought in with Import, which signs into the account the key belongs to.
+//
+// Nothing here moves SOL. Funding is on the Funder page. Back up every key
 // from the Wallet page — nobody can recover one.
 
-import { useState } from 'react';
-import { Check, Copy, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
-import type { WalletGroupView } from '@shared/types';
+import { useEffect, useState } from 'react';
+import { Check, Copy, KeyRound, Loader2, LogIn, RefreshCw, Trash2, UserCheck } from 'lucide-react';
+import { sessionForWallet, type PumpAuthStatus } from '@shared/pumpAuth';
+import { REFERRAL_NOTICE } from '@shared/pumpReferral';
 import { Badge, Card, Empty, GhostButton, NumberInput, Page, PrimaryButton, Section } from '../../components/common';
-import { useModal } from '../../state/ModalProvider';
 import { useToast } from '../../state/ToastProvider';
-import { cls } from '../../utils/format';
-import { groupBalance, inputCls, selectCls, useLabData } from './shared';
+import { useModal } from '../../state/ModalProvider';
+import { cls, shortAddr } from '../../utils/format';
+import { inputCls, useLabData } from './shared';
 import { SwitchToPaper } from '../../components/SwitchToPaper';
+import { loadPumpStatus } from '../../state/pumpStatus';
+
+/** Fifteen in all, the main wallet included. Mirrors walletStore MAX_WALLETS. */
+const MAX_WALLETS = 15;
+
 
 /**
- * The wallet's full address, click to copy.
- *
- * It used to be truncated to six characters at each end, which is fine for
- * recognising a wallet and useless for the thing people actually do here: send
- * it money. A group wallet is empty until someone funds it from outside the
- * app, so the address has to be readable and copyable without a detour through
- * a details panel.
- *
- * `select-all` means a drag selects the whole thing rather than a word, for
- * anyone who prefers selecting to clicking.
+ * The wallet's full address, click to copy. A new wallet is empty until it is
+ * funded, so the address has to be readable and copyable without a detour.
  */
 function WalletAddress({ value }: { value: string }) {
   const toast = useToast();
@@ -39,86 +52,104 @@ function WalletAddress({ value }: { value: string }) {
           () => toast.error('Could not copy — select the address and copy it by hand'),
         );
       }}
-      title="Copy this wallet's address"
-      className="group/addr mt-0.5 flex w-full items-center gap-1.5 text-left"
+      title="Copy address"
+      className="group flex max-w-full items-center gap-1.5 text-left font-mono text-label text-krypt-muted hover:text-white"
     >
-      <span className="select-all truncate font-mono text-label text-krypt-muted group-hover/addr:text-white/70">{value}</span>
-      {copied ? (
-        <Check className="h-3 w-3 shrink-0 text-emerald-400" />
-      ) : (
-        <Copy className="h-3 w-3 shrink-0 text-krypt-muted/50 group-hover/addr:text-krypt-purple" />
-      )}
+      <span className="select-all break-all">{value}</span>
+      {copied ? <Check className="h-3 w-3 flex-shrink-0 text-emerald-300" /> : <Copy className="h-3 w-3 flex-shrink-0 opacity-60 group-hover:opacity-100" />}
     </button>
   );
 }
 
 export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint: string) => void }) {
   const toast = useToast();
-  const modal = useModal();
   const data = useLabData();
-  const { wallets, groups, armed, active, balanceOf, busy, setBusy, setWallets, applyGroups, reload, refreshBalances } = data;
+  const { wallets, armed, active, busy, setBusy, setWallets, reload, refreshBalances } = data;
 
-  // ── Groups ───────────────────────────────────────────────────────────
-  const [newGroup, setNewGroup] = useState('');
-  const [groupRenaming, setGroupRenaming] = useState<string | null>(null);
-  const [groupRenameText, setGroupRenameText] = useState('');
-
-  const createGroup = async (): Promise<void> => {
-    const n = newGroup.trim();
-    if (!n) return;
-    const before = new Set(groups.map((g) => g.id));
-    const r = await window.krypt.wallet.createGroup(n);
-    applyGroups(r);
-    if (r.ok && r.data) {
-      setNewGroup('');
-      // The new group is the id that was not there before — never a name
-      // match, which a duplicate or normalised name would get wrong.
-      const made = r.data.find((g) => !before.has(g.id)) ?? r.data[r.data.length - 1];
-      if (made) setTargetGroup(made.id);
+  // ── pump.fun accounts, one per wallet ────────────────────────────────
+  const [pump, setPump] = useState<PumpAuthStatus | null>(null);
+  const refreshPump = (): void => {
+    void window.krypt.pump.status().then((r) => r.ok && r.data && setPump(r.data));
+  };
+  // Re-reads while a name main is filling in is still missing.
+  useEffect(() => loadPumpStatus(setPump), []);
+  const pumpSignIn = async (walletId: string): Promise<void> => {
+    setBusy(`pump:${walletId}`);
+    try {
+      const r = await window.krypt.pump.signIn(walletId);
+      if (r.ok) toast.success(r.message);
+      else toast.error(r.message);
+      refreshPump();
+      // The display name arrives a moment after the token.
+      window.setTimeout(refreshPump, 1500);
+    } finally {
+      setBusy(null);
     }
   };
-  const deleteGroup = async (g: WalletGroupView): Promise<void> => {
-    const yes = await modal.confirm({
-      title: `Delete group “${g.name}”`,
-      message: 'The wallets stay; only the grouping is removed.',
-      confirmLabel: 'Delete',
-      destructive: true,
-    });
-    if (!yes) return;
-    applyGroups(await window.krypt.wallet.deleteGroup(g.id));
-  };
-  const toggleMember = async (g: WalletGroupView, walletId: string): Promise<void> => {
-    const ids = new Set(g.members.map((m) => m.id));
-    ids.has(walletId) ? ids.delete(walletId) : ids.add(walletId);
-    applyGroups(await window.krypt.wallet.setGroupMembers(g.id, [...ids]));
-  };
 
-  // ── Create wallets INTO a group ──────────────────────────────────────
-  const [targetGroup, setTargetGroup] = useState<string>('');
-  const [createCount, setCreateCount] = useState(3);
+  // ── Make wallets ─────────────────────────────────────────────────────
+  const room = Math.max(0, MAX_WALLETS - wallets.length);
+  const [createCount, setCreateCount] = useState(1);
   const [createPrefix, setCreatePrefix] = useState('');
-  const target = groups.find((g) => g.id === targetGroup) ?? null;
-
+  const n = Math.max(1, Math.min(room, Math.round(createCount)));
   const createMany = async (): Promise<void> => {
-    if (!target) return toast.error('Create a group first, then choose it');
-    const n = Math.max(1, Math.min(20, Math.round(createCount)));
+    if (room === 0) return void toast.error(`You have ${wallets.length} wallets — ${MAX_WALLETS} is the most, your main one included`);
     setBusy('create');
     try {
-      const r = await window.krypt.lab.generateMany(n, createPrefix.trim(), target.id);
+      const r = await window.krypt.lab.generateMany(n, createPrefix.trim());
       if (r.ok && r.data) {
         setWallets(r.data);
-        await reload();
-        // The store's own count: it stops early at the wallet limit.
-        toast.success(`${r.message} in “${target.name}” — back them up from the Wallet page`);
+        toast.success(`${r.message} — back them up from the Wallet page`);
       } else toast.error(r.message);
     } finally {
       setBusy(null);
     }
   };
 
-  // ── Wallet list ──────────────────────────────────────────────────────
+  // ── Import an existing wallet ────────────────────────────────────────
+  const [importKey, setImportKey] = useState('');
+  const [importLabel, setImportLabel] = useState('');
+  const importOne = async (): Promise<void> => {
+    if (room === 0) return void toast.error(`You are at ${MAX_WALLETS} wallets — remove one before importing another`);
+    setBusy('import');
+    try {
+      // pump.importAccount imports the key AND signs into its pump account if
+      // one exists (the same call as "Bring an existing account").
+      const r = await window.krypt.pump.importAccount(importKey.trim(), importLabel.trim());
+      if (r.ok && r.data) {
+        setImportKey('');
+        setImportLabel('');
+        toast.success(r.message);
+        await reload();
+        refreshPump();
+        window.setTimeout(refreshPump, 1500);
+      } else toast.error(r.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // ── Rows ─────────────────────────────────────────────────────────────
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
+  const modal = useModal();
+  // Remove a wallet's encrypted key from this machine. Not the main wallet
+  // (switch main first) and not while live is armed, the same guards as the
+  // Sol Wallet page. A pump.fun session on it goes too — see wallet.remove.
+  const removeWallet = async (w: (typeof wallets)[number]): Promise<void> => {
+    const yes = await modal.confirm({
+      title: `Remove ${w.label || 'this wallet'}?`,
+      message: `This deletes the encrypted key for ${w.publicKey.slice(0, 8)}… from this machine. If you have not backed it up, anything in it is gone for good.`,
+      confirmLabel: 'Remove wallet',
+      destructive: true,
+    });
+    if (!yes) return;
+    const r = await window.krypt.wallet.remove(w.id);
+    if (r.ok) {
+      toast.success('Wallet removed');
+      await reload();
+    } else toast.error(r.message);
+  };
   const makeActive = async (id: string): Promise<void> => {
     const r = await window.krypt.wallet.select(id);
     if (r.ok) {
@@ -131,129 +162,33 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
     setRenaming(null);
     if (!label) return;
     const r = await window.krypt.wallet.rename(id, label);
-    if (r.ok) {
-      const l = await window.krypt.wallet.list();
-      if (l.ok && l.data) setWallets(l.data);
-    } else toast.error(r.message);
+    if (r.ok) await reload();
+    else toast.error(r.message);
   };
-
   return (
     <Page
-      title="Group Wallets"
-      subtitle={`${groups.length} group${groups.length === 1 ? '' : 's'} · ${wallets.length} wallet${wallets.length === 1 ? '' : 's'} · active: ${active?.label ?? '—'}`}
+      title="Wallet list"
+      subtitle={`${wallets.length} of ${MAX_WALLETS} wallets · main: ${active?.label ?? '—'}`}
       actions={
         <GhostButton onClick={() => void refreshBalances()} disabled={busy === 'refresh'}>
           <RefreshCw className={cls('h-3.5 w-3.5', busy === 'refresh' && 'animate-spin')} /> Refresh balances
         </GhostButton>
       }
     >
-      {/* ── 1. Groups ── */}
+      {/* ── Make wallets ── */}
       <Section
-        title="1 · Groups"
-        description="A group is what the Funder acts on: it funds every member from your active wallet and collects back. Create one first."
+        title="Make wallets"
+        description={`At most ${MAX_WALLETS} wallets, your main one included — so at most ${MAX_WALLETS} pump.fun accounts too. New wallets are generated here and encrypted by your OS; the first one ever made becomes the main wallet.`}
       >
         <Card>
-          <div className="flex items-center gap-2">
-            <input
-              value={newGroup}
-              onChange={(e) => setNewGroup(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && void createGroup()}
-              placeholder="New group name"
-              maxLength={32}
-              className={cls(inputCls, 'w-56')}
-            />
-            <PrimaryButton onClick={() => void createGroup()} disabled={!newGroup.trim()} className="!py-1.5">
-              Create group
-            </PrimaryButton>
-          </div>
-          {groups.length === 0 ? (
-            <div className="mt-3 text-body text-krypt-muted">No groups yet — create one above, then fill it below.</div>
-          ) : (
-            <div className="mt-3 grid gap-3 lg:grid-cols-2">
-              {groups.map((g) => {
-                const bal = groupBalance(g, balanceOf);
-                const memberIds = new Set(g.members.map((m) => m.id));
-                return (
-                  <div key={g.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <div className="flex items-center gap-2">
-                      {groupRenaming === g.id ? (
-                        <input
-                          autoFocus
-                          value={groupRenameText}
-                          onChange={(e) => setGroupRenameText(e.target.value)}
-                          onBlur={() => {
-                            setGroupRenaming(null);
-                            const n = groupRenameText.trim();
-                            if (n && n !== g.name) void window.krypt.wallet.renameGroup(g.id, n).then(applyGroups);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                            if (e.key === 'Escape') setGroupRenaming(null);
-                          }}
-                          className={cls(inputCls, 'w-40 py-0.5')}
-                        />
-                      ) : (
-                        <button
-                          onClick={() => {
-                            setGroupRenaming(g.id);
-                            setGroupRenameText(g.name);
-                          }}
-                          title="Rename group"
-                          className="text-value font-semibold text-white hover:text-krypt-pink"
-                        >
-                          {g.name}
-                        </button>
-                      )}
-                      <span className="text-label font-mono text-krypt-muted">
-                        {g.members.length} wallet{g.members.length === 1 ? '' : 's'} · {bal === null ? '—' : `${bal.toFixed(4)} SOL`}
-                      </span>
-                      <div className="flex-1" />
-                      <GhostButton onClick={() => void deleteGroup(g)} destructive>
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </GhostButton>
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {wallets.length === 0 ? (
-                        <span className="text-body text-krypt-muted">No wallets yet.</span>
-                      ) : (
-                        wallets.map((w) => (
-                          <label
-                            key={w.id}
-                            className={cls(
-                              'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-body cursor-pointer transition',
-                              memberIds.has(w.id) ? 'border-krypt-purple/50 bg-krypt-purple/15 text-white' : 'border-white/10 text-krypt-muted hover:text-white',
-                            )}
-                          >
-                            <input type="checkbox" className="accent-krypt-purple" checked={memberIds.has(w.id)} onChange={() => void toggleMember(g, w.id)} />
-                            {w.label}
-                            {w.active && <span className="text-micro text-arc-gold">active</span>}
-                          </label>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+          {wallets.length > MAX_WALLETS && (
+            <p className="mb-2 text-body text-arc-gold">
+              You have {wallets.length} wallets from before the limit. Every one is kept; new ones can be made once you are under {MAX_WALLETS}.
+            </p>
           )}
-        </Card>
-      </Section>
-
-      {/* ── 2. Create wallets ── */}
-      <Section
-        title="2 · Create wallets"
-        description="New wallets are generated here, encrypted by your OS, and added to the chosen group straight away. The first wallet ever created becomes the active signer."
-      >
-        <Card>
           <div className="flex flex-wrap items-center gap-2">
-            <select value={targetGroup} onChange={(e) => setTargetGroup(e.target.value)} className={selectCls}>
-              <option value="">— choose a group —</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-            <span className="text-body text-krypt-muted">count</span>
-            <NumberInput value={createCount} min={1} max={20} onChange={setCreateCount} className="w-16" />
+            <span className="text-body text-krypt-muted">make</span>
+            <NumberInput value={Math.min(createCount, Math.max(1, room))} min={1} max={Math.max(1, room)} onChange={setCreateCount} className="w-16" />
             <input
               value={createPrefix}
               onChange={(e) => setCreatePrefix(e.target.value)}
@@ -261,78 +196,131 @@ export function CreatorPage({ onOpenToken: _onOpenToken }: { onOpenToken: (mint:
               maxLength={24}
               className={cls(inputCls, 'w-44')}
             />
-            <PrimaryButton onClick={() => void createMany()} disabled={!target || busy === 'create'} className="!py-1.5">
-              <KeyRound className="h-3.5 w-3.5" /> Create {Math.max(1, Math.min(20, Math.round(createCount)))} wallet{createCount === 1 ? '' : 's'}
+            <PrimaryButton onClick={() => void createMany()} disabled={room === 0 || busy === 'create'} className="!py-1.5">
+              <KeyRound className="h-3.5 w-3.5" /> {room === 0 ? 'At the limit' : `Make ${n} wallet${n === 1 ? '' : 's'}`}
             </PrimaryButton>
+            <span className="text-label text-krypt-muted">{room} left</span>
           </div>
-          {!target && <div className="mt-2 text-body text-arc-gold">Create a group first, then choose it here.</div>}
+
+          {/* Import an existing wallet's key (2026-09-23). The same call as
+              "Bring an existing account" on the pump.fun accounts page: it
+              imports the key AND signs into its pump.fun account if one
+              exists — the route for an account made on pump.fun (email or a
+              social login) once its key is exported there. */}
+          <div className="mt-3 border-t border-white/8 pt-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="password"
+                value={importKey}
+                onChange={(e) => setImportKey(e.target.value)}
+                placeholder="Import a private key (base58 or JSON array)"
+                spellCheck={false}
+                autoComplete="off"
+                className={cls(inputCls, 'w-72 font-mono')}
+              />
+              <input
+                value={importLabel}
+                onChange={(e) => setImportLabel(e.target.value)}
+                placeholder="label (optional)"
+                maxLength={24}
+                className={cls(inputCls, 'w-40')}
+              />
+              <PrimaryButton onClick={() => void importOne()} disabled={room === 0 || busy === 'import' || !importKey.trim()} className="!py-1.5">
+                {busy === 'import' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />} Import
+              </PrimaryButton>
+            </div>
+            <p className="mt-1.5 text-label leading-relaxed text-krypt-muted/70">
+              Signs into its pump.fun account if it has one — how an account made on pump.fun with email or Google comes in: export its key on pump.fun (profile → View Wallet → Export Wallet), paste it here. Stored encrypted; never leaves this machine. Counts toward your {MAX_WALLETS} wallets.
+            </p>
+          </div>
         </Card>
       </Section>
 
-      {/* ── 3. All wallets ── */}
-      <Section title="3 · Wallets" description="One wallet signs at a time (the active one). Switching is blocked while live execution is armed.">
+      {/* ── The list ── */}
+      <Section
+        title="Your wallets"
+        description="Each one on its own: make it the main wallet, or give it a pump.fun account. A script can trade from any of them by address (see the Scripts page)."
+      >
         <Card>
+          <p className="mb-2 text-label leading-relaxed text-krypt-muted/80">{REFERRAL_NOTICE}</p>
           {wallets.length === 0 ? (
-            <Empty title="No wallets yet" message="Create a group above, then create wallets into it." />
+            <Empty title="No wallets yet" message="Make one above, or import a key on the Wallet page." />
           ) : (
             <div className="space-y-1.5">
-              {wallets.map((w) => (
-                <div
-                  key={w.id}
-                  className={cls(
-                    'flex items-center gap-3 rounded-lg border px-3 py-2 transition',
-                    w.active ? 'border-krypt-purple/50 bg-krypt-purple/10' : 'border-white/8 bg-white/[0.02]',
-                  )}
-                >
-                  {/* basis gives the address room to render in full before
-                      anything else claims width; a 44-character key at 10px is
-                      about 17rem. */}
-                  <div className="min-w-0 flex-1 basis-[17rem]">
-                    {renaming === w.id ? (
-                      <input
-                        autoFocus
-                        value={renameText}
-                        onChange={(e) => setRenameText(e.target.value)}
-                        onBlur={() => void doRename(w.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') void doRename(w.id);
-                          if (e.key === 'Escape') setRenaming(null);
-                        }}
-                        className={cls(inputCls, 'w-44 py-0.5')}
-                      />
-                    ) : (
-                      <button
-                        onClick={() => {
-                          setRenaming(w.id);
-                          setRenameText(w.label);
-                        }}
-                        title="Rename"
-                        className="text-note font-medium text-white/90 hover:text-white"
-                      >
-                        {w.label}
-                      </button>
-                    )}
-                    <WalletAddress value={w.publicKey} />
+              {wallets.map((w) => {
+                const session = pump ? sessionForWallet(pump, w.id) : null;
+                return (
+                  <div
+                    key={w.id}
+                    className={cls('rounded-lg border px-3 py-2 transition', w.active ? 'border-krypt-purple/50 bg-krypt-purple/10' : 'border-white/8 bg-white/[0.02]')}
+                  >
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="min-w-0 flex-1 basis-[17rem]">
+                        {renaming === w.id ? (
+                          <input
+                            autoFocus
+                            value={renameText}
+                            onChange={(e) => setRenameText(e.target.value)}
+                            onBlur={() => void doRename(w.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void doRename(w.id);
+                              if (e.key === 'Escape') setRenaming(null);
+                            }}
+                            className={cls(inputCls, 'w-44 py-0.5')}
+                          />
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setRenaming(w.id);
+                              setRenameText(w.label);
+                            }}
+                            title="Rename"
+                            className="text-note font-medium text-white/90 hover:text-white"
+                          >
+                            {w.label}
+                          </button>
+                        )}
+                        <WalletAddress value={w.publicKey} />
+                      </div>
+
+                      <div className="w-24 text-right font-mono text-note text-white/85">{w.balanceSol != null ? `${w.balanceSol.toFixed(4)} SOL` : '—'}</div>
+
+                      {/* pump.fun: one account per wallet. */}
+                      {session ? (
+                        <span className="inline-flex items-center gap-1 text-body text-emerald-300" title="Signed in to pump.fun">
+                          <UserCheck className="h-3.5 w-3.5" />
+                          {session.username || shortAddr(session.address)}
+                        </span>
+                      ) : (
+                        <GhostButton onClick={() => void pumpSignIn(w.id)} disabled={busy !== null || !pump?.ready}>
+                          {busy === `pump:${w.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
+                          pump.fun account
+                        </GhostButton>
+                      )}
+
+                      {w.active ? (
+                        <Badge tone="gradient">main</Badge>
+                      ) : (
+                        <GhostButton onClick={() => void makeActive(w.id)} disabled={armed}>
+                          Make main
+                        </GhostButton>
+                      )}
+                      {/* The main wallet cannot be removed here — switch main
+                          to another first. Blocked while armed, like Make main. */}
+                      {!w.active && (
+                        <GhostButton destructive onClick={() => void removeWallet(w)} disabled={armed}>
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </GhostButton>
+                      )}
+                    </div>
                   </div>
-                  <span className="min-w-0 shrink truncate text-label text-krypt-muted/70">
-                    {groups.filter((g) => g.members.some((m) => m.id === w.id)).map((g) => g.name).join(', ') || 'no group'}
-                  </span>
-                  {w.active && <Badge tone="gradient">active</Badge>}
-                  <div className="font-mono text-note text-white/85 w-24 text-right">
-                    {w.balanceSol != null ? `${w.balanceSol.toFixed(4)} SOL` : '—'}
-                  </div>
-                  {!w.active && (
-                    <GhostButton onClick={() => void makeActive(w.id)} disabled={armed}>
-                      Make active
-                    </GhostButton>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
           {armed && (
             <div className="mt-2">
-              <SwitchToPaper reason="Live execution is armed — the active wallet cannot change while it is." />
+              <SwitchToPaper reason="Live execution is armed — the main wallet cannot change while it is." />
             </div>
           )}
         </Card>

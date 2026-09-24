@@ -101,6 +101,27 @@ import { DEFAULT_SETTINGS, resolveRpc } from './.types.mjs';
   console.log('ok  enum fields are closed');
 }
 
+// The AI connection's two dangerous fields are not renderer-writable
+// (2026-09-21). The token is GENERATED in main, so a patch that could set it
+// is a patch that could choose a known one; the access level is what decides
+// whether an agent may spend, so it moves through `mcp:setAccess`. Both are
+// dropped from a patch rather than rejecting it, the same way
+// execution.liveEnabled is — a panel editing the port must still be able to
+// save while spreading the block it lives in.
+{
+  const r = v({ mcp: { ...DEFAULT_SETTINGS.mcp, token: 'attacker-chosen', access: 'live', port: 9999 } });
+  assert.equal(r.ok, true, r.message);
+  assert.equal(r.patch.mcp.token, undefined, 'the bearer token cannot be set from the renderer');
+  assert.equal(r.patch.mcp.access, undefined, 'nor the level that decides whether an agent may spend');
+  assert.equal(r.patch.mcp.port, 9999, 'while the rest of the block still saves');
+  assert.ok(r.stripped.includes('mcp.token') && r.stripped.includes('mcp.access'), `both are named as stripped: ${r.stripped}`);
+  // And the budget is bounded, since it is the ceiling on live spending.
+  assert.equal(v({ mcp: { ...DEFAULT_SETTINGS.mcp, budget: { ...DEFAULT_SETTINGS.mcp.budget, maxBuySol: 100 } } }).ok, false);
+  assert.equal(v({ mcp: { ...DEFAULT_SETTINGS.mcp, budget: { ...DEFAULT_SETTINGS.mcp.budget, maxTradesPerMinute: 0 } } }).ok, false);
+  assert.equal(v({ mcp: { ...DEFAULT_SETTINGS.mcp, port: 80 } }).ok, false, 'a privileged port is refused');
+  console.log('ok  the AI connection: the token and the access level cannot be set from the renderer, and the budget is bounded');
+}
+
 // The migration stamp is not renderer-writable.
 {
   const r = v({ settingsRevision: 0, recorderEnabled: true });

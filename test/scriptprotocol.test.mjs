@@ -62,4 +62,24 @@ for (const c of cases) {
     process.exitCode = 1;
   }
 }
+{
+  // bot.stat messages (09-22): untrusted, so every entry is checked and a bad
+  // one is dropped without losing the rest.
+  const r = parseFromSandbox({ t: 'stats', values: { ok: 1, text: 'x'.repeat(200), flag: true, none: null, bad: NaN, obj: { a: 1 }, '   ': 5, ['n'.repeat(60)]: 2 } });
+  assert.equal(r.t, 'stats');
+  assert.equal(r.values.ok, 1);
+  assert.equal(r.values.text.length, 80, 'text cut to 80');
+  assert.equal(r.values.flag, true);
+  assert.equal(r.values.none, null, 'null is kept — it means unknown');
+  assert.ok(!('bad' in r.values) && !('obj' in r.values), 'NaN and objects are dropped');
+  assert.ok(!Object.keys(r.values).some((k) => !k.trim()), 'a blank name is dropped');
+  assert.ok(Object.keys(r.values).every((k) => k.length <= 32), 'names cut to 32');
+  assert.equal(parseFromSandbox({ t: 'stats', values: [1, 2] }), null, 'an array is not a stats object');
+  assert.equal(parseFromSandbox({ t: 'stats', values: {}, clear: true }).clear, true);
+  const many = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`k${i}`, i]));
+  assert.equal(Object.keys(parseFromSandbox({ t: 'stats', values: many }).values).length, 24, 'at most 24 per message');
+  const page = sandboxPageHtml();
+  for (const f of ['stat:', 'stats:', 'clearStats:', 'error:']) assert.ok(page.includes(`    ${f}`), `bot.${f.slice(0, -1)} exists in the harness`);
+  console.log('ok  bot.stat messages are checked, cut and capped');
+}
 console.log(`scriptprotocol: ${passed}/${cases.length} passed`);

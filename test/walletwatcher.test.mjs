@@ -91,6 +91,9 @@ globalThis.fetch = async (_url, init) => {
   return reply(BUY_TX);
 };
 
+/** The stub above, so a later case can put it back after one that used the real fetch. */
+const stubbedFetch = globalThis.fetch;
+
 const notification = (sub, sig) =>
   JSON.stringify({
     jsonrpc: '2.0',
@@ -344,6 +347,119 @@ const notification = (sub, sig) =>
   watcher._reset();
   await s.close();
   console.log('ok  a leader transaction that cannot be read is chased, then reported — never dropped in silence');
+}
+
+// ── a keyed socket rides transactionSubscribe: no read-back ──────────────
+//
+// 2026-09-21: Helius pushes the parsed transaction with the notification on
+// its Developer plan and up. On a keyed socket the watcher tries that first;
+// the transaction is decoded from the push, and getTransaction is never
+// called. Confirmed, not processed; the frame is pinned in
+// leaderfeedframes.test.mjs.
+{
+  const received = [];
+  let sock = null;
+  const s = await server((ws) => {
+    sock = ws;
+    ws.on('message', (raw) => {
+      const req = JSON.parse(String(raw));
+      received.push(req);
+      if (req.method === 'transactionSubscribe') ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: 9 }));
+      if (req.method === 'transactionUnsubscribe') ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: true }));
+    });
+  });
+  globalThis.fetch = stubbedFetch;
+  fetches = 0;
+  sigList = [];
+  const swaps = [];
+  const logs = [];
+  watcher._reset();
+  watcher.attach({
+    wssUrl: () => `${s.url}/?api-key=test`,
+    httpUrl: () => 'https://rpc.test/',
+    onSwap: (ev) => swaps.push(ev),
+    log: (level, line) => logs.push({ level, line }),
+  });
+  watcher.setWallets([W1]);
+  assert.ok(await waitFor(() => received.length === 1), 'a subscribe went out');
+  assert.equal(received[0].method, 'transactionSubscribe', 'a keyed socket tries the push transport first');
+  assert.deepEqual(received[0].params[0].accountInclude, [W1]);
+  assert.equal(received[0].params[1].commitment, 'confirmed');
+  assert.equal(received[0].params[1].maxSupportedTransactionVersion, 1);
+  assert.ok(await waitFor(() => watcher.status()[W1]?.state === 'watching'), 'watching after the ack');
+  assert.equal(watcher.status()[W1].feed, 'tx', 'the status says which transport it rides');
+  sock.send(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'transactionNotification',
+      params: { subscription: 9, result: { signature: 'sigPush1', slot: 1, transactionIndex: 0, transaction: { transaction: BUY_TX.transaction, meta: BUY_TX.meta } } },
+    }),
+  );
+  assert.ok(await waitFor(() => swaps.length === 1), 'the pushed transaction was decoded');
+  assert.equal(swaps[0].signature, 'sigPush1');
+  assert.equal(swaps[0].swap.isBuy, true);
+  assert.equal(swaps[0].swap.mint, MINT);
+  assert.equal(fetches, 0, 'and NOTHING was read back');
+  assert.equal(swaps[0].tradeAt, null, 'a push carries no block time; undated is honest, not invented');
+  // A push whose transaction the parser does not know falls back to a read.
+  sock.send(JSON.stringify({ jsonrpc: '2.0', method: 'transactionNotification', params: { subscription: 9, result: { signature: 'sigPush2', slot: 2, transaction: {} } } }));
+  assert.ok(await waitFor(() => swaps.length === 2), 'the unknown shape was read back and decoded');
+  assert.equal(fetches, 1, 'one read, for the one push that needed it');
+  assert.equal(watcher.status()[W1].seen, 2);
+  watcher.setWallets([]);
+  assert.ok(await waitFor(() => received.some((r) => r.method === 'transactionUnsubscribe' && r.params[0] === 9)), 'unsubscribed with the matching method');
+  await s.close();
+  watcher._reset();
+  console.log('ok  a keyed socket rides transactionSubscribe: the pushed transaction is decoded with no read-back');
+}
+
+// ── a plan refusal falls back to logsSubscribe, once, for the session ────
+{
+  const received = [];
+  let sock = null;
+  const W2 = 'Whae2222222222222222222222222222222222222';
+  const s = await server((ws) => {
+    sock = ws;
+    ws.on('message', (raw) => {
+      const req = JSON.parse(String(raw));
+      received.push(req);
+      if (req.method === 'transactionSubscribe') ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32601, message: 'Method not found' } }));
+      if (req.method === 'logsSubscribe') ws.send(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: 11 + received.length }));
+    });
+  });
+  globalThis.fetch = stubbedFetch;
+  fetches = 0;
+  sigList = [];
+  const swaps = [];
+  const logs = [];
+  watcher._reset();
+  watcher.attach({
+    wssUrl: () => `${s.url}/?api-key=test`,
+    httpUrl: () => 'https://rpc.test/',
+    onSwap: (ev) => swaps.push(ev),
+    log: (level, line) => logs.push({ level, line }),
+  });
+  watcher.setWallets([W1]);
+  assert.ok(await waitFor(() => received.length === 2), 'refused, then retried on the other transport');
+  assert.deepEqual(
+    received.map((r) => r.method),
+    ['transactionSubscribe', 'logsSubscribe'],
+  );
+  assert.ok(await waitFor(() => watcher.status()[W1]?.state === 'watching'), 'watching on the fallback');
+  assert.equal(watcher.status()[W1].feed, 'logs');
+  assert.ok(logs.some((l) => /does not serve transactionSubscribe/.test(l.line)), `the fallback is said once: ${JSON.stringify(logs)}`);
+  const subId = received.length === 2 ? 13 : null;
+  sock.send(notification(subId, 'sigFallback1'));
+  assert.ok(await waitFor(() => swaps.length === 1), 'the logs path works after the fallback');
+  assert.equal(fetches, 1, 'read back once, as before');
+  // A wallet followed later in the same session goes straight to logs.
+  watcher.setWallets([W1, W2]);
+  assert.ok(await waitFor(() => received.length === 3));
+  assert.equal(received[2].method, 'logsSubscribe', 'the refusal is remembered for the session');
+  watcher.setWallets([]);
+  await s.close();
+  watcher._reset();
+  console.log('ok  a plan refusal falls back to logsSubscribe once, for every wallet, and says so');
 }
 
 console.log('\nwalletwatcher: all tests passed');

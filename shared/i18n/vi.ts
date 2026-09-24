@@ -23,7 +23,7 @@ export const vi: Catalogue = {
   'nav.observatory': 'Đài quan sát',
   'nav.copyTrading': 'Copy trade',
   'nav.scripts': 'Kịch bản',
-  'nav.groupWallets': 'Nhóm ví',
+  'nav.groupWallets': 'Danh sách ví',
   'nav.funder': 'Nạp vốn',
   'nav.launches': 'Token mới',
   'nav.execution': 'Thực thi',

@@ -78,6 +78,11 @@ interface AppState {
   stopEngine: () => Promise<void>;
   killSwitch: () => Promise<void>;
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  /** Re-read settings from main. For changes made through a handler of
+   *  their own rather than settings:update — the multi-wallet
+   *  acknowledgement stamps its own version in main, so the renderer cannot
+   *  send the patch and has to ask for the result. */
+  refreshSettings: () => Promise<void>;
   blacklistCreator: (creator: string) => Promise<void>;
   /** Re-pull the engine snapshot (status, launches, positions, runners). The
    *  stream keeps these live; this is for a user who wants to be sure. */
@@ -266,6 +271,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshSettings = useCallback(async () => {
+    const r = await window.krypt.settings.get();
+    if (r.ok && r.data) setSettings(r.data);
+  }, []);
+
   const refreshFromEngine = useCallback(async () => {
     const r = await window.krypt.engine.snapshot();
     if (!r.ok || !r.data) {
@@ -299,10 +309,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       stopEngine,
       killSwitch,
       updateSettings,
+      refreshSettings,
       blacklistCreator,
       refreshFromEngine,
     }),
-    [status, launches, positions, runners, evmRunners, evmScan, settings, equity, startEngine, stopEngine, killSwitch, updateSettings, blacklistCreator, refreshFromEngine],
+    [status, launches, positions, runners, evmRunners, evmScan, settings, equity, startEngine, stopEngine, killSwitch, updateSettings, refreshSettings, blacklistCreator, refreshFromEngine],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

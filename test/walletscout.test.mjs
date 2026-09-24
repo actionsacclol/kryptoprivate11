@@ -7,18 +7,40 @@
 import assert from 'node:assert';
 import {
   MIN_TRIPS_FOR_RANK,
+  SCOUT_FILTERS,
+  SCOUT_FILTER_TEXT,
   SCOUT_MAX_TRACKED,
+  SCOUT_REACHABLE_MIN_PCT,
+  SCOUT_REGULAR_DAYS,
   SCOUT_RETENTION_DAYS,
+  SCOUT_SLOW_ENOUGH_MS,
+  SOLANA_SCAN_GAP_MS,
+  SOLANA_SCAN_MAX_PAGES,
+  SOLANA_SCAN_MAX_TOKENS,
+  anyScoutFilter,
+  applyScoutFilters,
   dayOf,
   looksAutomated,
+  passesScoutFilter,
   rankScout,
   rotate,
+  scoutFiltersAllOff,
+  scoutFiltersAllOn,
   summarise,
   tradeId,
 } from './.walletscout.mjs';
+import { COPY_LATENCY_FLOOR_MS } from './.copyshared.mjs';
 import * as scout from './.walletscoutstore.mjs';
 
 let passed = 0;
+// The Solana scan's pace, as the Scout page states it, must equal the
+// `pumpswap` provider gap in electron/data/http.ts (pinned there at 2 s,
+// http.test.mjs) — swap-api.pump.fun blocks an IP for ~35 s past roughly
+// 22 requests in a short window (measured 2026-09-21), and a page promising
+// a faster scan than the provider allows would be a promise the app breaks.
+assert.equal(SOLANA_SCAN_GAP_MS, 2_000, 'the page states the pace http.ts enforces');
+assert.equal(SOLANA_SCAN_MAX_TOKENS, 60);
+assert.equal(SOLANA_SCAN_MAX_PAGES, 3);
 const ok = (label) => {
   console.log(`  ok   ${label}`);
   passed += 1;
@@ -362,6 +384,110 @@ const wallet = (days, over = {}) => ({
   assert.equal(again.copyScore, row.copyScore);
   fs.rmSync(dir, { recursive: true, force: true });
   ok("the row's copy figures and score come from the buckets, and survive a save");
+}
+
+// ── the board's filters (2026-09-21) ─────────────────────────────────────
+//
+// The board ranked but never filtered, so the first screen was mostly records
+// nobody should copy. These pin what each switch means, that every one is off
+// until the user says otherwise, and the rule that matters most: an UNKNOWN
+// number never hides a wallet.
+{
+  // One fact, two readers: the Scout's "holds over a minute" switch and copy
+  // trading's too-fast flag are the same threshold, and a copier told a wallet
+  // is fast enough to follow while the copy page calls it too fast to follow
+  // would be the app disagreeing with itself.
+  assert.equal(SCOUT_SLOW_ENOUGH_MS, COPY_LATENCY_FLOOR_MS, 'the Scout filter and the copy latency floor are the same number');
+  assert.equal(SCOUT_REACHABLE_MIN_PCT, 25, 'the same 25% the unreachable flag uses');
+  assert.deepEqual(SCOUT_FILTERS, ['hideBots', 'ranked', 'reachable', 'slowEnough', 'regular']);
+  for (const k of SCOUT_FILTERS) {
+    assert.ok(SCOUT_FILTER_TEXT[k].label.length > 0 && SCOUT_FILTER_TEXT[k].why.length > 20, `${k} says what it hides and why`);
+  }
+  const off = scoutFiltersAllOff();
+  assert.equal(anyScoutFilter(off), false, 'nothing is filtered until the user asks');
+  assert.equal(anyScoutFilter(scoutFiltersAllOn()), true);
+  assert.equal(
+    SCOUT_FILTERS.every((k) => scoutFiltersAllOn()[k]),
+    true,
+    'the one-click preset turns on every switch, so the button and the chips cannot disagree',
+  );
+  ok('every switch is off by default, explains itself, and shares its threshold with the rest of the app');
+}
+
+{
+  const row = (over = {}) => ({
+    chain: 'solana',
+    address: 'w',
+    window: 'week',
+    buys: 10,
+    sells: 10,
+    roundTrips: 10,
+    wins: 5,
+    losses: 5,
+    pnl: 1,
+    volume: 10,
+    returnPct: 10,
+    winRatePct: 50,
+    medianHoldMs: 10 * 60_000,
+    lastSeen: NOW,
+    ranked: true,
+    looksAutomated: false,
+    fTrips: 8,
+    fMedianReturnPct: -2,
+    fWinRatePct: 40,
+    reachablePct: 80,
+    judgedTrips: 10,
+    fastPct: 0,
+    activeDays: 5,
+    distinctMints: 8,
+    copyScore: 60,
+    flags: [],
+    ...over,
+  });
+  const good = row();
+  const bot = row({ address: 'bot', looksAutomated: true });
+  const thin = row({ address: 'thin', ranked: false, roundTrips: 2 });
+  const locked = row({ address: 'locked', reachablePct: 10 });
+  const fast = row({ address: 'fast', medianHoldMs: 6_000 });
+  const rare = row({ address: 'rare', activeDays: 1 });
+  const unmeasured = row({ address: 'unmeasured', reachablePct: null, medianHoldMs: null });
+
+  assert.equal(passesScoutFilter(good, 'hideBots'), true);
+  assert.equal(passesScoutFilter(bot, 'hideBots'), false);
+  assert.equal(passesScoutFilter(thin, 'ranked'), false);
+  assert.equal(passesScoutFilter(locked, 'reachable'), false);
+  assert.equal(passesScoutFilter(fast, 'slowEnough'), false);
+  assert.equal(passesScoutFilter(rare, 'regular'), false);
+  assert.equal(passesScoutFilter(row({ activeDays: SCOUT_REGULAR_DAYS }), 'regular'), true, 'the threshold is inclusive');
+  assert.equal(passesScoutFilter(row({ medianHoldMs: SCOUT_SLOW_ENOUGH_MS }), 'slowEnough'), true);
+  assert.equal(passesScoutFilter(row({ reachablePct: SCOUT_REACHABLE_MIN_PCT }), 'reachable'), true);
+
+  // The rule the whole app follows for a missing number: unknown is not a
+  // failure. Hiding a wallet whose hold was never measured would claim a fact
+  // nobody has.
+  assert.equal(passesScoutFilter(unmeasured, 'reachable'), true, 'an unmeasured reachable share never hides a wallet');
+  assert.equal(passesScoutFilter(unmeasured, 'slowEnough'), true, 'an unmeasured hold never hides a wallet');
+
+  const all = [good, bot, thin, locked, fast, rare, unmeasured];
+  assert.deepEqual(applyScoutFilters(all, scoutFiltersAllOff()).length, all.length, 'no switch on, no row hidden');
+  assert.deepEqual(
+    applyScoutFilters(all, scoutFiltersAllOn()).map((r) => r.address),
+    ['w', 'unmeasured'],
+    'every switch on leaves the good record and the unmeasured one, in the order they came',
+  );
+  assert.deepEqual(
+    applyScoutFilters(all, { ...scoutFiltersAllOff(), hideBots: true }).map((r) => r.address),
+    ['w', 'thin', 'locked', 'fast', 'rare', 'unmeasured'],
+    'one switch hides only what that switch is about',
+  );
+  // Ranking happens in main; the filter must not reorder what it is handed.
+  const ordered = applyScoutFilters([rare, good, bot], { ...scoutFiltersAllOff(), hideBots: true });
+  assert.deepEqual(
+    ordered.map((r) => r.address),
+    ['rare', 'w'],
+    'the filter preserves the ranking it was given',
+  );
+  ok('each switch hides exactly what it names, unknowns survive every switch, and the ranking order is kept');
 }
 
 console.log(`\nwalletscout: ${passed}/${passed} passed`);

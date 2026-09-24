@@ -26,7 +26,12 @@ const CSP_PROD = [
   "img-src 'self' data: blob: krypt-img:",
   "font-src 'self' data:",
   "connect-src 'self'",
-  "media-src 'self'",
+  // blob: is for a video the USER picked as a card background: the renderer
+  // reads the file it was handed and makes an object URL for it. It is the
+  // renderer's own bytes, same-origin, and opens no network origin — an mp4
+  // is far too large to carry as a data: URL, which is why img-src's trick
+  // does not work here. See src/components/terminal/videoBackground.ts.
+  "media-src 'self' blob:",
   "worker-src 'self' blob:",
   "base-uri 'none'",
   "form-action 'none'",
@@ -51,7 +56,7 @@ function cspDev(devUrl: string): string {
     `img-src 'self' data: blob: krypt-img: ${origin}`,
     `font-src 'self' data: ${origin}`,
     `connect-src 'self' ${origin} ${ws}`,
-    "media-src 'self'",
+    "media-src 'self' blob:",
     "worker-src 'self' blob:",
     "base-uri 'none'",
     "form-action 'none'",

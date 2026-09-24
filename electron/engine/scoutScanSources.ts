@@ -27,13 +27,19 @@ import { headBlock } from '../evm/market';
 import { fetchAllCurveTrades, shortError } from '../evm/pons';
 import * as fourmeme from '../evm/fourmeme';
 import { EVM_CHAIN_META, type EvmChainKind } from '@shared/evm';
-import { tradeId, type ScoutChain } from '@shared/walletScout';
+import { SOLANA_SCAN_MAX_PAGES, SOLANA_SCAN_MAX_TOKENS, tradeId, type ScoutChain } from '@shared/walletScout';
 import type { ScanBatch, ScanSource } from './scoutScan';
 
-/** Tokens per Solana scan. At ≤3 pages each that is ≤180 calls at the
- *  provider's 300 ms gap — under a minute, and most tokens need one page. */
-const SOLANA_MAX_TOKENS = 60;
-const SOLANA_MAX_PAGES = 3;
+/**
+ * Tokens per Solana scan, and pages per token. At most 180 calls, paced by
+ * the `pumpswap` provider gap in http.ts (2 s — swap-api.pump.fun blocks an
+ * IP for ~35 s past roughly 22 requests in a short window, measured
+ * 2026-09-21). Most tokens need one page, so a scan is usually two minutes;
+ * the page says so. The constants live in shared/walletScout so the page
+ * and this file cannot disagree about what a scan is.
+ */
+const SOLANA_MAX_TOKENS = SOLANA_SCAN_MAX_TOKENS;
+const SOLANA_MAX_PAGES = SOLANA_SCAN_MAX_PAGES;
 
 const solana: ScanSource = async function* (ctx) {
   let mints: string[] = [];

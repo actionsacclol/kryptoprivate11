@@ -343,3 +343,22 @@ console.log(`livebreakers: ${passed}/${total} tests passed`);
   assert.equal(escalatedSellSlippagePct(NaN), 38);
   console.log('ok  a failed exit retries at a wider, bounded slippage');
 }
+
+{
+  // 2026-09-23: a CHECKED pump upgrade re-arms live — narrowly.
+  const reverify = engineSrc.slice(engineSrc.indexOf('private async tryReverifyDecoder('), engineSrc.indexOf('Every socket down, positions and orders untouched.'));
+  const passIdx = reverify.indexOf('programWatch.acceptCurrent(');
+  const rearmIdx = reverify.indexOf('this.onRearmAfterUpgrade()');
+  assert.ok(passIdx > 0 && rearmIdx > passIdx, 're-arming happens only AFTER the verification passed');
+  assert.ok(reverify.indexOf('if (!v.ok) {') < passIdx, 'a failed check returns before it can re-arm');
+  const cond = reverify.slice(reverify.indexOf('const wanted = this.armedWhenUpgradeHit;'), rearmIdx);
+  assert.match(cond, /wanted &&/, 'only if live was armed when the upgrade hit');
+  assert.match(cond, /this\.lastDisarmReason === 'program_upgrade'/, 'and nothing (a person, a breaker) has changed the mode since');
+  assert.match(cond, /rearmAfterVerifiedUpgrade !== false/, 'and the switch allows it');
+  assert.match(engineSrc, /this\.armedWhenUpgradeHit = this\.armed;\n\s+this\.disarm\('program_upgrade'\);/, 'the armed state is captured before the disarm');
+  const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const hook = main.slice(main.indexOf('getEngine().onRearmAfterUpgrade = () => {'), main.indexOf('getEngine().onDisarm = (reason) => {'));
+  assert.match(hook, /getEngine\(\)\.arm\(wallet\.exists\(\)\)/, 'through the same arm() as the top-bar switch');
+  assert.match(hook, /liveEnabled: true/, 'and Live is saved as the mode, so the top bar tells the truth');
+  console.log('ok  a checked pump upgrade re-arms live only when it disarmed it, and only through the top-bar path');
+}

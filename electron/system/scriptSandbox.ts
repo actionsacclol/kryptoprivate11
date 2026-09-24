@@ -12,7 +12,7 @@
 
 import { BrowserWindow, ipcMain, session, type WebContents } from 'electron';
 import path from 'node:path';
-import { parseFromSandbox, sandboxPageHtml, ALIVE_TIMEOUT_MS, EVENT_TIMEOUT_MS, READY_MAX_MS, READY_TIMEOUT_MS, type MainToSandbox, type SandboxToMain } from '@shared/scriptProtocol';
+import { parseFromSandbox, sandboxPageHtml, ALIVE_TIMEOUT_MS, EVENT_HARD_MS, EVENT_TIMEOUT_MS, READY_MAX_MS, READY_TIMEOUT_MS, type MainToSandbox, type SandboxToMain } from '@shared/scriptProtocol';
 
 const CHANNEL = 'script-sandbox';
 const PARTITION = 'script-sandbox';
@@ -42,6 +42,17 @@ interface Box {
   contentsId: number;
   /** Which start() made this box; a stale start must not touch a newer one. */
   gen: number;
+  /**
+   * Set just before WE crash the renderer, and read by `gone` (2026-09-21).
+   *
+   * Electron reports our own watchdog kill as `render-process-gone` with
+   * reason `killed` — indistinguishable from a renderer someone else killed,
+   * and the script's card then said "sandbox gone (renderer killed)", which
+   * reads like a mystery crash. It is not a mystery: it is almost always a
+   * handler that ran past the deadline. A user reported exactly that line and
+   * asked what had happened. Say which it was.
+   */
+  killedBy: string | null;
   /** The harness said `alive`: the preload installed the bridge. */
   alive: boolean;
   aliveWaiters: Array<() => void>;
@@ -193,7 +204,7 @@ export interface StartResult {
 }
 
 /** Start (or restart) the sandbox for a script and load its code. */
-export async function start(scriptId: string, code: string, info?: { chain?: string; nativeSymbol?: string }): Promise<StartResult> {
+export async function start(scriptId: string, code: string, info?: { chain?: string; nativeSymbol?: string; inputs?: Record<string, unknown> }): Promise<StartResult> {
   await stop(scriptId, 'restart');
   let win: BrowserWindow;
   try {
@@ -229,6 +240,7 @@ export async function start(scriptId: string, code: string, info?: { chain?: str
     ready: false,
     readyWaiters: [],
     preloadError: null,
+    killedBy: null,
     inflight: new Map(),
     nextEventId: 1,
   };
@@ -266,7 +278,7 @@ export async function start(scriptId: string, code: string, info?: { chain?: str
     teardown(box);
     if (mine) host?.onGone(scriptId, reason);
   };
-  contents.on('render-process-gone', (_e, d) => gone(`renderer ${d.reason}`));
+  contents.on('render-process-gone', (_e, d) => gone(box.killedBy ? box.killedBy : `the renderer stopped (${d.reason})`));
   win.on('closed', () => gone('closed'));
 
   // Every failure below tears down THIS box, never `stop(scriptId)`: a second
@@ -315,7 +327,7 @@ export async function start(scriptId: string, code: string, info?: { chain?: str
   // Phase 2: the script's own top-level code. It may use top-level `await`,
   // so this budget is the USER's, and a renderer that keeps answering is
   // given more of it rather than killed for being slow.
-  post(box, { t: 'init', scriptId, code, chain: info?.chain, nativeSymbol: info?.nativeSymbol });
+  post(box, { t: 'init', scriptId, code, chain: info?.chain, nativeSymbol: info?.nativeSymbol, inputs: info?.inputs });
   const startedAt = Date.now();
   let ready: { ok: boolean; why: string } | null = null;
   for (;;) {
@@ -381,18 +393,33 @@ async function probeAlive(contents: WebContents): Promise<boolean> {
   });
 }
 
-/** Push an event and wait for the handlers. A handler still running after
- *  EVENT_TIMEOUT_MS is a runaway: the renderer is killed, the script is
- *  reported gone, and the caller sees an error.
+/** Push an event and wait for the handlers.
  *
- *  The page cannot talk its way out of that. Its `done` answers the caller,
- *  but the deadline is only lifted once the RENDERER answers an injected
- *  expression — `executeJavaScript` is a true liveness probe (it sits pending
- *  for exactly as long as a wedged renderer is wedged, where
- *  `win.on('unresponsive')` never fires at all for a hidden window: Chromium's
- *  hang monitor is input-driven). So a forged `done` from a second, additive
- *  ipcRenderer listener buys nothing — the probe never comes back and the
- *  renderer is crashed on time. */
+ *  WHAT THE DEADLINE IS ACTUALLY FOR (rewritten 2026-09-21). It exists to
+ *  catch a WEDGED renderer — a handler in an infinite loop, which nothing
+ *  else can stop. It was killing something else too: a handler legitimately
+ *  AWAITING one of our own calls. `bot.market()` is documented as "slow — a
+ *  second or more", so two of them inside one handler used up the three
+ *  seconds and the script was crashed for our latency, losing every byte of
+ *  its in-memory state. A user hit this for seven hours (see
+ *  docs/script-never-bought-2026-09-21.md).
+ *
+ *  The two cases are perfectly distinguishable and the code already knew how:
+ *  a renderer stuck in a loop cannot answer an injected expression, and one
+ *  merely awaiting can. So when the deadline fires we ASK. If it answers, the
+ *  script is not wedged — it is waiting on us — and the deadline is extended.
+ *  If it does not, it is crashed exactly as before.
+ *
+ *  Extensions are bounded by EVENT_HARD_MS: a handler still waiting after
+ *  that is a bug whichever side it is on, and an unbounded extension would be
+ *  a watchdog that never bites.
+ *
+ *  The page still cannot talk its way out of it. Its `done` answers the
+ *  caller, but the deadline is only lifted once the RENDERER answers the
+ *  probe (`executeJavaScript` sits pending for exactly as long as a wedged
+ *  renderer is wedged, where `win.on('unresponsive')` never fires at all for
+ *  a hidden window: Chromium's hang monitor is input-driven). A forged `done`
+ *  from a second, additive ipcRenderer listener buys nothing. */
 export function dispatch(scriptId: string, name: string, payload: unknown): Promise<{ ok: boolean; error?: string }> {
   const box = boxes.get(scriptId);
   if (!box || !box.ready || box.contents.isDestroyed()) return Promise.resolve({ ok: false, error: 'not running' });
@@ -405,13 +432,55 @@ export function dispatch(scriptId: string, name: string, payload: unknown): Prom
       settled = true;
       resolve(r);
     };
-    const timer = setTimeout(() => {
+    const startedAt = Date.now();
+    let timer: NodeJS.Timeout;
+    let extended = false;
+    /**
+     * Only a PROVEN-ALIVE renderer lifts the deadline.
+     *
+     * Never `settled`: the page can settle the caller by forging a `done` for
+     * an event it never finished (the bridge's `on` is additive and the id
+     * rides in the message), so a deadline that stood down once the caller
+     * was answered could be talked out of existence by the very script it is
+     * there to stop. Caught by `forgedDoneStillKilled` in the live sandbox
+     * test the moment it was written that way (2026-09-21).
+     */
+    let cleared = false;
+    /** The deadline fired. Wedged, or just waiting on us? Ask before killing. */
+    const onDeadline = async (): Promise<void> => {
+      if (cleared || box.contents.isDestroyed()) return;
+      const waited = Date.now() - startedAt;
+      const alive = waited < EVENT_HARD_MS ? await probeAlive(box.contents) : false;
+      if (cleared || box.contents.isDestroyed()) return;
+      if (alive) {
+        // Not wedged — the handler is awaiting something, most often one of
+        // our own calls. Give it another slice rather than crashing it.
+        if (!extended) {
+          extended = true;
+          host?.log(
+            'info',
+            `script ${scriptId}: the "${name}" handler is still waiting after ${Math.round(waited / 1000)}s — it is responsive, so it is waiting on something rather than stuck. Letting it finish (up to ${EVENT_HARD_MS / 1000}s).`,
+          );
+        }
+        timer = setTimeout(() => void onDeadline(), EVENT_TIMEOUT_MS);
+        if (box.inflight.get(id) === entry) entry.timer = timer;
+        return;
+      }
       box.inflight.delete(id);
-      settle({ ok: false, error: `handler for "${name}" ran past ${EVENT_TIMEOUT_MS} ms — killed` });
-      kill(box, scriptId);
-    }, EVENT_TIMEOUT_MS);
+      const secs = Math.round(waited / 1000);
+      settle({ ok: false, error: `handler for "${name}" ran past ${secs} s — killed` });
+      kill(
+        box,
+        scriptId,
+        waited >= EVENT_HARD_MS
+          ? `your "${name}" handler was still going after ${secs}s, so the script was restarted — anything it held in memory is gone (use bot.setState to keep it)`
+          : `your "${name}" handler stopped responding — it is most likely stuck in a loop. The script was restarted and anything it held in memory is gone (use bot.setState to keep it).`,
+      );
+    };
+    timer = setTimeout(() => void onDeadline(), EVENT_TIMEOUT_MS);
     const clear = (): void => {
-      clearTimeout(timer);
+      cleared = true;
+      clearTimeout(entry ? entry.timer : timer);
       if (box.inflight.get(id) === entry) box.inflight.delete(id);
     };
     const onDone = (r: { ok: boolean; error?: string }): void => {
@@ -428,12 +497,16 @@ export function dispatch(scriptId: string, name: string, payload: unknown): Prom
       }
     };
     const entry: Inflight = { settle, timer, onDone };
+    entry.timer = timer;
     box.inflight.set(id, entry);
     post(box, { t: 'event', id, name, payload });
   });
 }
 
-function kill(box: Box, scriptId: string): void {
+function kill(box: Box, scriptId: string, why: string): void {
+  // Recorded BEFORE the crash, because `render-process-gone` fires from it
+  // and has no idea who pulled the trigger.
+  box.killedBy = why;
   try {
     if (!box.contents.isDestroyed()) box.contents.forcefullyCrashRenderer();
     else void stop(scriptId, 'watchdog');

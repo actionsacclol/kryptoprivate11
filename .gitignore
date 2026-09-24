@@ -30,3 +30,8 @@ __pycache__/
 # Research tape — collected market data, never committed
 tape/
 tape-ofi.out
+
+# Our own scripts. Not shipped with the app and not pushed: these are run by
+# pasting them into Automation -> Scripts, which stores them in the app's
+# user-data folder, never in the repo.
+private/

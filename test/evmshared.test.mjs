@@ -289,6 +289,13 @@ ok('referral problems: blank fine, garbage refused, self refused, treasury refus
   assert.match(evmReferralProblem(ADDR.toLowerCase(), { self: ADDR }), /yourself/);
   assert.equal(evmReferralProblem(ADDR, { self: null }), null);
   if (evmFeesEnabled()) assert.match(evmReferralProblem(EVM_TREASURY_ADDRESS, { self: null }), /treasury/);
+  // The referrer is ONE setting for every EVM chain, but the chains can hold
+  // different wallets, so a self-referral has to be caught against all of
+  // them and not just the page you happen to be looking at (2026-09-21).
+  const OTHER = '0x' + 'ab'.repeat(20);
+  assert.match(evmReferralProblem(OTHER, { self: ADDR, alsoMine: [OTHER] }), /yourself/);
+  assert.equal(evmReferralProblem(OTHER, { self: ADDR, alsoMine: [null] }), null);
+  assert.equal(evmReferralProblem(OTHER, { self: ADDR }), null);
 });
 
 // ── unit conversions ──────────────────────────────────────────────────

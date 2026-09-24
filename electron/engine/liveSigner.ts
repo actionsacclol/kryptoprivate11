@@ -81,8 +81,12 @@ const RENT_NEGATIVE_TTL_MS = 30_000;
  *
  * Reads run in parallel (they are independent), and prewarmFeeRecipients()
  * fills both caches on arm so the first trade pays nothing here.
+ *
+ * Exported because swap.ts builds its own fee transfers and went without this
+ * guard until 2026-09-21 — a referral cut to a brand-new wallet could revert
+ * a swap. Every path that attaches a fee must go through here.
  */
-async function rentSafeTransfers(
+export async function rentSafeTransfers(
   transfers: Array<{ to: string; lamports: number }>,
   httpUrl: string,
 ): Promise<Array<{ to: string; lamports: number }>> {
@@ -675,6 +679,10 @@ async function runPipeline(
 
   let fee: FeeSplit = { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
   let feeNote = '';
+  // Kept apart from feeNote because the success summary below REASSIGNS
+  // feeNote; anything about an unpaid referral has to survive that and is
+  // appended after it.
+  let referralNote = '';
   // Anti-tamper interlock, BUYS ONLY. Derived from the integrity-protected
   // treasury and set independently of the injection below, so if a cracked
   // build strips the injection this requirement still stands and the signer
@@ -711,6 +719,21 @@ async function runPipeline(
     const referrer = (p.referrer ?? configuredReferrer).trim();
     const hasReferrer =
       looksLikeSolAddress(referrer) && referrer !== treasury && referrer !== owner && !!treasury;
+    // A referrer was NAMED and refused. Three ways: it is not an address, it
+    // is the treasury, or it is the wallet doing the trading. All three are
+    // settings mistakes the user can fix, and all three used to pass in
+    // silence with the whole fee going to the treasury (2026-09-21). Settings
+    // now catches the same cases at the input, but the signer is the place
+    // that decides, so it is the place that has to say so.
+    if (referrer && !hasReferrer) {
+      const why = !looksLikeSolAddress(referrer)
+        ? 'not a Solana address'
+        : referrer === owner
+          ? 'it is this wallet — you cannot refer yourself'
+          : 'it is the Krypt fee address';
+      referralNote = `, no referrer credited (${why}; fix it in Settings)`;
+      console.warn(`[fee] referrer ignored: ${why}`);
+    }
     const split = treasury
       ? splitFee(solValueLamports, hasReferrer, holderFeeBps(FEE_BPS, holder))
       : { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
@@ -722,6 +745,13 @@ async function runPipeline(
       // trade. What survives is what we actually send and require.
       const safe = await rentSafeTransfers(wanted, p.httpUrl);
       if (safe.length === 0) feeNote = ', fee skipped (recipient below rent — would revert the trade; fund the treasury)';
+      // A PARTIAL drop used to be silent (2026-09-21). Onboarding tells a
+      // referrer they earn on every trade, so the one case where they do not
+      // has to be said out loud rather than inferred from a missing transfer.
+      else if (split.referrerLamports > 0 && !safe.some((t) => t.to === referrer)) {
+        referralNote = ', referrer not paid (their wallet is below rent-exemption — paying it would revert the trade)';
+        console.warn(`[fee] referrer ${referrer.slice(0, 8)}… skipped: below rent-exemption`);
+      }
       for (const t of safe) {
         const kind: keyof typeof PRIORITY = t.to === treasury ? 'treasury' : 'referrer';
         kindOf.set(t.to, kind);
@@ -734,6 +764,15 @@ async function runPipeline(
     const fit = await injectTransfersFit(baseTx, owner, planned, p.httpUrl);
     if (fit) {
       builtTx = fit.tx;
+      // The size fit drops the least important transfer first, and the
+      // referrer is deliberately below the treasury and the landing tip in
+      // that order (PRIORITY above). The drop itself is REPORTED below, where
+      // the kept transfers are summed — a fee share that silently does not
+      // arrive is the small lie this file's header warns about.
+      const droppedFee = fit.dropped.filter((t) => kindOf.get(t.to) === 'referrer' || kindOf.get(t.to) === 'treasury');
+      if (droppedFee.length) {
+        console.warn(`[fee] ${droppedFee.map((t) => kindOf.get(t.to)).join(' and ')} transfer dropped to fit under ${MAX_TX_BYTES} bytes`);
+      }
       const keptTips = fit.kept.filter((t) => kindOf.get(t.to) === 'jito' || kindOf.get(t.to) === 'helius');
       const hasJito = keptTips.some((t) => kindOf.get(t.to) === 'jito');
       const hasHelius = keptTips.some((t) => kindOf.get(t.to) === 'helius');
@@ -778,6 +817,11 @@ async function runPipeline(
       feeNote = ', fee skipped (could not attach)';
     }
   }
+  // Appended LAST, never assigned into feeNote earlier: the success summary
+  // above rewrites feeNote from scratch, so a note set before it was silently
+  // thrown away (2026-09-21). A referral that was not paid has to outlive the
+  // line that says what the fee was.
+  feeNote += referralNote;
   timing.tips = Date.now() - tipStart;
 
   const built = { tx: builtTx };

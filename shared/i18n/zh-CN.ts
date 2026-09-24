@@ -24,7 +24,7 @@ export const zhCN: Catalogue = {
   'nav.observatory': '观测台',
   'nav.copyTrading': '跟单',
   'nav.scripts': '脚本',
-  'nav.groupWallets': '钱包组',
+  'nav.groupWallets': '钱包列表',
   'nav.funder': '划转',
   'nav.launches': '新币',
   'nav.execution': '执行',

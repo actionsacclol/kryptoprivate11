@@ -25,7 +25,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     // eslint-disable-next-line no-console
-    console.error('[ui] render crashed', error, info.componentStack);
+    // One string, stack included — see main.tsx for why.
+    console.error(`[ui] render crashed ${error.stack ?? error.message}
+component stack:${info.componentStack ?? ' (none)'}`);
   }
 
   private stopEngine = async (): Promise<void> => {

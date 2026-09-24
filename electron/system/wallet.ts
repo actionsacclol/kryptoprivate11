@@ -46,17 +46,13 @@ import {
   removeWallet as removeFromStore,
   renameWallet as renameInStore,
   selectWallet,
-  createGroup as createGroupInStore,
-  renameGroup as renameGroupInStore,
-  deleteGroup as deleteGroupInStore,
-  setGroupMembers as setGroupMembersInStore,
-  groupWallets,
   DEFAULT_MAX_BALANCE_SOL,
+  MAX_WALLETS,
   type StoredWallet,
   type WalletsFile,
-  type WalletGroup,
 } from './walletStore';
 import type { WalletInfo, WalletSummary } from '@shared/types';
+import { pumpLoginMessage } from '@shared/pumpAuth';
 
 export type { SignIntent, SignPolicy } from './signPolicy';
 
@@ -316,29 +312,11 @@ export function select(id: string): { ok: boolean; message: string } {
   return commit(selectWallet(loadFile(), id));
 }
 
-// ─── Groups (fan-out). Public data only — never any key material. ─────
-
-export interface GroupView {
-  id: string;
-  name: string;
-  /** Member wallets, resolved to public data for the UI. */
-  members: Array<{ id: string; label: string; publicKey: string }>;
-}
-
-export function groups(): GroupView[] {
-  const file = loadFile();
-  return (file.groups ?? []).map((g: WalletGroup) => ({
-    id: g.id,
-    name: g.name,
-    members: groupWallets(file, g.id).map((w) => ({ id: w.id, label: w.label, publicKey: w.publicKey })),
-  }));
-}
-
 /** Several wallets in one go (Wallet Lab). Stops at the first refusal. */
 export function generateMany(count: number, labelPrefix: string): { ok: boolean; message: string; created: number; ids: string[] } {
   const blocked = blockedByFailure();
   if (blocked) return { ...blocked, created: 0, ids: [] };
-  const n = Math.max(1, Math.min(20, Math.floor(count)));
+  const n = Math.max(1, Math.min(MAX_WALLETS, Math.floor(count)));
   const ids: string[] = [];
   const before = new Set(loadFile().wallets.map((w) => w.id));
   for (let i = 0; i < n; i++) {
@@ -350,22 +328,6 @@ export function generateMany(count: number, labelPrefix: string): { ok: boolean;
   const created = ids.length;
   if (created < n) return { ok: created > 0, message: `${created} of ${n} created`, created, ids };
   return { ok: true, message: `${created} wallet(s) created`, created, ids };
-}
-
-export function createGroup(name: string): { ok: boolean; message: string } {
-  return commit(createGroupInStore(loadFile(), name, `g_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`));
-}
-
-export function renameGroup(id: string, name: string): { ok: boolean; message: string } {
-  return commit(renameGroupInStore(loadFile(), id, name));
-}
-
-export function deleteGroup(id: string): { ok: boolean; message: string } {
-  return commit(deleteGroupInStore(loadFile(), id));
-}
-
-export function setGroupMembers(id: string, walletIds: string[]): { ok: boolean; message: string } {
-  return commit(setGroupMembersInStore(loadFile(), id, walletIds));
 }
 
 export function rename(id: string, label: string): { ok: boolean; message: string } {
@@ -550,6 +512,52 @@ export function signLaunchForWallet(
   const w = loadFile().wallets.find((x) => x.id === walletId);
   if (!w) return { ok: false, message: 'No such wallet' };
   return signWith(w, unsignedTx, policy, launchMintSecret);
+}
+
+/**
+ * Sign pump.fun's login message with a wallet this app holds.
+ *
+ * ─── Why this takes a NUMBER and not bytes ──────────────────────────────
+ *
+ * Every other door in this module signs a TRANSACTION, which `checkOutflow`
+ * decodes and validates before the key is decrypted. A login message is not a
+ * transaction, so none of that machinery applies — which makes it exactly the
+ * shape that must never become a general "sign these bytes" call. That is the
+ * primitive wallet phishing runs on, and it would sit here beside keys holding
+ * real positions.
+ *
+ * So the caller cannot supply the message. It passes a wallet id and a
+ * timestamp, and the string is built HERE from the shared template. There is
+ * no parameter through which arbitrary bytes can reach a signature — a
+ * property of the shape, not of a check someone has to remember.
+ *
+ * The message is returned alongside the signature so the caller can log what
+ * was actually signed without ever being able to choose it.
+ */
+export function signPumpLogin(
+  walletId: string,
+  timestamp: number,
+): { ok: boolean; message: string; signature?: string; address?: string; signed?: string } {
+  const built = pumpLoginMessage(timestamp);
+  if (!built) {
+    // The template is not known yet (see shared/pumpAuth.ts). Refusing beats
+    // signing a guess that pump would reject as OUR signature being bad.
+    return { ok: false, message: 'The pump.fun sign-in message is not known in this build yet' };
+  }
+  const w = loadFile().wallets.find((x) => x.id === walletId);
+  if (!w) return { ok: false, message: 'No such wallet' };
+  let secret: Uint8Array | null = null;
+  try {
+    secret = decryptSecret(w);
+    const kp = Keypair.fromSeed(secret);
+    if (kp.publicKey.toBase58() !== w.publicKey) return { ok: false, message: 'Key mismatch — refusing to sign' };
+    const sig = ed25519.sign(new TextEncoder().encode(built), secret);
+    return { ok: true, message: 'signed', signature: base58Encode(sig), address: w.publicKey, signed: built };
+  } catch (err) {
+    return { ok: false, message: `Signing failed: ${(err as Error).message}` };
+  } finally {
+    if (secret) secret.fill(0);
+  }
 }
 
 /** Public key of a specific wallet by id, for building that wallet's tx. */

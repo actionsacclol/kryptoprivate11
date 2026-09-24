@@ -920,6 +920,38 @@ test('one full pass costs Jupiter a handful of calls, and the next pass within t
   assert.ok(jupTotal() - first <= 2, `at most the two short-lived lists on a second pass — got ${jupTotal() - first} more (${[...counts.entries()].filter(([k]) => k.startsWith('jup:')).map(([k, v]) => `${k}=${v}`).join(' ')})`);
 });
 
+// ── The first-open chart is a live price, never a blank spinner ───────
+//
+// A runner opened for the first time has nothing cached and an empty tape,
+// and pump.fun can have every history provider parked at once. Rather than
+// sit on "Loading history…" for the length of a 120 s park, candlesFast
+// draws ONE honest bar at the price the app already read from the chain —
+// and, per the honest-null rule, draws nothing at all when it has no price.
+test('a first-open runner draws a live-price seed bar, not a blank spinner', async () => {
+  http.clearCache();
+  const books = seedLiveBooks(3);
+  market.attach(liveCtx(books));
+  const mint = books.curves[0].mint;
+  // Opening a token page reads the curve once; that read is what the seed uses.
+  await market.summary(mint);
+  const s = await market.candlesFast(mint, '1s', 500);
+  assert.equal(s.candles.length, 1, 'one seed bar, not a blank spinner');
+  assert.equal(s.pending, true, 'still pending — the real history replaces it when it lands');
+  const [bar] = s.candles;
+  assert.ok(bar.close > 0, 'priced at the current price');
+  assert.ok(bar.open === bar.close && bar.high === bar.low && bar.high === bar.close, 'a single flat bar at that price');
+  assert.equal(bar.volume, 0, 'no invented volume');
+  assert.match(s.note ?? '', /Live price/, 'and the note says it is a live price, not history');
+  assert.ok(s.source === 'onchain' || s.source === 'derived', `an authoritative source, got ${s.source}`);
+});
+
+test('a mint the app has never priced gets no invented bar (honest null)', async () => {
+  http.clearCache();
+  market.attach(liveCtx(seedLiveBooks(0))); // clears the chain accounts
+  const blank = await market.candlesFast(liveMintFor(9_999), '1s', 500);
+  assert.equal(blank.candles.length, 0, 'no price anywhere → no bar, just the loading placeholder');
+});
+
 // ── Go ────────────────────────────────────────────────────────────────
 
 let passed = 0;

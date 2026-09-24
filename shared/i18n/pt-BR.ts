@@ -23,7 +23,7 @@ export const ptBR: Catalogue = {
   'nav.observatory': 'Observatório',
   'nav.copyTrading': 'Copy trading',
   'nav.scripts': 'Scripts',
-  'nav.groupWallets': 'Grupos de carteiras',
+  'nav.groupWallets': 'Lista de carteiras',
   'nav.funder': 'Aporte',
   'nav.launches': 'Lançamentos',
   'nav.execution': 'Execução',

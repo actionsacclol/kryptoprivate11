@@ -53,13 +53,25 @@ import './index.css';
 // Errors that escape React entirely (event handlers, timers, un-awaited
 // promises) do not reach the boundary. Log them so they show up in the
 // console page rather than vanishing; never throw from here.
+//
+// Logged as ONE string with the stack in it: main copies console errors into
+// app.log, and an Error object passed as a second argument arrived there as
+// "Error" with no stack, which made a user's report unreadable (2026-09-23).
+const described = (x: unknown): string =>
+  x instanceof Error ? (x.stack ?? `${x.name}: ${x.message}`) : typeof x === 'string' ? x : (() => {
+    try {
+      return JSON.stringify(x);
+    } catch {
+      return String(x);
+    }
+  })();
 window.addEventListener('error', (e) => {
   // eslint-disable-next-line no-console
-  console.error('[ui] uncaught', e.error ?? e.message);
+  console.error(`[ui] uncaught ${described(e.error ?? e.message)}`);
 });
 window.addEventListener('unhandledrejection', (e) => {
   // eslint-disable-next-line no-console
-  console.error('[ui] unhandled rejection', e.reason);
+  console.error(`[ui] unhandled rejection ${described(e.reason)}`);
 });
 
 // The preload exposes window.krypt before any page script runs. When it is

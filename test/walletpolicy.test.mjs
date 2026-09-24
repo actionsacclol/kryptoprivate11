@@ -1293,3 +1293,75 @@ const bridgeIx = (program, accounts = 2) =>
   assert.match(r.message, /lookup table/i);
   console.log('ok  the measured Mayan route is refused for hiding accounts in lookup tables');
 }
+
+// ── Token withdrawal: USDC to the stored withdrawal address, nothing else ──
+// Added 2026-09-23 for pump.fun callout rewards (paid in USDC). Every shape
+// below except the first two must be refused.
+{
+  const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+  const OTHER_MINT = Keypair.generate().publicKey;
+  const TOKEN = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+  const ATA_PROG = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+  const ata = (owner, mint) => PublicKey.findProgramAddressSync([new PublicKey(owner).toBuffer(), TOKEN.toBuffer(), new PublicKey(mint).toBuffer()], ATA_PROG)[0];
+  const WD = (mint = USDC.toBase58()) => ({ intent: 'withdraw-token', maxTransferLamports: 0, withdrawMint: mint });
+  const mine = ata(MY_PUB, USDC);
+  const homeAta = ata(HOME, USDC);
+  const attackerAta = ata(ATTACKER, USDC);
+  const checked = (src, mint, dst, auth = me.publicKey, amount = 1_000_000n) => {
+    const data = Buffer.alloc(10);
+    data[0] = 12;
+    data.writeBigUInt64LE(amount, 1);
+    data[9] = 6;
+    return new TransactionInstruction({
+      programId: TOKEN,
+      keys: [
+        { pubkey: src, isSigner: false, isWritable: true },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: dst, isSigner: false, isWritable: true },
+        { pubkey: auth, isSigner: true, isWritable: false },
+      ],
+      data,
+    });
+  };
+  const create = (owner, ataAddr = ata(owner, USDC), mint = USDC) =>
+    new TransactionInstruction({
+      programId: ATA_PROG,
+      keys: [
+        { pubkey: me.publicKey, isSigner: true, isWritable: true },
+        { pubkey: ataAddr, isSigner: false, isWritable: true },
+        { pubkey: new PublicKey(owner), isSigner: false, isWritable: false },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: TOKEN, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from([1]),
+    });
+  const price = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 });
+
+  let r = check(tx([price, create(HOME), checked(mine, USDC, homeAta)]), MY_PUB, HOME, WD());
+  assert.equal(r.ok, true, r.message);
+  r = check(tx([checked(mine, USDC, homeAta)]), MY_PUB, HOME, WD());
+  assert.equal(r.ok, true, r.message);
+
+  const refused = (label, bytes, policy = WD(), home = HOME) => {
+    const x = check(bytes, MY_PUB, home, policy);
+    assert.equal(x.ok, false, `REFUSED: ${label}`);
+  };
+  refused('USDC to an attacker', tx([checked(mine, USDC, attackerAta)]));
+  refused('an account created for an attacker, then paid', tx([create(ATTACKER), checked(mine, USDC, attackerAta)]));
+  refused('a create that names the home owner but an attacker account', tx([create(HOME, attackerAta), checked(mine, USDC, homeAta)]));
+  refused('another mint named in the policy', tx([checked(ata(MY_PUB, OTHER_MINT), OTHER_MINT, ata(HOME, OTHER_MINT))]), WD(OTHER_MINT.toBase58()));
+  refused('another mint moved under a USDC policy', tx([checked(ata(MY_PUB, OTHER_MINT), OTHER_MINT, ata(HOME, OTHER_MINT))]));
+  refused('a SOL transfer riding along', tx([checked(mine, USDC, homeAta), transfer(HOME, 1_000)]));
+  refused('a SOL transfer to an attacker riding along', tx([checked(mine, USDC, homeAta), transfer(ATTACKER, 1_000)]));
+  refused('two transfers', tx([checked(mine, USDC, homeAta), checked(mine, USDC, homeAta)]));
+  refused('no transfer at all', tx([create(HOME)]));
+  refused('no withdrawal address stored', tx([checked(mine, USDC, homeAta)]), WD(), null);
+  const plain = new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: mine, isSigner: false, isWritable: true }, { pubkey: homeAta, isSigner: false, isWritable: true }, { pubkey: me.publicKey, isSigner: true, isWritable: false }], data: Buffer.from([3, 64, 66, 15, 0, 0, 0, 0, 0]) });
+  refused('an unchecked Transfer (carries no mint)', tx([plain]));
+  refused('an unknown program', tx([checked(mine, USDC, homeAta), new TransactionInstruction({ programId: PUMP_PROGRAM, keys: [], data: Buffer.from([1]) })]));
+  // And the old intents did not change: a trade or a sweep still may not move USDC to the home address.
+  refused('USDC to home under a TRADE', tx([checked(mine, USDC, homeAta)]), TRADE(0));
+  refused('USDC to home under a SWEEP', tx([checked(mine, USDC, homeAta)]), SWEEP(0));
+  console.log('ok  USDC can be withdrawn ONLY to the stored withdrawal address, in one checked transfer, with nothing riding along');
+}

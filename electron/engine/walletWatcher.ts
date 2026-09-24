@@ -25,16 +25,42 @@
 
 import WebSocket from 'ws';
 import type { CopyWatchStatus } from '@shared/copytrade';
-import { getSignaturesForAddress, getTransaction, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from '../chain/rpcClient';
+import { getSignaturesForAddress, getTransaction, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs, type RawTransaction } from '../chain/rpcClient';
 import { decodeWalletSwap, type WalletSwap } from './walletSwap';
+import { isPlanRefusal, parseTransactionNotification, subscribeFrame, unsubscribeFrame, type LeaderFeedMethod } from './leaderFeedFrames';
 
 export interface WalletWatcherHost {
   /** Socket to subscribe on; empty means the watcher cannot run. */
   wssUrl(): string;
   /** HTTP endpoint the leader's transactions are read from. */
   httpUrl(): string;
-  onSwap(ev: { wallet: string; swap: WalletSwap; signature: string; at: number; tradeAt: number | null }): void;
+  onSwap(ev: {
+    wallet: string;
+    swap: WalletSwap;
+    signature: string;
+    at: number;
+    tradeAt: number | null;
+    /** What the delivery half cost (2026-09-21). The copier adds its own
+     *  stages and the signer's, so one line can account for the whole path
+     *  from the leader's fill to ours. */
+    timing: DeliveryTiming;
+  }): void;
   log(level: 'info' | 'warn' | 'error', line: string): void;
+}
+
+/** The stages this module owns: hearing about the trade and getting the
+ *  transaction in hand. Durations in ms; null is unknown, never zero. */
+export interface DeliveryTiming {
+  feed: LeaderFeedMethod;
+  /** Their block time → the notification arriving here. Null when the
+   *  transaction carried no block time, which every `tx` push does. */
+  detectMs: number | null;
+  /** The read-back. Null on the `tx` transport, which has none. */
+  readMs: number | null;
+  readTries: number;
+  decodeMs: number;
+  /** When the notification arrived, so later stages can measure from it. */
+  detectedAt: number;
 }
 
 interface WalletStats {
@@ -92,8 +118,23 @@ const SILENCE_MS = 25_000;
  * so it is worth tens of seconds and a line in the log when it fails.
  */
 const FETCH_ATTEMPTS = 6;
-const FETCH_RETRY_MS = 700;
-const FETCH_RETRY_MAX_MS = 8_000;
+/**
+ * The wait BETWEEN attempts, one entry per gap.
+ *
+ * It used to be 700 ms doubling (700, 1400, 2800, 5600, 8000). The patience
+ * at the tail is the point and is kept; the 700 ms at the FRONT was not. A
+ * transaction the socket just told us about is confirmed — the node simply
+ * has not indexed it yet, which is a matter of tens of milliseconds, and
+ * sleeping 700 ms before asking again put most of a second into the middle
+ * of the copy path for nothing (2026-09-21, after a tester timed ~5–6 s from
+ * a leader's fill to their copy's).
+ *
+ * The early gaps are now short and the late ones are longer than before, so
+ * a transaction that really is missing is still chased for tens of seconds —
+ * each attempt also carries the call's own timeout, and `rpcClient` waits
+ * out a parked host INSIDE the call rather than here.
+ */
+const FETCH_BACKOFF_MS = [120, 300, 800, 2_000, 5_000];
 const SEEN_CAP = 2_000;
 
 // ── Catch-up ──────────────────────────────────────────────────────────
@@ -130,11 +171,26 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 let recoverTimer: NodeJS.Timeout | null = null;
 let currentUrl = '';
 let capNotedAt = 0;
+/**
+ * Which subscription the current socket carries (2026-09-21).
+ *
+ * `logs` is `logsSubscribe` — every host serves it, and each notification
+ * costs a `getTransaction` read-back with up to six retries on a
+ * rate-limited endpoint. `tx` is Helius's `transactionSubscribe`, which
+ * pushes the PARSED transaction with the notification, so the read-back and
+ * its retries disappear. It is a paid-plan method (Developer and up): a
+ * keyed socket TRIES it and, on a refusal that names the method or the plan,
+ * falls back to `logs` for the rest of the session — a free key changes
+ * nothing. Frames and the parser live in leaderFeedFrames.ts.
+ */
+let method: LeaderFeedMethod = 'logs';
+/** The keyed host refused `transactionSubscribe` this session. */
+let txDenied = false;
 
 /** Followed wallet → live subscription id (null until acked). */
 const wanted = new Map<string, number | null>();
-/** Pending request id → wallet. */
-const pending = new Map<number, string>();
+/** Pending request id → wallet, and which transport the request used. */
+const pending = new Map<number, { wallet: string; method: LeaderFeedMethod }>();
 /** Subscription id → wallet, for routing notifications. */
 const bySub = new Map<number, string>();
 const stats = new Map<string, WalletStats>();
@@ -184,6 +240,7 @@ export function status(): Record<string, CopyWatchStatus> {
       swaps: s.swaps,
       unreadable: s.unreadable,
       notSwap: s.notSwap,
+      feed: method,
     };
   }
   return out;
@@ -205,7 +262,7 @@ function unwatch(wallet: string): void {
     bySub.delete(id);
     if (ws?.readyState === WebSocket.OPEN) {
       try {
-        ws.send(JSON.stringify({ jsonrpc: '2.0', id: nextId++, method: 'logsUnsubscribe', params: [id] }));
+        ws.send(unsubscribeFrame(method, nextId++, id));
       } catch {
         /* the socket is going away anyway */
       }
@@ -260,6 +317,9 @@ function connect(): void {
     return;
   }
   currentUrl = url;
+  // The push transport is tried on a keyed socket only, and not again once
+  // this session's key has refused it.
+  method = keyed(url) && !txDenied ? 'tx' : 'logs';
   let sock: WebSocket;
   try {
     sock = new WebSocket(url, { handshakeTimeout: 10_000, perMessageDeflate: false });
@@ -318,9 +378,22 @@ function connect(): void {
       return;
     }
     if (typeof msg.id === 'number' && msg.error) {
-      const wallet = pending.get(msg.id);
+      const req = pending.get(msg.id);
       pending.delete(msg.id);
       const text = msg.error.message ?? 'no reason given';
+      if (req?.method === 'tx' && !txDenied && isPlanRefusal(text, msg.error.code)) {
+        // This key's plan does not serve transactionSubscribe. Every wallet
+        // goes back to logsSubscribe on the same socket, once, and the
+        // refusal is remembered for the session.
+        txDenied = true;
+        method = 'logs';
+        host?.log('info', `wallet watcher: this endpoint does not serve transactionSubscribe (${text}) — using logsSubscribe with a read-back per trade`);
+        pending.clear();
+        for (const w of wanted.keys()) wanted.set(w, null);
+        for (const w of wanted.keys()) subscribe(w);
+        return;
+      }
+      const wallet = req?.wallet;
       if (wallet) {
         if (/too many|limit/i.test(text)) {
           statsFor(wallet).overCap = true;
@@ -334,7 +407,7 @@ function connect(): void {
     }
     if (typeof msg.id === 'number' && typeof msg.result === 'number') {
       attempts = 0;
-      const wallet = pending.get(msg.id);
+      const wallet = pending.get(msg.id)?.wallet;
       pending.delete(msg.id);
       if (wallet && wanted.has(wallet)) {
         wanted.set(wallet, msg.result);
@@ -346,6 +419,20 @@ function connect(): void {
         if (st.subscribed) void recoverGap(wallet, 'the subscription was re-established');
         st.subscribed = true;
       }
+      return;
+    }
+    if (msg.method === 'transactionNotification') {
+      attempts = 0;
+      const n = parseTransactionNotification(msg);
+      if (!n) return;
+      const wallet = bySub.get(n.subscription);
+      if (!wallet || !wanted.has(wallet)) return;
+      // The transaction came with the push: decoded here, no read-back. A
+      // push whose transaction does not parse falls back to the read-by-
+      // signature path, so a shape change on the host's side costs a round
+      // trip, never a trade.
+      if (n.tx) onTransaction(wallet, n.signature, n.tx);
+      else void onNotification(wallet, n.signature, null);
       return;
     }
     if (msg.method !== 'logsNotification') return;
@@ -396,19 +483,13 @@ function subscribe(wallet: string): void {
     }
   }
   const id = nextId++;
-  pending.set(id, wallet);
+  pending.set(id, { wallet, method });
   try {
-    ws.send(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        id,
-        method: 'logsSubscribe',
-        // Confirmed, not processed: the transaction is read back at
-        // confirmed, and a processed notification would only be asked for
-        // before it can be answered.
-        params: [{ mentions: [wallet] }, { commitment: 'confirmed' }],
-      }),
-    );
+    // Confirmed on both transports (leaderFeedFrames.ts): on `logs` the
+    // transaction is read back at confirmed, and a processed notification
+    // would only be asked for before it can be answered; on `tx` a processed
+    // push could describe a transaction that never lands.
+    ws.send(subscribeFrame(method, id, wallet));
   } catch {
     pending.delete(id);
   }
@@ -424,24 +505,78 @@ function remember(signature: string): boolean {
   return true;
 }
 
+/**
+ * A transaction that arrived WITH its notification (the `tx` transport):
+ * the same decode as a read-back, minus the read-back and its retries.
+ */
+function onTransaction(wallet: string, signature: string, tx: RawTransaction): void {
+  const h = host;
+  if (!h) return;
+  const detectedAt = Date.now();
+  const s = statsFor(wallet);
+  s.seen += 1;
+  s.lastSeenAt = detectedAt;
+  if (tx.meta?.err) return;
+  if (!remember(signature)) return;
+  const decodeStart = Date.now();
+  const swap = decodeWalletSwap(tx, wallet);
+  const decodeMs = Date.now() - decodeStart;
+  if (!swap) {
+    s.notSwap += 1;
+    return;
+  }
+  s.swaps += 1;
+  s.lastSwapAt = Date.now();
+  const blockTime = tx.blockTime;
+  const tradeAt = typeof blockTime === 'number' && blockTime > 0 ? blockTime * 1_000 : null;
+  h.onSwap({
+    wallet,
+    swap,
+    signature,
+    at: Date.now(),
+    // A push carries no block time. Null is "undated", which the copier
+    // treats as now — and with the transaction delivered as it lands, that
+    // is close to true. The `logs` path still dates by the block it reads.
+    tradeAt,
+    timing: {
+      feed: 'tx',
+      // Usually null here, and honestly so: without a block time there is
+      // nothing to measure the delivery against. It is not zero.
+      detectMs: tradeAt === null ? null : Math.max(0, detectedAt - tradeAt),
+      readMs: null, // the whole point of this transport
+      readTries: 0,
+      decodeMs,
+      detectedAt,
+    },
+  });
+}
+
 async function onNotification(wallet: string, signature: string, err: unknown, recovered = false): Promise<void> {
   const h = host;
   if (!h) return;
   const s = statsFor(wallet);
+  const detectedAt = Date.now();
   if (!recovered) {
     s.seen += 1;
-    s.lastSeenAt = Date.now();
+    s.lastSeenAt = detectedAt;
   }
   if (err) return;
   if (!remember(signature)) return;
   // A just-confirmed transaction can take a beat to be readable, and a
   // rate-limited host can take a great deal longer than a beat.
   let why = 'not readable';
+  const readStart = Date.now();
   for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt++) {
     if (!wanted.has(wallet)) return;
     const res = await getTransaction(h.httpUrl(), signature);
     if (res.ok && res.data) {
+      // The read-back INCLUDING every retry and the sleeps between them —
+      // which is the number worth seeing, because a second attempt costs
+      // 700 ms of deliberate backoff before the request is even sent.
+      const readMs = Date.now() - readStart;
+      const decodeStart = Date.now();
       const swap = decodeWalletSwap(res.data, wallet);
+      const decodeMs = Date.now() - decodeStart;
       if (!swap) {
         s.notSwap += 1;
         return;
@@ -451,19 +586,33 @@ async function onNotification(wallet: string, signature: string, err: unknown, r
       // WHEN THEY TRADED, not when we read it. A recovered transaction can
       // be many minutes old, and the copier decides what to do about that.
       const blockTime = res.data.blockTime;
+      const tradeAt = typeof blockTime === 'number' && blockTime > 0 ? blockTime * 1_000 : null;
       h.onSwap({
         wallet,
         swap,
         signature,
         at: Date.now(),
-        tradeAt: typeof blockTime === 'number' && blockTime > 0 ? blockTime * 1_000 : null,
+        tradeAt,
+        timing: {
+          feed: 'logs',
+          // A RECOVERED transaction can be minutes old through no fault of
+          // the delivery path, so it is not timed at all — averaging those
+          // in would make the feed look far worse than it is.
+          detectMs: recovered || tradeAt === null ? null : Math.max(0, detectedAt - tradeAt),
+          readMs,
+          readTries: attempt + 1,
+          decodeMs,
+          detectedAt,
+        },
       });
       return;
     }
     why = res.ok ? 'the node does not have it yet' : res.message;
-    // Backoff, capped: a parked host is not helped by six fast retries, and
-    // `rpcClient` already waits out its own park inside the call.
-    await new Promise((r) => setTimeout(r, Math.min(FETCH_RETRY_MAX_MS, FETCH_RETRY_MS * 2 ** attempt)));
+    // Short at the front, patient at the tail — see FETCH_BACKOFF_MS. A
+    // parked host is not helped by fast retries either way, because
+    // `rpcClient` waits out its own park inside the call above.
+    const gap = FETCH_BACKOFF_MS[attempt] ?? FETCH_BACKOFF_MS[FETCH_BACKOFF_MS.length - 1];
+    await new Promise((r) => setTimeout(r, gap));
   }
   // Silence here was the bug: a leader trade that is KNOWN to have happened
   // and could not be read is a copy that will not fire, and the user had no
@@ -548,6 +697,8 @@ function scheduleReconnect(why: string): void {
 
 /** Test seam. */
 export function _reset(): void {
+  txDenied = false;
+  method = 'logs';
   stop();
   wanted.clear();
   stats.clear();

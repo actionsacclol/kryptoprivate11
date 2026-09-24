@@ -181,18 +181,32 @@ const FAST = { initialBackoffMs: 100, maxBackoffMs: 2000, backoffResetAfterMs: 1
     } // n >= 5: stays open
   });
   const r = recorder();
-  const feed = new FeedManager([s.url], 'processed', r.cb, 'Prog111', { ...FAST, subscribeAckTimeoutMs: 5000 });
+  // JITTER PINNED TO THE MIDDLE, so the delays are exactly 100/200/400/100.
+  //
+  // This block is about the BACKOFF, and it cannot also be sampling the
+  // jitter: with ±25% on each delay, 100 ms reaches 125 and 200 ms starts at
+  // 150, so "did it grow?" came down to a 20 % margin measured off a real
+  // clock — and a busy machine failed it (139,154,435,493 on 2026-09-22)
+  // while the code was perfectly correct. The jitter has its own test above.
+  const feed = new FeedManager([s.url], 'processed', r.cb, 'Prog111', {
+    ...FAST,
+    subscribeAckTimeoutMs: 5000,
+    rnd: () => 0.5,
+  });
   feed.start();
   assert.ok(await waitFor(() => at.length >= 5, 6000));
   const gaps = at.slice(1).map((t, i) => t - at[i]);
-  // Delays are 100/200/400 (±25%) before the healthy open; after it the
-  // backoff is back to ~100 (the 4th socket was open 400ms > 150ms).
-  assert.ok(gaps[1] > gaps[0] * 1.15, `backoff grows despite the open: ${gaps.join(',')}`);
-  assert.ok(gaps[2] > gaps[1] * 1.15, `backoff keeps growing: ${gaps.join(',')}`);
-  assert.ok(gaps[2] >= 250, `third delay is ~400ms, not 100: ${gaps.join(',')}`);
-  // gaps[3] = 400ms open + a reset (~100ms) delay: well under the ~800ms it
-  // would be if backoff had continued doubling.
-  assert.ok(gaps[3] < 400 + 300, `healthy open resets backoff: ${gaps.join(',')}`);
+  // DIFFERENCES, not ratios. Every gap carries the same connect overhead on
+  // top of its delay, and overhead is additive — so it cancels in a
+  // subtraction and inflates a ratio. Each step should add ~100 then ~200;
+  // half of that is the margin, which no amount of load turns negative.
+  assert.ok(gaps[1] - gaps[0] > 50, `backoff grows despite the open: ${gaps.join(',')}`);
+  assert.ok(gaps[2] - gaps[1] > 100, `backoff keeps growing: ${gaps.join(',')}`);
+  assert.ok(gaps[2] >= 300, `third delay is ~400ms, not 100: ${gaps.join(',')}`);
+  // gaps[3] = 400ms open + a reset (~100ms) delay. Had the backoff kept
+  // doubling it would be 400 + 800; anything under ~750 can only be a reset,
+  // and that gives 250ms of slack for a slow machine.
+  assert.ok(gaps[3] < 750, `healthy open resets backoff: ${gaps.join(',')}`);
   feed.stop();
   await s.close();
   console.log('ok  backoff survives accept-and-close, resets after a healthy open');

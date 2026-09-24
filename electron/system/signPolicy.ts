@@ -172,7 +172,17 @@ const SYS_IX_TRANSFER_WITH_SEED = 11;
 /** What the caller says the transaction is for. The policy enforces a
  *  different rule per intent — it does not take the caller's word for the
  *  contents. */
-export type SignIntent = 'trade' | 'sweep' | 'rent-reclaim' | 'fund' | 'launch' | 'collect-fees' | 'bridge';
+export type SignIntent = 'trade' | 'sweep' | 'rent-reclaim' | 'fund' | 'launch' | 'collect-fees' | 'bridge' | 'withdraw-token';
+
+/**
+ * Tokens that may be WITHDRAWN (intent 'withdraw-token') — USDC only.
+ *
+ * Added 2026-09-23 for pump.fun callout rewards, which are paid in USDC. The
+ * list is here, in the signer, not in the caller: a caller naming any other
+ * mint is refused whatever it claims. Widening this is a decision, not a
+ * convenience — every token added is one more thing the wallet can send.
+ */
+export const WITHDRAWABLE_TOKENS: ReadonlySet<string> = new Set(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v']);
 
 /**
  * Programs whose CREATE instructions a launch may contain.
@@ -468,6 +478,12 @@ export interface SignPolicy {
    * stranger, and the SOL-only rule let it through. See checkTokenInstruction.
    */
   trade?: TradeContext;
+  /**
+   * Intent 'withdraw-token' ONLY: the token being withdrawn. Must be in
+   * WITHDRAWABLE_TOKENS. The destination is not a field — it is the wallet's
+   * STORED withdrawal address, the same one a SOL sweep may pay.
+   */
+  withdrawMint?: string;
 }
 
 export interface OutflowCheck {
@@ -525,6 +541,82 @@ function checkLaunchSigners(
 
 const short = (k: string | undefined): string => `${(k ?? '?').slice(0, 8)}…`;
 
+/**
+ * The token-withdrawal exception (2026-09-23), in one place.
+ *
+ * A withdrawal of a WITHDRAWABLE_TOKENS mint to the wallet's STORED
+ * withdrawal address, and nothing else. Every instruction must be exactly one
+ * of:
+ *
+ *  · a ComputeBudget instruction (priority fee — moves nothing of ours);
+ *  · at most ONE Associated-Token-Account CreateIdempotent, creating the
+ *    WITHDRAWAL ADDRESS's account for this mint, paid by us (its rent, about
+ *    0.002 SOL, is the only SOL that leaves — by CPI, bounded by the caller's
+ *    simulation guard);
+ *  · exactly ONE classic-Token TransferChecked of this mint, from OUR account
+ *    to the withdrawal address's account, authorised by us alone.
+ *
+ * No SystemProgram instruction, no other program, no plain Transfer (it
+ * carries no mint to check), no multisig signers. Returns a refusal or null.
+ */
+function checkTokenWithdraw(
+  msg: VersionedTransaction['message'],
+  staticKeys: string[],
+  walletPublicKey: string,
+  homeAddress: string | null,
+  policy: SignPolicy,
+): string | null {
+  const mint = policy.withdrawMint;
+  if (!mint || !WITHDRAWABLE_TOKENS.has(mint)) return 'Only USDC may be withdrawn as a token — refusing to sign';
+  if (!homeAddress) return 'No withdrawal address set — refusing to sign a token withdrawal';
+  const source = ataFor(walletPublicKey, mint, TOKEN_PROGRAM);
+  const dest = ataFor(homeAddress, mint, TOKEN_PROGRAM);
+  let transfers = 0;
+  let creates = 0;
+  for (const ix of msg.compiledInstructions) {
+    if (ix.programIdIndex >= staticKeys.length) {
+      return 'Instruction program is hidden in an address lookup table — refusing to sign';
+    }
+    const program = staticKeys[ix.programIdIndex];
+    // Every account must be static, so every account can be named.
+    const at = (i: number): string | undefined => {
+      const k = ix.accountKeyIndexes[i];
+      return k !== undefined && k < staticKeys.length ? staticKeys[k] : undefined;
+    };
+    if (program === COMPUTE_BUDGET_PROGRAM) continue;
+    if (program === ATA_PROGRAM) {
+      creates += 1;
+      if (creates > 1) return 'A token withdrawal creates at most one account — refusing to sign';
+      if (ix.data.length !== 1 || ix.data[0] !== 1) return 'A token withdrawal may only create an account idempotently — refusing to sign';
+      if (
+        ix.accountKeyIndexes.length !== 6 ||
+        at(0) !== walletPublicKey ||
+        at(1) !== dest ||
+        at(2) !== homeAddress ||
+        at(3) !== mint ||
+        at(4) !== SYSTEM_PROGRAM_ID ||
+        at(5) !== TOKEN_PROGRAM
+      ) {
+        return 'The account being created is not the token account of your withdrawal address — refusing to sign';
+      }
+      continue;
+    }
+    if (program === TOKEN_PROGRAM) {
+      transfers += 1;
+      if (transfers > 1) return 'A token withdrawal is exactly one transfer — refusing to sign';
+      // TransferChecked: [12, amount u64, decimals u8]; accounts source, mint, destination, authority.
+      if (ix.data.length !== 10 || ix.data[0] !== 12) return 'A token withdrawal must be a checked transfer — refusing to sign';
+      if (ix.accountKeyIndexes.length !== 4 || at(0) !== source || at(1) !== mint || at(2) !== dest || at(3) !== walletPublicKey) {
+        return 'This transfer does not go from your wallet to your withdrawal address — refusing to sign';
+      }
+      continue;
+    }
+    return `A token withdrawal may not call ${short(program)} — refusing to sign`;
+  }
+  if (transfers !== 1) return 'A token withdrawal is exactly one transfer — refusing to sign';
+  return null;
+}
+
 export function checkOutflow(
   tx: VersionedTransaction,
   walletPublicKey: string,
@@ -561,6 +653,14 @@ export function checkOutflow(
   if (policy.intent === 'collect-fees') {
     const bad = checkCollectFees(msg, staticKeys, walletPublicKey);
     if (bad) return { ok: false, message: bad };
+  }
+
+  // A token withdrawal is decided entirely here: every instruction is one of
+  // three exact shapes or the whole thing is refused, so nothing below (the
+  // SOL loop, the token rule) is consulted for it.
+  if (policy.intent === 'withdraw-token') {
+    const bad = checkTokenWithdraw(msg, staticKeys, walletPublicKey, homeAddress, policy);
+    return bad ? { ok: false, message: bad } : { ok: true, message: 'ok' };
   }
 
   if (policy.intent === 'bridge') {

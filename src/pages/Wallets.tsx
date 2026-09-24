@@ -25,6 +25,7 @@ import {
   validateConfig,
   winRate,
   type CopyConfig,
+  type CopyLatency,
   type CopySnapshot,
   type LeaderRankKey,
   type CopyStats,
@@ -128,6 +129,75 @@ function Tot({ label, value, tone }: { label: string; value: string; tone?: 'goo
   );
 }
 
+/**
+ * Where the time goes between a leader's fill and ours.
+ *
+ * A tester timed ~5–6 s from outside and could not tell which half was
+ * which (2026-09-21). Every stage is a median over this session's copies,
+ * and a stage nothing measured shows an em dash rather than a zero — "did
+ * not happen" and "took no time" are different facts.
+ */
+function CopyLatencyPanel({ l }: { l: CopyLatency }) {
+  const ms = (n: number | null): string =>
+    n === null ? '—' : n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${Math.round(n)}ms`;
+  // The delivery half is the chain, the RPC and the transport; the rest is
+  // this app. Splitting them is the whole question.
+  const heard = (l.detectMs ?? 0) + (l.readMs ?? 0) + (l.decodeMs ?? 0);
+  const ours = (l.checkMs ?? 0) + (l.delayMs ?? 0) + (l.sendMs ?? 0);
+  const mixed = l.feeds.logs > 0 && l.feeds.tx > 0;
+  return (
+    <Section
+      title="Where a copy's time goes"
+      description="Median across this session's copies, paper and live. Measured from the leader's own block time, so it is the same stopwatch you would hold watching two wallets side by side."
+    >
+      <Card>
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+          <Tot label="Their fill → ours" value={ms(l.totalMs)} />
+          <Tot label="Heard about it" value={ms(l.detectMs)} />
+          <Tot label="Read the tx" value={ms(l.readMs)} />
+          <Tot label="Decode" value={ms(l.decodeMs)} />
+          <Tot label="Checks" value={ms(l.checkMs)} />
+          <Tot label="Your delay" value={ms(l.delayMs)} />
+          <Tot label="Our order" value={ms(l.sendMs)} />
+        </div>
+        <p className="mt-3 text-body leading-relaxed text-krypt-muted">
+          {l.samples < 5 ? (
+            <>
+              <span className="text-arc-gold">{l.samples} copy{l.samples === 1 ? '' : ' copies'} so far</span> — too few
+              to read as a measurement yet.{' '}
+            </>
+          ) : (
+            <>Over {l.samples} copies. </>
+          )}
+          {heard > 0 && ours > 0 && (
+            <>
+              Roughly <span className="text-white">{ms(heard)}</span> of it is hearing about the trade and{' '}
+              <span className="text-white">{ms(ours)}</span> is placing yours.{' '}
+            </>
+          )}
+          {l.factsMs !== null && l.checkMs !== null && l.factsMs > l.checkMs / 2 && (
+            <>
+              Most of the checks is one token lookup ({ms(l.factsMs)}), which is a network call on a mint nothing has
+              seen before.{' '}
+            </>
+          )}
+          {mixed ? (
+            <>Mixed transports this session ({l.feeds.logs} read back, {l.feeds.tx} delivered whole).</>
+          ) : l.feeds.tx > 0 ? (
+            <>Delivered whole by transactionSubscribe — no read-back at all.</>
+          ) : l.feeds.logs > 0 ? (
+            <>
+              Delivered as a signature, so every trade costs a read-back — the &ldquo;read the tx&rdquo; column above. A
+              Helius key on a plan that serves transactionSubscribe removes that stage entirely, because the
+              transaction arrives with the notification.
+            </>
+          ) : null}
+        </p>
+      </Card>
+    </Section>
+  );
+}
+
 function ConfigEditor({
   initial,
   wallets,
@@ -156,6 +226,19 @@ function ConfigEditor({
       ? { ok: false, message: chain === 'solana' ? 'Enter a valid wallet address' : `Enter a valid 0x address on ${EVM_CHAIN_META[chain].name}` }
       : base;
   const optNum = (raw: string): number | null => (raw.trim() === '' ? null : Number(raw));
+  // Token age is stored in seconds (the unit competitors and the engine use)
+  // and edited in minutes, which is how a person thinks about it.
+  const optMinutes = (v: number | null | undefined): string => (v === null || v === undefined ? '' : String(v / 60));
+  const fromMinutes = (raw: string): number | null => (raw.trim() === '' ? null : Number(raw) * 60);
+  // The blocklists are edited as text (one address per line) and carried as
+  // arrays. Local text keeps the newline the user just typed; the array is
+  // rebuilt from it on every change, empties dropped.
+  const [blockedMintsText, setBlockedMintsText] = useState((initial.blockedMints ?? []).join('\n'));
+  const [blockedCreatorsText, setBlockedCreatorsText] = useState((initial.blockedCreators ?? []).join('\n'));
+  const parseList = (raw: string): string[] | null => {
+    const out = raw.split(/[\s,]+/).map((s) => s.trim()).filter((s, i, a) => s && a.indexOf(s) === i);
+    return out.length ? out : null;
+  };
 
   return (
     <Card className="space-y-3 border-krypt-purple/25">
@@ -475,6 +558,66 @@ function ConfigEditor({
           >
             {c.onlyPumpfun ? 'Yes' : 'Any launchpad'}
           </button>
+        </Field>
+      </div>
+
+      {/* The 2026-09-21 filters — the controls every competitor ships and this
+          page lacked (docs/copy-trade-competitors-2026-09-21.md). Blank is
+          off; every refusal lands on the record with its reason, and a fact
+          the engine cannot read refuses rather than guesses. */}
+      <div className="pt-1 text-micro uppercase tracking-label text-krypt-muted/60">More filters · blank = off</div>
+      <div className="grid grid-cols-4 gap-3">
+        <Field label="Min market cap" hint="USD">
+          <input type="number" value={c.minMarketCapUsd ?? ''} onChange={(e) => set('minMarketCapUsd', optNum(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Their trade at least" hint={sym}>
+          <input type="number" value={c.minLeaderSol ?? ''} onChange={(e) => set('minLeaderSol', optNum(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Their trade at most" hint={sym}>
+          <input type="number" value={c.maxLeaderSol ?? ''} onChange={(e) => set('maxLeaderSol', optNum(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Max buys per token" hint="1 = buy once">
+          <input type="number" value={c.maxBuysPerToken ?? ''} onChange={(e) => set('maxBuysPerToken', optNum(e.target.value))} className={numBox} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-4 gap-3">
+        <Field label="Token at least" hint="minutes old">
+          <input type="number" value={optMinutes(c.minTokenAgeSec)} onChange={(e) => set('minTokenAgeSec', fromMinutes(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Token at most" hint="minutes old">
+          <input type="number" value={optMinutes(c.maxTokenAgeSec)} onChange={(e) => set('maxTokenAgeSec', fromMinutes(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Mirror sells of at least" hint="% of their bag">
+          <input type="number" value={c.minLeaderSellPct ?? ''} onChange={(e) => set('minLeaderSellPct', optNum(e.target.value))} className={numBox} />
+        </Field>
+        <Field label="Trailing stop" hint="% below the peak">
+          <input type="number" value={c.exitTrailingPct ?? ''} onChange={(e) => set('exitTrailingPct', optNum(e.target.value))} className={numBox} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Never copy these tokens" hint="one address per line">
+          <textarea
+            value={blockedMintsText}
+            onChange={(e) => {
+              setBlockedMintsText(e.target.value);
+              set('blockedMints', parseList(e.target.value));
+            }}
+            rows={2}
+            className={cls(numBox, 'min-h-[52px] resize-y')}
+            spellCheck={false}
+          />
+        </Field>
+        <Field label="Never copy these creators" hint="one address per line">
+          <textarea
+            value={blockedCreatorsText}
+            onChange={(e) => {
+              setBlockedCreatorsText(e.target.value);
+              set('blockedCreators', parseList(e.target.value));
+            }}
+            rows={2}
+            className={cls(numBox, 'min-h-[52px] resize-y')}
+            spellCheck={false}
+          />
         </Field>
       </div>
 
@@ -1072,7 +1215,7 @@ export function WalletsPage() {
                     }
                     return (
                       <p className="text-label text-krypt-muted/60">
-                        Watching on the live socket, any DEX · {w.seen} transaction{w.seen === 1 ? '' : 's'} seen
+                        Watching on the live socket{w.feed === 'tx' ? ' with pushed transactions' : ''}, any DEX · {w.seen} transaction{w.seen === 1 ? '' : 's'} seen
                         {w.lastSeenAt ? `, last ${fmtAgo(w.lastSeenAt)} ago` : ' so far'} · {w.swaps} swap{w.swaps === 1 ? '' : 's'}
                         {w.lastSwapAt ? ` (last ${fmtAgo(w.lastSwapAt)} ago)` : ''}
                         {(w.notSwap ?? 0) > 0 && <span title="Read fine, but not a swap this copier acts on — a transfer, an LP move, a claim."> · {w.notSwap} not swaps</span>}
@@ -1112,6 +1255,11 @@ export function WalletsPage() {
           </div>
         )}
       </Section>
+
+      {/* Where the time goes (2026-09-21). Shown whenever anything has been
+          timed, paper included — the detection half costs the same either
+          way, so a follower can measure it without spending. */}
+      {snap?.latency && snap.latency.samples > 0 && <CopyLatencyPanel l={snap.latency} />}
 
       {/* Recent copies */}
       {snap && snap.recent.length > 0 && (

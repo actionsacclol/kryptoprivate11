@@ -276,7 +276,18 @@ const MIN_GAP_MS: Record<HttpProviderId, number> = {
   dexscreener: 250,
   pumpfun: 260,
   geckoterminal: 2_100, // 30/min with headroom
-  pumpswap: 300,
+  // swap-api.pump.fun — MEASURED 2026-09-21, because the Wallet Scout's scan
+  // "worked for two minutes and then got limited". The `x-ratelimit-limit:
+  // 1000` it answers is not the limit that bites: a Cloudflare rule (HTTP
+  // 429, body `error code: 1015`, `Retry-After: 34`) blocks the IP for ~35 s
+  // after roughly 22 requests inside a short window, and every request made
+  // during the block extends it. 40 calls with no gap: 11 answered. 30 at
+  // 1 s: the 23rd refused. 30 at 2.5 s and 30 at 3 s: all answered. The old
+  // 300 ms gap tripped it a dozen calls into every scan, the park + slow
+  // start then crawled for a minute, and the cycle repeated — which is what
+  // "two minutes then limited" was. 2 s is ~15 per 30 s, under the edge with
+  // room for the token page's launch scan to share the host.
+  pumpswap: 2_000,
   // The free package is one request per second, per account — the old
   // 120 ms gap 429'd every free-key user's chart and holders panel by the
   // second call of any burst.
@@ -527,15 +538,37 @@ export function parseRetryAfterMs(value: string | null): number | null {
 }
 
 /** Park the provider after a refusal. Returns the park length chosen. */
+/**
+ * Where this module's lines go (2026-09-21).
+ *
+ * `http.ts` logged NOTHING until a logging audit found it, and it is one of
+ * the two layers every feature sits on. A park is the single most common
+ * explanation for "no price", "the chart is empty" and "Discover is blank",
+ * and it was visible only in a live panel — a user who closed the app took
+ * the evidence with them. Injected so the module stays offline-testable.
+ */
+type HttpLog = (level: 'info' | 'warn' | 'error', line: string) => void;
+let httpLog: HttpLog = () => {};
+export function attachLog(fn: HttpLog): void {
+  httpLog = fn;
+}
+
 function park(id: HttpProviderId, retryAfter: string | null, quota = false): number {
   const now = Date.now();
+  // Logged only when the park is NEW or longer than the one already running,
+  // so a backlog firing into an existing park cannot fill the log with the
+  // same sentence — the exact shape the 2026-09-06 storm had.
+  const wasUntil = blockedUntil.get(id) ?? 0;
   // A spent allowance does not escalate and does not listen to Retry-After:
   // the provider is telling us to come back next billing period, and every
   // knock before then is another certain failure.
   if (quota) {
     quotaParked.add(id);
     const until = now + QUOTA_PARK_MS;
-    if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
+    if (until > wasUntil) {
+      blockedUntil.set(id, until);
+      httpLog('warn', `provider ${id}: allowance spent — paused for ${Math.round(QUOTA_PARK_MS / 60_000)} min. Top up the plan or switch it off in Settings.`);
+    }
     slowStartUntil.set(id, until + SLOW_START_MS);
     return QUOTA_PARK_MS;
   }
@@ -558,7 +591,13 @@ function park(id: HttpProviderId, retryAfter: string | null, quota = false): num
   // only costs us freshness.
   const length = Math.max(escalated, parseRetryAfterMs(retryAfter) ?? 0);
   const until = now + length;
-  if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
+  if (until > wasUntil) {
+    blockedUntil.set(id, until);
+    httpLog(
+      'warn',
+      `provider ${id} (${providerHost(id)}) rate limited — paused ${Math.round(length / 1000)}s${count > 1 ? `, strike ${count}` : ''}${retryAfter ? ` (it asked for ${retryAfter})` : ''}. Prices and charts from it are stale until then.`,
+    );
+  }
   slowStartUntil.set(id, until + SLOW_START_MS);
   return length;
 }

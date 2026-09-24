@@ -343,7 +343,17 @@ export async function plan(req: TradeRequest, owner: Address | null): Promise<Pl
   // first time an address is seen).
   {
     const candidate = usableReferrer(req.referrer, activeEvmTreasury(), owner);
-    if (candidate && !(await canTakeNative(chain, candidate))) req = { ...req, referrer: '' };
+    if (candidate && !(await canTakeNative(chain, candidate))) {
+      // Dropping it is right — the leg is inside the router call and would
+      // revert the trade. Dropping it in silence is not: the trade goes
+      // through, the referrer earns nothing, and nothing anywhere says why
+      // (fixed 2026-09-21, the Solana twin is in liveSigner.ts).
+      console.warn(`[evm-fee] referrer ${candidate.slice(0, 8)}… cannot receive ${chain} native currency — no referral paid`);
+      req = { ...req, referrer: '' };
+    } else if (req.referrer && !candidate) {
+      const why = !isEvmAddress(req.referrer) ? 'not an address' : 'it is the fee address or this wallet';
+      console.warn(`[evm-fee] referrer ignored: ${why}`);
+    }
   }
   const decimals = v.decimals;
   const fees = await feeFields(chain);

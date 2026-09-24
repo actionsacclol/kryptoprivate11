@@ -21,6 +21,11 @@ export const ROUTE_LOADERS = {
   wire: () => import('./pages/Wire'),
   creator: () => import('./pages/lab/Creator'),
   funder: () => import('./pages/lab/Funder'),
+  // The Copier merged into the Wallet list (2026-09-22); the id stays so a
+  // pinned or saved 'copier' still opens something.
+  copier: () => import('./pages/lab/Creator'),
+  autocallout: () => import('./pages/AutoCallout'),
+  pumpaccounts: () => import('./pages/PumpAccounts'),
   scripts: () => import('./pages/Scripts'),
   orders: () => import('./pages/Orders'),
   trades: () => import('./pages/Trades'),
@@ -37,6 +42,7 @@ export const ROUTE_LOADERS = {
   backtest: () => import('./pages/Backtest'),
   guides: () => import('./pages/Guides'),
   farming: () => import('./pages/Farming'),
+  mcp: () => import('./pages/AiConnection'),
   wallet: () => import('./pages/Wallet'),
   // Both EVM wallet pages live in the same chunk as the Solana one — they
   // share EvmWalletPanel and the page shell, so splitting them would fetch

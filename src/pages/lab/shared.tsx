@@ -1,14 +1,14 @@
-// Shared plumbing for the wallet pages under Automation — Wallet Creator and
-// Funder. Both act on the same data: the wallet list, the groups, and live
-// state (armed or not). Everything real-money on those pages goes through the
+// Shared plumbing for the wallet pages under Automation — the Wallet list and
+// the Funder. Both act on the same data: the wallet list (at most ten —
+// groups and the Copier were removed 2026-09-22) and live state (armed or
+// not). Everything real-money on those pages goes through the
 // signer policy and the trade pipeline; the contract is shared/lab.ts and the
 // engine owns the money.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { LiveState, WalletGroupView, WalletSummary } from '@shared/types';
+import type { LiveState, WalletSummary } from '@shared/types';
 import { MAX_LAB_WALLETS_PER_CALL } from '@shared/lab';
 import { cls } from '../../utils/format';
-import { useToast } from '../../state/ToastProvider';
 
 export const selectCls = 'rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-note text-white';
 export const inputCls = 'rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-note text-white outline-none focus:border-krypt-purple/60';
@@ -45,12 +45,11 @@ export function useTick(ms: number): void {
 
 /** More wallets than one IPC call accepts — the pages disable above it. */
 export function tooMany(n: number): string | null {
-  return n > MAX_LAB_WALLETS_PER_CALL ? `At most ${MAX_LAB_WALLETS_PER_CALL} wallets per action — pick a smaller group or hand-pick` : null;
+  return n > MAX_LAB_WALLETS_PER_CALL ? `At most ${MAX_LAB_WALLETS_PER_CALL} wallets per action — hand-pick fewer` : null;
 }
 
 export interface LabData {
   wallets: WalletSummary[];
-  groups: WalletGroupView[];
   live: LiveState | null;
   armed: boolean;
   /** Why real-money actions are disabled, or null. */
@@ -63,29 +62,20 @@ export interface LabData {
   busy: string | null;
   setBusy: (b: string | null) => void;
   setWallets: (w: WalletSummary[]) => void;
-  /** Apply an IPC result that carries the group list; toast on failure. */
-  applyGroups: (r: { ok: boolean; message: string; data?: WalletGroupView[] }) => void;
   reload: () => Promise<void>;
   refreshBalances: () => Promise<void>;
 }
 
 export function useLabData(): LabData {
-  const toast = useToast();
   const [wallets, setWallets] = useState<WalletSummary[]>([]);
-  const [groups, setGroups] = useState<WalletGroupView[]>([]);
   const [live, setLive] = useState<LiveState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const armedRef = useRef<boolean | null>(null);
   armedRef.current = live?.armed ?? null;
 
   const reload = useCallback(async () => {
-    const [l, g, s] = await Promise.all([
-      window.krypt.wallet.list(),
-      window.krypt.wallet.groups(),
-      window.krypt.live.state(),
-    ]);
+    const [l, s] = await Promise.all([window.krypt.wallet.list(), window.krypt.live.state()]);
     if (l.ok && l.data) setWallets(l.data);
-    if (g.ok && g.data) setGroups(g.data);
     if (s.ok && s.data) setLive(s.data);
   }, []);
 
@@ -122,14 +112,6 @@ export function useLabData(): LabData {
     }
   }, []);
 
-  const applyGroups = useCallback(
-    (r: { ok: boolean; message: string; data?: WalletGroupView[] }): void => {
-      if (r.ok && r.data) setGroups(r.data);
-      else if (!r.ok) toast.error(r.message);
-    },
-    [toast],
-  );
-
   const armed = live?.armed === true;
   const active = useMemo(() => wallets.find((w) => w.active) ?? null, [wallets]);
   const others = useMemo(() => wallets.filter((w) => !w.active), [wallets]);
@@ -138,7 +120,6 @@ export function useLabData(): LabData {
 
   return {
     wallets,
-    groups,
     live,
     armed,
     armedReason: armed ? null : 'Arm live execution on the Wallet page first — this moves real SOL',
@@ -149,24 +130,9 @@ export function useLabData(): LabData {
     busy,
     setBusy,
     setWallets,
-    applyGroups,
     reload,
     refreshBalances,
   };
-}
-
-/** Group balance = sum of known member balances; null when none is known. */
-export function groupBalance(g: WalletGroupView, balanceOf: Map<string, number | null>): number | null {
-  let sum = 0;
-  let known = false;
-  for (const m of g.members) {
-    const b = balanceOf.get(m.id);
-    if (typeof b === 'number') {
-      sum += b;
-      known = true;
-    }
-  }
-  return known ? sum : null;
 }
 
 /**
@@ -191,29 +157,24 @@ export function RealMoneyBanner({ armed, what, kind = 'trade' }: { armed: boolea
 }
 
 /**
- * Scope picker used by Funder and Copier: a group, or a hand-picked set of
- * wallets. Returns the resolved wallet ids (never the active wallet).
+ * Which wallets a Funder action touches: every wallet but the active one, or
+ * a hand-picked set. Returns the resolved wallet ids (never the active wallet).
  */
 export function useScope(data: LabData) {
-  const [mode, setMode] = useState<'group' | 'pick'>('group');
-  const [groupId, setGroupId] = useState<string>('');
+  const [mode, setMode] = useState<'all' | 'pick'>('all');
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const walletIds = useMemo(() => {
     const activeId = data.active?.id;
-    if (mode === 'pick') return [...picked].filter((id) => id !== activeId && data.wallets.some((w) => w.id === id));
-    // '' means every wallet; a group id that no longer resolves (deleted
-    // meanwhile) means NOTHING, never silently everything.
-    const g = data.groups.find((x) => x.id === groupId);
-    const ids = groupId ? (g ? g.members.map((m) => m.id) : []) : data.wallets.map((w) => w.id);
-    return ids.filter((id) => id !== activeId);
-  }, [mode, groupId, picked, data.groups, data.wallets, data.active]);
+    const pool = mode === 'pick' ? data.wallets.filter((w) => picked.has(w.id)) : data.wallets;
+    return pool.map((w) => w.id).filter((id) => id !== activeId);
+  }, [mode, picked, data.wallets, data.active]);
   const toggle = (id: string): void =>
     setPicked((cur) => {
       const next = new Set(cur);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-  return { mode, setMode, groupId, setGroupId, picked, toggle, walletIds };
+  return { mode, setMode, picked, toggle, walletIds };
 }
 
 export function ScopePicker({
@@ -225,30 +186,21 @@ export function ScopePicker({
   scope: ReturnType<typeof useScope>;
   allLabel?: string;
 }) {
-  const activeId = data.active?.id;
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <select value={scope.mode} onChange={(e) => scope.setMode(e.target.value as 'group' | 'pick')} className={selectCls}>
-          <option value="group">By group</option>
+        <select value={scope.mode} onChange={(e) => scope.setMode(e.target.value as 'all' | 'pick')} className={selectCls}>
+          <option value="all">
+            {allLabel} ({data.others.length})
+          </option>
           <option value="pick">Pick wallets</option>
         </select>
-        {scope.mode === 'group' && (
-          <select value={scope.groupId} onChange={(e) => scope.setGroupId(e.target.value)} className={selectCls}>
-            <option value="">{allLabel} ({data.others.length})</option>
-            {data.groups.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name} ({g.members.filter((m) => m.id !== activeId).length})
-              </option>
-            ))}
-          </select>
-        )}
         <span className="text-body font-mono text-krypt-muted">{scope.walletIds.length} wallet{scope.walletIds.length === 1 ? '' : 's'}</span>
       </div>
       {scope.mode === 'pick' && (
         <div className="flex flex-wrap gap-1.5">
           {data.others.length === 0 ? (
-            <span className="text-body text-krypt-muted">No other wallets yet — create some in Group Wallets.</span>
+            <span className="text-body text-krypt-muted">No other wallets yet — make some on the Wallet list.</span>
           ) : (
             data.others.map((w) => (
               <label

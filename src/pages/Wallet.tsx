@@ -1,6 +1,8 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 
-import { AlertTriangle, ArrowUpRight, Download, ExternalLink, FlaskConical, KeyRound, RefreshCw, ShieldAlert, Trash2, Wallet as WalletIcon, Zap } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, Download, ExternalLink, FlaskConical, KeyRound, RefreshCw, ShieldAlert, Trash2, UserCheck, UserX, Wallet as WalletIcon, Zap } from 'lucide-react';
+import { sessionForWallet } from '@shared/pumpAuth';
+import { usePumpStatus } from '../state/pumpStatus';
 import { Badge, Card, Copyable, GhostButton, NumberInput, Page, PrimaryButton, Section, Switch } from '../components/common';
 import { useReduceEffects, EffectsOff } from '../components/viz/useReduceEffects';
 import { useToast } from '../state/ToastProvider';
@@ -9,6 +11,7 @@ import { useAppState } from '../state/AppStateProvider';
 import { SwitchToPaper } from '../components/SwitchToPaper';
 import { EvmWalletPanel } from '../components/terminal/EvmWalletPanel';
 import { WalletRewards } from '../components/terminal/WalletRewards';
+import { PumpAccountsSection } from '../components/terminal/PumpAccountsSection';
 import { HoldingsSection } from './Positions';
 import { EVM_CHAIN_META, type EvmChainKind } from '@shared/evm';
 import type { LiveState, WalletInfo, WalletSummary } from '@shared/types';
@@ -334,6 +337,9 @@ function WithdrawPanel({
 
 
 export function WalletPage() {
+  // Which wallets have a pump.fun account signed in (2026-09-23): the list
+  // below said nothing about it, and scripts and callouts depend on it.
+  const pump = usePumpStatus();
   const toast = useToast();
   const modal = useModal();
   const { settings, updateSettings } = useAppState();
@@ -617,6 +623,7 @@ export function WalletPage() {
                         </button>
                       )}
                       <div className="font-mono text-label text-krypt-muted truncate">{wal.publicKey}</div>
+                      <PumpBadge session={pump ? sessionForWallet(pump, wal.id) : undefined} />
                     </div>
 
                     <div className="text-right">
@@ -765,6 +772,12 @@ export function WalletPage() {
                 </div>
               </div>
               <Switch
+                checked={settings.execution.rearmAfterVerifiedUpgrade !== false}
+                onChange={(v) => void updateSettings({ execution: { ...settings.execution, rearmAfterVerifiedUpgrade: v } })}
+                label="Re-arm after a checked pump upgrade"
+                description="When pump.fun upgrades its program, live switches off while the app re-checks it against real launches — usually within seconds. With this on, live switches back on by itself if the check passes and live was on before. A failed check never re-arms. You get a notification either way."
+              />
+              <Switch
                 checked={settings.execution.autoSellOnExit}
                 onChange={(v) => void updateSettings({ execution: { ...settings.execution, autoSellOnExit: v } })}
                 label="Auto-sell on stop or crash"
@@ -793,7 +806,11 @@ export function WalletPage() {
           {/* Buy by mint + sell */}
           <LiveExecutionPanel armed={!!live?.armed} balanceSol={info.balanceSol} />
 
-          {/* Fan-out: groups + several wallets buying the same token at once */}
+          {/* pump.fun accounts (2026-09-22): one per wallet, all live at once.
+              Here rather than on the Launch page because the account IS the
+              wallet, and this is where someone looks at what their wallets
+              are and what they can do. */}
+          <PumpAccountsSection wallets={wallets} />
 
           {/* Backup / danger */}
           <Section title="Backup & removal">
@@ -845,5 +862,25 @@ export function EvmWalletPage({ chain }: { chain: EvmChainKind }) {
           until the button is pressed. */}
       <WalletRewards chain={chain} />
     </Page>
+  );
+}
+
+/**
+ * This wallet's pump.fun account, or that it has none. `undefined` = status
+ * not read yet, which shows nothing rather than a wrong "none".
+ */
+function PumpBadge({ session }: { session: import('@shared/pumpAuth').PumpSessionView | null | undefined }) {
+  if (session === undefined) return null;
+  if (!session) {
+    return (
+      <span className="mt-0.5 inline-flex items-center gap-1 text-label text-krypt-muted/60" title="Make one under Automation → Wallet list or pump.fun accounts">
+        <UserX className="h-3 w-3" /> no pump.fun account
+      </span>
+    );
+  }
+  return (
+    <span className="mt-0.5 inline-flex items-center gap-1 text-label text-emerald-300" title="Signed in to pump.fun">
+      <UserCheck className="h-3 w-3" /> pump.fun: {session.username ?? 'signed in (name loading…)'}
+    </span>
   );
 }

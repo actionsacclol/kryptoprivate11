@@ -27,23 +27,62 @@ import { WORKSPACES, workspaceOf } from '../workspaces';
 import { isPinnable, loadPinned, savePinned } from '../panels/pinned';
 
 const STORE_KEY = 'krypt.panels.enabled.v1';
+/**
+ * Every panel id this install has been SHOWN (asked 2026-09-22: "all panels
+ * toggled on when run first time"). A panel not in here is new to this user —
+ * a fresh install, or a panel added in an update — so it starts ON, once.
+ * One they then switch off stays off, because by then it is in here.
+ *
+ * Until this key existed a saved layout froze the set: someone who arranged
+ * their grid before Runners, Callouts, Links or Games existed never saw them.
+ * An install with a saved set but no seen-list is treated as having seen
+ * nothing, so everything comes on one time and the list starts from there.
+ */
+const SEEN_KEY = 'krypt.panels.seen.v1';
 
 function loadEnabled(): string[] {
+  const known = PANELS.map((p) => p.id);
+  let seen: Set<string> = new Set();
+  try {
+    const raw = window.localStorage.getItem(SEEN_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) seen = new Set(parsed.filter((x): x is string => typeof x === 'string'));
+  } catch {
+    /* unreadable = nothing seen */
+  }
+  const unseen = known.filter((id) => !seen.has(id));
+  // Every branch lands in `enabled` — none returns early — so a fresh
+  // install records what it was shown too, and a panel switched off in the
+  // first session is not switched back on at the second start.
+  let enabled: string[] = DEFAULT_ENABLED;
   try {
     const raw = window.localStorage.getItem(STORE_KEY);
-    if (!raw) return DEFAULT_ENABLED;
-    const saved: unknown = JSON.parse(raw);
-    if (!Array.isArray(saved)) return DEFAULT_ENABLED;
-    // Keep only ids that still exist. A panel removed in a later build must
-    // not leave a hole, and an unknown id must not reach the grid.
-    const known = new Set(PANELS.map((p) => p.id));
-    const kept = saved.filter((x): x is string => typeof x === 'string' && known.has(x));
-    // An empty saved set is a real choice ("show me nothing"), so it is kept —
-    // but a set that became empty only because every id went stale is not.
-    return kept.length || saved.length === 0 ? kept : DEFAULT_ENABLED;
+    const saved: unknown = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(saved)) {
+      // Keep only ids that still exist. A panel removed in a later build must
+      // not leave a hole, and an unknown id must not reach the grid.
+      const knownSet = new Set(known);
+      const kept = saved.filter((x): x is string => typeof x === 'string' && knownSet.has(x));
+      // An empty saved set is a real choice ("show me nothing"), so it is
+      // kept — but a set that became empty only because every id went stale
+      // is not.
+      enabled = kept.length || saved.length === 0 ? kept : DEFAULT_ENABLED;
+    }
   } catch {
-    return DEFAULT_ENABLED;
+    enabled = DEFAULT_ENABLED;
   }
+  if (!unseen.length) return enabled;
+  // Panels this user has never been shown come on, once. The merged set and
+  // the seen-list are written TOGETHER, so calling this twice (React's dev
+  // double-invoke, a popped-out window) returns the same answer both times.
+  const merged = [...enabled, ...unseen.filter((id) => !enabled.includes(id))];
+  try {
+    window.localStorage.setItem(STORE_KEY, JSON.stringify(merged));
+    window.localStorage.setItem(SEEN_KEY, JSON.stringify(known));
+  } catch {
+    /* private window — every start is a first start, which is harmless */
+  }
+  return merged;
 }
 
 /** Pages that can be pinned, grouped by the workspace they belong to. */

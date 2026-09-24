@@ -29,7 +29,7 @@
 // public fact about a public token.
 
 import { request } from 'undici';
-import { webhookUrlProblem } from '@shared/webhook';
+import { webhookUrlProblem, type ScriptEmbed } from '@shared/webhook';
 
 // The URL rules live in shared/webhook.ts so the IPC validator and the
 // renderer can import them without pulling undici in behind them. Re-exported
@@ -89,6 +89,22 @@ export async function postFlag(webhookUrl: string, flag: WebhookFlag): Promise<W
     ],
   };
 
+  return send(url, payload, 'this flag was dropped');
+}
+
+/**
+ * Post an embed a script built (already rebuilt by `scriptEmbed`). Same
+ * host rule, same no-retry, mentions always off.
+ */
+export async function postEmbed(webhookUrl: string, embed: ScriptEmbed): Promise<WebhookResult> {
+  const problem = webhookUrlProblem(webhookUrl);
+  if (problem) return { ok: false, message: problem };
+  const url = webhookUrl.trim();
+  if (!url) return { ok: false, message: 'no webhook set' };
+  return send(url, { username: 'Krypto Bot', allowed_mentions: { parse: [] as string[] }, embeds: [embed] }, 'this post was dropped');
+}
+
+async function send(url: string, payload: unknown, droppedWhat: string): Promise<WebhookResult> {
   try {
     const res = await request(url, {
       method: 'POST',
@@ -104,7 +120,7 @@ export async function postFlag(webhookUrl: string, flag: WebhookFlag): Promise<W
     if (code === 401 || code === 403 || code === 404) {
       return { ok: false, message: `Discord rejected the webhook (${code}) — it may have been deleted or the URL is wrong` };
     }
-    if (code === 429) return { ok: false, message: 'Discord is rate-limiting this webhook — this flag was dropped' };
+    if (code === 429) return { ok: false, message: `Discord is rate-limiting this webhook — ${droppedWhat}` };
     return { ok: false, message: `Discord answered ${code}` };
   } catch (e) {
     return { ok: false, message: (e as Error)?.message ?? 'the request failed' };

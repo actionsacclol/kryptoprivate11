@@ -41,6 +41,7 @@ import {
   withAlert,
   withGlobals,
   withLeader,
+  withLaunchLinks,
   withMarket,
   withOrder,
   withPosition,
@@ -52,6 +53,7 @@ import {
   MAX_STATE_BYTES,
   RULE_ACTIONS,
   type LeaderFacts,
+  type LaunchLinks,
   type MarketFacts,
   type ScriptLinks,
   type ScriptSecurity,
@@ -65,7 +67,9 @@ import {
   type ScriptStats,
   type UserScript,
 } from '@shared/automation';
-import { MIN_INTERVAL_S, type SandboxToMain } from '@shared/scriptProtocol';
+import { MAX_STAT_KEYS, MIN_INTERVAL_S, type SandboxToMain, type ScriptStatValue } from '@shared/scriptProtocol';
+import { REPLY_BUDGET, THESIS_BUDGET, calloutPageUrl } from '@shared/calloutAuto';
+import { redactWebhook, scriptEmbed, type ScriptEmbed } from '@shared/webhook';
 import type { EngineEvent, LaunchRow } from '@shared/types';
 import { nativeSymbolOf } from '@shared/evm';
 import type { ChainKind } from '@shared/evm';
@@ -116,7 +120,12 @@ export interface LeaderTrade extends LeaderFacts {
 export interface AutomationHost {
   /** A buy in the script's mode: paper = simulated fill into the paper book;
    *  live = the real pipeline. */
-  buy(mint: string, sol: number, mode: ScriptMode, chain?: ChainKind): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }>;
+  /**
+   * `ownCapSol` is the script's OWN per-trade cap, which it has already
+   * enforced. It replaces the app's manual per-trade cap for this buy rather
+   * than adding to it — a script's budget is the authority on its own size.
+   */
+  buy(mint: string, sol: number, mode: ScriptMode, chain?: ChainKind, ownCapSol?: number): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }>;
   /** A sell of `pct`% of what is held, in the script's mode. `realizedSol`
    *  when the fill can say (paper: exact). */
   sell(mint: string, pct: number, mode: ScriptMode, chain?: ChainKind): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }>;
@@ -129,6 +138,9 @@ export interface AutomationHost {
   priceSol(mint: string, chain?: ChainKind): number | null;
   /** The launch feed's row for a mint, if it has one. */
   launch(mint: string): LaunchRow | null;
+  /** Which links the launch's own metadata file published, as the scanner
+   *  read it at create time — free. Null until that read resolves. */
+  launchLinks?(mint: string): LaunchLinks | null;
   /** Provider facts already cached — free. */
   marketCached(mint: string, chain?: ChainKind): MarketFacts | null;
   /** Provider facts, fetched — a round trip. */
@@ -159,11 +171,56 @@ export interface AutomationHost {
   runners(): RunnerFlag[];
   leaders(): LeaderView[];
   notify(title: string, body: string): void;
+  /**
+   * Post a pump.fun callout on a coin, as one of the user's pump accounts.
+   *
+   * `thesis` empty means "use a random line from the Auto-callout settings".
+   * `wallet` empty means the active trading wallet; otherwise it is matched
+   * against the ADDRESSES of signed-in accounts, so a caller can only ever
+   * name an account this app already holds a session for.
+   *
+   * Never throws: pump refusing a call is ordinary and comes back as ok:false.
+   */
+  callout(
+    mint: string,
+    thesis: string,
+    wallet: string,
+  ): Promise<{ ok: boolean; message: string; thesis?: string; address?: string; calloutId?: string | null }>;
+  /** Reply to the callout this account already made on the coin. */
+  calloutReply(
+    mint: string,
+    content: string,
+    wallet: string,
+  ): Promise<{ ok: boolean; message: string; thesis?: string; address?: string; calloutId?: string | null; replyId?: string | null }>;
+  /** POST one embed to a Discord webhook. The URL comes from the script's own
+   *  `webhook` answer, resolved in this module, never from the sandbox. */
+  discord(webhookUrl: string, embed: ScriptEmbed): Promise<{ ok: boolean; message: string }>;
+  /** Follow / unfollow a pump user, like / unlike a callout, as one of the
+   *  user's accounts. Same `wallet` rule as callout. Never throws. */
+  pumpSocial(
+    action: 'follow' | 'unfollow' | 'like' | 'unlike',
+    target: string,
+    wallet: string,
+  ): Promise<{ ok: boolean; message: string; address?: string }>;
+  /** The user's own wallets on this chain: address, label, which is active. */
+  wallets(): Array<{ address: string; label: string; active: boolean }>;
+  /**
+   * Buy / sell with one of the user's OTHER wallets, named by address.
+   *
+   * There is no per-coin wallet cap on this — it is the only multi-wallet
+   * path left (the Copier was removed 2026-09-22), and the script's own
+   * budget bounds it. Here a script names one per call and its own budget bounds it. The
+   * multi-wallet acknowledgement still applies.
+   */
+  walletBuy(address: string, mint: string, sol: number, ownCapSol?: number): Promise<{ ok: boolean; message: string }>;
+  walletSell(address: string, mint: string, pct: number): Promise<{ ok: boolean; message: string }>;
+  /** The signed-in pump.fun accounts, newest first. A free read. */
+  pumpAccounts(): Array<{ address: string; username: string | null; active: boolean }>;
   log(level: 'info' | 'warn' | 'error', line: string): void;
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   changed(): void;
   sandbox: {
-    start(scriptId: string, code: string, info?: { chain?: string; nativeSymbol?: string }): Promise<{ ok: boolean; message: string; retryable?: boolean }>;
+    start(scriptId: string, code: string, info?: { chain?: string; nativeSymbol?: string; inputs?: Record<string, unknown> }): Promise<{ ok: boolean; message: string; retryable?: boolean }>;
     dispatch(scriptId: string, name: string, payload: unknown): Promise<{ ok: boolean; error?: string }>;
     reply(scriptId: string, id: number, ok: boolean, value?: unknown, error?: string): void;
     stop(scriptId: string, reason?: string): Promise<void>;
@@ -184,6 +241,7 @@ interface Runtime {
   errorsInARow: number;
   lastRunAt: number | null;
   lastError: string | null;
+  lastErrorAt: number | null;
   firedMints: Set<string>;
   lastFireAt: Map<string, number>;
   /** Timestamps of actions in the last minute. */
@@ -194,6 +252,17 @@ interface Runtime {
   opened: Map<string, { costSol: number; at: number }>;
   /** Mints the script asked to stream ticks for. */
   subscribed: Set<string>;
+  /**
+   * Accounts this script has already called each coin from: mint → addresses.
+   *
+   * A dedupe, not a limit: pump allows exactly one callout per coin per
+   * account, so a second attempt from the same one is a request that would be
+   * refused. Skipping it costs nothing and saves a round trip.
+   *
+   * In memory only. A restart clears it, and pump's own "you have already
+   * called this coin" is what catches the repeat after that.
+   */
+  calledOut: Map<string, Set<string>>;
   kv: Record<string, unknown>;
   lastUpdateAt: Map<string, number>;
   lastTickAt: Map<string, number>;
@@ -208,6 +277,8 @@ interface Runtime {
   /** Daily schedules: "HH:MM" → timer to the next occurrence. */
   atTimers: Map<string, NodeJS.Timeout>;
   log: ScriptLogLine[];
+  /** The script's own widget stats (bot.stat), insertion-ordered. */
+  metrics: Map<string, { value: ScriptStatValue; at: number }>;
   running: boolean;
   queue: Array<{ name: string; payload: unknown }>;
   busy: boolean;
@@ -398,12 +469,14 @@ function freshRuntime(): Runtime {
     errorsInARow: 0,
     lastRunAt: null,
     lastError: null,
+    lastErrorAt: null,
     firedMints: new Set(),
     lastFireAt: new Map(),
     actions: [],
     analyses: [],
     opened: new Map(),
     subscribed: new Set(),
+    calledOut: new Map(),
     kv: {},
     lastUpdateAt: new Map(),
     lastTickAt: new Map(),
@@ -413,6 +486,7 @@ function freshRuntime(): Runtime {
     startRetry: null,
     atTimers: new Map(),
     log: [],
+    metrics: new Map(),
     running: false,
     queue: [],
     busy: false,
@@ -440,6 +514,39 @@ function pushLog(rt: Runtime, level: ScriptLogLine['level'], line: string): void
   if (rt.log.length > LOG_CAP) rt.log.splice(0, rt.log.length - LOG_CAP);
 }
 
+/**
+ * A script's OWN bot.log / bot.warn / bot.error lines, into app.log.
+ *
+ * Until 2026-09-23 only bot.error reached the file; info and warn lived in the
+ * script panel's memory and died with a restart — so a support bundle could
+ * not show what a script was doing, and a script that logs results for later
+ * analysis (scorenow's "SCORE {…}" lines) had nowhere durable to put them.
+ *
+ * Capped per script, because a script can log in a loop and the file is
+ * 5 MB with one rotation: past SCRIPT_FILE_LINES_PER_MIN in a minute, lines
+ * go to the panel only, and the next line that is written says how many
+ * were skipped. The panel itself is unchanged.
+ */
+const SCRIPT_FILE_LINES_PER_MIN = 120;
+const fileLogBudget = new Map<string, { windowStart: number; n: number; dropped: number }>();
+
+function scriptFileLog(s: UserScript, level: ScriptLogLine['level'], line: string): void {
+  const now = Date.now();
+  let b = fileLogBudget.get(s.id);
+  if (!b || now - b.windowStart >= 60_000) {
+    const dropped = b?.dropped ?? 0;
+    b = { windowStart: now, n: 0, dropped: 0 };
+    fileLogBudget.set(s.id, b);
+    if (dropped > 0) host?.log('warn', `script "${s.name}": ${dropped} log line(s) not written to the file (over ${SCRIPT_FILE_LINES_PER_MIN} a minute; they are in the script panel)`);
+  }
+  if (b.n >= SCRIPT_FILE_LINES_PER_MIN) {
+    b.dropped += 1;
+    return;
+  }
+  b.n += 1;
+  host?.log(level === 'info' ? 'info' : 'warn', `script "${s.name}": ${line.slice(0, 2000)}`);
+}
+
 function slog(s: UserScript, level: ScriptLogLine['level'], line: string): void {
   pushLog(rtFor(s), level, line);
   host?.log(level === 'error' ? 'warn' : 'info', `script "${s.name}": ${line}`);
@@ -452,7 +559,7 @@ export function all(): UserScript[] {
 }
 
 export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }): { ok: boolean; message: string; id?: string } {
-  const v = validateScript(input, { maxLiveSol: host?.maxLiveSol() });
+  const v = validateScript(input);
   if (!v.ok) return { ok: false, message: v.message };
   const now = Date.now();
   if (input.id) {
@@ -584,6 +691,7 @@ function statsFor(s: UserScript): ScriptStats {
     errorsInARow: rt.errorsInARow,
     lastRunAt: rt.lastRunAt,
     lastError: rt.lastError,
+    lastErrorAt: rt.lastErrorAt,
     openCount: rt.opened.size,
     firedMints: rt.firedMints.size,
     running: s.kind === 'code' ? rt.running && (host?.sandbox.isRunning(s.id) ?? false) : s.enabled,
@@ -593,14 +701,18 @@ function statsFor(s: UserScript): ScriptStats {
 export function snapshot(): ScriptSnapshot {
   const stats: Record<string, ScriptStats> = {};
   const logs: Record<string, ScriptLogLine[]> = {};
+  const metrics: NonNullable<ScriptSnapshot['metrics']> = {};
   for (const s of scripts) {
     stats[s.id] = statsFor(s);
-    logs[s.id] = rtFor(s).log.slice(-SNAPSHOT_LOG_LINES);
+    const rt = rtFor(s);
+    logs[s.id] = rt.log.slice(-SNAPSHOT_LOG_LINES);
+    metrics[s.id] = [...rt.metrics].map(([name, m]) => ({ name, value: m.value, at: m.at }));
   }
   return {
     scripts: all(),
     stats,
     logs,
+    metrics,
     liveBlockedReason: host?.liveBlockedReason() ?? null,
     // Per chain: a script only ever runs on one, and the reason it cannot
     // execute is that chain's. Asking Solana on behalf of a Robinhood script
@@ -632,6 +744,7 @@ async function ctxFor(s: UserScript, mint: string, base?: RuleContext): Promise<
   const mine = rtFor(s).opened.has(mint);
   let c = base ?? (row ? contextFromLaunch(row, now) : emptyContext(mint, pos?.symbol, pos?.name));
   c = withMarket(c, h.marketCached(mint, scriptChain(s)));
+  c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(mint) ?? null) : null);
   c = withPosition(c, mine && pos ? withPeak(s.mode, pos) : null, now);
   c = withGlobals(c, { walletSol: h.wallet().sol, now });
   return c;
@@ -689,9 +802,17 @@ async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, wh
   await reconcileOpened(s, rt);
   if (!rt.opened.has(mint) && rt.opened.size >= s.budget.maxOpenPositions) return refuse(s, `buy ${what}: already holding ${rt.opened.size} positions (max ${s.budget.maxOpenPositions})`);
   if (s.mode === 'live') {
+    // The master switch still applies — armed, execution on, no breaker. That
+    // is not a rule a script gets to have its own version of; it is the app
+    // being off.
     const blocked = h.liveBlockedReason(scriptChain(s)) ?? h.buyBlockedReason(scriptChain(s));
     if (blocked) return refuse(s, `buy ${what}: not executed — ${blocked}`);
-    if (sol > h.maxLiveSol(scriptChain(s))) return refuse(s, `buy ${what}: ${sol} SOL is over the execution cap (${h.maxLiveSol(scriptChain(s))} SOL per trade)`);
+    // The app's MANUAL per-trade cap deliberately does NOT apply (2026-09-22).
+    // `maxSolPerTrade` above is this script's own, set on the same screen as
+    // its code, and it is the authority on its size. Two caps for one decision
+    // meant keeping them in step, with the smaller winning silently to whoever
+    // set the other. `testTrade` is told the script's number so the backstop
+    // there enforces that one instead of the manual cap.
   }
   return null;
 }
@@ -781,7 +902,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       // says "every script is off" and must not be overtaken by a buy that was
       // already past its checks.
       if (!s.enabled || killSwitch) return { ok: false, message: 'script is disabled' };
-      const r = await h.buy(mint, sol, s.mode, scriptChain(s));
+      const r = await h.buy(mint, sol, s.mode, scriptChain(s), s.budget.maxSolPerTrade);
       if (r.ok || r.pending) {
         rt.buysToday += 1;
         const prev = rt.opened.get(mint);
@@ -1098,7 +1219,14 @@ async function startCodeInner(s: UserScript): Promise<void> {
   rt.running = false;
   clearSchedules(rt);
   const chain = scriptChain(s);
-  const r = await h.sandbox.start(s.id, s.code, { chain, nativeSymbol: nativeSymbolOf(chain) });
+  // Coerced against the code being STARTED, so a script whose @inputs block
+  // was edited without re-answering the form gets the declared shape rather
+  // than yesterday's answers in yesterday's shape.
+  // Webhook answers go in redacted: the URL is a credential the script has
+  // no use for (bot.discord names the field, see 'discord' below).
+  const { inputsForScript, parseInputs } = await import('@shared/scriptInputs');
+  const inputs = inputsForScript(parseInputs(s.code).specs, s.inputs ?? {});
+  const r = await h.sandbox.start(s.id, s.code, { chain, nativeSymbol: nativeSymbolOf(chain), inputs });
   if (!r.ok) {
     rt.running = false;
     rt.lastError = r.message;
@@ -1173,6 +1301,7 @@ function noteError(s: UserScript, line: string): void {
   const rt = rtFor(s);
   rt.errorsInARow += 1;
   rt.lastError = line;
+  rt.lastErrorAt = Date.now();
   slog(s, 'error', line);
   if (rt.errorsInARow >= ERRORS_TO_DISABLE) {
     disable(s, `${ERRORS_TO_DISABLE} errors in a row (last: ${line.slice(0, 120)})`);
@@ -1224,15 +1353,33 @@ export function onSandboxMessage(scriptId: string, msg: SandboxToMain): void {
     case 'alive':
       // The bridge is up. The script's own code has not run yet, so this is
       // not "running" — it only tells main the sandbox is not broken.
+      // A new run starts with an empty widget: a stat from the last run
+      // shown as current would be a number nobody measured.
+      if (rt.metrics.size) {
+        rt.metrics.clear();
+        changed();
+      }
       return;
     case 'ready':
       rt.running = true;
       return;
     case 'log':
       pushLog(rt, msg.level, msg.line);
-      if (msg.level === 'error') host?.log('warn', `script "${s.name}": ${msg.line}`);
+      scriptFileLog(s, msg.level, msg.line);
       changed();
       return;
+    case 'stats': {
+      if (msg.clear) rt.metrics.clear();
+      const at = Date.now();
+      for (const [name, value] of Object.entries(msg.values)) {
+        // A name already shown is updated in place; a new one only while
+        // there is room, so a script cannot grow the widget without bound.
+        if (!rt.metrics.has(name) && rt.metrics.size >= MAX_STAT_KEYS) continue;
+        rt.metrics.set(name, { value, at });
+      }
+      changed();
+      return;
+    }
     case 'error':
       noteError(s, msg.line);
       return;
@@ -1279,6 +1426,65 @@ const isMint = (v: unknown): v is string => typeof v === 'string' && /^[1-9A-HJ-
 const ORDER_KINDS: OrderKind[] = ['limit_buy', 'limit_sell', 'take_profit', 'stop_loss', 'trailing_stop', 'sell_on_dev_sell', 'sell_on_migration', 'buy_on_migration'];
 
 
+/**
+ * A script trading with one of the user's OTHER wallets, named by address.
+ *
+ * Every gate `act()` applies to an ordinary buy applies here — the script's
+ * own budget, its per-minute rate, the live master switch — because they are
+ * the script's rules and naming a different wallet does not change them. What
+ * does NOT apply is any per-coin wallet cap: nothing touches a coin here
+ * without a line of code saying so. Here it is a line of code.
+ *
+ * Paper spends nothing and says what it would have done. There is no paper
+ * book per wallet, and booking the position under the active wallet would
+ * report a holding in the wrong place.
+ */
+async function walletTrade(
+  s: UserScript,
+  side: 'buy' | 'sell',
+  address: string,
+  mint: string,
+  amount: number,
+): Promise<ActResult> {
+  const h = host as AutomationHost;
+  const rt = rtFor(s);
+  const label = mint.slice(0, 8);
+  const who = address.slice(0, 8);
+  if (scriptChain(s) !== 'solana') return refuse(s, `${side}: naming a wallet is Solana-only`);
+  if (rateLimited(s, rt, Date.now())) return refuse(s, `${side} ${label}: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+
+  if (side === 'buy') {
+    const gate = await buyGate(s, rt, mint, amount, label);
+    if (gate) return gate;
+    if (s.mode === 'paper') {
+      slog(s, 'info', `PAPER buy ${amount} SOL of ${label} as ${who}… — nothing spent`);
+      return { ok: true, message: 'paper: nothing was bought' };
+    }
+    const r = await h.walletBuy(address, mint, amount, s.budget.maxSolPerTrade);
+    if (r.ok) {
+      // Counted like any other buy this script made: the budget is about what
+      // the SCRIPT spends, not about which key signed it.
+      rt.buysToday += 1;
+      const prev = rt.opened.get(mint);
+      rt.opened.set(mint, { costSol: (prev?.costSol ?? 0) + amount, at: Date.now() });
+      persist();
+    }
+    slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'bought' : 'buy failed'} ${amount} SOL of ${label} as ${who}…: ${r.message}`);
+    return { ok: r.ok, message: r.message };
+  }
+
+  // A script may only sell a mint it opened — the same rule as bot.sell. It is
+  // what separates the script's own bags from bags bought by hand.
+  if (!rt.opened.has(mint)) return refuse(s, `sell ${label}: this script does not hold it`);
+  if (s.mode === 'paper') {
+    slog(s, 'info', `PAPER sell ${Math.round(amount)}% of ${label} as ${who}… — nothing sold`);
+    return { ok: true, message: 'paper: nothing was sold' };
+  }
+  const r = await h.walletSell(address, mint, amount);
+  slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'sold' : 'sell failed'} ${Math.round(amount)}% of ${label} as ${who}…: ${r.message}`);
+  return { ok: r.ok, message: r.message };
+}
+
 async function handleCall(s: UserScript, id: number, method: string, args: unknown[]): Promise<void> {
   const h = host;
   if (!h) return;
@@ -1291,15 +1497,21 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
   try {
     switch (method) {
       case 'buy': {
-        const [mint, sol] = args;
+        const [mint, sol, who] = args;
         if (!isMint(mint)) return answer(false, undefined, 'buy: bad mint');
-        return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint)));
+        const addr = typeof who === 'string' ? who.trim() : '';
+        if (!addr) return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint)));
+        return result(await chain(s, () => walletTrade(s, 'buy', addr, mint, Number(sol))));
       }
       case 'sell': {
-        const [mint, pct] = args;
+        const [mint, pct, who] = args;
         if (!isMint(mint)) return answer(false, undefined, 'sell: bad mint');
-        return result(await act(s, { type: 'sell', pct: Number(pct) }, await ctxFor(s, mint)));
+        const addr = typeof who === 'string' ? who.trim() : '';
+        if (!addr) return result(await act(s, { type: 'sell', pct: Number(pct) }, await ctxFor(s, mint)));
+        return result(await chain(s, () => walletTrade(s, 'sell', addr, mint, Number(pct))));
       }
+      case 'wallets':
+        return answer(true, h.wallets());
       case 'sellAll':
         return result(await act(s, { type: 'sell_all' }, null));
       case 'order': {
@@ -1414,6 +1626,161 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (!text) return answer(false, undefined, 'notify: empty');
         return result(await act(s, { type: 'notify', message: text }, null));
       }
+      // A PUBLIC post, under the trading wallet's name, on a coin the script
+      // is holding. It is an action like any other spend: it costs the budget,
+      // it is refused on paper, and pump's own eligibility check decides
+      // whether it happens at all. The watermark is applied in main, so a
+      // script cannot post an unmarked one.
+      // A PUBLIC post, under a wallet's name, on a coin it holds. It is an
+      // action like any other spend: it costs the budget, it is refused on
+      // paper, and pump's own eligibility check decides whether it happens at
+      // all. The watermark is applied in main, so a script cannot post an
+      // unmarked one.
+      //
+      // A script may name WHICH of the user's accounts posts — that is what
+      // makes a group of wallets scriptable rather than needing a switch that
+      // fans one buy out into N posts.
+      //
+      // There was a ceiling of five accounts per coin here until 2026-09-22,
+      // by analogy with the wallets-per-coin cap. That analogy was ours, not
+      // the user's: pump already allows exactly one callout per coin per
+      // account, so the real limit is how many accounts someone has, and a
+      // second rule on top of it only governed their own accounts. What is
+      // left is a dedupe, which is not a limit — it skips a request pump
+      // would refuse anyway.
+      case 'callout': {
+        const [mint, text, who] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'callout: bad mint');
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, 'callout: pump.fun callouts are Solana only');
+        const words = typeof text === 'string' ? text.trim().slice(0, THESIS_BUDGET) : '';
+        const wallet = typeof who === 'string' ? who.trim().slice(0, 64) : '';
+        const label = mint.slice(0, 8);
+        // Paper posts nothing. A callout is public whichever mode the script
+        // is in, so there is no paper version of it to run — saying what it
+        // WOULD have said is the rehearsal.
+        if (s.mode === 'paper') {
+          slog(s, 'info', `PAPER callout on ${label} — nothing posted${words ? `; would have said "${words}"` : ''}`);
+          return answer(true, { ok: true, message: 'paper: nothing was posted', thesis: words || null });
+        }
+        const rt = rtFor(s);
+        if (rateLimited(s, rt, Date.now())) {
+          return answer(false, undefined, `callout: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        }
+        const called = rt.calledOut.get(mint) ?? new Set<string>();
+        if (wallet && called.has(wallet)) {
+          return answer(true, { ok: false, message: 'this script has already called that coin from that account', thesis: null });
+        }
+        const r = await h.callout(mint, words, wallet);
+        if (r.ok) {
+          called.add(r.address ?? wallet);
+          rt.calledOut.set(mint, called);
+        }
+        slog(s, r.ok ? 'info' : 'warn', `callout on ${label}${r.address ? ` as ${r.address.slice(0, 8)}…` : ''}: ${r.message}`);
+        return answer(true, {
+          ok: r.ok,
+          message: r.message,
+          thesis: r.thesis ?? null,
+          address: r.address ?? null,
+          calloutId: r.calloutId ?? null,
+          // pump's own public page for it — what a share button or a Discord
+          // post links to. Null when the id could not be learned.
+          link: r.calloutId ? calloutPageUrl(mint, r.calloutId) : null,
+        });
+      }
+      // Following up a call that already exists. NOT capped by the per-coin
+      // ceiling above: that one limits how many of your accounts may call one
+      // coin, and a reply adds no new caller. pump's own reply cooldown is
+      // what paces these, and its refusal is reported rather than retried.
+      case 'calloutReply': {
+        const [mint, text, who] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'calloutReply: bad mint');
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, 'calloutReply: pump.fun callouts are Solana only');
+        const words = typeof text === 'string' ? text.trim().slice(0, REPLY_BUDGET) : '';
+        if (!words) return answer(false, undefined, 'calloutReply: no text');
+        const wallet = typeof who === 'string' ? who.trim().slice(0, 64) : '';
+        const label = mint.slice(0, 8);
+        if (s.mode === 'paper') {
+          slog(s, 'info', `PAPER callout reply on ${label} — nothing posted; would have said "${words}"`);
+          return answer(true, { ok: true, message: 'paper: nothing was posted', thesis: words });
+        }
+        if (rateLimited(s, rtFor(s), Date.now())) {
+          return answer(false, undefined, `calloutReply: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        }
+        const r = await h.calloutReply(mint, words, wallet);
+        slog(s, r.ok ? 'info' : 'warn', `callout reply on ${label}${r.address ? ` as ${r.address.slice(0, 8)}…` : ''}: ${r.message}`);
+        return answer(true, {
+          ok: r.ok,
+          message: r.message,
+          thesis: r.thesis ?? null,
+          address: r.address ?? null,
+          calloutId: r.calloutId ?? null,
+          replyId: r.replyId ?? null,
+          // The reply's own link when pump said its id, else the callout's.
+          link: r.ok && r.calloutId ? calloutPageUrl(mint, r.calloutId, r.replyId) : null,
+        });
+      }
+      // A Discord post (asked 09-23, to share callouts). The script names one
+      // of ITS OWN `webhook` settings — never a URL — and the URL is looked
+      // up here from the answers the user typed, already held to Discord's
+      // hosts by coerceInputs. The embed is rebuilt field by field by
+      // scriptEmbed.
+      case 'discord': {
+        const [field, embedIn] = args;
+        const key = typeof field === 'string' ? field.trim() : '';
+        const { coerceInputs, parseInputs } = await import('@shared/scriptInputs');
+        const specs = parseInputs(s.code).specs;
+        if (!key || specs[key]?.type !== 'webhook') {
+          return answer(false, undefined, `discord: "${key.slice(0, 40)}" is not one of this script's webhook settings — declare it in @inputs with "type": "webhook" and pass its name`);
+        }
+        // A Discord post is a public, outside-the-app side effect, so a PAPER
+        // script does not send it — the same rule as callout/reply/follow/like
+        // (a paper run rehearsing filters must not spam a real, possibly
+        // shared, channel). It says what it would have done and nothing goes
+        // out. (audit 2026-09-23)
+        if (s.mode === 'paper') {
+          slog(s, 'info', `PAPER discord — nothing posted${typeof embedIn === 'object' && embedIn && 'title' in embedIn ? `; would have posted "${String((embedIn as { title?: unknown }).title ?? '').slice(0, 80)}"` : ''}`);
+          return answer(true, { ok: true, message: 'paper: nothing was posted' });
+        }
+        const url = String(coerceInputs(specs, s.inputs ?? {})[key] ?? '');
+        if (!url) return answer(true, { ok: false, message: `${specs[key].label} is not set` });
+        const built = scriptEmbed(embedIn, s.name, false);
+        if ('error' in built) return answer(false, undefined, `discord: ${built.error}`);
+        if (rateLimited(s, rtFor(s), Date.now())) {
+          return answer(false, undefined, `discord: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        }
+        const r = await h.discord(url, built.embed);
+        // Never the URL: its last segment is the webhook's password.
+        slog(s, r.ok ? 'info' : 'warn', `discord → ${redactWebhook(url)}: ${r.ok ? (built.embed.title ?? 'posted') : r.message}`);
+        return answer(true, { ok: r.ok, message: r.message });
+      }
+      // Follows and likes (asked 09-22, for scripting). Public, like a
+      // callout, so paper does nothing and says what it would have done. The
+      // target's shape is checked in main (shared/pumpSocial.ts); pump's own
+      // refusal comes back as ok:false.
+      case 'follow':
+      case 'unfollow':
+      case 'like':
+      case 'unlike': {
+        const [target, who] = args;
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, `${method}: pump.fun is Solana only`);
+        const t = typeof target === 'string' ? target.trim().slice(0, 200) : '';
+        if (!t) return answer(false, undefined, `${method}: nothing to ${method}`);
+        const wallet = typeof who === 'string' ? who.trim().slice(0, 64) : '';
+        if (s.mode === 'paper') {
+          slog(s, 'info', `PAPER ${method} ${t.slice(0, 12)} — nothing sent`);
+          return answer(true, { ok: true, message: `paper: nothing was sent` });
+        }
+        if (rateLimited(s, rtFor(s), Date.now())) {
+          return answer(false, undefined, `${method}: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        }
+        const r = await h.pumpSocial(method, t, wallet);
+        slog(s, r.ok ? 'info' : 'warn', `${method}${r.address ? ` as ${r.address.slice(0, 8)}…` : ''}: ${r.message}`);
+        return answer(true, { ok: r.ok, message: r.message, address: r.address ?? null });
+      }
+      // A free read: which pump.fun accounts are signed in, so a script can
+      // post from each in turn. Addresses and names only — never a token.
+      case 'pumpAccounts':
+        return answer(true, h.pumpAccounts());
       case 'price': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'price: bad mint');
@@ -1484,6 +1851,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           const row = h.launch(p.mint);
           let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
           c = withMarket(c, h.marketCached(p.mint, scriptChain(s)));
+          c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(p.mint) ?? null) : null);
           c = withPosition(c, withPeak(s.mode, p), now);
           out.push(withGlobals(c, { walletSol: h.wallet().sol, now }));
         }
@@ -1725,6 +2093,7 @@ export async function pollPositions(): Promise<void> {
       const row = h.launch(p.mint);
       let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
       c = withMarket(c, h.marketCached(p.mint, scriptChain(s)));
+      c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(p.mint) ?? null) : null);
       c = withPosition(c, withPeak(s.mode, p), now);
       c = withGlobals(c, { walletSol: h.wallet().sol, now });
       if (s.kind === 'rules') await runRules(s, c);

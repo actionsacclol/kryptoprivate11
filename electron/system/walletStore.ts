@@ -23,26 +23,18 @@ export interface StoredWallet {
   createdAt: number;
 }
 
-/** A named set of wallets, so a fan-out buy can target a whole group at once.
- *  Membership is by wallet id; a removed wallet is simply dropped from every
- *  group it was in. */
-export interface WalletGroup {
-  id: string;
-  name: string;
-  walletIds: string[];
-}
+/**
+ * GROUPS ARE GONE (2026-09-22, the owner's call: "grouping feels like
+ * bundling"), and so is the Copier that followed them. A file written before
+ * then may still carry `groups`; it is ignored and never written again.
+ */
 
 export interface WalletsFile {
   version: 2;
   /** The wallet that signs single trades. Null only when there are none. */
   activeId: string | null;
   wallets: StoredWallet[];
-  /** Named groups for fan-out. Absent on files written before groups existed. */
-  groups: WalletGroup[];
 }
-
-export const MAX_GROUPS = 20;
-const MAX_GROUP_NAME = 32;
 
 /** The single-wallet file this replaced. Still read once, to migrate. */
 export interface LegacyWalletFile {
@@ -56,12 +48,19 @@ export interface LegacyWalletFile {
 
 export const DEFAULT_MAX_BALANCE_SOL = 2;
 const MAX_LABEL = 32;
-/** A cap, not a limit anyone should reach — it exists so a runaway loop or a
- *  pasted list cannot fill the keystore. */
-export const MAX_WALLETS = 20;
+/**
+ * At most ten Solana wallets, the main one included (2026-09-22, the owner's
+ * call). It also caps pump.fun accounts at ten — one per wallet — which is the
+ * difference between someone's own handful and an account farm.
+ *
+ * Enforced where a wallet is ADDED, never on read: a file that already holds
+ * more (made before the cap) keeps every key; it just cannot grow until it is
+ * back under ten. A cap that deleted keys would be data loss.
+ */
+export const MAX_WALLETS = 15;
 
 export function emptyFile(): WalletsFile {
-  return { version: 2, activeId: null, wallets: [], groups: [] };
+  return { version: 2, activeId: null, wallets: [] };
 }
 
 export function cleanLabel(raw: string, fallbackIndex: number): string {
@@ -100,29 +99,7 @@ export function parseFile(raw: unknown, now: number, mintId: () => string): Wall
   if (wallets.length === 0 && (obj.wallets as unknown[]).length > 0) return null;
 
   const activeId = typeof obj.activeId === 'string' ? obj.activeId : null;
-  const validIds = new Set(wallets.map((w) => w.id));
-  const groups: WalletGroup[] = [];
-  if (Array.isArray(obj.groups)) {
-    for (const g of obj.groups as unknown[]) {
-      const parsed = parseGroup(g, validIds);
-      if (parsed && !groups.some((x) => x.id === parsed.id)) groups.push(parsed);
-    }
-  }
-  return healActive({ version: 2, activeId, wallets, groups });
-}
-
-function parseGroup(g: unknown, validIds: Set<string>): WalletGroup | null {
-  if (!g || typeof g !== 'object') return null;
-  const o = g as Record<string, unknown>;
-  if (typeof o.id !== 'string' || !o.id) return null;
-  const name = typeof o.name === 'string' && o.name.trim() ? o.name.slice(0, MAX_GROUP_NAME) : 'Group';
-  // Only keep member ids that still refer to a real wallet, and drop dupes.
-  const walletIds = Array.isArray(o.walletIds)
-    ? [...new Set((o.walletIds as unknown[]).filter((id): id is string => typeof id === 'string' && validIds.has(id)))]
-    : [];
-  // A `lab` block written by an older build is dropped on read: the follow
-  // and random-trading features it configured no longer exist.
-  return { id: o.id, name, walletIds };
+  return healActive({ version: 2, activeId, wallets });
 }
 
 function parseWallet(w: unknown): StoredWallet | null {
@@ -153,7 +130,7 @@ export function migrateLegacy(legacy: LegacyWalletFile, now: number, id: string)
     maxBalanceSol: legacy.maxBalanceSol > 0 ? legacy.maxBalanceSol : DEFAULT_MAX_BALANCE_SOL,
     createdAt: legacy.createdAt || now,
   };
-  return { version: 2, activeId: w.id, wallets: [w], groups: [] };
+  return { version: 2, activeId: w.id, wallets: [w] };
 }
 
 /**
@@ -226,60 +203,11 @@ export function removeWallet(file: WalletsFile, id: string): StoreResult {
   if (!target) return { file, ok: false, message: 'No such wallet.' };
   const wallets = file.wallets.filter((w) => w.id !== id);
   const activeId = file.activeId === id ? null : file.activeId;
-  // Drop the gone wallet from every group it was in, so no group points at a
-  // wallet that no longer exists.
-  const groups = (file.groups ?? []).map((g) => ({ ...g, walletIds: g.walletIds.filter((wid) => wid !== id) }));
   return {
-    file: healActive({ ...file, wallets, activeId, groups }),
+    file: healActive({ ...file, wallets, activeId }),
     ok: true,
     message: `Removed ${target.label}`,
   };
-}
-
-// ─── Groups (for fan-out) ─────────────────────────────────────────────
-
-export function createGroup(file: WalletsFile, name: string, id: string): StoreResult {
-  const cur = file.groups ?? [];
-  if (cur.length >= MAX_GROUPS) return { file, ok: false, message: `At most ${MAX_GROUPS} groups.` };
-  const clean = (name ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_GROUP_NAME) || `Group ${cur.length + 1}`;
-  const group: WalletGroup = { id, name: clean, walletIds: [] };
-  return { file: { ...file, groups: [...cur, group] }, ok: true, message: `Created ${clean}` };
-}
-
-export function renameGroup(file: WalletsFile, id: string, name: string): StoreResult {
-  const cur = file.groups ?? [];
-  const idx = cur.findIndex((g) => g.id === id);
-  if (idx < 0) return { file, ok: false, message: 'No such group.' };
-  const clean = (name ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_GROUP_NAME) || cur[idx].name;
-  const groups = [...cur];
-  groups[idx] = { ...groups[idx], name: clean };
-  return { file: { ...file, groups }, ok: true, message: 'Renamed' };
-}
-
-export function deleteGroup(file: WalletsFile, id: string): StoreResult {
-  const cur = file.groups ?? [];
-  if (!cur.some((g) => g.id === id)) return { file, ok: false, message: 'No such group.' };
-  return { file: { ...file, groups: cur.filter((g) => g.id !== id) }, ok: true, message: 'Deleted' };
-}
-
-/** Set a group's membership to exactly these wallet ids (invalid ids dropped). */
-export function setGroupMembers(file: WalletsFile, id: string, walletIds: string[]): StoreResult {
-  const cur = file.groups ?? [];
-  const idx = cur.findIndex((g) => g.id === id);
-  if (idx < 0) return { file, ok: false, message: 'No such group.' };
-  const valid = new Set(file.wallets.map((w) => w.id));
-  const members = [...new Set(walletIds.filter((w) => valid.has(w)))];
-  const groups = [...cur];
-  groups[idx] = { ...groups[idx], walletIds: members };
-  return { file: { ...file, groups }, ok: true, message: 'Updated' };
-}
-
-/** The wallets in a group, in the group's order, skipping any that vanished. */
-export function groupWallets(file: WalletsFile, id: string): StoredWallet[] {
-  const group = (file.groups ?? []).find((g) => g.id === id);
-  if (!group) return [];
-  const byId = new Map(file.wallets.map((w) => [w.id, w]));
-  return group.walletIds.map((wid) => byId.get(wid)).filter((w): w is StoredWallet => w !== undefined);
 }
 
 /** Patch the ACTIVE wallet's settings (withdrawal address, balance cap). */

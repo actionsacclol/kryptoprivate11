@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as copy from './.copytrade.mjs';
-import { describeConfig, COPY_LATENCY_FLOOR_MS, FOMO_WALLET, MIN_TRIPS_FOR_RANK, SIMPLE_MAX_SOL, SIMPLE_SIZES, TOO_FAST_FLAG_PCT, chainForAddress, copySize, defaultConfig, emptyLeaderStats, leaderTooFast, leaderWinRate, ownExitsOf, rankLeaders, simpleConfig, validateConfig, winRate } from './.copyshared.mjs';
+import { describeConfig, COPY_LATENCY_FLOOR_MS, FOMO_WALLET, MIN_TRIPS_FOR_RANK, SIMPLE_MAX_SOL, SIMPLE_SIZES, TOO_FAST_FLAG_PCT, chainForAddress, cleanBlocklist, copySize, defaultConfig, emptyLeaderStats, isBlocked, leaderTooFast, leaderWinRate, ownExitsOf, rankLeaders, simpleConfig, validateConfig, winRate } from './.copyshared.mjs';
 
 let passed = 0;
 const cases = [];
@@ -2366,7 +2366,7 @@ test('fomo: its own take-profit and stop-loss close it too, and a copy config ma
   copy.markToMarket(MINT, 0.01, undefined, Date.now() + 600 * 60_000);
   await sleep(40);
   assert.equal(copy.snapshot().recent.filter((t) => t.kind === 'exit').length, 0, 'a copy has no exits of its own unless asked');
-  assert.deepEqual(ownExitsOf(cfg()), { takeProfitPct: null, stopLossPct: null, maxHoldMin: null });
+  assert.deepEqual(ownExitsOf(cfg()), { takeProfitPct: null, stopLossPct: null, maxHoldMin: null, trailingPct: null });
 });
 
 test('fomo: a paused config hears nothing, and a source the host cannot answer is an empty crowd', async () => {
@@ -2420,7 +2420,7 @@ test('fomo: validation, defaults, the snapshot and the description', () => {
   assert.equal(d.mode, 'paper', 'FOMO starts on paper like everything else');
   assert.equal(d.enabled, false);
   assert.deepEqual([d.fomoSource, d.fomoMinWallets, d.fomoWindowSec, d.fomoTopN, d.fomoCrowdExitPct], ['followed', 3, 180, 25, 50]);
-  assert.deepEqual(ownExitsOf(d), { takeProfitPct: 25, stopLossPct: 20, maxHoldMin: 30 });
+  assert.deepEqual(ownExitsOf(d), { takeProfitPct: 25, stopLossPct: 20, maxHoldMin: 30, trailingPct: null });
   assert.match(describeConfig({ ...fomoCfg(), id: 'f', createdAt: 0 }), /^Paper-FOMO Crowd: buy when 3 of followed wallets buy the same coin within 180 s.*\+25%.*−20%.*30 min or when 50% of them have sold/);
   setupCrowd();
   saveFomo({ fomoSource: 'saved' });
@@ -2466,6 +2466,182 @@ test('copy simple: three answers make a valid, paper, switched-on config with de
   const d = defaultConfig(WALLET, 'Whale');
   const c = simpleConfig(WALLET, 'Whale', 'solana', 0.1);
   for (const k of ['delayMs', 'maxSlippagePct', 'minLiquidityUsd', 'onlyPumpfun', 'dailyTradeLimit']) assert.deepEqual(c[k], d[k], `${k} is the default`);
+});
+
+// ── The 2026-09-21 filters ────────────────────────────────────────────
+//
+// Each is a control every competitor ships and this app lacked
+// (docs/copy-trade-competitors-2026-09-21.md). Each is a REFUSAL recorded
+// as a skip, failing closed on a fact the host cannot read — the same rule
+// the older three filters follow — and absent means off, so a config saved
+// before this day behaves exactly as it did.
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const MINT_B = 'CopyMintB11111111111111111111111111111111';
+const MINT_C = 'CopyMintC11111111111111111111111111111111';
+const FACTS = { liquidityUsd: 50_000, marketCapUsd: 100_000, kryptScore: 80, isPumpfun: true };
+
+test('filters 2026-09-21: bounds validate, absent is off, helpers behave', () => {
+  assert.equal(validateConfig(cfg()).ok, true);
+  assert.equal(validateConfig(cfg({ minLeaderSol: 5, maxLeaderSol: 1 })).ok, false, 'an empty size band');
+  assert.equal(validateConfig(cfg({ minTokenAgeSec: 600, maxTokenAgeSec: 60 })).ok, false, 'an empty age band');
+  assert.equal(validateConfig(cfg({ maxBuysPerToken: 0 })).ok, false);
+  assert.equal(validateConfig(cfg({ maxBuysPerToken: 1.5 })).ok, false, 'whole numbers only');
+  assert.equal(validateConfig(cfg({ exitTrailingPct: 100 })).ok, false);
+  assert.equal(validateConfig(cfg({ minLeaderSellPct: 0 })).ok, false);
+  assert.equal(validateConfig(cfg({ minMarketCapUsd: 10_000, maxMarketCapUsd: 5_000 })).ok, false, 'min above max');
+  assert.equal(validateConfig(cfg({ blockedMints: [''] })).ok, false);
+  assert.equal(
+    validateConfig(
+      cfg({ minLeaderSol: 0.5, maxLeaderSol: 5, minTokenAgeSec: 60, maxTokenAgeSec: 600, maxBuysPerToken: 1, exitTrailingPct: 20, minLeaderSellPct: 10, minMarketCapUsd: 1_000, blockedMints: [MINT], blockedCreators: ['Dev111'] }),
+    ).ok,
+    true,
+  );
+  const d = defaultConfig(WALLET, 'x');
+  for (const k of ['minMarketCapUsd', 'minLeaderSol', 'maxLeaderSol', 'minTokenAgeSec', 'maxTokenAgeSec', 'maxBuysPerToken', 'blockedMints', 'blockedCreators', 'minLeaderSellPct', 'exitTrailingPct']) {
+    assert.equal(d[k], null, `${k} defaults to off`);
+  }
+  assert.deepEqual(cleanBlocklist([' a ', 'a', '', 7, 'b']), ['a', 'b'], 'trimmed, deduped, non-strings dropped');
+  assert.equal(cleanBlocklist([]), null, 'nothing left is off, not an empty rule');
+  assert.equal(isBlocked(['0xABC'], '0xabc'), true, 'EVM spelling is case-insensitive');
+  assert.equal(isBlocked(null, MINT), false);
+  assert.equal(ownExitsOf({ direction: 'reverse' }).trailingPct, null, 'a trailing stop is never defaulted, on any direction');
+  assert.equal(ownExitsOf({ direction: 'copy', exitTrailingPct: 15 }).trailingPct, 15);
+});
+
+test('their trade size band refuses buys outside it and names the side', async () => {
+  setup();
+  save({ minLeaderSol: 0.5, maxLeaderSol: 5 });
+  copy.onWalletTrade(trade({ sol: 0.1 }));
+  copy.onWalletTrade(trade({ sol: 50, mint: MINT_B }));
+  copy.onWalletTrade(trade({ sol: 1, mint: MINT_C }));
+  await wait(40);
+  const rows = copy.snapshot().recent;
+  assert.match(rows.find((r) => r.mint === MINT).reason, /under your 0.5 minimum/);
+  assert.match(rows.find((r) => r.mint === MINT_B).reason, /over your 5 maximum/);
+  assert.equal(rows.find((r) => r.mint === MINT_C).state, 'open', 'inside the band copies');
+});
+
+test('buy once: a second entry on the same token is refused; a skip never counts as an entry', async () => {
+  setup();
+  save({ maxBuysPerToken: 1 });
+  copy.onWalletTrade(trade({ isBuy: true }));
+  await wait(30);
+  copy.onWalletTrade(trade({ isBuy: false, soldFraction: 1 }));
+  await wait(30);
+  copy.onWalletTrade(trade({ isBuy: true }));
+  await wait(30);
+  const rows = copy.snapshot().recent.filter((r) => r.kind !== 'exit');
+  const skipped = rows.filter((r) => r.state === 'skipped');
+  assert.equal(skipped.length, 1, 'the second buy was refused');
+  assert.match(skipped[0].reason, /already bought this token once/);
+  // A third try is still refused — the skip did not count as an entry, but
+  // the closed one still does: bought once means once.
+  copy.onWalletTrade(trade({ isBuy: true }));
+  await wait(30);
+  assert.equal(copy.snapshot().recent.filter((r) => r.kind !== 'exit' && r.state === 'skipped').length, 2);
+});
+
+test('token age band fails closed without a launch time and refuses outside it', async () => {
+  setup({ facts: { ...FACTS, createdAt: null } });
+  save({ minTokenAgeSec: 60 });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /token age unknown/, 'unknown is a refusal, never a pass');
+
+  setup({ facts: { ...FACTS, createdAt: Date.now() - 10_000 } });
+  save({ minTokenAgeSec: 60 });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /under your 60 s minimum/);
+
+  setup({ facts: { ...FACTS, createdAt: Date.now() - 3_600_000 } });
+  save({ maxTokenAgeSec: 600 });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /over your 600 s maximum/);
+
+  setup({ facts: { ...FACTS, createdAt: Date.now() - 120_000 } });
+  save({ minTokenAgeSec: 60, maxTokenAgeSec: 600 });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.equal(copy.snapshot().recent[0].state, 'open', 'inside the band copies');
+});
+
+test('a minimum market cap refuses under it and fails closed when unknown', async () => {
+  setup({ facts: { ...FACTS, marketCapUsd: 8_000 } });
+  save({ minMarketCapUsd: 10_000 });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /market cap below \$10,000/);
+  setup({ facts: { ...FACTS, marketCapUsd: null } });
+  save({ minMarketCapUsd: 10_000 });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /market cap unknown/);
+});
+
+test('blocked mints and creators are refused; an unknown creator fails closed', async () => {
+  setup({ facts: { ...FACTS, creator: 'Dev111' } });
+  save({ blockedMints: [MINT] });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /token is on your blocklist/);
+
+  setup({ facts: { ...FACTS, creator: 'Dev111' } });
+  save({ blockedCreators: ['Dev111'] });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /creator is on your blocklist/);
+
+  setup({ facts: { ...FACTS } });
+  save({ blockedCreators: ['Dev111'] });
+  copy.onWalletTrade(trade());
+  await wait(30);
+  assert.match(copy.snapshot().recent[0].reason, /creator unknown/, 'no creator on file is a refusal while the list is set');
+});
+
+test('a leader trim under the mirror threshold is recorded, not mirrored; over it mirrors', async () => {
+  setup({ priceSol: 0.001 });
+  save({ minLeaderSellPct: 10 });
+  copy.onWalletTrade(trade({ isBuy: true }));
+  await wait(30);
+  copy.onWalletTrade(trade({ isBuy: false, soldFraction: 0.05 }));
+  await wait(30);
+  let rows = copy.snapshot().recent;
+  const skip = rows.find((r) => r.kind === 'exit');
+  assert.ok(skip, 'the refused trim is on the record');
+  assert.equal(skip.state, 'skipped');
+  assert.match(skip.reason, /sold 5% of their bag, under your 10% threshold/);
+  assert.equal(rows.find((r) => r.kind !== 'exit').state, 'open', 'the copy stays open');
+  copy.onWalletTrade(trade({ isBuy: false, soldFraction: 0.5 }));
+  await wait(30);
+  rows = copy.snapshot().recent;
+  assert.ok(rows.some((r) => r.kind === 'exit' && r.state !== 'skipped'), 'a sell over the threshold is mirrored');
+});
+
+test('a trailing stop exits from the peak, and is armed from entry', async () => {
+  setup({ priceSol: 0.001 });
+  save({ exitTrailingPct: 20 });
+  copy.onWalletTrade(trade({ isBuy: true }));
+  await wait(30);
+  copy.markToMarket(MINT, 0.002);
+  copy.markToMarket(MINT, 0.0017);
+  await wait(30);
+  assert.equal(copy.snapshot().recent.find((r) => r.kind !== 'exit').state, 'open', '15 % off the peak holds');
+  copy.markToMarket(MINT, 0.0015);
+  await wait(40);
+  const exit = copy.snapshot().recent.find((r) => r.kind === 'exit');
+  assert.ok(exit, '25 % off the peak books an exit');
+  assert.match(exit.reason, /trailing stop −20% from peak/);
+
+  setup({ priceSol: 0.001 });
+  save({ exitTrailingPct: 20 });
+  copy.onWalletTrade(trade({ isBuy: true }));
+  await wait(30);
+  copy.markToMarket(MINT, 0.00079);
+  await wait(40);
+  assert.match(copy.snapshot().recent.find((r) => r.kind === 'exit').reason, /trailing stop/, 'a position that only fell stops at −20 % from its entry');
 });
 
 await run();

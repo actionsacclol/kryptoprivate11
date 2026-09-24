@@ -26,6 +26,11 @@ export function RunnerWebhook({
   chainLabel,
   webhookUrl,
   onSave,
+  title,
+  description,
+  savedMessage,
+  clearedMessage,
+  onTest,
 }: {
   chain: ChainKind;
   chainLabel: string;
@@ -33,6 +38,14 @@ export function RunnerWebhook({
   webhookUrl: string;
   /** Persist it. Rejects with a message the caller has already toasted. */
   onSave: (url: string) => Promise<boolean>;
+  /** Other pages reuse the card (Auto-callout, 2026-09-23); these default to
+   *  the runner-flag wording. */
+  title?: string;
+  description?: string;
+  savedMessage?: string;
+  clearedMessage?: string;
+  /** Defaults to the runner-flag test for `chain`. */
+  onTest?: () => Promise<{ ok: boolean; message: string }>;
 }) {
   const toast = useToast();
   const saved = (webhookUrl ?? '').trim();
@@ -59,7 +72,7 @@ export function RunnerWebhook({
       if (await onSave(draft.trim())) {
         setDraft('');
         setEditing(false);
-        toast.success(`${chainLabel} runner flags will be posted to Discord.`);
+        toast.success(savedMessage ?? `${chainLabel} runner flags will be posted to Discord.`);
       }
     } finally {
       setBusy(null);
@@ -72,7 +85,7 @@ export function RunnerWebhook({
       if (await onSave('')) {
         setDraft('');
         setEditing(true);
-        toast.success(`Stopped posting ${chainLabel} flags to Discord.`);
+        toast.success(clearedMessage ?? `Stopped posting ${chainLabel} flags to Discord.`);
       }
     } finally {
       setBusy(null);
@@ -85,7 +98,7 @@ export function RunnerWebhook({
   const test = async (): Promise<void> => {
     setBusy('test');
     try {
-      const r = await window.krypt.runners.testWebhook(chain);
+      const r = onTest ? await onTest() : await window.krypt.runners.testWebhook(chain);
       r.ok ? toast.success(r.message) : toast.error(r.message);
     } catch (err) {
       toast.error((err as Error).message);
@@ -96,8 +109,11 @@ export function RunnerWebhook({
 
   return (
     <Section
-      title="Post flags to Discord"
-      description={`Every ${chainLabel} flag that raises a desktop notification is also posted to this webhook, with a link to the token. Outbound only — nothing reads your server, and no wallet or position data is ever sent. The per-hour limit above applies to both.`}
+      title={title ?? 'Post flags to Discord'}
+      description={
+        description ??
+        `Every ${chainLabel} flag that raises a desktop notification is also posted to this webhook, with a link to the token. Outbound only — nothing reads your server, and no wallet or position data is ever sent. The per-hour limit above applies to both.`
+      }
     >
       <Card className="space-y-3">
         {!editing && saved ? (
@@ -117,7 +133,7 @@ export function RunnerWebhook({
             <button
               onClick={() => void clear()}
               disabled={busy !== null}
-              title="Stop posting flags to Discord"
+              title="Stop posting to Discord"
               className="text-krypt-muted/60 transition hover:text-rose-300 disabled:opacity-50"
             >
               <Trash2 className="h-3.5 w-3.5" />

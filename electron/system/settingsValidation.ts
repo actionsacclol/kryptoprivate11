@@ -50,10 +50,25 @@ export interface Validated {
  * never reach the store from a patch) without holding the rest of the patch
  * hostage to it.
  */
-const OWNED_ELSEWHERE = new Set(['execution.liveEnabled']);
+const OWNED_ELSEWHERE = new Set([
+  'execution.liveEnabled',
+  // The AI connection's two dangerous fields. The token is GENERATED in main
+  // and never typed, so a patch that could set it is a patch that could
+  // choose a known one; the access level is what decides whether an agent may
+  // spend, so it moves through `mcp:setAccess`, which logs and announces it —
+  // the same reasoning that keeps `execution.liveEnabled` off this path.
+  'mcp.token',
+  'mcp.access',
+]);
 
 /** Inclusive bounds for numbers where a bad value costs real SOL. */
 const BOUNDS: Record<string, { min: number; max: number; int?: boolean }> = {
+  // The AI connection. Same shape and same reasoning as the chat-bot policy:
+  // an automated caller that can spend needs the USER's ceiling, not its own.
+  'mcp.port': { min: 1024, max: 65535, int: true },
+  'mcp.budget.maxBuySol': { min: 0.000001, max: 25 },
+  'mcp.budget.hourlyCapSol': { min: 0.000001, max: 100 },
+  'mcp.budget.maxTradesPerMinute': { min: 1, max: 60, int: true },
   'execution.maxLiveSol': { min: 0.000001, max: 25 },
   'execution.liveSlippagePct': { min: 0, max: 50 },
   // Both live breakers are OFF at 0 (the shipped default since revision 3;
@@ -134,6 +149,7 @@ const WEBHOOK_FIELDS = new Set([
   'strategy.runnerAlerts.webhookUrl',
   'evm.robinhood.runnerAlerts.webhookUrl',
   'evm.bnb.runnerAlerts.webhookUrl',
+  'autoCallout.discordWebhookUrl',
 ]);
 
 /** Fields that may only take one of a fixed set of values. */

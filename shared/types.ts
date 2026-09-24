@@ -49,13 +49,6 @@ export interface WalletSummary {
   createdAt: number;
 }
 
-/** A wallet group with its members resolved to public data, for the UI. */
-export interface WalletGroupView {
-  id: string;
-  name: string;
-  members: Array<{ id: string; label: string; publicKey: string }>;
-}
-
 /** Outcome of a user-initiated SOL withdrawal (wallet:withdraw). */
 export interface WalletWithdrawResult {
   ok: boolean;
@@ -389,6 +382,16 @@ export interface ExecutionSettings {
   /** Auto-sell every held token when the engine stops, the app quits, or a
    *  previous run crashed leaving tokens behind. Needs liveEnabled. */
   autoSellOnExit: boolean;
+  /**
+   * When pump upgrades its program the engine disarms live and re-checks its
+   * decoder against real launches. With this on, a re-check that PASSES
+   * re-arms live — but only if live was armed when the upgrade hit, and only
+   * through the same arm path as the top-bar switch (breakers re-baselined,
+   * prewarm restarted, Live saved as the mode). A failed re-check never
+   * re-arms. Asked 2026-09-23: a routine upgrade left a live script refusing
+   * every buy for eight hours.
+   */
+  rearmAfterVerifiedUpgrade: boolean;
   /** Sweep realized live profits to the wallet's withdrawal address. */
   autoCashout: boolean;
   /** Sweep once unswept live profit reaches this many SOL. */
@@ -422,6 +425,7 @@ export interface WalletHolding {
 export const SETTINGS_REVISION = 6;
 
 import { defaultBotSettings, type BotSettings } from './bots';
+import { DEFAULT_MCP_SETTINGS, type McpSettings } from './mcp';
 import { DEFAULT_EVM_SETTINGS, type EvmSettings } from './evm';
 export { DEFAULT_EVM_SETTINGS } from './evm';
 export type { EvmSettings } from './evm';
@@ -445,6 +449,9 @@ export interface AppSettings {
   /** Telegram / Discord bots (shared/bots.ts). Off and unpaired by default;
    *  READ-ONLY — no command can trade. */
   bots: BotSettings;
+  /** The AI connection (MCP). Off, read-only and tokenless by default; see
+   *  shared/mcp.ts for what an agent may and may not reach. */
+  mcp: McpSettings;
   /** BYO-key AI second opinion on a token. Off by default; keys stay main-side. */
   ai: AiSettings;
   /** Robinhood Chain (shared/evm.ts): RPC, slippage, referrer. The chain's
@@ -459,6 +466,23 @@ export interface AppSettings {
   /** True once the first-run flow has been shown, so it is never shown twice.
    *  Separate from `referrer` because declining to name one is a real answer. */
   onboarded: boolean;
+  /**
+   * The multi-wallet acknowledgement (2026-09-22), or a null `acceptedAt`
+   * when it has never been given.
+   *
+   * Splitting a position across your own wallets is off until this is
+   * accepted, and an acceptance given to older WORDING does not count — see
+   * shared/multiWallet.ts.
+   */
+  multiWallet: import('./multiWallet').MultiWalletConsent;
+  /**
+   * Post a pump.fun callout on the coins you buy (2026-09-22).
+   *
+   * Off by default. Only a wallet with a pump.fun account signed in posts,
+   * and pump's own eligibility preflight decides whether each one goes —
+   * see shared/calloutAuto.ts.
+   */
+  autoCallout: import('./calloutAuto').AutoCalloutSettings;
   /** Pin a token to the watchlist when you buy it by hand. On by default:
    *  a coin you just put money into is the definition of one you want to
    *  keep an eye on, and doing it manually is the step people skip. */
@@ -1100,6 +1124,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     // Off by default; scoping sellAllHeld to session-opened mints is tracked
     // separately.
     autoSellOnExit: false,
+    rearmAfterVerifiedUpgrade: true,
     autoCashout: false,
     cashoutThresholdSol: 0.05,
   },
@@ -1107,10 +1132,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
   alerts: structuredClone(DEFAULT_ALERT_SETTINGS),
   hotkeys: structuredClone(DEFAULT_HOTKEYS),
   bots: defaultBotSettings(),
+  mcp: { ...DEFAULT_MCP_SETTINGS, budget: { ...DEFAULT_MCP_SETTINGS.budget } },
   ai: DEFAULT_AI_SETTINGS,
   evm: { ...DEFAULT_EVM_SETTINGS },
   referrer: '',
   onboarded: false,
+  // Never accepted. Every multi-wallet path refuses until it is. 0 rather
+  // than null on purpose — see MultiWalletConsent for why a null default
+  // would stop the acceptance ever saving.
+  multiWallet: { acceptedAt: 0, version: '' },
+  // Off, with nothing to say. Every callout is a public post under the
+  // user's name; none happens until they write the text and switch it on.
+  autoCallout: { enabled: false, text: '', minBuySol: 0, likeOwn: true, discordWebhookUrl: '', onLaunch: true, launchMinUsd: 2 },
   locale: 'system',
   watchOnBuy: true,
   recorderEnabled: false,

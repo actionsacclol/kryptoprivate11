@@ -24,7 +24,7 @@ export const es: Catalogue = {
   'nav.observatory': 'Observatorio',
   'nav.copyTrading': 'Copy trading',
   'nav.scripts': 'Scripts',
-  'nav.groupWallets': 'Grupos de billeteras',
+  'nav.groupWallets': 'Lista de carteras',
   'nav.funder': 'Fondeo',
   'nav.launches': 'Lanzamientos',
   'nav.execution': 'Ejecución',

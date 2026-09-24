@@ -8,6 +8,7 @@ import path from 'node:path';
 import { DEFAULT_SETTINGS, SETTINGS_REVISION, type AppSettings } from '@shared/types';
 import { isLocaleId } from '@shared/i18n';
 import { isSkinId, isThemeId } from '@shared/theme';
+import { webhookUrlProblem } from '@shared/webhook';
 import { logger } from './logger';
 
 let cached: AppSettings | null = null;
@@ -174,6 +175,15 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
       // (everything off) rather than undefined.
       trading: { ...d.bots.trading, ...(loaded.bots?.trading ?? {}) },
     },
+    // The AI connection. A save from before it existed gets the shipped
+    // default — off, read-only, no token — rather than undefined, and the
+    // budget is merged field by field so a later field added to it does not
+    // arrive missing on an upgrading install.
+    mcp: {
+      ...d.mcp,
+      ...(loaded.mcp ?? {}),
+      budget: { ...d.mcp.budget, ...(loaded.mcp?.budget ?? {}) },
+    },
     rpc,
     strategy: {
       ...d.strategy,
@@ -190,6 +200,28 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
     evm: mergeEvm(loaded.evm),
     referrer: typeof loaded.referrer === 'string' ? loaded.referrer : d.referrer,
     onboarded: loaded.onboarded ?? d.onboarded,
+    // Read field by field rather than spread: a stored acceptance carrying a
+    // stale `version` must survive to BE compared, and fail the comparison,
+    // rather than being replaced by the default and looking like a fresh one.
+    multiWallet: {
+      acceptedAt: typeof loaded.multiWallet?.acceptedAt === 'number' ? loaded.multiWallet.acceptedAt : 0,
+      version: typeof loaded.multiWallet?.version === 'string' ? loaded.multiWallet.version : '',
+    },
+    autoCallout: {
+      enabled: loaded.autoCallout?.enabled === true,
+      text: typeof loaded.autoCallout?.text === 'string' ? loaded.autoCallout.text : '',
+      minBuySol: typeof loaded.autoCallout?.minBuySol === 'number' ? loaded.autoCallout.minBuySol : 0,
+      // On unless switched off: a settings file from before 09-22 has no key.
+      likeOwn: loaded.autoCallout?.likeOwn !== false,
+      // A hand-edited file cannot aim this anywhere but Discord.
+      discordWebhookUrl:
+        typeof loaded.autoCallout?.discordWebhookUrl === 'string' && !webhookUrlProblem(loaded.autoCallout.discordWebhookUrl)
+          ? loaded.autoCallout.discordWebhookUrl.trim()
+          : '',
+      onLaunch: loaded.autoCallout?.onLaunch !== false,
+      launchMinUsd:
+        typeof loaded.autoCallout?.launchMinUsd === 'number' && loaded.autoCallout.launchMinUsd >= 0 ? loaded.autoCallout.launchMinUsd : 2,
+    },
     watchOnBuy: loaded.watchOnBuy ?? d.watchOnBuy,
     recorderEnabled: loaded.recorderEnabled ?? d.recorderEnabled,
     scannersAutoStart: loaded.scannersAutoStart ?? d.scannersAutoStart,

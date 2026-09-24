@@ -25,6 +25,7 @@ import type { AdvOrder, OrdersSnapshot } from '@shared/orders';
 import type { TradeHistoryRow } from '@shared/portfolio';
 import type { EvmFill } from '@shared/evm';
 import { scriptChain, type ScriptSnapshot } from '@shared/automation';
+import type { ScriptStatValue } from '@shared/scriptProtocol';
 import { chainOf, leaderTooFast, type CopySnapshot } from '@shared/copytrade';
 import type { Alert } from '@shared/alerts';
 import type { Position } from '@shared/portfolio';
@@ -38,7 +39,7 @@ import { describeTelegram, fmtRegistered } from '@shared/linkIntel';
 import { parseXLink } from '@shared/xLink';
 import { ExternalLink } from 'lucide-react';
 import { GamesBody } from './GamesBody';
-import { cls } from '../utils/format';
+import { cls, scoreTone } from '../utils/format';
 import { newestFirst } from '@shared/callouts';
 import { useCallouts } from '../state/callouts';
 import { CalloutRow } from '../components/CalloutRow';
@@ -375,20 +376,73 @@ function TokenRow({
   );
 }
 
+/** Krypt scores for the runner rows, keyed `chain:address`. One batched call
+ *  per chain (the same `summaries` the Watchlist uses), on a change of the row
+ *  set and once a minute — never one request per row. A score nobody could
+ *  read is absent, which the row shows as an em dash, never 0. */
+function useRunnerScores(rows: Array<{ chain: ChainKind; mint: string }>): Record<string, number | null> {
+  const [scores, setScores] = useState<Record<string, number | null>>({});
+  const key = rows.map((r) => `${r.chain}:${r.mint}`).join(',');
+  useEffect(() => {
+    if (!key) return;
+    let alive = true;
+    const load = async (): Promise<void> => {
+      const list = key.split(',').map((k) => {
+        const i = k.indexOf(':');
+        return { chain: k.slice(0, i) as ChainKind, mint: k.slice(i + 1) };
+      });
+      const out: Record<string, number | null> = {};
+      const sol = list.filter((r) => r.chain === 'solana').map((r) => r.mint);
+      const jobs: Array<Promise<void>> = [];
+      if (sol.length) {
+        jobs.push(
+          window.krypt.market.summaries(sol).then((r) => {
+            for (const [mint, sum] of Object.entries(r.ok && r.data ? r.data : {})) out[`solana:${mint}`] = sum.kryptScore;
+          }),
+        );
+      }
+      for (const ch of ['robinhood', 'bnb'] as const) {
+        const addrs = list.filter((r) => r.chain === ch).map((r) => r.mint);
+        if (!addrs.length) continue;
+        jobs.push(
+          window.krypt.evm.summaries(ch, addrs).then((r) => {
+            // Keyed by lower-case address there; the row keeps its own casing.
+            for (const a of addrs) out[`${ch}:${a}`] = r.ok && r.data ? (r.data[a.toLowerCase()]?.kryptScore ?? null) : null;
+          }),
+        );
+      }
+      await Promise.allSettled(jobs);
+      if (alive) setScores((prev) => ({ ...prev, ...out }));
+    };
+    void load();
+    const t = window.setInterval(() => void load(), 60_000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [key]);
+  return scores;
+}
+
 function RunnersBody(): ReactNode {
-  const { runners, evmRunners } = useAppState();
+  const { runners, evmRunners, launches } = useAppState();
   const filter = usePanelChain();
   // Both rails in one newest-first list. They are separate types on purpose —
   // an EVM chain measures buyers and a rate, not a curve regime or an odds
   // bucket — so only what BOTH actually have is shown per row, and each says
   // which chain it came from.
   const rows = useMemo(() => {
+    // Buyers: the launch's LIVE count while the feed still tracks it, else the
+    // count when it was flagged. Unique buyers is the flow fact that matters
+    // most after a flag, so it is the one on the row.
+    const liveBuyers = new Map(launches.map((l) => [l.mint, l.flow.uniqueBuyers]));
     const sol = runners.map((r) => ({
       key: `sol-${r.mint}-${r.flaggedAt}`,
       chain: 'solana' as ChainKind,
       mint: r.mint,
       symbol: r.symbol || `${r.mint.slice(0, 6)}…`,
       at: r.flaggedAt,
+      buyers: liveBuyers.get(r.mint) ?? r.uniqueBuyers ?? null,
       note: `${r.windowS}s`,
       title: r.line,
     }));
@@ -398,14 +452,16 @@ function RunnersBody(): ReactNode {
       mint: f.token,
       symbol: f.symbol || `${f.token.slice(0, 6)}…`,
       at: f.flaggedAt,
-      note: `${f.uniqueBuyers} buyers`,
+      buyers: f.uniqueBuyers ?? null,
+      note: null as string | null,
       title: f.detail,
     }));
     return [...sol, ...evm]
       .filter((r) => chainMatches(filter, r.chain))
       .sort((a, b) => b.at - a.at)
       .slice(0, 40);
-  }, [runners, evmRunners, filter]);
+  }, [runners, evmRunners, launches, filter]);
+  const scores = useRunnerScores(rows);
   if (!rows.length) return <Empty>Nothing flagged this session{filter === 'all' ? '' : ` on ${CHAIN_SHORT[filter]}`}.</Empty>;
   return (
     <Rows>
@@ -422,8 +478,16 @@ function RunnersBody(): ReactNode {
             </span>
           }
           right={
-            <span className="shrink-0 font-mono text-krypt-muted">
-              {r.note} · {ago(r.at)}
+            <span className="flex shrink-0 items-center gap-1.5 font-mono text-krypt-muted">
+              {/* Krypt score, toned like everywhere else; — until it is read. */}
+              <span className={cls('font-semibold', scoreTone(scores[`${r.chain}:${r.mint}`]))} title="Krypt score">
+                {scores[`${r.chain}:${r.mint}`] ?? '—'}
+              </span>
+              <span title="Unique buyers">{r.buyers === null ? '—' : r.buyers} buyers</span>
+              <span>
+                {r.note ? `${r.note} · ` : ''}
+                {ago(r.at)}
+              </span>
             </span>
           }
         />
@@ -1421,6 +1485,157 @@ function XCell({ v, label }: { v: string; label: string }): ReactNode {
   );
 }
 
+// ─── Script monitor ─────────────────────────────────────────────────────
+//
+// One script's own stats (bot.stat / bot.stats) and its log, live (asked
+// 09-22: "a script could send stats to a widget — total likes, callouts, pnl,
+// trades"). The numbers are whatever the SCRIPT chose to show; the app's own
+// budget numbers stay on the Scripts widget. The picked script is kept in
+// localStorage so the header and the body — rendered in different places,
+// and possibly in a popped-out window — agree.
+
+const MONITOR_KEY = 'krypt.panels.scriptMonitor.v1';
+const MONITOR_EVENT = 'krypt:scriptmonitor';
+
+function loadMonitorPick(): string | null {
+  try {
+    return window.localStorage.getItem(MONITOR_KEY);
+  } catch {
+    return null;
+  }
+}
+function saveMonitorPick(id: string): void {
+  try {
+    window.localStorage.setItem(MONITOR_KEY, id);
+  } catch {
+    /* private window — the pick just does not persist */
+  }
+  window.dispatchEvent(new Event(MONITOR_EVENT));
+}
+/** The pick, following changes from this window and from others. */
+function useMonitorPick(): string | null {
+  const [pick, setPick] = useState<string | null>(() => loadMonitorPick());
+  useEffect(() => {
+    const again = (): void => setPick(loadMonitorPick());
+    const onStorage = (e: StorageEvent): void => {
+      if (e.key === MONITOR_KEY) again();
+    };
+    window.addEventListener(MONITOR_EVENT, again);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(MONITOR_EVENT, again);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+  return pick;
+}
+
+/** The automation snapshot, kept current from the engine's pushes. */
+function useScriptSnapshot(): ScriptSnapshot | null {
+  const [snap, setSnap] = useState<ScriptSnapshot | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void window.krypt.automation.list().then((r) => {
+      if (alive && r.ok && r.data) setSnap(r.data);
+    });
+    const off = window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'automation') setSnap(ev.snapshot);
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, []);
+  return snap;
+}
+
+/** The script to show: the pick if it still exists, else the first one on. */
+function monitoredScript(snap: ScriptSnapshot | null, pick: string | null) {
+  if (!snap || !snap.scripts.length) return null;
+  return snap.scripts.find((s) => s.id === pick) ?? snap.scripts.find((s) => s.enabled) ?? snap.scripts[0];
+}
+
+function fmtStat(v: ScriptStatValue): string {
+  if (v === null) return '—';
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  if (typeof v === 'number') return Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return v;
+}
+
+function ScriptMonitorHeaderControl(): ReactNode {
+  const snap = useScriptSnapshot();
+  const pick = useMonitorPick();
+  const current = monitoredScript(snap, pick);
+  if (!snap || !snap.scripts.length) return <span className="truncate text-micro text-krypt-muted">No scripts yet</span>;
+  return (
+    <select
+      // Both drag systems have to leave it alone — see chainFilter.tsx.
+      className="panel-action no-drag max-w-[10rem] cursor-pointer rounded border border-white/10 bg-black/30 px-1 py-0.5 text-micro text-krypt-muted outline-none transition hover:text-white focus:border-krypt-purple/50"
+      value={current?.id ?? ''}
+      onPointerDown={(e) => e.stopPropagation()}
+      onChange={(e) => saveMonitorPick(e.target.value)}
+      title="Which script this widget shows"
+      aria-label="Script"
+    >
+      {snap.scripts.map((s) => (
+        <option key={s.id} value={s.id}>
+          {s.name}
+          {s.enabled ? '' : ' (off)'}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function ScriptMonitorBody(): ReactNode {
+  const snap = useScriptSnapshot();
+  const pick = useMonitorPick();
+  const sc = monitoredScript(snap, pick);
+  if (!snap) return <Empty>Loading…</Empty>;
+  if (!sc) return <Empty>No scripts yet — write one under Automation › Scripts.</Empty>;
+  const metrics = snap.metrics?.[sc.id] ?? [];
+  const log = (snap.logs[sc.id] ?? []).slice(-40).reverse();
+  const chain = scriptChain(sc);
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex shrink-0 items-center gap-1.5 text-micro">
+        <span className={cls('shrink-0 rounded px-1 font-semibold uppercase', CHAIN_TAG[chain])}>{CHAIN_SHORT[chain]}</span>
+        <span className={cls('rounded px-1 font-semibold uppercase', sc.mode === 'live' ? 'bg-rose-500/15 text-rose-300' : 'bg-white/10 text-krypt-muted')}>{sc.mode}</span>
+        <span className={sc.enabled ? 'text-emerald-300' : 'text-krypt-muted'}>{sc.enabled ? 'on' : 'off'}</span>
+      </div>
+      {metrics.length > 0 ? (
+        <div className="grid shrink-0 grid-cols-[repeat(auto-fill,minmax(7.5rem,1fr))] gap-1.5">
+          {metrics.map((m) => (
+            <div key={m.name} className="rounded border border-white/5 bg-white/[0.03] px-2 py-1.5">
+              <div className="truncate text-micro text-krypt-muted" title={m.name}>
+                {m.name}
+              </div>
+              <div className="truncate font-mono text-value font-semibold text-white" title={fmtStat(m.value)}>
+                {fmtStat(m.value)}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="shrink-0 text-micro text-krypt-muted">
+          No stats from this script yet. A script shows them with <span className="font-mono">bot.stat('Callouts', 12)</span>.
+        </p>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto rounded border border-white/5 bg-black/20 px-2 py-1 font-mono text-micro">
+        {log.length === 0 ? (
+          <span className="text-krypt-muted">Nothing logged yet.</span>
+        ) : (
+          log.map((l, i) => (
+            <div key={`${l.at}-${i}`} className={cls('truncate', l.level === 'error' ? 'text-rose-300' : l.level === 'warn' ? 'text-arc-gold' : 'text-white/75')} title={l.line}>
+              <span className="text-krypt-muted/70">{new Date(l.at).toLocaleTimeString()}</span> {l.line}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 export const PANELS: PanelSpec[] = [
   { id: 'engine', title: 'Engine', blurb: 'Scanner state, uptime and what it has seen.', layout: { x: 0, y: 0, w: 4, h: 6, minW: 3, minH: 5 }, Body: EngineBody },
   { id: 'wallet', title: 'Wallet', blurb: 'Balance, live trade counts and session PnL.', layout: { x: 4, y: 0, w: 4, h: 6, minW: 3, minH: 5 }, Body: WalletBody },
@@ -1437,6 +1652,7 @@ export const PANELS: PanelSpec[] = [
   { id: 'links', title: 'Links', blurb: 'The open token’s X, website and launchpad page, shown in a box you can switch between.', layout: { x: 6, y: 14, w: 6, h: 10, minW: 4, minH: 6 }, Body: LinksBody },
   { id: 'games', title: 'Games', blurb: 'Snake, Flappy Crypto, Dino and Tetris — for the wait between candles.', layout: { x: 0, y: 24, w: 4, h: 10, minW: 3, minH: 7 }, Body: GamesBody },
   { id: 'runners', chainAware: true, title: 'Runner alerts', blurb: 'Launches flagged as potential runners this session.', layout: { x: 8, y: 6, w: 4, h: 8, minW: 3, minH: 4 }, Body: RunnersBody },
+  { id: 'scriptmonitor', HeaderControl: ScriptMonitorHeaderControl, title: 'Script monitor', blurb: 'One script’s own live stats (bot.stat) and its log.', layout: { x: 8, y: 32, w: 4, h: 8, minW: 3, minH: 5 }, Body: ScriptMonitorBody },
   { id: 'callouts', chainAware: true, title: 'Callouts', blurb: 'Coins people are publicly calling on pump.fun, and whether the caller holds one.', layout: { x: 4, y: 32, w: 4, h: 8, minW: 3, minH: 4 }, Body: CalloutsBody },
 ];
 

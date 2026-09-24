@@ -37,6 +37,7 @@ import {
   ACCEPTANCE_RETENTION_DAYS,
 } from './entity';
 import { feePctLabel } from '../fees';
+import { KRYPT_REFERRAL_CODE } from '../pumpReferral';
 
 export interface LegalSection {
   heading: string;
@@ -245,6 +246,7 @@ export const PRIVACY_POLICY: LegalDocument = {
         'Trade execution: pumpportal.fun (transaction relayer), bundles.jito.wtf and mainnet.block-engine.jito.wtf (transaction submission lanes).',
         'Token images and metadata: ipfs.io, ipfs.4everland.io and ipfs.filebase.io (public IPFS gateways, asked in that order), and — because a token’s image is whatever URL its creator published — any public image host that URL points to.',
         'Bridging (the Bridge page, off by default): li.quest. Pricing a transfer necessarily sends the aggregator the amount and BOTH of your own wallet addresses — the one the money leaves and the one it arrives at — and following a transfer sends its transaction hash. For the minutes a transfer is in flight, your funds are held by the bridge’s own contracts, not by you and not by us; see the Terms.',
+        'pump.fun accounts, only if you sign in to one: signing in sends pump.fun (frontend-api-v3.pump.fun) that wallet’s address and a signature over pump’s own sign-in message — never a key — and pump.fun then knows that address as an account, referred by our pump.fun account (see the Terms, Fees). Callouts, profile edits, follows and likes you make, by hand or from a script, are published by pump.fun under that account.',
         'Launching a token (the Launch page, off by default): pump.fun receives the image you chose and the name, symbol, description and links you typed, and pins them publicly. Nothing else — no wallet address, no key — is sent with them.',
         'Update check: thirty seconds after every start, and every six hours after, the software fetches a small version file from krypt.cc to learn whether a newer build exists. That request carries no identifier and no data about you, but like any request it reveals your IP address to the host serving the file (our site is fronted by Cloudflare, which sees it too). Nothing is downloaded or installed automatically; the software only shows a notice.',
         'Discord Rich Presence, ON BY DEFAULT since 3.0.0 and switchable off in Settings: the Discord client on your own computer is told what the software is doing — that you are running it, and a short line about the scanner and your session — so Discord can show it on your profile. Anyone who can see your Discord profile can therefore see that you use this software. It is a local connection to the Discord app on your own machine; nothing is sent to us, and no wallet address, balance, token or trade is included.',
@@ -402,6 +404,8 @@ export const SOFTWARE_TERMS: LegalDocument = {
         `${BRAND} charges a platform fee on trades executed through the software. The current rate is shown in the application before you trade and in Settings. It is charged inside the same blockchain transaction as your trade wherever the venue allows it, so it is visible on-chain; on launchpad curves that cannot carry a fee it is a separate transfer sent immediately after the fill, and on four.meme sells the whole fee goes to the treasury with no referrer share.`,
         'This is separate from, and in addition to, fees charged by the launchpad, protocol, relayer, or network — none of which we receive. Network and priority fees are paid to validators.',
         'If you entered a referrer, a share of our fee is sent to that address in the same transaction. It comes out of our fee and does not increase what you pay.',
+        'A referral share is skipped, and the whole fee goes to us, in three cases: the address cannot receive it (an empty wallet that the payment would leave below the network rent minimum, or a contract that cannot accept the chain currency), the transaction is already at its size limit, or the address is unusable as a referral because it is not a valid address, is our own fee address, or is the wallet doing the trading. The software tells you when this happens. It never increases what you pay.',
+        `pump.fun accounts. Every pump.fun account you create or sign in to through the software is registered under our pump.fun referral code ("${KRYPT_REFERRAL_CODE}"), applied automatically when the account first signs in, because pump.fun only accepts a referral in the first 24 hours of an account. It is not optional. Under pump.fun's referral programme we may receive: (a) a first-deposit reward, which pump.fun pays and which costs you nothing; and (b) a share of the callout rewards the account earns, which pump.fun deducts from that account's reward and pays to us. pump.fun sets both amounts and may change them; we do not control or receive anything else from your account. An account that pump.fun will not accept a referral for (for example, one older than its programme) is left as it is.`,
         'We may change the fee. Material changes come with a new version of these terms and you will be asked to accept them.',
       ],
     },
@@ -587,6 +591,11 @@ export const CLICKWRAP_SUMMARY: SummaryPoint[] = [
   {
     title: `${BRAND} takes a ${feePctLabel()} fee on each trade`,
     detail: `A ${feePctLabel()} platform fee is charged inside the same transaction as your trade — about half the going rate for a memecoin terminal. It is visible on-chain and shown in Settings. This is separate from what the launchpad and network charge.`,
+    flagged: true,
+  },
+  {
+    title: `pump.fun accounts made here are referred by ${BRAND}`,
+    detail: `Under code “${KRYPT_REFERRAL_CODE}”. pump.fun pays us a share of the callout rewards the account earns, out of that account’s share. Not optional.`,
     flagged: true,
   },
   {

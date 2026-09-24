@@ -61,6 +61,21 @@ const jobs = new Map<ScoutChain, ScoutScanStatus>();
 const running = new Map<ScoutChain, Promise<void>>();
 const cancels = new Set<ScoutChain>();
 
+/**
+ * Where this module's lines go (2026-09-21).
+ *
+ * The Scout logged NOTHING until a logging audit found it: a user reporting
+ * "the scan hung" or "it found nobody" handed support an empty file, on a job
+ * that runs for minutes and spends hundreds of provider calls. Injected
+ * rather than imported so the module stays testable offline, and a null sink
+ * is a no-op — a scan must not fail because nobody attached a logger.
+ */
+type Log = (level: 'info' | 'warn' | 'error', line: string) => void;
+let log: Log = () => {};
+export function attachLog(fn: Log): void {
+  log = fn;
+}
+
 function fresh(chain: ScoutChain, hours: ScoutScanHours): ScoutScanStatus {
   return {
     chain,
@@ -111,6 +126,7 @@ export function start(chain: ScoutChain, hours: ScoutScanHours, source: ScanSour
   st.trackedAfter = st.trackedBefore;
   jobs.set(chain, st);
   cancels.delete(chain);
+  log('info', `scout scan ${chain}: reading the last ${hours}h (${st.trackedBefore.toLocaleString()} wallet(s) already on record)`);
   const p = run(chain, st, source).finally(() => running.delete(chain));
   running.set(chain, p);
   return { ok: true, message: 'started' };
@@ -139,8 +155,13 @@ async function run(chain: ScoutChain, st: ScoutScanStatus, source: ScanSource): 
       if (batch.units !== undefined) st.units = batch.units;
       st.calls += batch.calls;
       // The first thing that went wrong is the one worth reading; later
-      // notes are almost always the same thing again.
-      if (batch.note && !st.message) st.message = batch.note;
+      // notes are almost always the same thing again — but EVERY one is
+      // logged, because "it found half of what it should" is a story the
+      // status line's single message cannot tell.
+      if (batch.note) {
+        log('warn', `scout scan ${chain}: ${batch.note}`);
+        if (!st.message) st.message = batch.note;
+      }
       const trades = [...batch.trades].sort((a, b) => a.at - b.at);
       for (const t of trades) {
         st.read += 1;
@@ -160,11 +181,18 @@ async function run(chain: ScoutChain, st: ScoutScanStatus, source: ScanSource): 
     }
   } catch (e) {
     st.message = st.message || `Scan stopped — ${(e as Error).message ?? String(e)}`.slice(0, 200);
+    log('error', `scout scan ${chain}: stopped after ${st.unitsDone}/${st.units} — ${(e as Error).message ?? String(e)}`);
   } finally {
     st.running = false;
     st.finishedAt = Date.now();
     st.trackedAfter = walletScout.counts(chain).tracked;
     cancels.delete(chain);
+    const secs = Math.round((Date.now() - (st.startedAt ?? Date.now())) / 1000);
+    const delta = st.trackedAfter - st.trackedBefore;
+    log(
+      st.cancelled ? 'warn' : 'info',
+      `scout scan ${chain}: ${st.cancelled ? 'cancelled' : 'done'} in ${secs}s — ${st.unitsDone}/${st.units} unit(s), ${st.read.toLocaleString()} trade(s) read, ${st.fed.toLocaleString()} recorded, ${st.duplicates.toLocaleString()} already known, ${st.calls} call(s), ${delta >= 0 ? '+' : '−'}${Math.abs(delta).toLocaleString()} wallet(s)`,
+    );
     // The store persists on a 30 s debounce after a sell; a scan is one
     // deliberate act and its result should survive a crash a second later.
     walletScout.persist();

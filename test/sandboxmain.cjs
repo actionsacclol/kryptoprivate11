@@ -132,7 +132,11 @@ app.whenReady().then(async () => {
   const d4 = await sb.dispatch('four', 'launch', {});
   const forgedFast = Date.now() - t4;
   out('forged done:', JSON.stringify(d4), `${forgedFast} ms`);
-  await new Promise((r) => setTimeout(r, 4_000));
+  // 6 s, not 4: the deadline now ASKS the renderer whether it is wedged
+  // before killing it, and a wedged one answers by never answering — so the
+  // kill lands one probe timeout later than it used to. That second is the
+  // price of not crashing well-behaved scripts.
+  await new Promise((r) => setTimeout(r, 6_000));
   out('after forge — gone:', JSON.stringify(gone), 'isRunning:', sb.isRunning('four'));
   const forgeKilled = !!gone && gone.id === 'four' && !sb.isRunning('four');
 
@@ -195,6 +199,28 @@ app.whenReady().then(async () => {
   const s10 = await sb.start('ten', `bot.on('launch', () => {});`);
   out('recovered after a broken preload:', JSON.stringify(s10));
 
+  // 11: a SLOW BUT RESPONSIVE handler must finish, not be crashed.
+  //
+  // The event deadline is 3 s and `bot.market()` alone is documented as "a
+  // second or more", so two of them in one handler used to blow it — and the
+  // sandbox was crashed for OUR latency, taking every byte of the script's
+  // in-memory state with it. A user lost seven hours to that
+  // (docs/script-never-bought-2026-09-21.md).
+  //
+  // The two cases are distinguishable: a renderer in a loop cannot answer an
+  // injected expression, one that is merely awaiting can. This handler awaits
+  // for twice the deadline and must come back normally, with the script still
+  // running afterwards. Case 3 above proves the wedged one still dies.
+  gone = null;
+  const s11 = await sb.start('eleven', `bot.on('launch', async () => { await new Promise((r) => setTimeout(r, 6500)); bot.log('slow handler finished'); });`);
+  const t11 = Date.now();
+  const d11 = await sb.dispatch('eleven', 'launch', {});
+  const slowHandlerMs = Date.now() - t11;
+  const elevenLines = messages.filter((x) => x.id === 'eleven' && x.m.t === 'log').map((x) => x.m.line);
+  out('slow handler:', JSON.stringify(d11), `${slowHandlerMs} ms`, JSON.stringify(elevenLines), 'isRunning:', sb.isRunning('eleven'));
+  const slowHandlerSurvived =
+    d11.ok && slowHandlerMs > 5_000 && elevenLines.includes('slow handler finished') && sb.isRunning('eleven') && !gone;
+
   await sb.stopAll();
   const checks = {
     loads: s1.ok && s2.ok,
@@ -220,6 +246,9 @@ app.whenReady().then(async () => {
       /broken install/.test(s9.message) &&
       badPreloadMs < 8_000,
     recoversAfterBrokenPreload: s10.ok,
+    // Waiting is not wedging: a responsive handler past the deadline is given
+    // more time, and its script keeps its memory.
+    slowHandlerSurvives: s11.ok && slowHandlerSurvived,
     noUncaught: uncaught.length === 0,
   };
   for (const [k, v] of Object.entries(checks)) out(`${v ? 'ok  ' : 'FAIL'} ${k}`);

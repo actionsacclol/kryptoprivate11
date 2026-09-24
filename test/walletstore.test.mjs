@@ -28,11 +28,6 @@ import {
   renameWallet,
   selectWallet,
   MAX_WALLETS,
-  createGroup,
-  renameGroup,
-  deleteGroup,
-  setGroupMembers,
-  groupWallets,
 } from './.walletstore.mjs';
 
 let passed = 0;
@@ -279,69 +274,56 @@ async function run() {
 }
 
 
-// ── Groups (fan-out) ──────────────────────────────────────────────────
+// ── Groups and the Copier are gone (2026-09-22) ───────────────────────
+//
+// "grouping feels like bundling": a flat list of at most ten wallets. Having
+// other wallets copy the main one was removed the same day; a script naming a
+// wallet by address is the only multi-wallet path left. A file written before
+// then may carry groups (and, briefly, per-wallet `copy` blocks); both are
+// ignored on read and never written again — and no wallet is lost.
 
-const threeWallets = () => {
-  let f = emptyFile();
-  f = addWallet(f, w('a')).file;
-  f = addWallet(f, w('b')).file;
-  f = addWallet(f, w('c')).file;
-  return f;
+const FOLLOW_ON = {
+  enabled: true, gapMinMs: 12_000, gapMaxMs: 40_000, sizeMode: 'random', ratio: 0.5,
+  fixedSol: 0.01, randomMinSol: 0.006, randomMaxSol: 0.012, maxTradeSol: 0.05, followSells: true,
 };
+const rawWallet = (id, at) => ({ id, publicKey: `pub_${id}`, secretEnc: `enc_${id}`, label: id.toUpperCase(), homeAddress: null, maxBalanceSol: 2, createdAt: at });
 
-test('a group is created empty and can be filled with members', () => {
-  let f = threeWallets();
-  f = createGroup(f, 'Snipers', 'g1').file;
-  assert.equal(f.groups.length, 1);
-  assert.equal(f.groups[0].walletIds.length, 0);
-  f = setGroupMembers(f, 'g1', ['a', 'c']).file;
-  assert.deepEqual(groupWallets(f, 'g1').map((x) => x.id), ['a', 'c']);
+test('the cap is fifteen wallets, the main one included', () => {
+  assert.equal(MAX_WALLETS, 15);
 });
 
-test('setGroupMembers drops ids that are not real wallets', () => {
-  let f = threeWallets();
-  f = createGroup(f, 'G', 'g1').file;
-  f = setGroupMembers(f, 'g1', ['a', 'ghost', 'b']).file;
-  assert.deepEqual(f.groups[0].walletIds, ['a', 'b']);
+test('a file with more than fifteen wallets keeps every one of them', () => {
+  // Made before the cap. The cap is on ADDING; reading never drops a key.
+  const raw = { version: 2, activeId: 'w0', wallets: Array.from({ length: 18 }, (_, i) => rawWallet(`w${i}`, i + 1)) };
+  const f = parseFile(raw, 0, () => 'x');
+  assert.equal(f.wallets.length, 18, 'no key is lost');
+  const more = addWallet(f, w('extra', { publicKey: 'pub_extra' }));
+  assert.equal(more.ok, false, 'but it cannot grow');
 });
 
-test('removing a wallet removes it from every group', () => {
-  let f = threeWallets();
-  f = createGroup(f, 'G', 'g1').file;
-  f = setGroupMembers(f, 'g1', ['a', 'b', 'c']).file;
-  f = removeWallet(f, 'b').file;
-  assert.deepEqual(f.groups[0].walletIds, ['a', 'c'], 'the gone wallet must leave the group');
-  assert.deepEqual(groupWallets(f, 'g1').map((x) => x.id), ['a', 'c']);
-});
-
-test('rename and delete a group', () => {
-  let f = threeWallets();
-  f = createGroup(f, 'Old', 'g1').file;
-  f = renameGroup(f, 'g1', 'New').file;
-  assert.equal(f.groups[0].name, 'New');
-  f = deleteGroup(f, 'g1').file;
-  assert.equal(f.groups.length, 0);
-});
-
-test('groups survive a round-trip through parseFile', () => {
-  let f = threeWallets();
-  f = createGroup(f, 'Snipers', 'g1').file;
-  f = setGroupMembers(f, 'g1', ['a', 'b']).file;
-  const reparsed = parseFile(JSON.parse(JSON.stringify(f)), 0, () => 'x');
-  assert.equal(reparsed.groups.length, 1);
-  assert.deepEqual(reparsed.groups[0].walletIds, ['a', 'b']);
-});
-
-test('a group member that vanished from disk is dropped on parse', () => {
-  // Hand-crafted file: group references a wallet id that is not in the list.
+test('an old file with following groups and copy blocks loads every wallet and copies nothing', () => {
   const raw = {
     version: 2,
-    activeId: 'a',
-    wallets: [{ id: 'a', publicKey: 'pub_a', secretEnc: 'enc_a', label: 'A', homeAddress: null, maxBalanceSol: 2, createdAt: 1 }],
-    groups: [{ id: 'g1', name: 'G', walletIds: ['a', 'gone'] }],
+    activeId: 'm',
+    wallets: [rawWallet('m', 1), rawWallet('a', 2), { ...rawWallet('b', 3), copy: FOLLOW_ON }],
+    groups: [{ id: 'g1', name: 'Group 1', walletIds: ['m', 'a', 'b'], lab: { follow: FOLLOW_ON } }],
   };
   const f = parseFile(raw, 0, () => 'x');
-  assert.deepEqual(f.groups[0].walletIds, ['a'], 'a phantom member must not survive');
+  assert.equal(f.wallets.length, 3, 'every wallet kept');
+  assert.equal(f.activeId, 'm');
+  assert.equal('groups' in f, false, 'no groups in the parsed file, so none are written back');
+  assert.ok(f.wallets.every((x) => !('copy' in x)), 'no copy settings survive — nothing follows the main wallet');
+});
+
+test('removing a wallet and switching main keep the file consistent', () => {
+  let f = emptyFile();
+  f = addWallet(f, w('m')).file;
+  f = addWallet(f, w('a')).file;
+  f = selectWallet(f, 'a').file;
+  assert.equal(f.activeId, 'a');
+  f = removeWallet(f, 'm').file;
+  assert.equal(f.wallets.length, 1);
+  assert.equal(f.activeId, 'a');
 });
 
 test('a v2 file with no groups key still parses (backward compat)', () => {
@@ -351,7 +333,7 @@ test('a v2 file with no groups key still parses (backward compat)', () => {
     wallets: [{ id: 'a', publicKey: 'pub_a', secretEnc: 'enc_a', label: 'A', homeAddress: null, maxBalanceSol: 2, createdAt: 1 }],
   };
   const f = parseFile(raw, 0, () => 'x');
-  assert.deepEqual(f.groups, []);
+  assert.equal(f.wallets.length, 1);
 });
 
 await run();

@@ -23,7 +23,7 @@ export const tr: Catalogue = {
   'nav.observatory': 'Gözlemevi',
   'nav.copyTrading': 'Copy trading',
   'nav.scripts': 'Betikler',
-  'nav.groupWallets': 'Cüzdan grupları',
+  'nav.groupWallets': 'Cüzdan listesi',
   'nav.funder': 'Fonlama',
   'nav.launches': 'Lansmanlar',
   'nav.execution': 'Yürütme',

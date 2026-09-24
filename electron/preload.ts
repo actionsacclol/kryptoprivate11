@@ -20,6 +20,12 @@ const api = {
     openRecordingsFolder: () => ipcRenderer.invoke('app:openRecordingsFolder'),
     openLogs: () => ipcRenderer.invoke('app:openLogs'),
     logPaths: () => ipcRenderer.invoke('app:logPaths'),
+    /** The support bundle (2026-09-21): one file a user can attach. Nothing
+     *  is sent anywhere — these write a file or fill the clipboard. */
+    logsPreview: () => ipcRenderer.invoke('logs:preview'),
+    /** `note` = the user's own description, printed first in the file. */
+    logsExport: (note?: string) => ipcRenderer.invoke('logs:export', note ?? ''),
+    logsCopy: (note?: string) => ipcRenderer.invoke('logs:copy', note ?? ''),
     integrity: () => ipcRenderer.invoke('app:integrity'),
   },
     panels: {
@@ -118,11 +124,6 @@ const api = {
     backup: () => ipcRenderer.invoke('wallet:backup'),
     exportAll: () => ipcRenderer.invoke('wallet:export'),
     remove: (id?: string) => ipcRenderer.invoke('wallet:remove', id),
-    groups: () => ipcRenderer.invoke('wallet:groups'),
-    createGroup: (name: string) => ipcRenderer.invoke('wallet:createGroup', name),
-    renameGroup: (id: string, name: string) => ipcRenderer.invoke('wallet:renameGroup', id, name),
-    deleteGroup: (id: string) => ipcRenderer.invoke('wallet:deleteGroup', id),
-    setGroupMembers: (id: string, walletIds: string[]) => ipcRenderer.invoke('wallet:setGroupMembers', id, walletIds),
   },
   live: {
     state: () => ipcRenderer.invoke('live:state'),
@@ -138,13 +139,20 @@ const api = {
   // Wallet Lab (shared/lab.ts): creating and funding groups of the user's
   // OWN wallets. Ids only — never a URL, never a key.
   lab: {
-    generateMany: (count: number, labelPrefix?: string, groupId?: string) => ipcRenderer.invoke('lab:generateMany', count, labelPrefix ?? '', groupId ?? ''),
+    generateMany: (count: number, labelPrefix?: string) => ipcRenderer.invoke('lab:generateMany', count, labelPrefix ?? ''),
     fund: (targets: Array<{ walletId: string; sol: number }>, fromWalletId?: string) => ipcRenderer.invoke('lab:fund', targets, fromWalletId ?? null),
     collect: (walletIds: string[], toWalletId?: string) => ipcRenderer.invoke('lab:collect', walletIds, toWalletId ?? null),
   },
   card: {
-    saveFile: (name: string, bytes: Uint8Array) => ipcRenderer.invoke('card:saveFile', name, bytes),
-    copyFile: (name: string, bytes: Uint8Array) => ipcRenderer.invoke('card:copyFile', name, bytes),
+    saveFile: (name: string, bytes: Uint8Array, kind?: 'gif' | 'mp4' | 'webm') =>
+      ipcRenderer.invoke('card:saveFile', name, bytes, kind ?? 'gif'),
+    copyFile: (name: string, bytes: Uint8Array, kind?: 'gif' | 'mp4' | 'webm') =>
+      ipcRenderer.invoke('card:copyFile', name, bytes, kind ?? 'gif'),
+    // A video background is far too big for localStorage, so main keeps the
+    // one the user picked and hands the bytes back next time.
+    saveBackground: (bytes: Uint8Array, type: string) => ipcRenderer.invoke('card:saveBackground', bytes, type),
+    loadBackground: () => ipcRenderer.invoke('card:loadBackground'),
+    clearBackground: () => ipcRenderer.invoke('card:clearBackground'),
   },
   ai: {
     analyze: (mint: string, force?: boolean) => ipcRenderer.invoke('ai:analyze', mint, force ?? false),
@@ -192,6 +200,8 @@ const api = {
     remove: (id: string) => ipcRenderer.invoke('automation:remove', id),
     setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('automation:setEnabled', id, enabled),
     killSwitch: (on: boolean) => ipcRenderer.invoke('automation:killSwitch', on),
+    /** Pick a .js file; its text comes back as a draft, never a path. */
+    openFile: () => ipcRenderer.invoke('automation:openFile'),
   },
   copy: {
     list: () => ipcRenderer.invoke('copy:list'),
@@ -226,6 +236,21 @@ const api = {
     scanCancel: (chain: string) => ipcRenderer.invoke('scout:scanCancel', chain),
     detail: (chain: string, address: string) => ipcRenderer.invoke('scout:detail', chain, address),
     clear: (chain: string) => ipcRenderer.invoke('scout:clear', chain),
+    // A wallet's recent swaps read from the chain into the record (2026-09-21).
+    readWallet: (chain: string, address: string) => ipcRenderer.invoke('scout:readWallet', chain, address),
+    readWalletStatus: (chain: string, address: string) => ipcRenderer.invoke('scout:readWalletStatus', chain, address),
+    readWalletCancel: (chain: string, address: string) => ipcRenderer.invoke('scout:readWalletCancel', chain, address),
+  },
+
+  /** The AI connection (MCP, 2026-09-21). The token and the access level are
+   *  owned by main; this side asks, it never sets them in a settings patch. */
+  mcp: {
+    status: () => ipcRenderer.invoke('mcp:status'),
+    setEnabled: (on: boolean) => ipcRenderer.invoke('mcp:setEnabled', on),
+    setAccess: (level: string) => ipcRenderer.invoke('mcp:setAccess', level),
+    newToken: () => ipcRenderer.invoke('mcp:newToken'),
+    setPort: (port: number) => ipcRenderer.invoke('mcp:setPort', port),
+    setBudget: (budget: { maxBuySol: number; hourlyCapSol: number; maxTradesPerMinute: number }) => ipcRenderer.invoke('mcp:setBudget', budget),
   },
 
   // Creating a token. `pickImage` and `upload` touch no chain; `preview` asks
@@ -252,12 +277,67 @@ const api = {
     check: () => ipcRenderer.invoke('app:checkForUpdate'),
   },
 
+  // Splitting a buy across your own wallets, spaced over time. The renderer
+  // asks; the cap and the gap floor are enforced in main.
+  multiwallet: {
+    accept: (accept: boolean) => ipcRenderer.invoke('multiwallet:accept', accept),
+  },
+  // pump.fun sign-in. The renderer names a wallet and learns who is signed
+  // in; the session token itself never crosses this boundary.
+  /** pump.fun callout rewards: what pump paid, its terms, and the USDC in
+   *  each wallet (swap to SOL, or send to the CONFIRMED withdrawal address). */
+  calloutRewards: {
+    list: () => ipcRenderer.invoke('calloutRewards:list'),
+    acceptTerms: (walletId: string) => ipcRenderer.invoke('calloutRewards:acceptTerms', walletId),
+    swapUsdc: (walletId: string) => ipcRenderer.invoke('calloutRewards:swapUsdc', walletId),
+    withdrawUsdc: (walletId: string, amountUsdc: number | 'max') => ipcRenderer.invoke('calloutRewards:withdrawUsdc', walletId, amountUsdc),
+  },
+  pump: {
+    status: () => ipcRenderer.invoke('pump:status'),
+    signIn: (walletId: string) => ipcRenderer.invoke('pump:signIn', walletId),
+    /** One wallet's account, or every account when none is named. */
+    signOut: (walletId?: string) => ipcRenderer.invoke('pump:signOut', walletId ?? ''),
+    /** Follow/unfollow a pump user or like/unlike a callout, as this wallet's account. */
+    social: (walletId: string, action: 'follow' | 'unfollow' | 'like' | 'unlike', target: string) =>
+      ipcRenderer.invoke('pump:social', walletId, action, target),
+    /** Whether each wallet's address already has a pump account. Public read. */
+    lookup: (walletIds: string[]) => ipcRenderer.invoke('pump:lookup', walletIds),
+    /** Import a key that already has a pump account, and sign in to it. */
+    importAccount: (secret: string, label?: string) => ipcRenderer.invoke('pump:importAccount', secret, label ?? ''),
+    /** Post ONE callout now, as this wallet. Real and public — only ever
+     *  called from a button a person pressed. */
+    callout: (walletId: string, mint: string, text: string) => ipcRenderer.invoke('pump:callout', walletId, mint, text),
+    /** Reply to the callout this wallet already made on a coin. Public. */
+    calloutReply: (walletId: string, mint: string, text: string) =>
+      ipcRenderer.invoke('pump:calloutReply', walletId, mint, text),
+    /** Post a TEST callout embed to the saved Auto-callout webhook. The URL
+     *  is read in main; the mint only picks the sample's numbers. */
+    testCalloutWebhook: (mint?: string) => ipcRenderer.invoke('pump:testCalloutWebhook', mint ?? ''),
+    /** Sign several wallets in, one after another. Reports per wallet. */
+    signInMany: (walletIds: string[]) => ipcRenderer.invoke('pump:signInMany', walletIds),
+    /** Usernames from a list, one per account. Refused if a name repeats. */
+    setUsernames: (pairs: Array<{ walletId: string; username: string }>) =>
+      ipcRenderer.invoke('pump:setUsernames', pairs),
+    /** What pump says about this account as a caller. */
+    callerStats: (walletId: string) => ipcRenderer.invoke('pump:callerStats', walletId),
+    /** The profile pump currently holds for this wallet's account. */
+    profile: (walletId: string) => ipcRenderer.invoke('pump:profile', walletId),
+    /** Write the changed parts of it. Public, under that account's name. */
+    setProfile: (walletId: string, draft: { username?: string; bio?: string; profileImage?: string }) =>
+      ipcRenderer.invoke('pump:setProfile', walletId, draft),
+    /** Pin a picked image and get back the link `profileImage` points at.
+     *  Takes the HANDLE from launch.pickImage — never a path. */
+    pinImage: (handle: string) => ipcRenderer.invoke('pump:pinImage', handle),
+  },
   launch: {
-    pickImage: () => ipcRenderer.invoke('launch:pickImage'),
+    pickImage: (purpose?: 'token' | 'profile') => ipcRenderer.invoke('launch:pickImage', purpose ?? 'token'),
     upload: (filePath: string, fields: Record<string, string>) => ipcRenderer.invoke('launch:upload', filePath, fields),
     /** Creator fees this install's launch wallet has accrued, across every
      *  coin it launched — the vault is per creator, not per token. */
     fees: () => ipcRenderer.invoke('launch:fees'),
+    /** How the coins you launched are doing. Mints come from the caller —
+     *  the chain is the truth and the local record is the map to it. */
+    stats: (mints: string[]) => ipcRenderer.invoke('launch:stats', mints),
     claimFees: () => ipcRenderer.invoke('launch:claimFees'),
     preview: (draft: LaunchDraft) => ipcRenderer.invoke('launch:preview', draft),
     send: (draft: LaunchDraft) => ipcRenderer.invoke('launch:send', draft),

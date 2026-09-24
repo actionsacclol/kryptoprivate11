@@ -40,8 +40,13 @@ const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
 
 {
   const ref = read('../shared/automation.ts');
-  const row = /event: 'launchUpdate'[^\n]*when: '([^']+)'/.exec(ref)?.[1] ?? '';
-  assert.ok(/flagged runner/.test(row) && /bot\.subscribe/.test(row) && /15 s/.test(row), 'the script reference says when launchUpdate flows and how to keep it flowing');
+  // Tolerates the entry being one line or several: it was reformatted when
+  // "THE SCORE DOES NOT CHANGE" was moved to the front of the sentence
+  // (2026-09-21), and a regex that only matched one line failed on wording it
+  // was never meant to police.
+  const row = /event: 'launchUpdate'[\s\S]{0,600}?when:\s*'([^']+)'/.exec(ref)?.[1] ?? '';
+  assert.ok(row.length > 0, 'the launchUpdate entry is findable whatever shape it is written in');
+  assert.ok(/flagged runner/.test(row) && /bot\.subscribe/.test(row) && /15 s/.test(row), `the script reference says when launchUpdate flows and how to keep it flowing: "${row.slice(0, 120)}"`);
   const doc = read('../docs/user-scripting.md');
   assert.ok(/bot\.subscribe\(mint\)/.test(doc) && /15 min/.test(doc), 'the doc says the same');
   ok('the reference and the doc name the rule and the supported way to keep updates coming');

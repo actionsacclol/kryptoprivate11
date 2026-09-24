@@ -74,6 +74,17 @@ export interface FeedTiming {
   backoffResetAfterMs?: number;
   /** No subscribe ack AND no notification within this window → reconnect. */
   subscribeAckTimeoutMs?: number;
+  /**
+   * Where the reconnect jitter comes from. Production leaves it alone.
+   *
+   * It is injectable for the same reason `pickThesis` and `followSize` take a
+   * `rand`: a test that wants to assert the BACKOFF cannot also be sampling
+   * the jitter. With ±25% on each delay, 100 ms and 200 ms overlap at
+   * 125 ms vs 150 ms, so "did the delay grow?" measured off a real clock came
+   * down to a 20% margin against whatever the machine was doing — which is a
+   * test that fails on a busy laptop and says nothing about the code.
+   */
+  rnd?: () => number;
 }
 
 /** Standby block sockets for a FeedManager. */
@@ -99,6 +110,7 @@ const DEFAULT_TIMING: Required<FeedTiming> = {
   maxBackoffMs: 30_000,
   backoffResetAfterMs: 30_000,
   subscribeAckTimeoutMs: 20_000,
+  rnd: Math.random,
 };
 const SEEN_CAP = 16_384;
 
@@ -439,7 +451,7 @@ abstract class RpcSocket {
     if (this.reconnectTimer) return; // one pending reconnect at a time
     this.subscriptionId = 0;
     this.setState('reconnecting', reason);
-    const delay = jitteredDelay(this.backoffMs);
+    const delay = jitteredDelay(this.backoffMs, this.timing.rnd());
     this.backoffMs = Math.min(this.backoffMs * 2, this.timing.maxBackoffMs);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

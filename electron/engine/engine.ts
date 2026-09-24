@@ -24,7 +24,7 @@ import { DipShadow } from './dipShadow';
 import { StratLab } from './stratLab';
 import { MigShadow } from './migShadow';
 import { decodeAmmEventEx, decodeCpiAmmEventData, executedPriceSol, PUMP_AMM_GLOBAL_CONFIG, type AmmEvent } from './ammDecoder';
-import { fetchSocials, type TokenSocials } from './metadata';
+import { fetchSocials, metadataLinksIfCached, type TokenSocials } from './metadata';
 import { decodeCpiEventData, decodeLogsEx, logsMentionPumpTrade, PUMP_PROGRAM_ID, type PumpCreateEvent, type PumpEvent, type PumpTradeEvent } from './pumpDecoder';
 import { staticChecks, checkMint, hasHardReject } from './risk';
 import { computeScore } from './scoring';
@@ -47,6 +47,7 @@ import * as orders from './orders';
 import * as creators from './creators';
 import * as watchlist from './watchlist';
 import * as recorder from './recorder';
+import * as pumpAuth from '../system/pumpAuth';
 import * as feeEstimator from './feeEstimator';
 import * as jitoTips from './jitoTips';
 import * as tradePrewarm from './prewarm';
@@ -57,6 +58,7 @@ import * as tape from '../data/tape';
 import { createChartTicks } from './chartTicks';
 import { LiveCurves, LiveMigrations } from './liveCurves';
 import * as market from '../data/market';
+import type { CalloutFacts } from '@shared/calloutAuto';
 import * as launchIntel from '../data/launchIntel';
 import * as xStatsStore from '../data/xStats';
 import * as linkIntel from '../data/linkIntel';
@@ -355,6 +357,12 @@ export class SniperEngine {
   private armed = false;
   private armedAt: number | null = null;
   private lastDisarmReason: DisarmReason | null = null;
+  /** Live was armed when the program-upgrade watchdog disarmed it — the
+   *  condition for re-arming once the decoder re-check passes. */
+  private armedWhenUpgradeHit = false;
+  /** main.ts: arm live the way the top-bar switch does (engine + the saved
+   *  mode). Returns what arm() said. */
+  onRearmAfterUpgrade: (() => { ok: boolean; message: string }) | null = null;
   /** Set by main: persists the mode bit whenever the engine disarms, so a
    *  safety trip reverts the UI to Paper truthfully (see live:setLive). */
   onDisarm: ((reason: DisarmReason) => void) | null = null;
@@ -473,7 +481,7 @@ export class SniperEngine {
         const rpc = this.getSettings().rpc;
         return rpc.execHttpUrl ?? rpc.httpUrl;
       },
-      onSwap: ({ wallet: leader, swap, signature, at, tradeAt }) => {
+      onSwap: ({ wallet: leader, swap, signature, at, tradeAt, timing }) => {
         // The leader's fill IS a price for that mint, and often the only
         // one this app has for a token the launch feed never carried.
         this.rememberPrice(swap.mint, swap.priceSol);
@@ -493,6 +501,9 @@ export class SniperEngine {
           // copyTrade refuses to enter on one and says how late an exit is.
           tradeAt,
           signature,
+          // What hearing about it cost. The copier adds its own stages and
+          // the signer's, and logs one line per copy (2026-09-21).
+          delivery: timing,
         });
         // User scripts see the same trade (Automation → Scripts, "Followed wallet traded").
         automation.onLeaderTrade({
@@ -752,6 +763,10 @@ export class SniperEngine {
           pending,
           spentSol: priced?.spentSol ?? r.sentSol,
           fillPriceSol: priced?.priceSol ?? undefined,
+          // The signer already measures itself (TradeTiming); passing two of
+          // its numbers through is what lets a copy's timing line separate
+          // building the transaction from waiting for the chain.
+          timing: r.timing ? { build: r.timing.build, confirm: r.timing.confirm } : undefined,
         };
       },
       // A mirrored sell is the same order a user places by hand: the full
@@ -881,6 +896,11 @@ export class SniperEngine {
           // refuses rather than guessing.
           kryptScore: t ? (t.row.score?.total ?? sum.kryptScore) : sum.kryptScore,
           isPumpfun: t ? true : sum.launchpad === 'pumpfun',
+          // For the age and creator filters (2026-09-21): a feed token's own
+          // launch time and creator, else what the market layer knows. Null
+          // is unknown, and those filters refuse rather than guess.
+          createdAt: t ? t.row.detectedAt : sum.createdAt,
+          creator: (t ? t.row.creator : null) || sum.creator || null,
         };
       },
       log: (level, line) => this.log(level, line),
@@ -912,40 +932,12 @@ export class SniperEngine {
       log: (level, line) => this.log(level, line),
     });
     automation.attach({
-      buy: async (mint, sol, mode, chain) => {
-        // Robinhood Chain / BNB go out on their own rail, the same one copy
-        // trading uses. Routed BEFORE the Solana path on purpose: a script on
-        // an EVM chain whose buy fell through to `testTrade` would spend SOL
-        // on a token address from another chain.
-        if (chain && chain !== 'solana') {
-          if (mode === 'paper') return this.evmPaperBuy(chain, mint, sol);
-          if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
-          return this.evmCopy.buy(chain, mint, sol);
-        }
-        // Paper = the same simulation a paper buy by hand runs, booked into
-        // the paper book from the simulated fill. Live = the real thing.
-        const r = await this.testTrade(mint, sol, mode === 'paper');
-        return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
-      },
-      sell: async (mint, pct, mode, chain) => {
-        if (chain && chain !== 'solana') {
-          if (mode === 'paper') return this.evmPaperSell(chain, mint, pct);
-          if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
-          const r = await this.evmCopy.sell(chain, mint, pct);
-          return { ok: r.ok, message: r.message, signature: r.signature, realizedSol: null };
-        }
-        if (mode === 'paper') {
-          const pos = paperBook.get(mint);
-          if (!pos) return { ok: false, message: 'no paper position in this token' };
-          const priceSol = pos.decimalsKnown ? await this.paperFillPrice(mint) : null;
-          const r = paperBook.sell(mint, pct, priceSol);
-          recorder.record('paper_sell', { mint, pct, ok: r.ok, priceSol, proceedsSol: r.proceedsSol, realizedSol: r.realizedSol, note: r.message.slice(0, 220), by: 'script' });
-          if (r.ok) this.emit({ kind: 'paper', mint, side: 'sell' });
-          return { ok: r.ok, message: r.message, realizedSol: typeof r.realizedSol === 'number' ? r.realizedSol : null };
-        }
-        const r = await this.manualSell(mint, pct);
-        return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending', realizedSol: null };
-      },
+      // One implementation, two callers: user scripts reach it here, the AI
+      // connection reaches `hostBuy` / `hostSell` directly (2026-09-21). They
+      // were duplicated for a day and that is exactly how an EVM routing rule
+      // ends up fixed on one path and not the other.
+      buy: (mint, sol, mode, chain, ownCapSol) => this.hostBuy(mint, sol, mode, chain, ownCapSol),
+      sell: (mint, pct, mode, chain) => this.hostSell(mint, pct, mode, chain),
       liveBlockedReason: (chain) =>
         chain && chain !== 'solana'
           ? (this.evmCopy ? this.evmCopy.blocked(chain) : 'EVM trading is not available in this build')
@@ -962,6 +954,22 @@ export class SniperEngine {
       priceSol: (mint, chain) =>
         chain && chain !== 'solana' ? (this.evmCopy?.price(chain, mint) ?? null) : this.cheapPriceSol(mint),
       launch: (mint) => this.tokens.get(mint)?.row ?? null,
+      launchLinks: (mint) => {
+        const t = this.tokens.get(mint);
+        const so = t?.socials;
+        if (!t || !so || !so.resolved) return null;
+        // The addresses themselves, from the same cached metadata file — a
+        // "website" that is really an X search is only visible in the URL.
+        const urls = t.createEvent.uri ? metadataLinksIfCached(t.createEvent.uri) : null;
+        return {
+          twitter: so.twitter,
+          website: so.website,
+          telegram: so.telegram,
+          twitterUrl: urls?.twitter ?? null,
+          websiteUrl: urls?.website ?? null,
+          telegramUrl: urls?.telegram ?? null,
+        };
+      },
       marketCached: (mint, chain) => {
         // The EVM rails have no cached provider summary here; their facts come
         // from the bridge and only on request, so "cached" is honestly nothing.
@@ -998,12 +1006,7 @@ export class SniperEngine {
       },
       // The rest of what the app knows about a token (2026-09-20). Solana only:
       // the EVM rails have no security report, creator record or AI opinion.
-      links: (mint, chain) => {
-        if (chain && chain !== 'solana') return null;
-        const s = market.summaryIfCached(mint);
-        if (s) linkIntel.trigger(mint);
-        return s ? scriptLinksFromSummary('solana', s, this.xReuseFor(s.socials.twitter, mint), xStatsStore.get(mint), linkIntel.facts(mint), siteReadStore.get(mint)) : null;
-      },
+      links: (mint, chain) => this.linksFor(mint, chain),
       security: async (mint, chain) => {
         if (chain && chain !== 'solana') return null;
         try {
@@ -1104,6 +1107,65 @@ export class SniperEngine {
       runners: () => this.runnersSnapshot(),
       leaders: () => copyTrade.all().map((c) => ({ wallet: c.wallet, label: c.label, enabled: c.enabled, mode: c.mode })),
       notify: (title, body) => this.notify(title, body),
+      // A script posting a callout. By default the ACTIVE Solana wallet's
+      // account — the wallet the script trades with, so the one holding the
+      // coin. A script may name a different account, but only one of the
+      // user's OWN signed-in ones, and it names it by address: `postNow` is
+      // given a wallet id resolved here, never one the sandbox invented.
+      callout: async (mint, thesis, who) => {
+        const pick = this.pumpAccountFor(who);
+        if ('error' in pick) return { ok: false, message: pick.error };
+        const { pickThesis } = await import('@shared/calloutAuto');
+        // Given text wins; otherwise a random line from the Auto-callout
+        // settings, which is where the user's own wording already lives.
+        const chosen = thesis || pickThesis(this.getSettings().autoCallout.text) || '';
+        if (!chosen) return { ok: false, message: 'no text given, and Auto-callout has no lines to pick from' };
+        // {ticker}, {mc} and the rest, from what the app already knows.
+        const { fillCallout } = await import('@shared/calloutAuto');
+        const text = fillCallout(chosen, this.calloutFacts(mint));
+        const { postNow } = await import('./autoCallout');
+        const r = await postNow(pick.walletId, mint, text, { likeOwn: this.getSettings().autoCallout.likeOwn });
+        recorder.record('auto_callout', { mint, ok: r.ok, verdict: r.verdict ?? null, note: r.message.slice(0, 160) });
+        return { ok: r.ok, message: r.message, thesis: r.thesis, address: pick.address, calloutId: r.calloutId ?? null };
+      },
+      // Your own wallets, so a script can name one to trade with. Addresses
+      // and labels only — no key, no id a caller could have invented.
+      wallets: () => wallet.list().map((w) => ({ address: w.publicKey, label: w.label, active: !!w.active })),
+      walletBuy: (address, mint, sol, ownCapSol) => this.scriptWalletTrade('buy', address, mint, sol, ownCapSol),
+      walletSell: (address, mint, pct) => this.scriptWalletTrade('sell', address, mint, pct),
+      // Following up a call that already exists. Same account rules; the
+      // callout's id is pump's to supply, not a script's.
+      calloutReply: async (mint, content, who) => {
+        const pick = this.pumpAccountFor(who);
+        if ('error' in pick) return { ok: false, message: pick.error };
+        const { fillCallout } = await import('@shared/calloutAuto');
+        const { replyNow } = await import('./autoCallout');
+        const r = await replyNow(pick.walletId, mint, fillCallout(content, this.calloutFacts(mint)));
+        recorder.record('auto_callout', { mint, ok: r.ok, verdict: r.verdict ?? null, note: `reply: ${r.message.slice(0, 150)}` });
+        return { ok: r.ok, message: r.message, thesis: r.thesis, address: pick.address, calloutId: r.calloutId ?? null, replyId: r.replyId ?? null };
+      },
+      // A script's Discord post. The URL was resolved from the script's own
+      // webhook answer in automation.ts; postEmbed checks the host again.
+      discord: async (url, embed) => {
+        const { postEmbed } = await import('../system/discordWebhook');
+        return postEmbed(url, embed);
+      },
+      // Follows and likes, from the same account a callout would post from.
+      pumpSocial: async (action, target, who) => {
+        const pick = this.pumpAccountFor(who);
+        if ('error' in pick) return { ok: false, message: pick.error };
+        const { act } = await import('../system/pumpSocial');
+        const r = await act(pick.walletId, action, target);
+        return { ok: r.ok, message: r.message, address: pick.address };
+      },
+      // Addresses and names only. A session's token never leaves main, and
+      // certainly never reaches a sandbox.
+      pumpAccounts: () =>
+        pumpAuth.status().sessions.map((x) => ({
+          address: x.address,
+          username: x.username,
+          active: x.walletId === (wallet.list().find((w) => w.active)?.id ?? null),
+        })),
       log: (level, line) => this.log(level, line),
       toast: (level, message) => this.emit({ kind: 'toast', level, message }),
       changed: () => this.emit({ kind: 'automation', snapshot: automation.snapshot() }),
@@ -1408,9 +1470,15 @@ export class SniperEngine {
     }
     if (r.changed && !this.hardPauseReason) {
       this.hardPauseReason = PROGRAM_UPGRADE_PAUSE;
+      this.armedWhenUpgradeHit = this.armed;
       this.disarm('program_upgrade');
       this.log('error', `program watchdog: ${r.message} — entries paused, recording continues`);
       this.emit({ kind: 'toast', level: 'error', message: 'Pump program upgraded — new entries paused while the decoder is re-checked' });
+      // A toast is gone in seconds, and on 2026-09-23 this disarm left a live
+      // script refusing every buy for eight hours with nobody the wiser. A
+      // desktop notification (and the paired chat bot) is what reaches
+      // someone who is not looking. No target: never posted to a channel.
+      this.notify('Live trading switched OFF', 'pump.fun upgraded its program. Krypto Bot disarmed live trading as a safety check. Scripts and orders cannot buy until you re-arm.');
       recorder.record('program_upgrade', { programId: PUMP_PROGRAM_ID, detail: r.message });
     } else if (!r.changed) {
       this.log('info', `program watchdog: ${r.message}`);
@@ -1476,12 +1544,34 @@ export class SniperEngine {
       // The address just observed, never the stored one.
       programWatch.acceptCurrent(PUMP_PROGRAM_ID, deployedSlot, programdata);
       this.hardPauseReason = null;
+      // Re-arm only what the upgrade itself disarmed, only when asked to,
+      // and only if nothing else has touched the mode since (a user who
+      // armed or disarmed in between has decided for themselves).
+      const wanted = this.armedWhenUpgradeHit;
+      this.armedWhenUpgradeHit = false;
+      if (
+        wanted &&
+        !this.armed &&
+        this.lastDisarmReason === 'program_upgrade' &&
+        this.getSettings().execution.rearmAfterVerifiedUpgrade !== false &&
+        this.onRearmAfterUpgrade
+      ) {
+        const r = this.onRearmAfterUpgrade();
+        if (r.ok) {
+          this.log('warn', `program watchdog: ${v.summary} — entries resume and live is RE-ARMED automatically (Wallet → "Re-arm after a checked pump upgrade")`);
+          this.emit({ kind: 'toast', level: 'success', message: 'pump.fun upgrade checked out — live trading is back ON.' });
+          this.notify('Live trading is back ON', 'The pump.fun upgrade checked out against real launches, so live was re-armed automatically.');
+          return;
+        }
+        this.log('warn', `program watchdog: re-check passed but re-arming failed (${r.message}) — live stays off`);
+      }
       this.log('warn', `program watchdog: ${v.summary} — entries resume; live execution stays DISARMED until you arm it`);
       this.emit({
         kind: 'toast',
         level: 'success',
         message: 'Decoder re-verified against the new pump deployment — entries resume. Live execution is still disarmed.',
       });
+      if (wanted) this.notify('Safe to re-arm live trading', 'The pump.fun upgrade checked out. Live is still OFF until you switch it back on in the top bar.');
     } catch (e) {
       this.log('warn', `decoder re-verify failed to run (${(e as Error)?.message ?? 'unknown'}) — entries stay paused`);
     } finally {
@@ -1896,7 +1986,22 @@ export class SniperEngine {
     mint: string,
     sol: number,
     simulateOnly: boolean,
-    opts: { manual?: boolean; slippagePct?: number } = {},
+    opts: {
+      manual?: boolean;
+      slippagePct?: number;
+      /**
+       * The CALLER's own per-trade cap, when it has one it already enforces.
+       *
+       * A script's budget is set on the same screen as its code and is the
+       * thing its author actually decided; making it also answer to the
+       * manual per-trade cap meant keeping two numbers in step for one
+       * decision, and the smaller one winning silently to whoever set the
+       * other. When this is given it REPLACES `execution.maxLiveSol` below —
+       * it does not add a second limit, and it is still a refusal rather than
+       * a clamp.
+       */
+      ownCapSol?: number;
+    } = {},
   ): Promise<EngineTradeResult> {
     const { executeTrade } = await import('./liveSigner');
     const s = this.getSettings();
@@ -1930,17 +2035,24 @@ export class SniperEngine {
     // then recorded at a size it never traded. Every unattended caller already
     // checks the cap before it gets here, so this is the backstop and it
     // names the cap it is enforcing.
-    if (!opts.manual && !simulateOnly && sol > s.execution.maxLiveSol) {
+    // The caller's own cap when it brought one (a script's budget), else the
+    // app-wide manual cap. Either way there is exactly one number, and it is
+    // named in the refusal so nobody hunts for which limit bit.
+    const unattendedCap = opts.ownCapSol ?? s.execution.maxLiveSol;
+    if (!opts.manual && !simulateOnly && sol > unattendedCap) {
       return {
         ok: false,
         stage: 'validate',
-        message: `${sol} SOL is above your per-trade cap of ${s.execution.maxLiveSol} SOL.`,
+        message:
+          opts.ownCapSol !== undefined
+            ? `${sol} SOL is above this script's max per trade of ${unattendedCap} SOL.`
+            : `${sol} SOL is above your per-trade cap of ${unattendedCap} SOL.`,
       };
     }
     // A dry run spends nothing, so the cap only SHAPES it: paper keeps
     // modelling the trade at the size live would have been allowed, rather
     // than refusing a rehearsal over a limit no money is crossing.
-    let capped = opts.manual || !simulateOnly ? sol : Math.min(sol, s.execution.maxLiveSol);
+    let capped = opts.manual || !simulateOnly ? sol : Math.min(sol, unattendedCap);
     if (opts.manual && sol > s.execution.maxLiveSol && !simulateOnly) {
       this.log('info', `manual buy ${sol} SOL is above the ${s.execution.maxLiveSol} SOL per-trade cap — allowed (manual)`);
     }
@@ -2014,11 +2126,22 @@ export class SniperEngine {
       if (res.ok) this.emitFill(mint, 'buy', res.signature, 'landed');
       else if (res.stage === 'confirm') this.emitFill(mint, 'buy', res.signature, 'failed');
     }
-    // Wallet Lab: groups that FOLLOW the active wallet repeat a manual buy.
     // Auto-sell template: arm the exit the user already decided on. These are
     // ordinary advanced orders — they appear on the Orders page and can be
     // cancelled — placed the moment there is a position to protect, rather
     // than typed out again per token.
+    // A pump.fun callout on what was just bought, when the wallet has an
+    // account and pump's own preflight allows it. Off by default, and a
+    // refusal is reported rather than retried (autoCallout.ts).
+    //
+    // MANUAL buys only — the same gate as the template orders below. A script,
+    // a copy config or an advanced order runs its OWN social flow (scorenow
+    // posts + likes from its account pool); the app grabbing the one callout
+    // pump allows per coin off the back of the script's buy is exactly the
+    // interference the user hit — the auto-call from the active account beat
+    // the script to it, and the script's like pool then found "already called"
+    // (2026-09-24). Automation is separate; this is for hand buys.
+    if (opts.manual && !simulateOnly && res.ok) this.autoCallout(mint, capped);
     if (opts.manual && !simulateOnly && res.ok) this.armTemplateOrders(mint);
     if (!res.ok && res.stage !== 'pending') {
       this.log('warn', `live buy FAILED ${mint} (${capped} SOL, stage ${res.stage}): ${res.message}`);
@@ -2235,6 +2358,20 @@ export class SniperEngine {
    */
   async fanoutPreflight(walletIds: string[], sizing: { mode: 'same' | 'total'; amountSol: number; jitter?: number }): Promise<string | null> {
     const s = this.getSettings();
+    // ── The multi-wallet gate (2026-09-22) ────────────────────────────
+    //
+    // Only when MORE THAN ONE wallet is involved. One wallet buying one coin
+    // is an ordinary buy, and the launcher comes through here with exactly
+    // one — requiring the acknowledgement for that would break launching to
+    // guard something that is not happening.
+    //
+    // Checked HERE, in main, rather than only in the form: the form's answer
+    // is a courtesy and this one is the rule.
+    if (walletIds.length > 1) {
+      const { multiWalletProblem } = await import('@shared/multiWallet');
+      const why = multiWalletProblem(walletIds.length, s.multiWallet);
+      if (why) return why;
+    }
     if (!this.armed) return 'Arm the engine before a fan-out buy';
     if (!s.execution.liveEnabled) return 'Enable live execution in settings first';
     const breaker = this.liveBreakerReason();
@@ -2255,7 +2392,11 @@ export class SniperEngine {
     mint: string,
     walletIds: string[],
     sizing: { mode: 'same' | 'total'; amountSol: number; jitter?: number },
-    opts: { staggerMaxMs?: number } = {},
+    /** The space BETWEEN buys, as a RANGE — each gap is drawn from it, so the
+     *  spacing is irregular rather than a fixed beat. Floored and capped by
+     *  shared/multiWallet.ts: asking for less, or for none, still gets the
+     *  floor. */
+    opts: { gapMinMs?: number; gapMaxMs?: number } = {},
   ): Promise<{ ok: boolean; message: string; results: Array<{ walletId: string; ok: boolean; stage: string; message: string; signature: string | null }> }> {
     const s = this.getSettings();
     // Every gate, in `fanoutPreflight` — armed, live, the breaker, the
@@ -2304,22 +2445,262 @@ export class SniperEngine {
       return { walletId, ok: res.ok, stage: res.stage, message: res.message, signature: res.signature ?? null };
     };
 
-    const stagger = Math.max(0, Math.min(2000, opts.staggerMaxMs ?? 0));
-    const results = await Promise.all(
-      plan.shares.map(async (sh) => {
-        // A small random delay per wallet so the buys do not all land in one
-        // slot. Zero stagger = all at once.
-        if (stagger > 0) await new Promise((r) => setTimeout(r, Math.floor(Math.random() * stagger)));
-        return run(sh.wallet, sh.sol);
-      }),
-    );
+    // ── Spaced, never simultaneous (2026-09-22) ───────────────────────
+    //
+    // This used to be `Promise.all` with a random delay of up to two seconds,
+    // defaulting to ZERO — every wallet buying in the same slot. That is the
+    // shape the whole feature was removed for on 2026-09-14, and it is the
+    // one thing that separates splitting an entry from bundling.
+    //
+    // Now the buys are SEQUENTIAL and separated by a real gap, floored in
+    // shared/multiWallet.ts so a caller cannot ask for less. Awaiting each
+    // buy before starting the next also means the gap is measured between
+    // buys that actually went out, not between when they were kicked off.
+    //
+    // One wallet is an ordinary buy and waits for nothing.
+    const { gapRange, randomGap } = await import('@shared/multiWallet');
+    const spread = gapRange(opts.gapMinMs ?? 0, opts.gapMaxMs ?? 0);
+    const results: Array<{ walletId: string; ok: boolean; stage: string; message: string; signature: string | null }> = [];
+    const gaps: number[] = [];
+    for (const sh of plan.shares) {
+      if (results.length > 0 && plan.shares.length > 1) {
+        // A fresh draw each time, not one interval repeated — an exact beat
+        // is its own signature.
+        const g = randomGap(spread.minMs, spread.maxMs);
+        gaps.push(g);
+        await new Promise((r) => setTimeout(r, g));
+      }
+      results.push(await run(sh.wallet, sh.sol));
+    }
     const landed = results.filter((r) => r.ok).length;
     // Pending = broadcast but unconfirmed; may still land. Counted apart so
     // nobody re-fires a fan-out over wallets that are about to be filled.
     const pending = results.filter((r) => !r.ok && r.stage === 'pending').length;
-    recorder.record('fanout_buy', { mint, wallets: results.length, landed, pending, total: plan.totalLamports / 1e9 });
+    // The gap is recorded too: a split entry and a bundle differ by exactly
+    // this number, so the history should say which one happened.
+    // The gaps are recorded too: a split entry and a bundle differ by exactly
+    // these numbers, so the history should say which one happened.
+    recorder.record('fanout_buy', { mint, wallets: results.length, landed, pending, total: plan.totalLamports / 1e9, gapsMs: gaps });
     this.log(landed === results.length ? 'info' : 'warn', `fan-out buy ${mint.slice(0, 8)}…: ${landed}/${results.length} landed${pending ? `, ${pending} pending` : ''}`);
     return { ok: landed > 0, message: `${landed}/${results.length} buys landed${pending ? `, ${pending} still pending` : ''}`, results };
+  }
+
+  /**
+   * What a callout line's variables resolve to for a coin.
+   *
+   * Read from what the app ALREADY knows — the launch row and the cached
+   * market summary — and never fetched. A callout goes out on the back of a
+   * buy that just happened; making it wait on a provider would delay a public
+   * post to fill in a word, and a field nobody knows renders as an em dash,
+   * which is the honest version anyway.
+   */
+  private calloutFacts(mint: string): CalloutFacts {
+    const row = this.tokens.get(mint)?.row ?? null;
+    const sum = market.summaryIfCached(mint);
+    return {
+      ticker: sum?.symbol || row?.symbol || null,
+      name: sum?.name || row?.name || null,
+      mc: sum?.marketCapUsd ?? null,
+      price: sum?.priceUsd ?? null,
+      holders: sum?.holders ?? null,
+      buyers: row?.flow?.uniqueBuyers ?? null,
+      liq: sum?.liquidityUsd ?? null,
+      mint,
+    };
+  }
+
+  /**
+   * A script trading with one of the user's OTHER wallets, by address.
+   *
+   * Since the Copier was removed (2026-09-22) this is the ONLY way several of
+   * the user's wallets trade the same coin. There is no per-coin cap on it: a
+   * script names one wallet per call, in code somebody wrote, and its own
+   * budget is what bounds it. The acknowledgement applies: it is consent, not
+   * a limit, and it is what says the user knows what trading several of their
+   * own wallets is.
+   *
+   * The address must be one this app holds a key for. A script cannot name a
+   * wallet id, and an address that is not the user's own is refused rather
+   * than falling back to the active wallet.
+   */
+  private async scriptWalletTrade(
+    side: 'buy' | 'sell',
+    address: string,
+    mint: string,
+    amount: number,
+    ownCapSol?: number,
+  ): Promise<{ ok: boolean; message: string }> {
+    const mine = wallet.list().find((w) => w.publicKey === address);
+    if (!mine) return { ok: false, message: `no wallet of yours has the address ${address.slice(0, 8)}…` };
+    const s = this.getSettings();
+    const { multiWalletProblem } = await import('@shared/multiWallet');
+    // Count 1: a script names one wallet per call, so this asks for the
+    // acknowledgement without applying the per-coin ceiling.
+    const why = multiWalletProblem(1, s.multiWallet);
+    if (why) return { ok: false, message: why };
+    if (side === 'buy') {
+      const r = await this.labBuy(mine.id, mint, amount, ownCapSol);
+      return { ok: r.ok, message: r.message };
+    }
+    const r = await this.labSell(mine.id, mint, amount);
+    return { ok: r.ok, message: r.message };
+  }
+
+  /**
+   * Which pump.fun account a script's post goes out as.
+   *
+   * Named accounts are matched against the ADDRESSES (or usernames) of
+   * sessions this app holds — so a script can pick any of the user's own
+   * accounts and can name nothing else. An unknown name is REFUSED rather
+   * than quietly falling back to the active wallet, which would post under
+   * somebody else's name.
+   *
+   * One resolver for both callout and reply: two copies of this would be two
+   * places for that fallback to creep back in.
+   */
+  private pumpAccountFor(who: string): { walletId: string; address: string | undefined } | { error: string } {
+    const { sessions } = pumpAuth.status();
+    const active = wallet.list().find((w) => w.active)?.id ?? null;
+    const picked = who ? sessions.find((x) => x.address === who || x.username === who) : null;
+    if (who && !picked) return { error: `no signed-in pump.fun account matches "${who}"` };
+    const walletId = picked?.walletId ?? active;
+    if (!walletId) return { error: 'no active wallet to post as' };
+    return { walletId, address: picked?.address ?? sessions.find((x) => x.walletId === walletId)?.address };
+  }
+
+  /**
+   * Post a pump.fun callout on a coin just bought, if that is switched on.
+   *
+   * Deliberately fire-and-forget: this runs off the back of a trade that has
+   * already succeeded, and a social post failing must never read as the trade
+   * failing. Every outcome is logged; only a success toasts, because a user
+   * who has not configured this does not need a notification per buy telling
+   * them so.
+   */
+  private autoCallout(mint: string, boughtSol: number): void {
+    const s = this.getSettings();
+    if (!s.autoCallout.enabled) return;
+    // The wallet that BOUGHT owns the position, so it is the only account
+    // pump would accept and the honest author of the call.
+    const walletId = wallet.list().find((w) => w.active)?.id ?? null;
+    if (!walletId) return;
+    void (async () => {
+      const { postCallout } = await import('./autoCallout');
+      const r = await postCallout(walletId, mint, s.autoCallout, boughtSol, this.calloutFacts(mint));
+      recorder.record('auto_callout', { mint, ok: r.ok, verdict: r.verdict ?? null, note: r.message.slice(0, 160) });
+      if (r.ok) {
+        this.log('info', `auto-callout: ${r.message}${r.thesis ? ` — "${r.thesis}"` : ''}`);
+        this.emit({ kind: 'toast', level: 'success', message: r.message });
+        // And to Discord, when a webhook is set on the Auto-callout page.
+        const hook = this.getSettings().autoCallout.discordWebhookUrl;
+        if (hook) await this.postCalloutToDiscord(hook, mint, r.thesis ?? '', r.calloutId ?? null);
+        return;
+      }
+      // Not a toast: pump refusing a call is ordinary (three per coin, a
+      // cooldown, a position too small) and a popup per buy would be noise.
+      this.log('info', `auto-callout: not posted — ${r.message}`);
+    })().catch((e) => this.log('warn', `auto-callout failed: ${e instanceof Error ? e.message : String(e)}`));
+  }
+
+  /**
+   * Call out a coin you just LAUNCHED (2026-09-23), from the launch wallet's
+   * pump account. Separate from the on-buy path above:
+   *
+   *  · gated on the `onLaunch` toggle, not `enabled` (the on-buy switch);
+   *  · only when the dev buy is worth more than `launchMinUsd` (default $2),
+   *    so a token-dust launch is not called;
+   *  · posted after a short delay (LAUNCH_CALLOUT_DELAY_MS), because a call
+   *    made the same second as the create is the kind pump was seen to drop.
+   *
+   * Fire-and-forget: the launch already succeeded, and a social post failing
+   * must never read as a failed launch. Solana only — the caller checks that.
+   */
+  calloutAfterLaunch(walletId: string, mint: string, devBuySol: number): void {
+    const a = this.getSettings().autoCallout;
+    if (!a.onLaunch) return;
+    void (async () => {
+      const { pickThesis, fillCallout, LAUNCH_CALLOUT_DELAY_MS } = await import('@shared/calloutAuto');
+      // The USD floor. An unknown SOL price is treated as "do not call" rather
+      // than guessed past the gate.
+      if (a.launchMinUsd > 0) {
+        const solUsd = await market.solUsd().catch(() => null);
+        const usd = solUsd !== null ? devBuySol * solUsd : null;
+        if (usd === null) {
+          this.log('info', `auto-callout (launch): SOL price unknown, not calling ${mint.slice(0, 8)}…`);
+          return;
+        }
+        if (usd < a.launchMinUsd) {
+          this.log('info', `auto-callout (launch): dev buy ~$${usd.toFixed(2)} is under the $${a.launchMinUsd} floor, not calling`);
+          return;
+        }
+      }
+      const chosen = pickThesis(a.text);
+      if (!chosen) {
+        this.log('info', 'auto-callout (launch): no callout text configured, nothing posted');
+        return;
+      }
+      await new Promise((r) => setTimeout(r, LAUNCH_CALLOUT_DELAY_MS));
+      const text = fillCallout(chosen, this.calloutFacts(mint));
+      const { postNow } = await import('./autoCallout');
+      const r = await postNow(walletId, mint, text, { likeOwn: a.likeOwn });
+      recorder.record('auto_callout', { mint, ok: r.ok, verdict: r.verdict ?? null, note: `launch: ${r.message.slice(0, 150)}` });
+      this.log('info', `auto-callout (launch) on ${mint.slice(0, 8)}…: ${r.message}`);
+      if (r.ok) {
+        this.emit({ kind: 'toast', level: 'success', message: r.message });
+        const hook = this.getSettings().autoCallout.discordWebhookUrl;
+        if (hook) await this.postCalloutToDiscord(hook, mint, r.thesis ?? text, r.calloutId ?? null);
+      }
+    })().catch((e) => this.log('warn', `auto-callout (launch) failed: ${e instanceof Error ? e.message : String(e)}`));
+  }
+
+  /**
+   * The Auto-callout page's Discord post: the same embed the scorenow script
+   * posts its calls in. Best effort and never thrown — the call already went
+   * out, and a Discord hiccup must not read as a failed callout. One market
+   * summary for a fresh cap, holders and image, cached facts otherwise.
+   */
+  /** The most recently seen launch, for a sample post. Null before any. */
+  newestLaunchMint(): string | null {
+    let last: string | null = null;
+    for (const k of this.tokens.keys()) last = k;
+    return last;
+  }
+
+  async postCalloutToDiscord(hook: string, mint: string, thesis: string, calloutId: string | null, test = false): Promise<{ ok: boolean; message: string }> {
+    try {
+      const facts = this.calloutFacts(mint);
+      const sum = await Promise.race([
+        market.summary(mint).catch(() => null),
+        new Promise<null>((r) => setTimeout(() => r(null), 6_000)),
+      ]);
+      const row = this.tokens.get(mint)?.row ?? null;
+      const [{ calloutEmbed, redactWebhook }, { postEmbed }, { calloutPageUrl }] = await Promise.all([
+        import('@shared/webhook'),
+        import('../system/discordWebhook'),
+        import('@shared/calloutAuto'),
+      ]);
+      const embed = calloutEmbed({
+        mint,
+        name: sum?.name || facts.name || null,
+        symbol: sum?.symbol || facts.ticker || null,
+        thesis,
+        link: calloutId ? calloutPageUrl(mint, calloutId) : null,
+        mcUsd: sum?.marketCapUsd ?? facts.mc ?? null,
+        holders: sum?.holders ?? facts.holders ?? null,
+        buyers: facts.buyers ?? null,
+        curvePct: sum?.bondingCurvePct ?? row?.flow?.curveProgressPct ?? null,
+        imageUrl: sum?.imageUrl ?? null,
+        test,
+      });
+      const r = await postEmbed(hook, embed);
+      // Never the URL itself: its last segment is the webhook's password.
+      this.log(r.ok ? 'info' : 'warn', `auto-callout → Discord ${redactWebhook(hook)}: ${r.message}`);
+      return r;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      this.log('warn', `auto-callout → Discord failed: ${message}`);
+      return { ok: false, message };
+    }
   }
 
   /** Run a live trade serialized behind any in-flight one (balance safety). */
@@ -2955,7 +3336,9 @@ export class SniperEngine {
    * notification has a token behind it — an update notice does not.
    */
   private notify(title: string, body: string, target?: NotifyTarget): void {
-    if (!this.getSettings().alerts.desktopNotifications) return;
+    // Not gated on alerts.desktopNotifications here: that switch is the OS
+    // pop-up only, checked in main's notifier. Chat pushes and runner
+    // webhooks ride this same call and keep their own opt-ins.
     this.notifier?.(title, body, target);
   }
 
@@ -4211,6 +4594,9 @@ export class SniperEngine {
     walletId: string,
     mint: string,
     wantSol: number,
+    /** The caller's own per-trade cap when it has one — a script's budget.
+     *  Replaces the manual cap for that caller, exactly as in `testTrade`. */
+    capSol?: number,
   ): Promise<{ ok: boolean; message: string; signature: string | null; costSol: number | null; stage?: string | null }> {
     const s = this.getSettings();
     if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'live execution is not armed', signature: null, costSol: null, stage: 'validate' };
@@ -4221,8 +4607,9 @@ export class SniperEngine {
       this.updateLiveBreakers();
       return { ok: false, message: `live buys paused — ${breaker}`, signature: null, costSol: null, stage: 'validate' };
     }
-    const sol = Math.min(wantSol, s.execution.maxLiveSol);
-    if (sol < wantSol) this.log('info', `lab buy sized down to the ${s.execution.maxLiveSol} SOL per-trade cap (asked ${wantSol})`);
+    const cap = capSol ?? s.execution.maxLiveSol;
+    const sol = Math.min(wantSol, cap);
+    if (sol < wantSol) this.log('info', `lab buy sized down to the ${cap} SOL per-trade cap (asked ${wantSol})`);
     const { executeTrade } = await import('./liveSigner');
     const owner = wallet.publicKeyOf(walletId);
     if (!owner) return { ok: false, message: 'no such wallet', signature: null, costSol: null, stage: 'validate' };
@@ -4299,7 +4686,7 @@ export class SniperEngine {
     if ((res.ok || res.stage === 'pending') && res.signature) {
       ledger.recordFill({ mint, symbol: this.tokens.get(mint)?.row.symbol ?? '', side: 'sell', requested: share, signature: res.signature }, { httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner });
     }
-    // Selling the ACTIVE wallet's own bag this way (a group that includes it)
+    // Selling the ACTIVE wallet's own bag this way (a script naming it)
     // must leave the engine's position tracking as a manual sell would.
     if (owner === wallet.publicKey() && share >= 100) {
       this.liveMints.delete(mint);
@@ -4325,7 +4712,7 @@ export class SniperEngine {
 
 
   /** Read every wallet's SOL balance (public RPC, parallel) and note it in
-   *  the store so the Lab pages can show what a group actually holds. */
+   *  the store so the Lab pages can show what each wallet holds. */
   async refreshAllBalances(): Promise<number> {
     const url = this.getSettings().rpc.httpUrl;
     const list = wallet.list();
@@ -5840,6 +6227,7 @@ export class SniperEngine {
         netInflowSol: t.row.flow.netInflowSol,
         tradesSeen: report.tradesSeen,
         regime: report.regime,
+        mayhem: mayhemFromReserves(t.createEvent.virtualSolReserves),
         creatorSoldAt: null,
       };
       t.flagged = true;
@@ -5855,6 +6243,63 @@ export class SniperEngine {
         this.emit({ kind: 'toast', level: 'info', message: `${title} · ${flag.observedPct.toFixed(0)} % of this bucket graduated (base ${flag.basePct.toFixed(1)} %)` });
       }
     }
+  }
+
+  /**
+   * A buy asked for by something that is not a hand on a button — a user
+   * script, or an AI through the MCP connection.
+   *
+   * The ONLY entry point either of them has, and it goes nowhere special: it
+   * routes to the same rails the app's own buttons use, so the fee, the
+   * signer's outflow policy and the live breakers all apply exactly as they
+   * do to a click. `mode` is the CALLER's paper/live, which is not always the
+   * app's — a paper script on a live app must simulate.
+   */
+  async hostBuy(mint: string, sol: number, mode: 'paper' | 'live', chain?: ChainKind, ownCapSol?: number): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }> {
+    // Robinhood Chain / BNB go out on their own rail, the same one copy
+    // trading uses. Routed BEFORE the Solana path on purpose: a caller on an
+    // EVM chain whose buy fell through to `testTrade` would spend SOL on a
+    // token address from another chain.
+    if (chain && chain !== 'solana') {
+      if (mode === 'paper') return this.evmPaperBuy(chain, mint, sol);
+      if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
+      return this.evmCopy.buy(chain, mint, sol);
+    }
+    // Paper = the same simulation a paper buy by hand runs, booked into the
+    // paper book from the simulated fill. Live = the real thing.
+    const r = await this.testTrade(mint, sol, mode === 'paper', { ownCapSol });
+    return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
+  }
+
+  /** The sell half of `hostBuy`. Same rule: the caller's mode, the app's rails. */
+  async hostSell(mint: string, pct: number, mode: 'paper' | 'live', chain?: ChainKind): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }> {
+    if (chain && chain !== 'solana') {
+      if (mode === 'paper') return this.evmPaperSell(chain, mint, pct);
+      if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
+      const r = await this.evmCopy.sell(chain, mint, pct);
+      return { ok: r.ok, message: r.message, signature: r.signature, realizedSol: null };
+    }
+    if (mode === 'paper') {
+      const pos = paperBook.get(mint);
+      if (!pos) return { ok: false, message: 'no paper position in this token' };
+      const priceSol = pos.decimalsKnown ? await this.paperFillPrice(mint) : null;
+      const r = paperBook.sell(mint, pct, priceSol);
+      recorder.record('paper_sell', { mint, pct, ok: r.ok, priceSol, proceedsSol: r.proceedsSol, realizedSol: r.realizedSol, note: r.message.slice(0, 220), by: 'script' });
+      if (r.ok) this.emit({ kind: 'paper', mint, side: 'sell' });
+      return { ok: r.ok, message: r.message, realizedSol: typeof r.realizedSol === 'number' ? r.realizedSol : null };
+    }
+    const r = await this.manualSell(mint, pct);
+    return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending', realizedSol: null };
+  }
+
+  /** A token's published links and what the app has read about them, for a
+   *  caller that is not the Links panel. Cached facts only — no request. */
+  linksFor(mint: string, chain?: ChainKind): ReturnType<typeof scriptLinksFromSummary> | null {
+    if (chain && chain !== 'solana') return null;
+    const s = market.summaryIfCached(mint);
+    if (!s) return null;
+    linkIntel.trigger(mint);
+    return scriptLinksFromSummary('solana', s, this.xReuseFor(s.socials.twitter, mint), xStatsStore.get(mint), linkIntel.facts(mint), siteReadStore.get(mint));
   }
 
   runnersSnapshot(): RunnerFlag[] {

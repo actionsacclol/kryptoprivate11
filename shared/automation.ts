@@ -27,6 +27,8 @@ import { launchpadSite } from './tokenLinks';
 import type { TokenSummary } from './market';
 import type { XStats } from './xStats';
 import { domainAgeDays, type LinkIntelFacts } from './linkIntel';
+import { EVENT_HARD_MS, EVENT_TIMEOUT_MS, type ScriptStatValue } from './scriptProtocol';
+import { SCRIPT_INPUT_TYPES } from './scriptInputs';
 import { siteLinksX, type SiteRead } from './siteRead';
 
 // ── Chains ────────────────────────────────────────────────────────────
@@ -76,6 +78,8 @@ export const SOLANA_ONLY_FIELDS: ReadonlySet<RuleField> = new Set<RuleField>([
   'buys5m',
   'sells5m',
   'priceChange5mPct',
+  'curveRegime',
+  'isMayhem',
   'hasTwitter',
   'hasWebsite',
   'hasTelegram',
@@ -189,7 +193,15 @@ export type ScriptMode = 'paper' | 'live';
 
 /** The walls around a script. Every one is checked in main, per action. */
 export interface ScriptBudget {
-  /** Hard cap on one buy, SOL. A live script is also capped by execution.maxLiveSol. */
+  /**
+   * Hard cap on one buy, SOL, and the ONLY cap on a script's size.
+   *
+   * The app's manual per-trade cap stopped applying to scripts on 2026-09-22:
+   * two caps for one decision meant keeping them in step, with the smaller
+   * winning silently to whoever set the other. This is the number a script's
+   * author set on the same screen as its code, so it is the one enforced —
+   * `testTrade` is handed it as `ownCapSol` and backstops against it.
+   */
   maxSolPerTrade: number;
   /** Buys per calendar day. */
   maxBuysPerDay: number;
@@ -296,6 +308,8 @@ export type RuleField =
   | 'buys5m'
   | 'sells5m'
   | 'priceChange5mPct'
+  | 'curveRegime'
+  | 'isMayhem'
   // links — what the token's creator published, and what the X link IS
   | 'hasTwitter'
   | 'hasWebsite'
@@ -370,7 +384,22 @@ export interface FieldSpec {
 /** Every fact a rule or script can see. The variable guide is this table. */
 export const RULE_FIELDS: FieldSpec[] = [
   { id: 'ageSec', label: 'Age (s)', kind: 'number', scope: 'token', unit: 'seconds', hint: 'Seconds since the launch was first seen', nullWhen: 'the token was never on the launch feed' },
-  { id: 'score', label: 'Krypt score', kind: 'number', scope: 'token', unit: '0–100', hint: 'The app’s composite score', nullWhen: 'the checks have not resolved yet, or the token was never on the launch feed' },
+  {
+    id: 'score',
+    label: 'Krypt score',
+    kind: 'number',
+    scope: 'token',
+    unit: '0–100',
+    // SET ONCE AND NEVER AGAIN, and the one fact a script author must know
+    // about it. A user waited seven hours across 1,770 launch updates for a
+    // score above 80 to appear (2026-09-21); it is computed exactly once per
+    // launch, so every one of those updates carried the same number. Typical
+    // values, measured live: median 47, 90th percentile 63, about one launch
+    // in thirty-six above 80 — and a first-time creator caps near 91, or 79
+    // while the mint check is still outstanding.
+    hint: 'The app’s composite score, fixed once when the launch is decided — it never moves afterwards, so do not wait for it to rise. Typically 40–65; above 80 is roughly 1 launch in 36.',
+    nullWhen: 'the checks have not resolved yet, or the token was never on the launch feed',
+  },
   { id: 'priceSol', label: 'Price (SOL)', kind: 'number', scope: 'token', unit: 'SOL per token', hint: 'Latest price the app knows', nullWhen: 'no price is known' },
   { id: 'curvePct', label: 'Curve progress %', kind: 'number', scope: 'token', unit: '0–100', hint: 'Bonding curve filled', nullWhen: 'not on the launch feed' },
   { id: 'uniqueBuyers', label: 'Unique buyers', kind: 'number', scope: 'token', unit: 'wallets', hint: 'Distinct wallets that bought in the window', nullWhen: 'not on the launch feed' },
@@ -384,7 +413,19 @@ export const RULE_FIELDS: FieldSpec[] = [
   { id: 'topBuyerShare', label: 'Top buyer share', kind: 'number', scope: 'token', unit: '0–1', hint: 'Largest buyer’s share of buy volume', nullWhen: 'not on the launch feed' },
   { id: 'topHolderShare', label: 'Top holder share', kind: 'number', scope: 'token', unit: '0–1', hint: 'Largest wallet’s share of circulating tokens', nullWhen: 'not on the launch feed' },
   { id: 'earlyBuyerShare', label: 'Early buyer share', kind: 'number', scope: 'token', unit: '0–1', hint: 'Held by wallets that bought in the early window', nullWhen: 'not on the launch feed' },
-  { id: 'creatorSold', label: 'Creator sold', kind: 'boolean', scope: 'token', unit: 'true/false', hint: 'The creator wallet has sold', nullWhen: 'not on the launch feed' },
+  {
+    id: 'creatorSold',
+    label: 'Creator sold',
+    kind: 'boolean',
+    scope: 'token',
+    unit: 'true/false',
+    // What FALSE means, which is not what it looks like. It is the starting
+    // value and flips only when a creator sell is actually seen inside the
+    // window, so false is "none seen yet", never "they will not". Roughly one
+    // launch in six flips to true (measured live, 2026-09-21).
+    hint: 'True once the creator wallet is seen selling. False is the starting value and means no sell has been seen YET, not that there will not be one — about 1 launch in 6 turns true.',
+    nullWhen: 'not on the launch feed',
+  },
   { id: 'creatorPriorLaunches', label: 'Creator prior launches', kind: 'number', scope: 'token', unit: 'count', hint: 'From the local creator history', nullWhen: 'not on the launch feed' },
   { id: 'creatorPriorRugs', label: 'Creator prior rugs', kind: 'number', scope: 'token', unit: 'count', hint: '', nullWhen: 'not on the launch feed' },
   { id: 'smartBuyerCount', label: 'Smart buyers', kind: 'number', scope: 'token', unit: 'wallets', hint: 'Watched wallets that bought', nullWhen: 'not on the launch feed' },
@@ -439,6 +480,17 @@ export const RULE_FIELDS: FieldSpec[] = [
   { id: 'siteOutboundHosts', label: 'Site outbound hosts', kind: 'number', scope: 'market', unit: 'hosts', hint: 'Distinct other sites the page links to — how much of a site it is', nullWhen: 'nobody opened the site in the Links panel' },
   { id: 'siteMentionsConnectWallet', label: 'Site asks to connect a wallet', kind: 'boolean', scope: 'market', unit: 'true/false', hint: 'The page text asks visitors to connect a wallet or claim tokens / an airdrop — the words a drainer page uses; the words, not a verdict', nullWhen: 'nobody opened the site in the Links panel' },
   { id: 'runnerOddsPct', label: 'Runner odds %', kind: 'number', scope: 'runner', unit: 'percent', hint: 'Observed graduation rate for the flag bucket', nullWhen: 'not a runner event' },
+  // The single most decision-relevant fact we have about a flag, and it was
+  // not reachable from a rule or a script until 2026-09-22. Buying every flag
+  // loses under every exit rule tested — but the loss lives almost entirely in
+  // MIXED curves (91 % of live flags), and classic-curve flags were
+  // indistinguishable from break-even. See docs/runner-outcome-2026-09-11.md.
+  { id: 'curveRegime', label: 'Curve regime', kind: 'text', scope: 'runner', unit: 'classic / mixed / unknown', hint: 'Mixed curves are the population that carries the loss after a flag', nullWhen: 'not a runner event, or the reserves could not be read' },
+  // A mayhem coin trades against inflated virtual reserves (hundreds of SOL
+  // at create, not 30) and needs a reserved fee recipient to trade — the same
+  // create-event test the scanner's mayhem filter uses. Added 09-22 so a
+  // script can refuse them.
+  { id: 'isMayhem', label: 'Mayhem coin', kind: 'boolean', scope: 'runner', unit: 'true/false', hint: 'A pump mayhem-mode coin, told from its create-event reserves', nullWhen: 'not a runner event, or the create event carried no reserves' },
   { id: 'held', label: 'Held by this script', kind: 'boolean', scope: 'position', unit: 'true/false', hint: 'This script holds the token (in its mode)', nullWhen: 'never' },
   { id: 'pnlPct', label: 'PnL %', kind: 'number', scope: 'position', unit: 'percent', hint: '', nullWhen: 'not held, or the position cannot be priced' },
   { id: 'pnlSol', label: 'PnL (SOL)', kind: 'number', scope: 'position', unit: 'SOL', hint: '', nullWhen: 'not held, or the position cannot be priced' },
@@ -587,6 +639,12 @@ export interface UserScript {
   mode: ScriptMode;
   /** kind = code. */
   code: string;
+  /**
+   * Answers to the settings the code declares in its `@inputs` block, read by
+   * the script as `bot.input`. Absent on every script written before
+   * 2026-09-22 and on any script that asks for nothing.
+   */
+  inputs?: import('./scriptInputs').ScriptInputValues;
   /** kind = rules. */
   rules: RuleSet;
   budget: ScriptBudget;
@@ -664,6 +722,9 @@ export interface ScriptPosition {
 
 /** Market facts from the providers, when the app has them cached. */
 export interface MarketFacts {
+  /** The token's image as the providers serve it — for a script's Discord
+   *  embed thumbnail. Null or absent when unknown (and on the EVM rails). */
+  imageUrl?: string | null;
   priceSol: number | null;
   priceUsd: number | null;
   marketCapUsd: number | null;
@@ -780,7 +841,7 @@ export interface GlobalFacts {
  * here; unknown is null and a condition on null does not hold. Scripts
  * receive this same object — never an internal one.
  */
-export type RuleContext = { [K in RuleField]: K extends 'riskFlags' ? string[] : K extends 'creatorSold' | 'smartEarly' | 'hardRisk' | 'held' | 'hasTwitter' | 'hasWebsite' | 'hasTelegram' | 'dexPaid' | 'xVerified' | 'siteNamesContract' | 'siteLinksX' | 'siteMentionsConnectWallet' ? boolean | null : K extends 'phase' | 'symbol' | 'name' | 'launchpad' | 'leaderWallet' | 'leaderLabel' | 'leaderSide' | 'orderKind' | 'orderState' | 'alertKind' | 'twitter' | 'website' | 'telegram' | 'xLinkKind' | 'xHandle' | 'tgKind' | 'domainHostedOn' ? string | null : number | null } & {
+export type RuleContext = { [K in RuleField]: K extends 'riskFlags' ? string[] : K extends 'creatorSold' | 'smartEarly' | 'hardRisk' | 'held' | 'isMayhem' | 'hasTwitter' | 'hasWebsite' | 'hasTelegram' | 'dexPaid' | 'xVerified' | 'siteNamesContract' | 'siteLinksX' | 'siteMentionsConnectWallet' ? boolean | null : K extends 'phase' | 'curveRegime' | 'symbol' | 'name' | 'launchpad' | 'leaderWallet' | 'leaderLabel' | 'leaderSide' | 'orderKind' | 'orderState' | 'alertKind' | 'twitter' | 'website' | 'telegram' | 'xLinkKind' | 'xHandle' | 'tgKind' | 'domainHostedOn' ? string | null : number | null } & {
   mint: string;
   symbol: string;
   name: string;
@@ -869,6 +930,11 @@ export function contextFromEvmLaunch(launch: EvmScanLaunch, now: number): RuleCo
 export function contextFromRunner(flag: RunnerFlag, launch: LaunchRow | null, now: number): RuleContext {
   const c = launch ? contextFromLaunch(launch, now) : emptyContext(flag.mint, flag.symbol ?? '', flag.name ?? '');
   c.runnerOddsPct = num(flag.observedPct);
+  // Carried from the flag, which is the only place it is measured. A launch
+  // that was never flagged has no regime here and reads as null — unknown,
+  // which a filter should treat as "not classic" rather than as permission.
+  c.curveRegime = flag.regime ?? null;
+  c.isMayhem = typeof flag.mayhem === 'boolean' ? flag.mayhem : null;
   return c;
 }
 
@@ -963,6 +1029,43 @@ export function withMarket(c: RuleContext, m: MarketFacts | null): RuleContext {
   return c;
 }
 
+/** Which links a launch's own metadata file published, as the scanner read it
+ *  at create time. Null = the file has not resolved (or never did). */
+export interface LaunchLinks {
+  twitter: boolean;
+  website: boolean;
+  telegram: boolean;
+  /** The addresses as the creator wrote them, when the file is cached. */
+  twitterUrl?: string | null;
+  websiteUrl?: string | null;
+  telegramUrl?: string | null;
+}
+
+/**
+ * Fill the has-link fields from the scanner's own metadata read when no
+ * provider has answered for socials yet. A freshly flagged runner is usually
+ * not in any provider's cache, but the scanner fetched its metadata file the
+ * moment it launched — without this, `hasTwitter`/`hasWebsite` sat null on
+ * exactly the coins a runner script acts on. A provider's answer, when there
+ * is one, is left alone. The addresses come from the same metadata file
+ * when it is cached, and fill only what the provider left empty.
+ */
+export function withLaunchLinks(c: RuleContext, l: LaunchLinks | null): RuleContext {
+  if (!l) return c;
+  if (c.hasTwitter === null) c.hasTwitter = l.twitter;
+  if (c.hasWebsite === null) c.hasWebsite = l.website;
+  if (c.hasTelegram === null) c.hasTelegram = l.telegram;
+  if (c.twitter === null && l.twitterUrl) {
+    c.twitter = l.twitterUrl;
+    const x = parseXLink(l.twitterUrl);
+    c.xLinkKind = x.kind;
+    c.xHandle = x.handle;
+  }
+  if (c.website === null && l.websiteUrl) c.website = l.websiteUrl;
+  if (c.telegram === null && l.telegramUrl) c.telegram = l.telegramUrl;
+  return c;
+}
+
 /**
  * One provider summary → the facts a script gets. The single place the
  * mapping lives, so the cached read and the fetched read agree field for
@@ -978,6 +1081,7 @@ export function marketFactsFromSummary(
 ): MarketFacts {
   const win = s.stats['5m'] ?? null;
   return {
+    imageUrl: s.imageUrl ?? null,
     priceSol: s.priceSol,
     priceUsd: s.priceUsd,
     marketCapUsd: s.marketCapUsd,
@@ -1210,12 +1314,16 @@ export function validateRules(r: RuleSet, chain: ChainKind = 'solana'): { ok: bo
   return { ok: true, message: 'ok' };
 }
 
+/**
+ * Why this script cannot be saved, or ok.
+ *
+ * It took the app's manual per-trade cap until 2026-09-22, to refuse a rule
+ * sized above it once rather than at every placement. That cap no longer
+ * applies to scripts — a script's own budget is the authority on its size —
+ * so the parameter is gone rather than left unread.
+ */
 export function validateScript(
   s: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>,
-  /** The execution per-trade cap when known: a buy above it would be
-   *  refused at every placement, so it is refused once, here, with the
-   *  reason. */
-  opts: { maxLiveSol?: number } = {},
 ): { ok: boolean; message: string } {
   if (!s.name || !s.name.trim() || s.name.length > 60) return { ok: false, message: 'Name: 1–60 characters' };
   if (s.kind !== 'rules' && s.kind !== 'code') return { ok: false, message: 'Unknown script kind' };
@@ -1266,12 +1374,9 @@ export function validateScript(
       if (a.sol > s.budget.maxSolPerTrade) {
         return { ok: false, message: nativeText(`Buy ${a.sol} SOL is above this script's max per trade (${s.budget.maxSolPerTrade})`, chain) };
       }
-      if (opts.maxLiveSol !== undefined && a.sol > opts.maxLiveSol) {
-        return {
-          ok: false,
-          message: nativeText(`Buy ${a.sol} SOL is above your per-trade cap (${opts.maxLiveSol} SOL, Wallet page) — every placement would be refused`, chain),
-        };
-      }
+      // The app's MANUAL per-trade cap is deliberately NOT checked here
+      // (2026-09-22): the script's own budget, just above, is the authority on
+      // its size, so a rule sized within it saves whatever the manual cap is.
     }
   }
   return { ok: true, message: 'ok' };
@@ -1346,6 +1451,16 @@ export interface ScriptStats {
   errorsInARow: number;
   lastRunAt: number | null;
   lastError: string | null;
+  /**
+   * WHEN the last error happened (2026-09-21).
+   *
+   * `lastError` is sticky: it stays on the card until the next one replaces
+   * it. Shown without a time, an error from six hours ago reads as one
+   * happening now — which is exactly how a user reported "the app displays
+   * sandbox gone, there's no timestamp". Absent on a snapshot built before
+   * this field existed.
+   */
+  lastErrorAt?: number | null;
   /** Positions this script opened and still holds. */
   openCount: number;
   /** Mints this script has ever fired on (once-per-mint memory). */
@@ -1358,6 +1473,14 @@ export interface ScriptSnapshot {
   scripts: UserScript[];
   stats: Record<string, ScriptStats>;
   logs: Record<string, ScriptLogLine[]>;
+  /**
+   * What each script chose to show on its widget (bot.stat / bot.stats), in
+   * the order it first set them. Not the budget numbers above — those are
+   * the app's; these are the script's own. Reset when a script starts, so a
+   * value on screen is always from the run that is going. Optional so a
+   * snapshot built before the field still satisfies the type.
+   */
+  metrics?: Record<string, Array<{ name: string; value: ScriptStatValue; at: number }>>;
   /** Solana's, kept for callers written before scripts had chains. */
   liveBlockedReason: string | null;
   /**
@@ -1396,11 +1519,11 @@ export interface ApiSpec {
 /** The whole `bot` object. The harness, the dispatcher and the docs all
  *  follow this table. */
 export const SCRIPT_API: ApiSpec[] = [
-  { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval. Handlers for one script run one at a time; one that runs past 3 s is killed and counts as an error.', action: false },
+  { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval. Handlers for one script run one at a time. One is checked at 3 s; if it is still awaiting bot calls it gets more time, up to 30 s — a stuck one is killed and counts as an error.', action: false },
   { method: 'every', signature: 'bot.every(seconds, async () => {})', returns: 'Promise<number> (the seconds used)', notes: 'A timer. 5 s minimum, 3600 max.', action: false },
   { method: 'at', signature: "bot.at('HH:MM', async () => {})", returns: 'Promise<string>', notes: 'Once a day at that local time.', action: false },
-  { method: 'buy', signature: 'await bot.buy(mint, sol)', returns: '{ok, message}', notes: 'Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over the per-trade cap, the daily buy cap, the open-position cap, the actions-per-minute cap, the execution cap, or while live is blocked.', action: true },
-  { method: 'sell', signature: 'await bot.sell(mint, pct)', returns: '{ok, message}', notes: 'pct 1–100 of what is held in the script’s mode. Refused when nothing is held.', action: true },
+  { method: 'buy', signature: 'await bot.buy(mint, sol, address?)', returns: '{ok, message}', notes: 'Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over THIS SCRIPT’S budget — max per trade, buys per day, open positions, actions per minute — or while live is blocked (not armed, execution off, a breaker). The app’s manual per-trade cap does NOT apply: a script’s own budget is the authority on its size. Pass another of your own wallet ADDRESSES (see bot.wallets) to buy with that wallet instead — refused until you accept “Trading from your other wallets” on the Scripts page. The app does not space these out or cap how many of your wallets touch a coin: the script does what it is written to, inside its own budget. Solana only, and paper spends nothing.', action: true },
+  { method: 'sell', signature: 'await bot.sell(mint, pct, address?)', returns: '{ok, message}', notes: 'pct 1–100 of what is held in the script’s mode. Refused when nothing is held. Pass another of your own wallet ADDRESSES to sell from that one instead — only a mint this script opened, and only on Solana.', action: true },
   { method: 'sellAll', signature: 'await bot.sellAll()', returns: '{ok, message, sold: number}', notes: 'Sell 100 % of every position this script holds.', action: true },
   { method: 'order', signature: "await bot.order({ mint, kind, triggerBasis, triggerValue, amount })", returns: '{ok, message}', notes: "kind: stop_loss | take_profit | trailing_stop | limit_buy | limit_sell | sell_on_dev_sell | sell_on_migration | buy_on_migration. triggerBasis: 'pct' (from the price now) | 'mcap_usd' | 'price_sol'. amount: SOL for buys, % for sells. Placed as a real advanced order (paused if the app cannot execute right now).", action: true },
   { method: 'cancelOrders', signature: 'await bot.cancelOrders(mint)', returns: '{ok, message, cancelled: number}', notes: 'Cancel every open order on the token.', action: true },
@@ -1412,10 +1535,21 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'subscribe', signature: 'await bot.subscribe(mint)', returns: '{ok, message}', notes: 'Stream tick events for the token without pinning it. Positions the script holds are always streamed.', action: false },
   { method: 'unsubscribe', signature: 'await bot.unsubscribe(mint)', returns: '{ok, message}', notes: '', action: false },
   { method: 'notify', signature: "await bot.notify('text')", returns: '{ok, message}', notes: 'Desktop notification and a toast.', action: true },
-  { local: true, method: 'log', signature: "bot.log('text') / bot.warn('text')", returns: 'void', notes: 'A line on this script’s log (400 chars max).', action: false },
+  { method: 'callout', signature: "await bot.callout(mint, 'text', address?)", returns: '{ok, message, thesis, address, calloutId, link}', notes: 'Post a pump.fun callout on a coin. `link` is the callout’s public pump.fun page (null when pump did not say its id). PUBLIC, under that account’s name, and pump shows its position beside it. By default it posts from the pump.fun account belonging to this chain’s trading wallet; pass the ADDRESS of another of your own signed-in accounts (see bot.pumpAccounts) to post from that one instead — an address with no session is refused, never swapped for a different account. Leave the text out to use a random line from Automation → Auto-callout. Every one ends with a line of its own, “Called with krypt.cc/bot”, so readers know a tool posted it. pump decides whether it is allowed: the account must hold at least $1 of the coin, there are three attempts per coin, and there is a cooldown — a refusal comes back as ok:false with pump’s own reason and is not retried. One script may call one coin from at most 5 accounts, once each, matching the wallets-per-coin cap. A paper script posts nothing and says so. Solana only.', action: true },
+  { method: 'pumpAccounts', signature: 'await bot.pumpAccounts()', returns: 'Array<{address, username, active}>', notes: 'Your signed-in pump.fun accounts (Wallet page → pump.fun accounts), newest first; `active` marks the one belonging to the current trading wallet. Addresses and names only — no session token ever reaches a script. Use an address with bot.callout to post from that account.', action: false },
+  { method: 'calloutReply', signature: "await bot.calloutReply(mint, 'text', address?)", returns: '{ok, message, thesis, address, calloutId, replyId, link}', notes: 'Reply to a callout this account already made on the coin. `link` is the reply’s public page (or the callout’s when pump did not say the reply id). A callout is ONE per coin per account, so once it exists this is how it is followed up as the coin moves — there is no edit. PUBLIC, under that account’s name, and ends with “Called with krypt.cc/bot” on its own line, like a callout. Same third argument as bot.callout: leave it out for this chain’s trading wallet, or pass another of your own signed-in addresses. Refused when that account has not called the coin, and while pump’s reply cooldown is running — its reason comes back as ok:false and is not retried. A paper script posts nothing. Solana only.', action: true },
+  { method: 'follow', signature: "await bot.follow(user, address?)", returns: '{ok, message}', notes: 'Follow a pump.fun user as one of your accounts. `user` is their wallet address, their pump user id, or a pump.fun/profile link. PUBLIC: it shows on their follower list. Same second argument as bot.callout’s third: leave it out for this chain’s trading wallet’s account, or pass another of your signed-in addresses (bot.pumpAccounts). Following someone already followed is fine. Calls from one account are spaced about a second apart. A paper script follows nobody. Solana only.', action: true },
+  { method: 'unfollow', signature: "await bot.unfollow(user, address?)", returns: '{ok, message}', notes: 'Stop following a pump.fun user. Same arguments as bot.follow.', action: true },
+  { method: 'discord', signature: "await bot.discord('webhookSetting', { title, description, url, color, fields, thumbnail, footer })", returns: '{ok, message}', notes: 'Post an embed to a Discord channel. The first argument is the NAME of one of this script’s own settings declared with "type": "webhook" in @inputs — never a URL; the app looks the URL up, and only Discord webhook addresses are accepted there. bot.input shows that setting redacted. Fields are capped to Discord’s limits, only https links are kept, mentions never ping, and the footer always names the script (and says PAPER on a paper script). Allowed on paper: it spends nothing. Costs one action.', action: true },
+  { method: 'like', signature: "await bot.like(calloutId, address?)", returns: '{ok, message}', notes: 'Like a pump.fun callout by its id (a pasted link containing the id works too). PUBLIC, under that account. Liking twice is fine. An id pump does not know comes back ok:false “callout not found”. A paper script likes nothing. Solana only.', action: true },
+  { method: 'unlike', signature: "await bot.unlike(calloutId, address?)", returns: '{ok, message}', notes: 'Take a like back. Same arguments as bot.like.', action: true },
+  { local: true, method: 'log', signature: "bot.log('text') / bot.warn('text') / bot.error('text')", returns: 'void', notes: 'A line on this script’s log at that level (400 chars max). bot.error does not stop the script — it is just a red line.', action: false },
+  { local: true, method: 'stat', signature: "bot.stat('Callouts', 12)", returns: 'void', notes: 'Show a live number (or short text, or true/false) on this script’s own widget — add the Script monitor widget and pick the script. The same name again replaces the value; names show in the order first set. null shows as unknown (—), never 0. Up to 24 stats, names up to 32 characters, text up to 80. Costs no action and nothing waits on it, so it is fine on every tick. The widget starts empty each time the script starts — re-send totals kept in bot.setState if they should carry over.', action: false },
+  { local: true, method: 'stats', signature: "bot.stats({ 'Callouts': 12, 'Likes': 30, 'PnL (SOL)': 0.42 })", returns: 'void', notes: 'Set several widget stats at once — same rules as bot.stat.', action: false },
+  { local: true, method: 'clearStats', signature: 'bot.clearStats()', returns: 'void', notes: 'Empty this script’s widget.', action: false },
   { method: 'price', signature: 'await bot.price(mint)', returns: 'number | null', notes: 'SOL per token from what the app already knows. Null when nothing local knows it.', action: false },
   { method: 'token', signature: 'await bot.token(mint)', returns: 'Token | null', notes: 'The same facts a rule sees (see the variable guide), from the launch feed and the cached market data. Null when the app has never seen the token.', action: false },
-  { method: 'market', signature: 'await bot.market(mint)', returns: 'Market | null', notes: 'Asks the market providers (a network round trip inside the app): priceSol, priceUsd, marketCapUsd, liquidityUsd, holders, launchpad, symbol, name. Slow — a second or more; not for every tick.', action: false },
+  { method: 'market', signature: 'await bot.market(mint)', returns: 'Market | null', notes: 'Asks the market providers (a network round trip inside the app): priceSol, priceUsd, marketCapUsd, liquidityUsd, holders, launchpad, symbol, name, imageUrl. Slow — a second or more; not for every tick.', action: false },
   { method: 'links', signature: 'await bot.links(mint)', returns: 'Links | null', notes: 'The token’s published links and what its X link IS, from cached facts — free, costs no action (the first call for a token starts its Telegram and domain lookups; their answers appear on later calls): {twitter, website, telegram, launchpadLabel, launchpadUrl, x: {kind, handle, postId, label, accountReuse, postReuse, stats, statsReadAt}, telegramStats, domain, site}. stats is what the Links panel read off the X page when a person opened it there — {page, handle, followers, following, joined, verified, likes, reposts, replies, views, bookmarks, loginWall} — else null; nothing is fetched for it. telegramStats is what t.me’s public preview says about the Telegram link — {kind: channel · group · account · invite · unknown, members, countWord, online, title, readAt} — else null (a private invite shows no count). domain is the website’s registry record — {name, registeredAt, registrar, hostedOn, readAt} — hostedOn naming a shared platform (Vercel, GitHub Pages…) when the site has no domain of its own; else null. site is what the Links panel read off the website when a person opened it there — {namesContract, xHandles, telegramLinks, outboundHosts, wordCount, generator, mentionsConnectWallet, readAt} — else null; the app never fetches a token’s website itself. kind is profile · post · community · search · other-x · not-x · none; accountReuse / postReuse count OTHER launches in view on the same account or post. Null when the app has no cached facts for the token (call bot.market first). The app never visits the links. Solana only.', action: false },
   { method: 'security', signature: 'await bot.security(mint)', returns: 'Security | null', notes: 'The token page’s security report (a round trip inside the app; costs an action like market): {score, checksResolved, checksTotal, checks: [{id, label, verdict, detail}], warnings}. verdict is pass · warn · fail · unknown. Null when it could not be read. Solana only.', action: false },
   { method: 'creator', signature: 'await bot.creator(mint)', returns: 'Creator | null', notes: 'The creator wallet’s launch record from pump.fun (a round trip; costs an action): {address, launches, graduated, graduationRate, medianAthUsd, bestAthUsd, firstLaunchAt, lastLaunchAt, truncated}. Null when the creator is unknown or the source did not answer. Solana only.', action: false },
@@ -1425,12 +1559,14 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'runners', signature: 'await bot.runners()', returns: 'Token[]', notes: 'Launches the scanner currently flags as runners.', action: false },
   { method: 'leaders', signature: 'await bot.leaders()', returns: 'Array<{wallet, label, enabled, mode}>', notes: 'Wallets followed on the Copy Trading page.', action: false },
   { method: 'wallet', signature: 'await bot.wallet()', returns: '{sol: number | null, address: string | null}', notes: "This script's chain's trading wallet — `sol` is that chain's own coin. Null when unknown.", action: false },
+  { method: 'wallets', signature: 'await bot.wallets()', returns: 'Array<{address, label, active}>', notes: 'Every wallet this app holds a key for (at most ten, the main one included — the Wallet list), so a script can name one to trade with. `active` marks the main wallet. Addresses and labels only — never a key or an id. Solana only.', action: false },
   { method: 'getState', signature: 'await bot.getState()', returns: 'object', notes: 'This script’s saved state.', action: false },
   { method: 'setState', signature: 'await bot.setState(obj)', returns: 'true', notes: 'Replace the saved state. 16 KB of JSON, survives restarts.', action: false },
   { method: 'disable', signature: "await bot.disable('reason')", returns: 'true', notes: 'The script turns itself off.', action: false },
   { local: true, method: 'now', signature: 'bot.now()', returns: 'number', notes: 'Milliseconds since the epoch.', action: false },
   { local: true, method: 'chain', signature: 'bot.chain', returns: "'solana' | 'robinhood' | 'bnb'", notes: 'The chain this script runs on. Not a call — a property, known before the first event.', action: false },
   { local: true, method: 'nativeSymbol', signature: 'bot.nativeSymbol', returns: 'string', notes: "The coin every amount here is in: SOL, ETH or BNB. Use it in logs so a script reads correctly on whichever chain it is on.", action: false },
+  { local: true, method: 'input', signature: 'bot.input.<name>', returns: 'the answers to this script’s own settings', notes: 'Whatever the script asked for in its @inputs block at the top of the file, as the form answered it — so one script can be pointed at a different coin, wallet or range without editing code. Types: text, lines (an array of non-empty strings), number, range (always two numbers, low first), mint, wallet (an address), pumpAccounts (addresses of signed-in pump.fun accounts), select, toggle (true/false). Every value arrives already in its declared shape. Empty object when the script declares nothing. Not a call — a property, known before the first event.', action: false },
 ];
 
 export interface EventSpec {
@@ -1441,7 +1577,15 @@ export interface EventSpec {
 
 export const SCRIPT_EVENTS_DOC: EventSpec[] = [
   { event: 'launch', payload: 'Token', when: 'a token was just created and the feed saw it (score usually still null)' },
-  { event: 'launchUpdate', payload: 'Token', when: 'a tracked launch traded; at most once per 2 s per token. Flows while the launch is being evaluated (the first 15 s by default), then only while it is a flagged runner (15 min from the flag), held by a position, or subscribed with bot.subscribe/bot.watch — call bot.subscribe(mint) on a runner you intend to act on and both tick and launchUpdate keep coming; the score is fixed at decision time, the flow fields move' },
+  {
+    event: 'launchUpdate',
+    payload: 'Token',
+    // The "score is fixed" clause used to be the tail of one long sentence and
+    // was missed by a user who then waited seven hours for it to change. It
+    // leads now.
+    when:
+      'a tracked launch traded; at most once per 2 s per token. THE SCORE DOES NOT CHANGE between updates — it is set once when the launch is decided, so read it on the first update and never wait for it to rise; the FLOW fields (buyers, inflow, sells, curve %) are what move. Flows while the launch is being evaluated (the first 15 s by default), then only while it is a flagged runner (15 min from the flag), held by a position, or subscribed with bot.subscribe/bot.watch — call bot.subscribe(mint) on a runner you intend to act on and both tick and launchUpdate keep coming',
+  },
   { event: 'runner', payload: 'Token + runnerOddsPct', when: 'the scanner flagged a potential runner' },
   { event: 'position', payload: 'Token + position fields (held=true)', when: 'every ~5 s for each position the script holds, and on every fill' },
   { event: 'tick', payload: 'Token + position fields; priceSol is the tick', when: 'the price moved on a token the script holds, watched or subscribed to; at most once a second per token' },
@@ -1466,8 +1610,8 @@ export const SCRIPT_API_DOC: string = [
   '',
   '// Not available: fetch, XMLHttpRequest, WebSocket, require, keys, files.',
   '// Unknown facts are null — never treat null as zero.',
-  '// A handler that runs longer than 3 s is killed and counts as an error;',
-  '// five errors in a row disable the script.',
+  `// A handler is checked at ${EVENT_TIMEOUT_MS / 1000} s: one still awaiting bot calls gets more time, up to ${EVENT_HARD_MS / 1000} s;`,
+  '// a stuck one is killed and counts as an error. Five errors in a row disable the script.',
 ].join('\n');
 
 export const SCRIPT_EXAMPLES: Array<{ name: string; description: string; code: string }> = [
@@ -1588,14 +1732,14 @@ export function aiPromptPack(): string {
   const examples = SCRIPT_EXAMPLES.map((e) => `### ${e.name}\n${e.description}\n\n\`\`\`js\n${e.code}\n\`\`\``).join('\n\n');
   return `# Write a Krypto Bot script
 
-You are writing a JavaScript automation script for **Krypto Bot**, a Solana memecoin trading terminal. The script runs inside the app, in a sandbox, against a small API called \`bot\`. Follow every rule below; the app enforces them and a script that ignores them simply gets refused.
+You are writing a JavaScript automation script for **Krypto Bot**, a memecoin trading terminal for Solana, Robinhood Chain and BNB Chain. The script runs inside the app, in a sandbox, against a small API called \`bot\`. Each script runs on ONE chain, chosen by the user: read it from \`bot.chain\`, and write amounts in \`bot.nativeSymbol\` (SOL, ETH or BNB). Methods marked "Solana only" below are refused on the other chains. Follow every rule below; the app enforces them and a script that ignores them simply gets refused.
 
 ## What you are writing
 
 - Plain JavaScript (ES2022). No imports, no \`require\`, no \`fetch\`, no \`WebSocket\`, no \`XMLHttpRequest\`, no DOM, no files, no timers other than \`bot.every\` / \`bot.at\`. Top-level \`await\` is allowed.
 - The script body runs once at load. Register handlers with \`bot.on(...)\`; everything happens in handlers.
 - Only \`bot\` and \`console\` (which logs to the script's own log) are available. \`Math\`, \`Date\`, \`JSON\`, \`Set\`, \`Map\` etc. are normal JavaScript.
-- Handlers run one at a time per script. A handler that runs longer than **3 seconds** is killed and counted as an error; five errors in a row turn the script off. Keep handlers short; never loop forever or busy-wait.
+- Handlers run one at a time per script. A handler is checked at **${EVENT_TIMEOUT_MS / 1000} seconds**: one that is still awaiting \`bot\` calls is given more time, up to **${EVENT_HARD_MS / 1000} seconds**; one that is stuck, or past that, is killed and counted as an error. Five errors in a row turn the script off. Keep handlers short — do a few network calls (\`bot.market\`, \`bot.callout\`, a trade) per handler, not a loop of them; spread work across \`bot.every\` ticks with a queue in \`bot.setState\`. Never loop forever or busy-wait.
 - The script's memory resets when it restarts. To remember across restarts use \`bot.getState()\` / \`bot.setState(obj)\` (16 KB of JSON).
 
 ## Money rules the app enforces (you cannot bypass them; design for them)
@@ -1603,6 +1747,7 @@ You are writing a JavaScript automation script for **Krypto Bot**, a Solana meme
 - The script has a **budget** set by the user in the app: max SOL per buy, buys per day, open positions, actions per minute, and a daily realised-loss stop that turns the script off. Any \`bot.buy\` over the cap is **refused**, not shrunk — check \`r.ok\` and \`r.message\`.
 - The script runs in **paper** (simulated fills into a paper book) or **live** mode, chosen by the user. The code is identical; do not branch on mode.
 - Buys and sells go through the app's own pipeline. Sells are a percentage of what is held in the script's mode.
+- **Public actions** — \`bot.callout\`, \`bot.calloutReply\`, \`bot.follow\`, \`bot.like\` and their undo methods — post under the user's own pump.fun account for anyone to see, and every callout ends with a "Called with krypt.cc/bot" line the app adds. On paper they send nothing and return ok with a "paper:" message, so paper tests the trading and filters, not the posting.
 - Treat \`null\` as **unknown, never as zero**. Every numeric fact can be null; write \`if (t.score === null || t.score < 70) return;\` not \`if (t.score < 70)\`.
 
 ## Events
@@ -1618,6 +1763,25 @@ ${api}
 Every event except \`fill\`, \`schedule\` and \`interval\` receives one object with these fields (null = unknown):
 
 ${fieldGuideText()}
+
+## A settings form (optional)
+
+A script can ask the user for settings with an \`@inputs\` block — a block comment holding one JSON object — at the top of the file. The app shows it as a form before the script runs, and the answers arrive as \`bot.input.<name>\`, already in their declared shape. Use it for anything the user might want to change without editing code (sizes, thresholds, lines of text, an account address).
+
+\`\`\`js
+/* @inputs
+{
+  "minBuyers": { "type": "number", "label": "Minimum unique buyers", "default": 25, "min": 0, "max": 5000 },
+  "buySol":    { "type": "range",  "label": "Buy size", "default": [0.01, 0.03], "min": 0.001, "max": 5, "step": 0.001 },
+  "lines":     { "type": "lines",  "label": "Callout lines", "default": ["{ticker} looking strong"], "optional": true },
+  "curve":     { "type": "select", "label": "Curve", "options": ["classic only", "any"] },
+  "needX":     { "type": "toggle", "label": "Must have an X link" }
+}
+*/
+\`\`\`
+
+- Types: ${SCRIPT_INPUT_TYPES.join(', ')}. Each field takes \`type\` and \`label\`; optional \`help\`, \`default\`, \`min\`/\`max\`/\`step\` (number, range), \`options\` (select) and \`optional: true\` (blank allowed — every other field must be answered before Run).
+- A range is always \`[low, high]\`; lines is an array of non-empty strings; toggle is true/false.
 
 ## Style
 

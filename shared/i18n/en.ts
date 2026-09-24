@@ -46,7 +46,7 @@ export const en = {
   'nav.observatory': 'Observatory',
   'nav.copyTrading': 'Copy Trading',
   'nav.scripts': 'Scripts',
-  'nav.groupWallets': 'Group Wallets',
+  'nav.groupWallets': 'Wallet list',
   'nav.funder': 'Funder',
   'nav.launches': 'Launches',
   'nav.execution': 'Execution',

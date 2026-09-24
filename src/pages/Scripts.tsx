@@ -13,8 +13,10 @@
 // main, every action a script takes is checked there against its budget,
 // and arming a script is a separate click from saving it.
 
+import { ScriptInputsDialog, useScriptInputs } from '../components/terminal/ScriptInputsDialog';
+import { inputsProblem } from '@shared/scriptInputs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, BookOpen, Clipboard, Code2, ListChecks, Play, Plus, Power, Trash2 } from 'lucide-react';
+import { AlertTriangle, BookOpen, Clipboard, Code2, FolderOpen, ListChecks, Play, Plus, Power, Settings2, Trash2 } from 'lucide-react';
 import { nativeSymbolOf, type ChainKind } from '@shared/evm';
 import {
   ALERT_KINDS,
@@ -54,6 +56,7 @@ import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
 import { cls } from '../utils/format';
+import { MultiWalletConsent } from '../components/MultiWalletConsent';
 
 type Draft = Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'> & { id?: string };
 
@@ -148,6 +151,12 @@ export function ScriptsPage() {
   }, [current?.id, current?.updatedAt]);
 
   // The arm switch acts on the SAVED script, while every control below it
+  /** The settings this script's own code asks for, and whether they are given. */
+  const inputs = useScriptInputs(draft?.kind === 'code' ? draft.code : '', draft?.inputs);
+  const [askingInputs, setAskingInputs] = useState(false);
+  /** Set when the dialog was opened BY pressing On: answer, and it arms. */
+  const [armAfterInputs, setArmAfterInputs] = useState(false);
+
   // edits the draft. Arming while they disagree is how a script gets armed at
   // a size the screen is not showing — or worse, flipped to live in the editor
   // and armed with no live confirmation, because the saved copy still says
@@ -194,33 +203,44 @@ export function ScriptsPage() {
     setView('scripts');
   };
 
+  /** A .js file off disk becomes a new code draft, exactly like an example. */
+  const openFile = async (): Promise<void> => {
+    const r = await window.krypt.automation.openFile();
+    if (!r.ok) toast.error(r.message);
+    else if (r.data) useExample(r.data);
+  };
+
   const openReference = (t: RefTab): void => {
     setRefTab(t);
     setView('reference');
   };
 
-  const save = async (): Promise<void> => {
-    if (!draft) return;
-    const v = validateScript(draft);
+  /** `override` is for a draft that was just built and not yet in state —
+   *  React has not re-rendered, so reading `draft` here would save the old one. */
+  const save = async (override?: Draft): Promise<boolean> => {
+    const d = override ?? draft;
+    if (!d) return false;
+    const v = validateScript(d);
     if (!v.ok) {
       toast.error(v.message);
-      return;
+      return false;
     }
     setBusy(true);
-    const r = await window.krypt.automation.save(draft);
+    const r = await window.krypt.automation.save(d);
     setBusy(false);
     if (!r.ok) {
       toast.error(r.message);
-      return;
+      return false;
     }
     toast.success(r.message);
     if (r.data) {
       setSnap(r.data);
-      if (!draft.id) {
-        const newest = r.data.scripts.find((s) => s.name === draft.name);
+      if (!d.id) {
+        const newest = r.data.scripts.find((x) => x.name === d.name);
         if (newest) setSelected(newest.id);
       }
     }
+    return true;
   };
 
   const toggle = async (s: UserScript, on: boolean): Promise<void> => {
@@ -337,6 +357,9 @@ export function ScriptsPage() {
                 </PrimaryButton>
                 <GhostButton onClick={() => openReference('examples')} className="!py-2 text-xs">
                   <BookOpen className="h-3.5 w-3.5" /> Start from an example
+                </GhostButton>
+                <GhostButton onClick={() => void openFile()} className="!py-2 text-xs">
+                  <FolderOpen className="h-3.5 w-3.5" /> Open a .js file
                 </GhostButton>
               </div>
             </Card>
@@ -457,13 +480,40 @@ export function ScriptsPage() {
                     <Badge>{chainName(scriptChain(draft))}</Badge>
                     <Badge tone={draft.mode === 'live' ? 'danger' : 'neutral'}>{draft.mode}</Badge>
                     <span className="flex-1" />
+                    {inputs.count > 0 && (
+                      <GhostButton onClick={() => setAskingInputs(true)} className="!py-2 text-xs">
+                        <Settings2 className="h-3.5 w-3.5" />
+                        Settings
+                        {inputs.problem && <span className="ml-1 text-arc-gold">·{' '}needed</span>}
+                      </GhostButton>
+                    )}
                     {current && (
                       <Switch
                         checked={current.enabled}
                         disabled={dirty}
-                        onChange={(v) => void toggle(current, v)}
+                        /* A script cannot run with its own settings
+                           unanswered — it would work against blanks and fail
+                           in a way that reads as the script being broken. So
+                           pressing On ASKS rather than refusing: the form
+                           opens, and answering it arms the script. */
+                        onChange={(v) => {
+                          if (v && inputs.problem) {
+                            setArmAfterInputs(true);
+                            setAskingInputs(true);
+                            return;
+                          }
+                          void toggle(current, v);
+                        }}
                         label={current.enabled ? 'On' : 'Off'}
-                        description={dirty ? 'Unsaved — save before arming' : current.enabled ? `Running in ${current.mode} mode` : 'Enable to start'}
+                        description={
+                          dirty
+                            ? 'Unsaved — save before arming'
+                            : inputs.problem
+                              ? 'Asks for its settings first'
+                              : current.enabled
+                                ? `Running in ${current.mode} mode`
+                                : 'Enable to start'
+                        }
                       />
                     )}
                     <PrimaryButton onClick={() => void save()} disabled={busy} className="!py-2 text-xs">
@@ -480,7 +530,15 @@ export function ScriptsPage() {
                       last run {fmtAgo(currentStats.lastRunAt)} · today {currentStats.buysToday} buys, {currentStats.sellsToday} sells,{' '}
                       {currentStats.realizedSolToday >= 0 ? '+' : ''}
                       {currentStats.realizedSolToday.toFixed(4)} {nativeSymbolOf(scriptChain(draft))} realised · {currentStats.openCount} open
-                      {currentStats.lastError ? <span className="text-rose-300"> · last error: {currentStats.lastError}</span> : null}
+                      {currentStats.lastError ? (
+                        // WHEN, not just what. This field is sticky — it stays
+                        // until the next error replaces it — so without a time
+                        // an error from six hours ago reads as one happening
+                        // now. A user reported exactly that (2026-09-21).
+                        <span className="text-rose-300">
+                          {' '}· last error{currentStats.lastErrorAt ? ` ${fmtAgo(currentStats.lastErrorAt)} ago` : ''}: {currentStats.lastError}
+                        </span>
+                      ) : null}
                     </div>
                   )}
                   {dirty && <p className="text-label text-amber-200/90">Unsaved changes. Arming waits for a save; saving a live script restarts it with the new settings.</p>}
@@ -615,6 +673,43 @@ export function ScriptsPage() {
             )}
           </div>
         </div>
+      )}
+      {/* The settings this script asks for. An overlay because it is a step in
+          RUNNING the script rather than part of writing it: be asked, answer,
+          go. Nothing is saved until Done. */}
+      {/* Trading from your OTHER wallets by address — the only multi-wallet
+          path since the Copier was removed (2026-09-22), so its acknowledgement
+          lives here. */}
+      {view === 'scripts' && <MultiWalletConsent />}
+
+      {askingInputs && draft && (
+        <ScriptInputsDialog
+          specs={inputs.specs}
+          values={draft.inputs}
+          onClose={() => {
+            setAskingInputs(false);
+            setArmAfterInputs(false);
+          }}
+          onDone={(next) => {
+            const answered = { ...draft, inputs: next };
+            setDraft(answered);
+            setAskingInputs(false);
+            if (!armAfterInputs) return;
+            setArmAfterInputs(false);
+            // Opened by pressing On, so finish the job: the answers have to be
+            // SAVED before arming (the engine starts the stored script, not
+            // the draft on screen), and a form left incomplete arms nothing.
+            void (async () => {
+              if (inputsProblem(inputs.specs, next)) {
+                toast.info('Fill in the rest and press On again.');
+                return;
+              }
+              if (!(await save(answered))) return;
+              const saved = current ?? null;
+              if (saved) await toggle({ ...saved, ...answered } as UserScript, true);
+            })();
+          }}
+        />
       )}
     </Page>
   );
@@ -1048,7 +1143,7 @@ function CodeEditor({ draft, setDraft, onReference }: { draft: Draft; setDraft: 
           className={cls(inputCls, 'font-mono text-note leading-5 min-h-[380px] resize-y')}
         />
         <div className="text-body text-krypt-muted flex items-center gap-2">
-          <Play className="h-3 w-3" /> Save, then switch it on at the top. A handler that runs past 3 s is killed; five errors in a row turn the script off. Unknown facts are null, never zero.
+          <Play className="h-3 w-3" /> Save, then switch it on at the top. A stuck handler is killed (one still awaiting the app gets up to 30 s); five errors in a row turn the script off. Unknown facts are null, never zero.
         </div>
       </Card>
     </Section>
@@ -1103,7 +1198,7 @@ function ScriptLog({ lines, stats, coin }: { lines: ScriptLogLine[]; stats?: Scr
   return (
     <Section
       title="Log"
-      description={stats ? `Last run ${fmtAgo(stats.lastRunAt)} · today ${stats.buysToday} buys, ${stats.sellsToday} sells, ${stats.realizedSolToday >= 0 ? '+' : ''}${stats.realizedSolToday.toFixed(4)} ${coin} realised · ${stats.openCount} open · fired on ${stats.firedMints} tokens${stats.lastError ? ` · last error: ${stats.lastError}` : ''}` : ''}
+      description={stats ? `Last run ${fmtAgo(stats.lastRunAt)} · today ${stats.buysToday} buys, ${stats.sellsToday} sells, ${stats.realizedSolToday >= 0 ? '+' : ''}${stats.realizedSolToday.toFixed(4)} ${coin} realised · ${stats.openCount} open · fired on ${stats.firedMints} tokens${stats.lastError ? ` · last error${stats.lastErrorAt ? ` ${fmtAgo(stats.lastErrorAt)} ago` : ''}: ${stats.lastError}` : ''}` : ''}
     >
       <Card padded={false} className="max-h-[320px] overflow-auto">
         {lines.length === 0 ? (

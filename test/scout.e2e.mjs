@@ -64,13 +64,39 @@ try {
   check('the follower columns are there', head.includes('Copy / trip') && head.includes('Reachable'), head.join(' | '));
   const sortLabels = await evaluate(`[...document.querySelectorAll('main button')].map((b) => b.textContent.trim()).filter((t) => ['Copy score','Follower return','Their profit'].includes(t))`);
   check('the sort pills lead with the copy figures', sortLabels.includes('Copy score') && sortLabels.includes('Follower return'), sortLabels.join(', '));
-  const scanBtn = await evaluate(`(() => { const b = [...document.querySelectorAll('aside button')].find((b) => /Scan last|Cancel scan/.test(b.textContent)); return b ? { text: b.textContent.trim(), h: b.getBoundingClientRect().height } : null; })()`);
-  check('the scan button is a real button now', !!scanBtn && scanBtn.h >= 32, scanBtn ? `${scanBtn.text} · ${Math.round(scanBtn.h)} px tall` : 'not found');
+  const scanBtn = await evaluate(`(() => { const b = document.querySelector('[data-testid="scout-scan"]'); return b ? { text: b.textContent.trim(), h: b.getBoundingClientRect().height } : null; })()`);
+  check('the scan button is a real button', !!scanBtn && scanBtn.h >= 40, scanBtn ? `${scanBtn.text} · ${Math.round(scanBtn.h)} px tall` : 'not found');
+  // 2026-09-21: every control on this page must be thumb-sized and say a word.
+  // The left panel used to be 26 px rows and the row actions a 12 px icon.
+  // Scoped to the Scout's own panel: 'aside button' also matches the app
+  // shell's sidebar and its legal footer links, which this page does not own.
+  const small = await evaluate(
+    `[...document.querySelectorAll('[data-testid="scout-panel"] button, [data-testid="scout-filter"], [data-testid="scout-row"] button')]
+       .filter((b) => b.getBoundingClientRect().height > 0 && b.getBoundingClientRect().height < 30)
+       .map((b) => (b.textContent.trim() || b.getAttribute('aria-label') || '?').slice(0, 28) + ' @' + Math.round(b.getBoundingClientRect().height) + 'px')`,
+  );
+  check('no control on the page is under 30 px tall', small.length === 0, small.join(' | ') || 'all clear');
+  const filters = await evaluate(`[...document.querySelectorAll('[data-testid="scout-filter"]')].map((b) => b.textContent.trim())`);
+  check('the five filters are on the board', filters.length === 5, filters.join(' · '));
+  const preset = await evaluate(`(() => { const b = document.querySelector('[data-testid="scout-worth-a-look"]'); return b ? b.textContent.trim() : null; })()`);
+  check('one button turns them all on', preset === 'Only the ones worth a look', String(preset));
   const footer = await evaluate(`document.querySelector('main')?.textContent || document.body.textContent`);
   check('the page says what the score is and is not', /not how the wallet did/.test(footer) && /It is not an edge/.test(footer));
   const rows = await evaluate(`document.querySelectorAll('[data-testid="scout-row"]').length`);
   out(`rows on the board: ${rows}`);
   await shot('scout-board');
+  if (rows > 0) {
+    // The preset must actually remove rows, and put them back.
+    await click(`() => document.querySelector('[data-testid="scout-worth-a-look"]')`);
+    await sleep(500);
+    const kept = await evaluate(`document.querySelectorAll('[data-testid="scout-row"]').length`);
+    const says = await evaluate(`document.querySelector('main')?.textContent || ''`);
+    check('the preset filters the board and says what it hid', kept <= rows && /Showing/.test(says), `${rows} → ${kept}`);
+    await shot('scout-board-filtered');
+    await click(`() => document.querySelector('[data-testid="scout-worth-a-look"]') || [...document.querySelectorAll('main button')].find((b) => b.textContent.trim() === 'Show everything')`);
+    await sleep(500);
+    check('turning it off brings them back', (await evaluate(`document.querySelectorAll('[data-testid="scout-row"]').length`)) === rows);
+  }
   if (rows > 0) {
     const firstScore = await evaluate(`document.querySelector('[data-testid="scout-row"] td:nth-child(2)')?.textContent.trim()`);
     out(`first row's copy score chip: ${firstScore}`);
@@ -82,6 +108,8 @@ try {
     check('the drawer lists the checks', /Follower return/.test(drawer) && /Reachable trips/.test(drawer) && /Coins per trip/.test(drawer));
     check('the drawer shows both sides', /If you had copied them/.test(drawer) && /What they did/.test(drawer));
     check('the drawer states the model\'s assumptions', /2 s after theirs/.test(drawer) && /1\.5% a side/.test(drawer));
+    // 2026-09-21: read a pasted wallet's history straight from the chain.
+    check('the drawer offers the chain read', /Read from the chain/.test(drawer) && /Spends nothing/.test(drawer));
     await shot('scout-drawer');
     await evaluate(`(() => { const b = document.querySelector('[data-testid="wallet-drawer"] button[aria-label="Close"]'); if (b) b.click(); return !!b; })()`);
   } else {

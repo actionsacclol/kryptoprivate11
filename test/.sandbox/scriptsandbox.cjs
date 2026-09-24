@@ -61,6 +61,10 @@ var SCRIPT_METHODS = [
   "price",
   "token",
   "market",
+  "links",
+  "security",
+  "creator",
+  "analyze",
   "positions",
   "orders",
   "runners",
@@ -73,6 +77,7 @@ var SCRIPT_METHODS = [
   "at"
 ];
 var EVENT_TIMEOUT_MS = 3e3;
+var EVENT_HARD_MS = 3e4;
 var ALIVE_TIMEOUT_MS = 4e3;
 var READY_TIMEOUT_MS = 8e3;
 var READY_MAX_MS = 3e4;
@@ -136,6 +141,12 @@ function sandboxPageHtml() {
   const pending = new Map();
   let nextId = 1;
   let scriptId = null;
+  // Static per script, so they are handed over with the code rather than
+  // costing a round trip. Exposed as getters because \`bot\` is frozen before
+  // init arrives. Deliberately NOT including the mode: a script that behaves
+  // differently on paper is not a rehearsal of the live one.
+  let chain = 'solana';
+  let nativeSymbol = 'SOL';
 
   const send = (m) => { try { bridge.send(m); } catch (_) {} };
   const str = (v) => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch (_) { return String(v); } };
@@ -191,6 +202,10 @@ function sandboxPageHtml() {
     setState: (obj) => call('setState', [obj]),
     disable: (reason) => call('disable', [str(reason || 'disabled by the script')]),
     now: () => Date.now(),
+    /** 'solana' | 'robinhood' | 'bnb' \u2014 the chain this script runs on. */
+    get chain() { return chain; },
+    /** The coin every amount in this script is denominated in: SOL, ETH or BNB. */
+    get nativeSymbol() { return nativeSymbol; },
   });
 
   const safeConsole = Object.freeze({
@@ -205,6 +220,8 @@ function sandboxPageHtml() {
     if (!m || typeof m !== 'object') return;
     if (m.t === 'init') {
       scriptId = m.scriptId;
+      if (typeof m.chain === 'string' && m.chain) chain = m.chain;
+      if (typeof m.nativeSymbol === 'string' && m.nativeSymbol) nativeSymbol = m.nativeSymbol;
       try {
         // AsyncFunction, not Function: the guide (and the generated AI
         // prompt) promise top-level \`await\`, and a plain Function body
@@ -327,7 +344,7 @@ function isRunning(scriptId) {
   const b = boxes.get(scriptId);
   return !!b && b.ready && !b.contents.isDestroyed();
 }
-async function start(scriptId, code) {
+async function start(scriptId, code, info) {
   await stop(scriptId, "restart");
   let win;
   try {
@@ -363,6 +380,7 @@ async function start(scriptId, code) {
     ready: false,
     readyWaiters: [],
     preloadError: null,
+    killedBy: null,
     inflight: /* @__PURE__ */ new Map(),
     nextEventId: 1
   };
@@ -383,7 +401,7 @@ async function start(scriptId, code) {
     teardown(box);
     if (mine) host?.onGone(scriptId, reason);
   };
-  contents.on("render-process-gone", (_e, d) => gone(`renderer ${d.reason}`));
+  contents.on("render-process-gone", (_e, d) => gone(box.killedBy ? box.killedBy : `the renderer stopped (${d.reason})`));
   win.on("closed", () => gone("closed"));
   const superseded = () => boxes.get(scriptId) !== box;
   try {
@@ -419,7 +437,7 @@ async function start(scriptId, code) {
     host?.log("error", `script ${scriptId}: ${why}`);
     return { ok: false, message: why, retryable: true };
   }
-  post(box, { t: "init", scriptId, code });
+  post(box, { t: "init", scriptId, code, chain: info?.chain, nativeSymbol: info?.nativeSymbol });
   const startedAt = Date.now();
   let ready = null;
   for (; ; ) {
@@ -484,13 +502,40 @@ function dispatch(scriptId, name, payload) {
       settled = true;
       resolve(r);
     };
-    const timer = setTimeout(() => {
+    const startedAt = Date.now();
+    let timer;
+    let extended = false;
+    let cleared = false;
+    const onDeadline = async () => {
+      if (cleared || box.contents.isDestroyed()) return;
+      const waited = Date.now() - startedAt;
+      const alive = waited < EVENT_HARD_MS ? await probeAlive(box.contents) : false;
+      if (cleared || box.contents.isDestroyed()) return;
+      if (alive) {
+        if (!extended) {
+          extended = true;
+          host?.log(
+            "info",
+            `script ${scriptId}: the "${name}" handler is still waiting after ${Math.round(waited / 1e3)}s \u2014 it is responsive, so it is waiting on something rather than stuck. Letting it finish (up to ${EVENT_HARD_MS / 1e3}s).`
+          );
+        }
+        timer = setTimeout(() => void onDeadline(), EVENT_TIMEOUT_MS);
+        if (box.inflight.get(id) === entry) entry.timer = timer;
+        return;
+      }
       box.inflight.delete(id);
-      settle({ ok: false, error: `handler for "${name}" ran past ${EVENT_TIMEOUT_MS} ms \u2014 killed` });
-      kill(box, scriptId);
-    }, EVENT_TIMEOUT_MS);
+      const secs = Math.round(waited / 1e3);
+      settle({ ok: false, error: `handler for "${name}" ran past ${secs} s \u2014 killed` });
+      kill(
+        box,
+        scriptId,
+        waited >= EVENT_HARD_MS ? `your "${name}" handler was still going after ${secs}s, so the script was restarted \u2014 anything it held in memory is gone (use bot.setState to keep it)` : `your "${name}" handler stopped responding \u2014 it is most likely stuck in a loop. The script was restarted and anything it held in memory is gone (use bot.setState to keep it).`
+      );
+    };
+    timer = setTimeout(() => void onDeadline(), EVENT_TIMEOUT_MS);
     const clear = () => {
-      clearTimeout(timer);
+      cleared = true;
+      clearTimeout(entry ? entry.timer : timer);
       if (box.inflight.get(id) === entry) box.inflight.delete(id);
     };
     const onDone = (r) => {
@@ -504,11 +549,13 @@ function dispatch(scriptId, name, payload) {
       }
     };
     const entry = { settle, timer, onDone };
+    entry.timer = timer;
     box.inflight.set(id, entry);
     post(box, { t: "event", id, name, payload });
   });
 }
-function kill(box, scriptId) {
+function kill(box, scriptId, why) {
+  box.killedBy = why;
   try {
     if (!box.contents.isDestroyed()) box.contents.forcefullyCrashRenderer();
     else void stop(scriptId, "watchdog");

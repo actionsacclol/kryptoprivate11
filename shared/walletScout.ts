@@ -71,6 +71,140 @@ export const SCOUT_MAX_TRACKED = 6_000;
 /** How far back a manual scan reaches. */
 export type ScoutScanHours = 1 | 6 | 24;
 export const SCOUT_SCAN_HOURS: ScoutScanHours[] = [1, 6, 24];
+
+/**
+ * The Solana scan's shape, shared so the page can say what a scan costs.
+ *
+ * swap-api.pump.fun blocks an IP for ~35 s after roughly 22 requests in a
+ * short window (measured 2026-09-21, see the `pumpswap` entry in
+ * electron/data/http.ts — the provider gap there IS this pace, pinned equal
+ * by test). At one request every 2 s, 60 tokens are two minutes when most
+ * need one page and up to six when every one needs three.
+ */
+export const SOLANA_SCAN_MAX_TOKENS = 60;
+export const SOLANA_SCAN_MAX_PAGES = 3;
+export const SOLANA_SCAN_GAP_MS = 2_000;
+
+/** Signatures a chain read of one wallet asks for (electron/engine/walletHistory.ts). */
+export const WALLET_READ_LIMIT = 200;
+
+// ── Board filters (2026-09-21) ────────────────────────────────────────
+//
+// The board ranked but never filtered, so the first screen was mostly
+// wallets nobody should copy: three-trade records, bots out in six seconds,
+// and wallets whose trips a follower could never have been inside. Sorting
+// cannot remove those — only a filter can, and the user has to be able to
+// see what was removed and put it back.
+//
+// Every filter is OFF by default. The board shows what was recorded; hiding
+// rows is the user's choice, and the count line always says how many are
+// hidden. Pure functions here so the page and the test agree on what each
+// switch means (test/walletscout.test.mjs).
+
+/**
+ * Hold time under which a wallet is "too fast to copy".
+ *
+ * The same number as `COPY_LATENCY_FLOOR_MS` in shared/copytrade.ts and the
+ * same reasoning: the median leader holds six seconds, their edge is latency,
+ * and latency is the one thing a follower cannot copy
+ * (docs/wallet-convergence-2026-09-14.md). The two constants are pinned equal
+ * by test — they are one fact with two readers, not two settings.
+ */
+export const SCOUT_SLOW_ENOUGH_MS = 60_000;
+/** Reachable share under which a follower was locked out of most trips — the
+ *  same 25 % the `unreachable` flag uses (shared/walletScore.ts). */
+export const SCOUT_REACHABLE_MIN_PCT = 25;
+/** Days of the window a wallet must have traded on to count as regular. */
+export const SCOUT_REGULAR_DAYS = 3;
+
+export type ScoutFilter = 'hideBots' | 'ranked' | 'reachable' | 'slowEnough' | 'regular';
+export const SCOUT_FILTERS: ScoutFilter[] = ['hideBots', 'ranked', 'reachable', 'slowEnough', 'regular'];
+
+/** What each switch is called and what it actually does, in plain words. */
+export const SCOUT_FILTER_TEXT: Record<ScoutFilter, { label: string; why: string }> = {
+  hideBots: {
+    label: 'No bots',
+    why: 'Hides wallets that hold for seconds and trade constantly. A bot wins on speed you do not have, so copying one is not the same trade.',
+  },
+  ranked: {
+    label: 'Enough trades',
+    why: `Hides wallets with fewer than ${MIN_TRIPS_FOR_RANK} finished round trips in this window. Under that it is luck, not a record.`,
+  },
+  reachable: {
+    label: 'You could have copied',
+    why: `Hides wallets where a copier could have been inside fewer than ${SCOUT_REACHABLE_MIN_PCT}% of the trips. The rest were over before a follower could land.`,
+  },
+  slowEnough: {
+    label: 'Holds over a minute',
+    why: 'Hides wallets whose typical trade is over inside a minute. Longer holds are not more profitable — they are just possible to follow.',
+  },
+  regular: {
+    label: 'Trades most days',
+    why: `Hides wallets active on fewer than ${SCOUT_REGULAR_DAYS} days of the window. A wallet that traded once is not a wallet you can follow.`,
+  },
+};
+
+/** All five on: the one-click "show me the ones worth a look" preset. */
+export const scoutFiltersAllOn = (): Record<ScoutFilter, boolean> => ({ hideBots: true, ranked: true, reachable: true, slowEnough: true, regular: true });
+export const scoutFiltersAllOff = (): Record<ScoutFilter, boolean> => ({ hideBots: false, ranked: false, reachable: false, slowEnough: false, regular: false });
+export const anyScoutFilter = (f: Record<ScoutFilter, boolean>): boolean => SCOUT_FILTERS.some((k) => f[k]);
+
+/**
+ * Does this row survive one filter?
+ *
+ * UNKNOWN NEVER HIDES A ROW. A wallet whose reachable share or median hold
+ * has not been measured is not a wallet that failed the test — it is one the
+ * test could not be run on, and hiding it would quietly claim a fact nobody
+ * has. The same rule the whole app follows for a missing number.
+ */
+export function passesScoutFilter(r: ScoutRow, k: ScoutFilter): boolean {
+  if (k === 'hideBots') return !r.looksAutomated;
+  if (k === 'ranked') return r.ranked;
+  if (k === 'reachable') return r.reachablePct === null || r.reachablePct >= SCOUT_REACHABLE_MIN_PCT;
+  if (k === 'slowEnough') return r.medianHoldMs === null || r.medianHoldMs >= SCOUT_SLOW_ENOUGH_MS;
+  return r.activeDays >= SCOUT_REGULAR_DAYS;
+}
+
+/** The rows a set of switches leaves standing, in the order they came. */
+export function applyScoutFilters(rows: readonly ScoutRow[], f: Record<ScoutFilter, boolean>): ScoutRow[] {
+  const on = SCOUT_FILTERS.filter((k) => f[k]);
+  if (!on.length) return [...rows];
+  return rows.filter((r) => on.every((k) => passesScoutFilter(r, k)));
+}
+
+/**
+ * A chain read of one wallet's recent swaps into the record (2026-09-21).
+ * Solana only; polled, cancellable. Fills in "what they did"; the copy
+ * figures still need the feed or a scan to see other wallets' prints.
+ */
+export interface WalletReadStatus {
+  chain: 'solana';
+  address: string;
+  running: boolean;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** Signatures inside the week, after failed ones are dropped. */
+  signatures: number;
+  /** Transactions asked for so far. */
+  read: number;
+  /** Decoded as a swap by the wallet. */
+  swaps: number;
+  /** Swaps that became a record. */
+  fed: number;
+  /** Swaps the store already had. */
+  duplicates: number;
+  /** Transactions the RPC could not serve. */
+  unreadable: number;
+  /** Read fine, not a trade (transfers, claims, mints, LP moves). */
+  notSwap: number;
+  calls: number;
+  cancelled: boolean;
+  /** Why it stopped, or what it could not do. Empty while all is well. */
+  message: string;
+  /** Block time of the oldest and newest swap fed, ms. */
+  oldestAt: number | null;
+  newestAt: number | null;
+}
 export const SCOUT_SCAN_HOURS_LABEL: Record<ScoutScanHours, string> = { 1: '1 hour', 6: '6 hours', 24: '24 hours' };
 
 /**

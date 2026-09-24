@@ -16,6 +16,8 @@ import {
   ListOrdered,
   Radar,
   Rocket,
+  Megaphone,
+
   Users,
   ScrollText,
   Settings,
@@ -23,7 +25,7 @@ import {
   Telescope,
   BookMarked,
   BookOpen,
-  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout, UserPlus } from 'lucide-react';
+  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout, UserPlus, AtSign, Bot } from 'lucide-react';
 import { groupsFor, workspaceSpec, type WorkspaceId } from '../workspaces';
 import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
@@ -52,11 +54,15 @@ export type RouteId =
   | 'trades'
   | 'creator'
   | 'funder'
+  | 'copier'
+  | 'autocallout'
+  | 'pumpaccounts'
   | 'orders'
   | 'copysimple'
   | 'wallets'
   | 'scripts'
   | 'farming'
+  | 'mcp'
   | 'dashboard'
   | 'observatoryrobinhood'
   | 'observatorybnb'
@@ -135,8 +141,15 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   { id: 'wallets', label: 'Copy Trading', i18n: 'nav.copyTrading', hint: "Follow other traders' wallets — every control", icon: Users },
   { id: 'scripts', label: 'Scripts', i18n: 'nav.scripts', hint: 'Your own rules and code, under a budget — paper first', icon: Code2 },
   { id: 'farming', label: 'Farming', hint: 'Not built yet — what it would be, and what has to be true first', icon: Sprout },
-  { id: 'creator', label: 'Group Wallets', i18n: 'nav.groupWallets', hint: 'Make a group of wallets to fund, warm or trade together', icon: FolderPlus },
-  { id: 'funder', label: 'Funder', i18n: 'nav.funder', hint: 'Fund wallets from the active one, by group or individually; collect back', icon: Coins },
+  // Moved out of Settings (2026-09-23): nobody found it there, and an AI
+  // trading through the app is a way of acting without your click.
+  { id: 'mcp', label: 'AI connection', hint: 'Let an AI like Claude read the app (MCP) and, if you allow it, trade through it', icon: Bot },
+  { id: 'creator', label: 'Wallet list', i18n: 'nav.groupWallets', hint: 'Up to 15 wallets: make main, pump.fun account, import an existing one', icon: FolderPlus },
+  { id: 'funder', label: 'Funder', i18n: 'nav.funder', hint: 'Fund wallets from the main one, all or hand-picked; collect back', icon: Coins },
+  // Merged into the Wallet list (2026-09-22). Hidden, kept so old pins open.
+  { id: 'copier', label: 'Copier', hint: 'Now part of the Wallet list', icon: Users, hidden: true },
+  { id: 'autocallout', label: 'Auto-callout', hint: 'Post a pump.fun callout on the coins you buy', icon: Megaphone },
+  { id: 'pumpaccounts', label: 'pump.fun accounts', hint: 'Every wallet’s account: sessions, names, and your caller stats', icon: AtSign },
   { id: 'launches', label: 'Launches', i18n: 'nav.launches', hint: 'Live launch scanner', icon: Rocket },
   { id: 'strategy', label: 'Strategy', hint: 'Paper-entry gates and backtest defaults — nothing here buys', icon: BookMarked },
   { id: 'execution', label: 'Execution', i18n: 'nav.execution', hint: 'What gets flagged as a runner, fees and lanes', icon: Gauge },

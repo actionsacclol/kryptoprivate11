@@ -24,7 +24,7 @@ export const ko: Catalogue = {
   'nav.observatory': '관측소',
   'nav.copyTrading': '카피 트레이딩',
   'nav.scripts': '스크립트',
-  'nav.groupWallets': '지갑 그룹',
+  'nav.groupWallets': '지갑 목록',
   'nav.funder': '자금 이동',
   'nav.launches': '신규 토큰',
   'nav.execution': '실행',

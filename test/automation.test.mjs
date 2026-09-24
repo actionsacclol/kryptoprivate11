@@ -6,6 +6,7 @@
 // stopped. Each rule of the house in automation.ts is pinned here.
 
 import assert from 'node:assert';
+import { parseInputs } from './.scriptinputs.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +37,7 @@ import {
   SCRIPT_API,
   SCRIPT_EVENTS_DOC,
   emptyContext,
+  withLaunchLinks,
   withMarket,
   marketFactsFromSummary,
   scriptLinksFromSummary,
@@ -84,7 +86,7 @@ function makeHost(over = {}) {
   // `buyChains` / `sellChains` are recorded SEPARATELY because several pinned
   // assertions deepEqual `buys` against { mint, sol, mode } and must keep
   // exactly that shape — the same rule copytrade.test.mjs follows for `opts`.
-  const calls = { buys: [], buyChains: [], sells: [], sellChains: [], toasts: [], notifies: [], watches: [], replies: [], dispatched: [], started: [], stopped: [], orders: [], templates: [], alerts: [], subscribed: [], pins: [] };
+  const calls = { buys: [], buyChains: [], buyCaps: [], sells: [], sellChains: [], toasts: [], notifies: [], watches: [], replies: [], dispatched: [], started: [], stopped: [], orders: [], templates: [], alerts: [], subscribed: [], pins: [] };
   const book = { paper: [], live: [] };
   const running = new Set();
   const launches = new Map();
@@ -95,9 +97,10 @@ function makeHost(over = {}) {
     launches,
     running,
     pos,
-    buy: async (mint, sol, mode, chain) => {
+    buy: async (mint, sol, mode, chain, ownCapSol) => {
       calls.buys.push({ mint, sol, mode });
       calls.buyChains.push(chain ?? null);
+      calls.buyCaps.push(ownCapSol ?? null);
       if (over.buyResult) return over.buyResult;
       book[mode].push(pos(mint, sol));
       return { ok: true, message: 'bought' };
@@ -255,8 +258,13 @@ test('validation: a launch rule cannot sell, a position rule cannot buy, scopes 
   const s = defaultScript('rules');
   assert.equal(validateScript({ ...s, budget: { ...s.budget, maxSolPerTrade: 0 } }).ok, false);
   assert.equal(validateScript({ ...s, rules: { ...s.rules, actions: [{ type: 'buy', sol: 5 }] } }).ok, false, 'a rule cannot buy more than its own budget cap');
+  // The app's MANUAL per-trade cap is NOT a second limit on a script
+  // (2026-09-22). Its own budget is the authority on its size: two caps for
+  // one decision meant keeping them in step, with the smaller winning
+  // silently to whoever set the other. A rule inside its budget saves
+  // whatever the manual cap happens to be.
   const under = { ...s, budget: { ...s.budget, maxSolPerTrade: 0.05 }, rules: { ...s.rules, actions: [{ type: 'buy', sol: 0.04 }] } };
-  assert.equal(validateScript(under, { maxLiveSol: 0.03 }).ok, false, 'nor above the execution per-trade cap — every placement would be refused');
+  assert.equal(validateScript(under).ok, true, 'a rule inside the script’s own budget saves');
   assert.equal(validateScript(under, { maxLiveSol: 0.05 }).ok, true);
   assert.equal(validateScript(under).ok, true, 'no cap known → budget rule only');
   assert.equal(validateScript({ ...defaultScript('code'), code: '' }).ok, false);
@@ -469,7 +477,7 @@ test('past the daily loss limit the script turns itself OFF', async () => {
   assert.ok(Math.abs(auto.snapshot().stats[c.id].realizedSolToday - -0.6) < 1e-9);
 });
 
-test('LIVE: blocked = refused with the reason; a live buy is also capped by the execution setting', async () => {
+test('LIVE: blocked = refused with the reason; the script’s OWN budget is the size cap', async () => {
   const h = setup({ liveBlocked: 'the engine is not armed', maxLiveSol: 0.05 });
   const c = saved(codeScript({ mode: 'live', budget: { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 10, maxOpenPositions: 50, maxActionsPerMinute: 100 } }));
   auto.setEnabled(c.id, true);
@@ -477,16 +485,25 @@ test('LIVE: blocked = refused with the reason; a live buy is also capped by the 
   await tick();
   assert.equal(h.calls.buys.length, 0);
   assert.match(h.calls.replies[0].value.message, /not executed — the engine is not armed/);
+  // THE APP'S MANUAL PER-TRADE CAP IS NOT A SECOND LIMIT (2026-09-22). The
+  // script's own budget is the authority on its size — it is set on the same
+  // screen as its code and is what its author actually decided. Two caps for
+  // one decision meant keeping them in step, with the smaller one winning
+  // silently to whoever set the other.
   const h2 = setup({ maxLiveSol: 0.05 });
   const c2 = saved(codeScript({ mode: 'live', budget: { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 10, maxOpenPositions: 50, maxActionsPerMinute: 100 } }));
   auto.setEnabled(c2.id, true);
   auto.onSandboxMessage(c2.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.1] });
   await tick();
-  assert.equal(h2.calls.buys.length, 0);
-  assert.match(h2.calls.replies[0].value.message, /over the execution cap/);
-  auto.onSandboxMessage(c2.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.04] });
+  assert.deepEqual(h2.calls.buys, [{ mint: MINT, sol: 0.1, mode: 'live' }], 'over the MANUAL cap, inside its own budget: it buys');
+  // And the buy carries the script's own cap, so the backstop in the engine
+  // enforces that number rather than the manual one.
+  assert.deepEqual(h2.calls.buyCaps, [1], 'the host is handed the script’s own cap, so the engine enforces that one');
+  // Its own budget still refuses, and says which limit bit.
+  auto.onSandboxMessage(c2.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 2] });
   await tick();
-  assert.deepEqual(h2.calls.buys, [{ mint: MINT, sol: 0.04, mode: 'live' }]);
+  assert.equal(h2.calls.buys.length, 1);
+  assert.match(h2.calls.replies[1].value.message, /over the script's max per trade/);
 });
 
 test('paper never touches the live gate; a sell of something not held is refused', async () => {
@@ -874,6 +891,21 @@ test('the AI prompt pack and the variable guide name every field, event and meth
   assert.ok(pack.includes('as **unknown, never as zero**'), 'the null rule is stated');
   assert.match(pack, /Output only the script/);
   assert.ok(pack.length > 8_000 && pack.length < 60_000, `a pasteable size (${pack.length} chars)`);
+  // 09-22: the prose that is NOT generated from a table drifted — the pack
+  // said handlers die at 3 s (a 30 s ceiling since 09-21), called the app
+  // Solana-only, and never showed how to write an @inputs form.
+  assert.match(pack, /up to \*\*30 seconds\*\*/, 'the real handler ceiling');
+  assert.doesNotMatch(pack, /longer than \*\*3 seconds\*\* is killed/, 'not the old 3 s rule');
+  assert.match(pack, /Solana, Robinhood Chain and BNB Chain/, 'every chain a script runs on');
+  assert.match(pack, /bot\.nativeSymbol/, 'and how amounts are named');
+  assert.match(pack, /Public actions/, 'callouts, follows and likes are public, and nothing on paper');
+  const block = pack.slice(pack.indexOf('/* @inputs'), pack.indexOf('*/', pack.indexOf('/* @inputs')) + 2);
+  const parsed = parseInputs(block);
+  assert.equal(parsed.error, null, `the @inputs example the pack teaches parses: ${parsed.error}`);
+  assert.equal(Object.keys(parsed.specs).length, 5, 'all five example fields');
+  for (const t of ['text', 'lines', 'number', 'range', 'mint', 'wallet', 'pumpAccounts', 'select', 'toggle']) {
+    assert.ok(pack.includes(t), `input type ${t} is named`);
+  }
 });
 
 test('a refused buy ends the firing — the "log bought" after it never runs — and tiny prices print with precision', async () => {
@@ -1161,7 +1193,10 @@ test('a save refused for size says the refusal in the right coin', () => {
     mode: 'live',
     rules: { ...defaultRules('robinhood'), conditions: [], actions: [{ type: 'buy', sol: 9 }] },
   };
-  const v = validateScript(s, { maxLiveSol: 1 });
+  // Refused by the script's OWN budget now — the manual cap no longer applies
+  // to a script. The point of this case is the WORDING: an ETH script must not
+  // be told off in SOL.
+  const v = validateScript(s);
   assert.equal(v.ok, false);
   assert.match(v.message, /ETH/, v.message);
   assert.ok(!/SOL/.test(v.message), `no SOL in an ETH script's refusal: ${v.message}`);
@@ -1260,6 +1295,31 @@ test('one summary becomes the facts a script sees, links classified, unknowns nu
   // An EVM host's facts carry none of this: every one stays null, not false.
   const evm = withMarket(emptyContext(MINT), { priceSol: 1, priceUsd: null, marketCapUsd: 5, liquidityUsd: 2, holders: null, launchpad: null });
   for (const id of [...SUMMARY_EXTRAS, ...LINK_FIELDS]) assert.equal(evm[id], null, `${id} is unknown, not a claim`);
+});
+
+test('a fresh runner gets its links from the launch metadata when no provider has answered', () => {
+  // The bug: hasTwitter/hasWebsite came ONLY from a provider summary, which a
+  // just-flagged runner rarely has, so a link filter waited and then dropped it.
+  const bare = withLaunchLinks(withMarket(emptyContext(MINT), null), { twitter: true, website: false, telegram: true });
+  assert.equal(bare.hasTwitter, true);
+  assert.equal(bare.hasWebsite, false, 'the metadata file said no website: a real none');
+  assert.equal(bare.hasTelegram, true);
+  assert.equal(bare.twitter, null, 'no address known: none is invented');
+  // With the cached metadata file, the addresses come along — the only way a
+  // "website" that is really an X search can be seen.
+  const withUrls = withLaunchLinks(emptyContext(MINT), { twitter: true, website: true, telegram: false, twitterUrl: 'https://x.com/someone', websiteUrl: 'https://x.com/search?q=coin', telegramUrl: null });
+  assert.equal(withUrls.website, 'https://x.com/search?q=coin');
+  assert.equal(withUrls.twitter, 'https://x.com/someone');
+  assert.equal(withUrls.xLinkKind, 'profile');
+  assert.equal(withUrls.telegram, null);
+  // A provider that answered wins.
+  const answered = withLaunchLinks(withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary())), { twitter: false, website: false, telegram: true });
+  assert.equal(answered.hasTwitter, true);
+  assert.equal(answered.hasTelegram, false);
+  // Metadata not resolved: still unknown, never false.
+  const unread = withLaunchLinks(emptyContext(MINT), null);
+  assert.equal(unread.hasTwitter, null);
+  assert.equal(unread.hasWebsite, null);
 });
 
 test('bot.links answers from cached facts with the launchpad page and the X reuse', () => {
@@ -1390,6 +1450,86 @@ test('the four new methods are sandbox methods and documented', () => {
   assert.equal(SCRIPT_API.find((x) => x.method === 'analyze').action, true, 'analyze is an action — it spends');
   assert.equal(SCRIPT_API.find((x) => x.method === 'links').action, false, 'links is a free read');
   assert.ok(/never visits/.test(SCRIPT_API.find((x) => x.method === 'links').notes), 'the app never visits the links');
+});
+
+// ── what a script author has to be told (2026-09-21) ─────────────────────
+//
+// From a real report: a script ran seven hours in paper across 1,770 launch
+// updates and never bought. Nothing was broken — it waited for `score` to
+// climb above 80, and the score is computed ONCE per launch. Every update
+// carried the same number. The three facts below are what the guide now
+// states, pinned here so the words cannot drift from the code that makes
+// them true.
+
+test('the score field warns that it never moves, and says what it typically is', () => {
+  const f = RULE_FIELDS.find((x) => x.id === 'score');
+  assert.ok(f, 'the score field exists');
+  assert.match(f.hint, /fixed once|never moves/i, `a script author must be told it does not move: "${f.hint}"`);
+  assert.match(f.hint, /do not wait for it to rise/i);
+  // A typical range, so "> 80" reads as the 1-in-36 bet it is rather than a
+  // round number someone picked.
+  assert.match(f.hint, /[0-9]+\s*[\u2013-]\s*[0-9]+/, 'and roughly where it usually lands');
+  assert.match(f.nullWhen, /never on the launch feed/);
+});
+
+test('the launchUpdate event leads with the score being fixed, not buries it', () => {
+  const e = SCRIPT_EVENTS_DOC.find((x) => x.event === 'launchUpdate');
+  assert.ok(e);
+  assert.match(e.when, /SCORE DOES NOT CHANGE/, 'stated in the open, where it cannot be skimmed past');
+  assert.match(e.when, /flow fields/i, 'and what DOES move is named');
+  // It used to be the tail of one long sentence: a reader reached "the score
+  // is fixed at decision time" after eighty words, and did not.
+  assert.ok(e.when.indexOf('SCORE DOES NOT CHANGE') < 120, 'and near the front of the sentence');
+});
+
+test('creatorSold says what FALSE means, which is not what it looks like', () => {
+  const f = RULE_FIELDS.find((x) => x.id === 'creatorSold');
+  assert.ok(f);
+  assert.match(f.hint, /seen YET/i, `false is "none seen yet", never "there will not be one": "${f.hint}"`);
+  assert.match(f.hint, /not that there will not be one/i);
+  assert.equal(f.kind, 'boolean');
+  // And the tri-state is real: unknown must not read as either answer.
+  const ctx = emptyContext('Mint1111111111111111111111111111111111111');
+  assert.equal(ctx.creatorSold, null, 'unknown until a launch fills it in');
+  const isFalse = conditionHolds({ field: 'creatorSold', op: 'is_false', value: '' }, ctx);
+  assert.equal(isFalse.ok, false, 'an unknown creatorSold does not pass "is false"');
+  assert.match(isFalse.why, /unknown/, 'and the reason says unknown, not that it is true');
+  const isTrue = conditionHolds({ field: 'creatorSold', op: 'is_true', value: '' }, ctx);
+  assert.equal(isTrue.ok, false, 'nor "is true" — unknown passes neither, which is the whole point');
+});
+
+// ── Script stats on a widget (09-22) ──────────────────────────────────
+test('bot.stat values reach the snapshot, in order, updated in place, capped, and reset per run', () => {
+  setup();
+  const s = saved(codeScript());
+  auto.onSandboxMessage(s.id, { t: 'stats', values: { Callouts: 1, Likes: 0 } });
+  auto.onSandboxMessage(s.id, { t: 'stats', values: { 'PnL (SOL)': 0.25, Callouts: 2 } });
+  let m = auto.snapshot().metrics[s.id];
+  assert.deepEqual(m.map((x) => [x.name, x.value]), [['Callouts', 2], ['Likes', 0], ['PnL (SOL)', 0.25]], 'first-set order, same name replaced');
+  // At most MAX_STAT_KEYS: a new name past the cap is dropped, an existing one still updates.
+  const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, i]));
+  auto.onSandboxMessage(s.id, { t: 'stats', values: many });
+  auto.onSandboxMessage(s.id, { t: 'stats', values: { Callouts: 9 } });
+  m = auto.snapshot().metrics[s.id];
+  assert.equal(m.length, 24, 'capped at 24');
+  assert.equal(m.find((x) => x.name === 'Callouts').value, 9, 'a shown name still updates at the cap');
+  auto.onSandboxMessage(s.id, { t: 'stats', values: {}, clear: true });
+  assert.equal(auto.snapshot().metrics[s.id].length, 0, 'clearStats empties it');
+  auto.onSandboxMessage(s.id, { t: 'stats', values: { Trades: 3 } });
+  auto.onSandboxMessage(s.id, { t: 'alive' });
+  assert.equal(auto.snapshot().metrics[s.id].length, 0, 'a new run starts with an empty widget');
+});
+
+test('the Script monitor widget exists, shows metrics and the log, and new panels come on once', () => {
+  const reg = fs.readFileSync('src/panels/registry.tsx', 'utf8');
+  assert.match(reg, /id: 'scriptmonitor', HeaderControl: ScriptMonitorHeaderControl/);
+  assert.match(reg, /snap\.metrics\?\.\[sc\.id\]/, 'reads the script’s own metrics');
+  assert.match(reg, /snap\.logs\[sc\.id\]/, 'and its log');
+  const ws = fs.readFileSync('src/pages/Workspace.tsx', 'utf8');
+  assert.match(ws, /const SEEN_KEY = 'krypt\.panels\.seen\.v1'/);
+  const load = ws.slice(ws.indexOf('function loadEnabled'), ws.indexOf('/** Pages that can be pinned'));
+  assert.doesNotMatch(load, /return DEFAULT_ENABLED;/, 'no early return skips recording what was seen');
+  assert.match(load, /setItem\(STORE_KEY[\s\S]{0,80}setItem\(SEEN_KEY/, 'the merged set and the seen-list are written together');
 });
 
 await run();

@@ -73,7 +73,12 @@ const ME = me.publicKey.toBase58();
   console.log('ok  fund: the allowlist is inert for other intents');
 }
 
-// ── parseFile drops a `lab` block written by an older build ──────────
+// ── parseFile drops every legacy group setting, follow AND random ──────
+//
+// Groups were removed on 2026-09-22, and the same day so was having other
+// wallets follow the main one. A file written by the builds that had them —
+// a group with a follow block and the Warmer's `random` block — must load
+// every wallet and bring back neither: nothing trades on its own from it.
 {
   const now = Date.now();
   const raw = {
@@ -81,7 +86,7 @@ const ME = me.publicKey.toBase58();
     activeId: 'w1',
     wallets: [
       { id: 'w1', label: 'main', publicKey: ME, secretEnc: 'x', createdAt: now, maxBalanceSol: 1, homeAddress: null },
-      { id: 'w2', label: 'two', publicKey: a, secretEnc: 'x', createdAt: now, maxBalanceSol: 1, homeAddress: null },
+      { id: 'w2', label: 'two', publicKey: a, secretEnc: 'x', createdAt: now, maxBalanceSol: 1, homeAddress: null, copy: { enabled: true } },
     ],
     groups: [
       { id: 'g1', name: 'Fleet', walletIds: ['w2'], lab: { follow: { enabled: true, ratio: 0.25 }, random: { maxLossSol: 0.02 } } },
@@ -89,12 +94,13 @@ const ME = me.publicKey.toBase58();
   };
   const f = parseFile(raw, now, () => 'id');
   assert.ok(f, 'file parses');
-  const g1 = f.groups.find((g) => g.id === 'g1');
-  assert.ok(g1, 'the group itself survives — only its dead settings go');
-  assert.equal(g1.name, 'Fleet');
-  assert.deepEqual(g1.walletIds, ['w2']);
-  assert.equal(g1.lab, undefined, 'follow and random trading are gone; their saved config is not carried forward');
-  console.log('ok  parseFile drops a legacy lab block and keeps the group');
+  assert.equal(f.wallets.length, 2, 'every wallet is kept');
+  assert.equal('groups' in f, false, 'the group is gone');
+  const text = JSON.stringify(f);
+  assert.equal(text.includes('maxLossSol'), false, 'random autotrading is not restored');
+  assert.equal(text.includes('ratio'), false, 'nor is following');
+  assert.equal(text.includes('"copy"'), false, 'nor a per-wallet copy setting');
+  console.log('ok  parseFile keeps every wallet and drops every legacy follow / random setting');
 }
 
 // ── a non-finite jitter or floor never yields a plan of NaN shares ────

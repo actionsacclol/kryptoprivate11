@@ -120,3 +120,32 @@ export async function uploadLaunchMetadata(filePath: string, fields: MetadataFie
     clearTimeout(timer);
   }
 }
+
+
+/**
+ * Pin a picture on its own and hand back the gateway URL.
+ *
+ * For a pump.fun profile picture, which is a URL rather than an upload — the
+ * image has to be hosted somewhere before `profileImage` can point at it, and
+ * this is the route that already does that here.
+ *
+ * It goes through the same multipart upload as a launch because that is the
+ * endpoint that exists; the metadata JSON it also pins is ignored. Sending a
+ * second, untested request shape at the same host to avoid one unused JSON
+ * file would be the worse trade.
+ *
+ * `filePath` comes from the app's own file dialog in main, never from the
+ * renderer — the same rule as the launch upload above.
+ */
+export async function uploadProfileImage(filePath: string): Promise<{ imageUrl: string } | { error: string }> {
+  const r = await uploadLaunchMetadata(filePath, {
+    name: 'profile picture',
+    symbol: '',
+    description: '',
+    twitter: '',
+    telegram: '',
+    website: '',
+  });
+  if ('error' in r) return r;
+  return { imageUrl: r.imageUrl };
+}

@@ -1,4 +1,4 @@
-import type { WalletWithdrawResult, AppSettings, BacktestTrade, EngineEvent, EngineSnapshot, ExecutionSnapshot, HistorySummary, IpcResult, LiveState, WalletHolding, WalletInfo, WalletGroupView, WalletSummary, WatchedWallet } from '@shared/types';
+import type { WalletWithdrawResult, AppSettings, BacktestTrade, EngineEvent, EngineSnapshot, ExecutionSnapshot, HistorySummary, IpcResult, LiveState, WalletHolding, WalletInfo, WalletSummary, WatchedWallet } from '@shared/types';
 import type {
   CandleInterval,
   CandleSeries,
@@ -39,7 +39,17 @@ import type { LaunchDraft, LaunchOutcome } from '@shared/launch';
 import type { UpdateStatus } from '@shared/version';
 import type { SwapDraft, SwapQuote } from '@shared/swap';
 import type { BridgeDraft, BridgeQuote, InFlight } from '@shared/bridge';
-import type { ScoutChain, ScoutRow, ScoutScanHours, ScoutScanStatus, ScoutSort, ScoutWallet, ScoutWindow } from '@shared/walletScout';
+import type { ScoutChain, ScoutRow, ScoutScanHours, ScoutScanStatus, ScoutSort, ScoutWallet, ScoutWindow, WalletReadStatus } from '@shared/walletScout';
+import type { McpAccess, McpBudget, McpSettings } from '@shared/mcp';
+
+/** What the AI-connection panel reads in one call. */
+interface McpPanel {
+  settings: McpSettings;
+  server: { running: boolean; port: number | null; sessions: number; lastClient: string | null; lastCallAt: number | null; calls: number; refusals: number; message: string };
+  /** The `claude mcp add …` line, or empty when there is no token yet. */
+  command: string;
+  json: string;
+}
 import type {
   EvmChainKind,
   EvmFill,
@@ -90,6 +100,10 @@ declare global {
         openRecordingsFolder: () => Promise<IpcResult>;
         openLogs: () => Promise<IpcResult>;
         logPaths: () => Promise<IpcResult<{ logs: string | null; crashes: string | null }>>;
+        /** Size and first lines of the support bundle, without writing it. */
+        logsPreview: () => Promise<IpcResult<{ bytes: number; truncatedBytes: number; head: string }>>;
+        logsExport: (note?: string) => Promise<IpcResult<{ path: string; bytes: number; truncatedBytes: number }>>;
+        logsCopy: (note?: string) => Promise<IpcResult<{ bytes: number }>>;
         integrity: () => Promise<IpcResult<{ seized: boolean; message: string }>>;
       };
       settings: {
@@ -170,11 +184,6 @@ declare global {
         backup: () => Promise<IpcResult>;
         exportAll: () => Promise<IpcResult<{ count: number }>>;
         remove: (id?: string) => Promise<IpcResult<WalletInfo>>;
-        groups: () => Promise<IpcResult<WalletGroupView[]>>;
-        createGroup: (name: string) => Promise<IpcResult<WalletGroupView[]>>;
-        renameGroup: (id: string, name: string) => Promise<IpcResult<WalletGroupView[]>>;
-        deleteGroup: (id: string) => Promise<IpcResult<WalletGroupView[]>>;
-        setGroupMembers: (id: string, walletIds: string[]) => Promise<IpcResult<WalletGroupView[]>>;
       };
       live: {
         state: () => Promise<IpcResult<LiveState>>;
@@ -189,19 +198,131 @@ declare global {
       };
       lab: {
         /** Generate `count` wallets at once (labels "<prefix> 1", "<prefix> 2", …). Returns the full wallet list. */
-        /** Creates `count` wallets; with `groupId` they join that group at once. Returns the full wallet list. */
-        generateMany: (count: number, labelPrefix?: string, groupId?: string) => Promise<IpcResult<WalletSummary[]>>;
+        /** Creates `count` wallets (the store stops at ten in all). Returns the full wallet list. */
+        generateMany: (count: number, labelPrefix?: string) => Promise<IpcResult<WalletSummary[]>>;
         /** One transaction from the ACTIVE wallet to the listed own wallets. */
         fund: (targets: Array<{ walletId: string; sol: number }>, fromWalletId?: string) => Promise<IpcResult<{ signature: string; sentSol: number; count: number }>>;
         /** Each listed wallet sends its spare SOL back to the ACTIVE wallet (one tx per wallet). */
         collect: (walletIds: string[], toWalletId?: string) => Promise<IpcResult<Array<{ walletId: string; ok: boolean; message: string; sol: number; signature: string | null }>>>;
-        /** Warm the whole group, or only `walletIds` (a subset of its members). */
+      };
+      multiwallet: {
+        /** Record or withdraw the acknowledgement. */
+        accept: (accept: boolean) => Promise<IpcResult<AppSettings>>;
+      };
+      calloutRewards: {
+        list: () => Promise<
+          IpcResult<{
+            accounts: import('@shared/pumpRewards').PumpRewards[];
+            wallets: Array<{ walletId: string; address: string; label: string; usdcRaw: string | null; homeAddress: string | null }>;
+          }>
+        >;
+        acceptTerms: (walletId: string) => Promise<IpcResult<void>>;
+        swapUsdc: (walletId: string) => Promise<IpcResult<unknown>>;
+        withdrawUsdc: (walletId: string, amountUsdc: number | 'max') => Promise<IpcResult<unknown>>;
+      };
+      pump: {
+        /** Who is signed in, and whether sign-in is possible in this build. */
+        status: () => Promise<IpcResult<import('@shared/pumpAuth').PumpAuthStatus>>;
+        /** Sign in with one of this app's wallets. */
+        signIn: (walletId: string) => Promise<IpcResult<import('@shared/pumpAuth').PumpAuthStatus>>;
+        /** One wallet's account, or every account when none is named. */
+        signOut: (walletId?: string) => Promise<IpcResult<import('@shared/pumpAuth').PumpAuthStatus>>;
+        /** Follow/unfollow a pump user or like/unlike a callout, as this wallet's account. */
+        social: (walletId: string, action: import('@shared/pumpSocial').SocialAction, target: string) => Promise<IpcResult>;
+        /**
+         * Whether each wallet's address already has a pump account, keyed by
+         * wallet id. `unknown` is never "no account".
+         */
+        lookup: (walletIds: string[]) => Promise<IpcResult<Record<string, import('@shared/pumpProfile').PumpAccountLookup>>>;
+        /**
+         * Import a key and sign in with it. For a wallet that already has a
+         * pump account, that IS logging in to it. `ok` with signedIn false
+         * means the wallet landed but the sign-in did not.
+         */
+        importAccount: (
+          secret: string,
+          label?: string,
+        ) => Promise<
+          IpcResult<{
+            walletId: string;
+            publicKey: string;
+            signedIn: boolean;
+            lookup: import('@shared/pumpProfile').PumpAccountLookup;
+            status: import('@shared/pumpAuth').PumpAuthStatus;
+          }>
+        >;
+        /**
+         * Post ONE pump.fun callout now, as this wallet, with these words.
+         *
+         * Real and public. The watermark is added in main, so what comes back
+         * in `thesis` is what actually went out.
+         */
+        callout: (
+          walletId: string,
+          mint: string,
+          text: string,
+        ) => Promise<IpcResult<import('@shared/calloutAuto').CalloutOutcome>>;
+        /** A TEST post to the saved Auto-callout Discord webhook. */
+        testCalloutWebhook: (mint?: string) => Promise<IpcResult<void>>;
+        /**
+         * Reply to the callout this wallet already made on a coin. A callout is
+         * one per coin per account, so this is how one is followed up.
+         */
+        calloutReply: (
+          walletId: string,
+          mint: string,
+          text: string,
+        ) => Promise<IpcResult<import('@shared/calloutAuto').CalloutOutcome>>;
+        /** Sign several wallets in, one after another. Reports per wallet. */
+        signInMany: (walletIds: string[]) => Promise<
+          IpcResult<{
+            results: Array<{ walletId: string; ok: boolean; message: string }>;
+            status: import('@shared/pumpAuth').PumpAuthStatus;
+          }>
+        >;
+        /** Usernames from a list, one per account, in order. */
+        setUsernames: (pairs: Array<{ walletId: string; username: string }>) => Promise<
+          IpcResult<{
+            results: Array<{ walletId: string; ok: boolean; message: string }>;
+            status: import('@shared/pumpAuth').PumpAuthStatus;
+          }>
+        >;
+        /**
+         * What pump says about this account as a caller. Fails with the reason
+         * rather than returning zeroes when the answer is unreadable.
+         */
+        callerStats: (walletId: string) => Promise<IpcResult<import('@shared/pumpStats').CallerStats>>;
+        /**
+         * The profile pump holds for this wallet's account. Fails rather than
+         * returning blanks when it could not be read — an empty profile and an
+         * unread one are different things.
+         */
+        /** `cachedAt` is set when pump did not answer and this is what the app last saw. */
+        profile: (walletId: string) => Promise<IpcResult<import('@shared/pumpProfile').PumpProfileDraft & { cachedAt: number | null }>>;
+        /** Write the changed parts of it. Public, under that account's name. */
+        setProfile: (
+          walletId: string,
+          draft: Partial<import('@shared/pumpProfile').PumpProfileDraft>,
+        ) => Promise<IpcResult<import('@shared/pumpProfile').ProfileOutcome & { status: import('@shared/pumpAuth').PumpAuthStatus }>>;
+        /** Pin a picked image; the result's url is what profileImage points at. */
+        pinImage: (handle: string) => Promise<IpcResult<{ imageUrl: string }>>;
       };
       card: {
-        /** Save an encoded animated card through a save dialog. */
-        saveFile: (name: string, bytes: Uint8Array) => Promise<IpcResult>;
-        /** Put the encoded animated card on the clipboard AS A FILE. */
-        copyFile: (name: string, bytes: Uint8Array) => Promise<IpcResult<{ path: string; clipboard: boolean }>>;
+        /** Save an encoded card through a save dialog. `kind` is the real
+         *  container of the bytes, so the extension cannot disagree. */
+        saveFile: (name: string, bytes: Uint8Array, kind?: 'gif' | 'mp4' | 'webm') => Promise<IpcResult>;
+        /** Put the encoded card on the clipboard AS A FILE. */
+        copyFile: (
+          name: string,
+          bytes: Uint8Array,
+          kind?: 'gif' | 'mp4' | 'webm',
+        ) => Promise<IpcResult<{ path: string; clipboard: boolean }>>;
+        /** Remember a video background; replaces whatever was there. */
+        saveBackground: (bytes: Uint8Array, type: string) => Promise<IpcResult>;
+        /** The remembered video background, or null when there is none. */
+        loadBackground: () => Promise<IpcResult<{ bytes: Uint8Array; type: string } | null>>;
+        /** Forget it. */
+        clearBackground: () => Promise<IpcResult>;
       };
       ai: {
         analyze: (mint: string, force?: boolean) => Promise<IpcResult<AiAnalysis>>;
@@ -259,6 +380,8 @@ declare global {
         remove: (id: string) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
         setEnabled: (id: string, enabled: boolean) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
         killSwitch: (on: boolean) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+        /** Pick a script file. Null data = cancelled. Nothing is saved. */
+        openFile: () => Promise<IpcResult<{ name: string; code: string } | null>>;
       };
       portfolio: {
         /** `stale: true` answers at once from the engine's last build (marked
@@ -297,6 +420,20 @@ declare global {
         detail: (chain: ScoutChain, address: string) => Promise<IpcResult<{ wallet: ScoutWallet | null; saved: boolean }>>;
         /** Forget every tracked wallet on a chain; saved ones survive. */
         clear: (chain: ScoutChain) => Promise<IpcResult<number>>;
+        /** Read a wallet's recent swaps from the chain into the record (Solana only); polled, cancellable. */
+        readWallet: (chain: ScoutChain, address: string) => Promise<IpcResult<WalletReadStatus>>;
+        readWalletStatus: (chain: ScoutChain, address: string) => Promise<IpcResult<WalletReadStatus>>;
+        readWalletCancel: (chain: ScoutChain, address: string) => Promise<IpcResult<WalletReadStatus>>;
+      };
+      /** The AI connection (MCP). `settings.token` is the bearer an AI client
+       *  sends; `command` and `json` are the ready-made ways to connect one. */
+      mcp: {
+        status: () => Promise<IpcResult<McpPanel>>;
+        setEnabled: (on: boolean) => Promise<IpcResult<McpPanel>>;
+        setAccess: (level: McpAccess) => Promise<IpcResult<McpPanel>>;
+        newToken: () => Promise<IpcResult<McpPanel>>;
+        setPort: (port: number) => Promise<IpcResult<McpPanel>>;
+        setBudget: (budget: McpBudget) => Promise<IpcResult<McpPanel>>;
       };
       bridge: {
         state: () => Promise<
@@ -335,7 +472,8 @@ declare global {
       };
       launch: {
         /** Open the app's own file dialog. The renderer never names a path. */
-        pickImage: () => Promise<IpcResult<{ handle: string; name: string; dataUrl: string } | null>>;
+        /** `purpose` only picks which constant dialog title is shown. */
+        pickImage: (purpose?: 'token' | 'profile') => Promise<IpcResult<{ handle: string; name: string; dataUrl: string } | null>>;
         upload: (
           handle: string,
           fields: { name: string; symbol: string; description: string; twitter: string; telegram: string; website: string },
@@ -345,6 +483,25 @@ declare global {
          *  rent — null means unknown, never zero. */
         fees: () => Promise<IpcResult<{ vault: string; balanceLamports: number | null; claimableLamports: number | null; failure: string | null }>>;
         claimFees: () => Promise<IpcResult<{ ok: boolean; message: string; signature?: string; claimedLamports?: number }>>;
+        /** Market cap, holders and price for the coins you launched, plus the
+         *  creator vault. A number that could not be read is null, never 0. */
+        stats: (mints: string[]) => Promise<
+          IpcResult<{
+            coins: Array<{
+              mint: string;
+              name: string | null;
+              symbol: string | null;
+              priceUsd: number | null;
+              marketCapUsd: number | null;
+              liquidityUsd: number | null;
+              holders: number | null;
+            }>;
+            creatorWallet: string | null;
+            feesLamports: number | null;
+            claimableLamports: number | null;
+            feesFailure: string | null;
+          }>
+        >;
         preview: (draft: LaunchDraft) => Promise<IpcResult<LaunchOutcome>>;
         send: (draft: LaunchDraft) => Promise<IpcResult<LaunchOutcome>>;
       };

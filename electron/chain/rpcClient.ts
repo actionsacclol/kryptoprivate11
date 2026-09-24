@@ -211,9 +211,25 @@ function noteRateLimit(httpUrl: string, retryAfter: string | null, method?: stri
   const ra = retryAfter ? Number(retryAfter) : NaN;
   if (Number.isFinite(ra) && ra > 0) length = Math.min(PARK_MAX_MS, Math.max(length, ra * 1000));
   const until = now + length;
-  if (until > (parkedUntil.get(key) ?? 0)) parkedUntil.set(key, until);
+  if (until > (parkedUntil.get(key) ?? 0)) {
+    parkedUntil.set(key, until);
+    // ONLY when nothing else will say it (2026-09-21). `noteFallback` already
+    // reports a call rescued by the other endpoint, and saying it twice is
+    // what `test/rpcratelimit.test.mjs` calls "the user is told once". This
+    // covers the case it cannot: a park with NO fallback configured, where
+    // the call simply waits and the user sees a spinner with nothing in the
+    // log behind it. Throttled per key, so a storm is not a storm of logging.
+    const rescued = Boolean(fallbackHttpUrl?.());
+    if (!rescued && now - (lastParkNoteAt.get(key) ?? 0) > 60_000) {
+      lastParkNoteAt.set(key, now);
+      fallbackLog?.(`RPC ${key} is rate limited — paused ${Math.round(length / 1000)}s${count > 1 ? `, strike ${count}` : ''}`);
+    }
+  }
   return length;
 }
+
+/** Throttle for the line above: a storm must not become a storm of logging. */
+const lastParkNoteAt = new Map<string, number>();
 
 /**
  * Milliseconds until this endpoint stops being rate limited, or 0. With a

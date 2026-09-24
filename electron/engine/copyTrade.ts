@@ -34,7 +34,13 @@ import {
   type CopyTrade,
   type CopyWatchStatus,
   type LeaderRoundTrip,
-  type LeaderStats, chainOf, isDustRemainder, rawOf, uiTokens } from '@shared/copytrade';
+  type LeaderStats,
+  type CopyTiming,
+  type CopyLatency,
+  copyLatency,
+  describeCopyTiming,
+  chainOf, isBlocked, isDustRemainder, rawOf, uiTokens } from '@shared/copytrade';
+import type { DeliveryTiming } from './walletWatcher';
 import { FEE_BPS } from '@shared/fees';
 import * as recorder from './recorder';
 
@@ -68,6 +74,13 @@ export interface CopyExecResult {
   filledRaw?: string;
   /** Decimals for `filledRaw`. */
   tokenDecimals?: number;
+  /**
+   * The signer's own breakdown of the order (2026-09-21), so a copy's timing
+   * line can say how much of the send was building and how much was waiting
+   * for the chain. A host that does not measure itself leaves it out, and
+   * those fields read as unknown.
+   */
+  timing?: { build?: number; confirm?: number };
 }
 
 /** Per-execution overrides. A host free to ignore them still type-checks. */
@@ -140,8 +153,10 @@ export interface CopyHost {
   maxLiveSol?(chain?: ChainKind): number | null;
   /** Current spot price in SOL for a mint, if known. */
   priceSol(mint: string, chain?: ChainKind): number | null;
-  /** Token facts used by the filters. */
-  tokenFacts(mint: string, chain?: ChainKind): Promise<{ liquidityUsd: number | null; marketCapUsd: number | null; kryptScore: number | null; isPumpfun: boolean }>;
+  /** Token facts used by the filters. `createdAt` (ms) and `creator` feed
+   *  the 2026-09-21 age and creator filters; a host that cannot say leaves
+   *  them absent, which those filters read as unknown and refuse on. */
+  tokenFacts(mint: string, chain?: ChainKind): Promise<{ liquidityUsd: number | null; marketCapUsd: number | null; kryptScore: number | null; isPumpfun: boolean; createdAt?: number | null; creator?: string | null }>;
   log(level: 'info' | 'warn' | 'error', line: string): void;
   toast(level: 'info' | 'success' | 'warn' | 'error', message: string): void;
   changed(): void;
@@ -511,7 +526,37 @@ export function snapshot(): CopySnapshot {
     leaders: leaderStats,
     loadFailure,
     crowd,
+    latency: copyLatency(recentTimings()),
   };
+}
+
+// ── How long a copy takes (2026-09-21) ────────────────────────────────
+//
+// A tester timing a leader's wallet against their copy wallet saw ~5–6 s and
+// could not tell, from outside, how much of that was hearing about the trade
+// and how much was placing ours. Each copy now logs its own breakdown; this
+// is the same data as a median, so the question has an answer on the page
+// rather than in an afternoon of reading log lines.
+//
+// Held in memory only. It is a measurement of THIS session's conditions —
+// this endpoint, this transport, this machine — and carrying it across a
+// restart would average away the very thing it is measuring.
+const LATENCY_KEEP = 50;
+const timings: CopyTiming[] = [];
+
+function noteTiming(t: CopyTiming): void {
+  timings.unshift(t);
+  if (timings.length > LATENCY_KEEP) timings.length = LATENCY_KEEP;
+}
+
+/** Newest first, for the summary. */
+function recentTimings(): CopyTiming[] {
+  return timings;
+}
+
+/** The median breakdown over this session's copies. */
+export function latency(): CopyLatency {
+  return copyLatency(recentTimings());
 }
 
 // ── The leader's own record ───────────────────────────────────────────
@@ -822,6 +867,14 @@ export interface WalletTrade {
    * onto the exit slice as its reason. A leader's real trade never has one.
    */
   note?: string;
+  /**
+   * What the DELIVERY half cost (2026-09-21), from the wallet watcher: which
+   * subscription carried it, how long after their fill we heard, what the
+   * read-back cost. The copier adds its own stages onto this. Absent on a
+   * rail that does not time itself, and on a synthetic exit, which has no
+   * delivery to measure.
+   */
+  delivery?: DeliveryTiming;
 }
 
 /**
@@ -1004,6 +1057,21 @@ export function openMints(chain?: ChainKind): string[] {
  * and it must not be blocked by the daily limits that gate opening one — the
  * same rule as orders, for the same reason.
  */
+/**
+ * Time one stage. Kept as a helper so every stage is measured the same way
+ * and a stage that threw is still measured — an error that took two seconds
+ * is exactly the kind of thing this is here to find.
+ */
+async function timed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }> {
+  const start = Date.now();
+  try {
+    return { value: await fn(), ms: Date.now() - start };
+  } catch (e) {
+    (e as { _ms?: number })._ms = Date.now() - start;
+    throw e;
+  }
+}
+
 export function onWalletTrade(t: WalletTrade): void {
   const h = host;
   if (!h) return;
@@ -1932,6 +2000,15 @@ async function closeOpen(c: CopyConfig, t: WalletTrade): Promise<void> {
     return;
   }
   const theirs = fraction;
+  // 2026-09-21: a trim under the config's threshold is not mirrored, and the
+  // skip is recorded so the scorecard shows what the rule kept you out of.
+  // Synthetic exits (an own take-profit, a reverse buy-back) carry 1 and pass.
+  const minSell = c.minLeaderSellPct ?? null;
+  if (minSell !== null && theirs * 100 < minSell) {
+    const share = Math.max(1, Math.round(theirs * 100));
+    record(exitSkipped(rows[0], t, share, `not mirrored — they ${oppositeVerb(c)} ${share}% of their bag, under your ${minSell}% threshold`));
+    return;
+  }
   const pct = Math.max(1, Math.min(100, Math.round(theirs * 100)));
   const exit = t.priceSol > 0 ? t.priceSol : (h.priceSol(t.mint, chainOf(c)) ?? null);
 
@@ -2046,6 +2123,14 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade, extra: Partial<CopyTra
     record({ ...base, reason: `not executed — they bought this ${ageText(stale)} ago, too old to copy` });
     return;
   }
+  // The 2026-09-21 refusals that need no token read — their size, a blocked
+  // mint, how many times this config has already entered this token — come
+  // before a slot is reserved or a fact is fetched.
+  const early = prefilter(c, t);
+  if (early) {
+    record({ ...base, reason: early });
+    return;
+  }
   const limit = limitHit(c);
   if (limit) {
     record({ ...base, reason: limit });
@@ -2070,6 +2155,32 @@ async function evaluateBuy(c: CopyConfig, t: WalletTrade, extra: Partial<CopyTra
 }
 
 /**
+ * Refusals that need nothing but the trade and the book (2026-09-21): the
+ * leader's size band, the mint blocklist, and the per-token entry cap. Each
+ * is a competitor-standard control this app lacked; each is recorded as a
+ * skip, like every other filter, so the scorecard shows what it kept out.
+ *
+ * The entry cap counts rows that ENTERED (open or closed, never a skip and
+ * never an exit slice) plus a buy still in flight for this mint, so a leader
+ * firing two buys in one slot cannot slip past "buy once".
+ */
+function prefilter(c: CopyConfig, t: WalletTrade): string | null {
+  const minL = c.minLeaderSol ?? null;
+  const maxL = c.maxLeaderSol ?? null;
+  if (minL !== null && t.sol < minL) return `their trade of ${t.sol.toFixed(3)} is under your ${minL} minimum`;
+  if (maxL !== null && t.sol > maxL) return `their trade of ${t.sol.toFixed(3)} is over your ${maxL} maximum`;
+  if (isBlocked(c.blockedMints, t.mint)) return 'token is on your blocklist';
+  const cap = c.maxBuysPerToken ?? null;
+  if (cap !== null) {
+    const entered =
+      trades.filter((r) => r.configId === c.id && r.mint === t.mint && r.kind !== 'exit' && r.state !== 'skipped').length +
+      (buysInFlight.has(flightKey(c.id, t.mint)) ? 1 : 0);
+    if (entered >= cap) return cap === 1 ? 'already bought this token once — buy once is on' : `already bought this token ${cap} times — your cap`;
+  }
+  return null;
+}
+
+/**
  * A filter is a REFUSAL, so it fails closed: "I could not read the
  * liquidity" is not "the liquidity is fine" (copy-4).
  *
@@ -2082,6 +2193,43 @@ function unknownReason(label: string): string {
   return `${label} unknown — the filter you set could not be checked`;
 }
 
+/**
+ * Does anything this config is set to check actually READ the token facts?
+ *
+ * `tokenFacts` is a network round trip whenever the mint is not already
+ * cached, and the mint a leader has just bought never is. Until 2026-09-21 it
+ * was paid on every copy whether or not a single filter looked at the answer
+ * — a config with all its filters cleared spent a provider round trip, in the
+ * middle of the copy path, to fill a variable nothing read.
+ *
+ * Every filter below fails CLOSED on an unknown fact, so this must list all
+ * of them: a filter left off this list would be checked against an empty
+ * facts object and refuse every copy. The test holds the two in step.
+ */
+function needsFacts(c: CopyConfig): boolean {
+  return (
+    c.onlyPumpfun ||
+    c.minLiquidityUsd !== null ||
+    c.maxMarketCapUsd !== null ||
+    c.minKryptScore !== null ||
+    (c.minMarketCapUsd ?? null) !== null ||
+    (c.minTokenAgeSec ?? null) !== null ||
+    (c.maxTokenAgeSec ?? null) !== null ||
+    !!(c.blockedCreators && c.blockedCreators.length)
+  );
+}
+
+/** What an unasked lookup answers with: every fact unknown. Safe only because
+ *  `needsFacts` is false, so nothing reads it. */
+const NO_FACTS = {
+  liquidityUsd: null,
+  marketCapUsd: null,
+  kryptScore: null,
+  isPumpfun: false,
+  createdAt: null,
+  creator: null,
+} as const;
+
 /** The leader's leg that cancels our entry: their sell for a copy, their
  *  buy-back for a reverse. */
 const oppositeVerb = (c: CopyConfig): string => (directionOf(c) === 'reverse' ? 'bought back' : 'sold');
@@ -2089,15 +2237,29 @@ const oppositeVerb = (c: CopyConfig): string => (directionOf(c) === 'reverse' ? 
 const entryNoun = (c: CopyConfig): string => (directionOf(c) === 'fomo' ? 'FOMO entry' : directionOf(c));
 
 async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyHost): Promise<void> {
+  // Where the time goes (2026-09-21). Measured on every copy, live and paper,
+  // because a tester benchmarking the path needs the same numbers whether or
+  // not they are spending. The stages start here; the delivery half arrived
+  // on the trade.
+  const checksStart = Date.now();
   // Filters. A rejected copy is RECORDED as skipped with its reason — the
   // paper scorecard must show what the filters kept you out of, or it is
   // only measuring the trades you happened to like.
   let facts: Awaited<ReturnType<CopyHost['tokenFacts']>>;
-  try {
-    facts = await h.tokenFacts(t.mint, chainOf(c));
-  } catch {
-    record({ ...base, reason: 'could not read token' });
-    return;
+  // Null, not 0, when the lookup was never made: "did not happen" and "took
+  // no time" are different facts, and the timing line prints the difference.
+  let factsMs: number | null = null;
+  if (needsFacts(c)) {
+    try {
+      const r = await timed(() => h.tokenFacts(t.mint, chainOf(c)));
+      facts = r.value;
+      factsMs = r.ms;
+    } catch {
+      record({ ...base, reason: 'could not read token' });
+      return;
+    }
+  } else {
+    facts = { ...NO_FACTS };
   }
   if (!stillConfigured(c.id)) return;
   if (c.onlyPumpfun && !facts.isPumpfun) {
@@ -2134,11 +2296,92 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
       return;
     }
   }
+  // The 2026-09-21 filters that need the token's facts. Same rule as above:
+  // a fact the host cannot read refuses the copy and says so.
+  const minMc = c.minMarketCapUsd ?? null;
+  if (minMc !== null) {
+    if (facts.marketCapUsd === null) {
+      record({ ...base, reason: unknownReason('market cap') });
+      return;
+    }
+    if (facts.marketCapUsd < minMc) {
+      record({ ...base, reason: `market cap below $${minMc.toLocaleString()}` });
+      return;
+    }
+  }
+  const minAge = c.minTokenAgeSec ?? null;
+  const maxAge = c.maxTokenAgeSec ?? null;
+  if (minAge !== null || maxAge !== null) {
+    const created = facts.createdAt ?? null;
+    if (created === null) {
+      record({ ...base, reason: unknownReason('token age') });
+      return;
+    }
+    // Age at THEIR buy, not at ours: a recovered trade is judged as it was.
+    const ageMs = Math.max(0, (t.tradeAt ?? t.at) - created);
+    if (minAge !== null && ageMs < minAge * 1000) {
+      record({ ...base, reason: `token was ${ageText(ageMs)} old — under your ${minAge} s minimum` });
+      return;
+    }
+    if (maxAge !== null && ageMs > maxAge * 1000) {
+      record({ ...base, reason: `token was ${ageText(ageMs)} old — over your ${maxAge} s maximum` });
+      return;
+    }
+  }
+  if (c.blockedCreators && c.blockedCreators.length) {
+    const creator = facts.creator ?? null;
+    if (creator === null) {
+      record({ ...base, reason: unknownReason('creator') });
+      return;
+    }
+    if (isBlocked(c.blockedCreators, creator)) {
+      record({ ...base, reason: 'creator is on your blocklist' });
+      return;
+    }
+  }
+
+  // Everything from the first filter to the last, INCLUDING the token-facts
+  // round trip above — which is the one that costs, whenever the mint is not
+  // already cached, and for a fresh launch it never is.
+  const checkMs = Date.now() - checksStart;
 
   // The configured delay is REAL, including in paper. Copy trading is a
   // latency game and a paper fill at their price is a fiction.
+  const delayStart = Date.now();
   if (c.delayMs > 0) await new Promise((r) => setTimeout(r, c.delayMs));
+  const delayMs = Date.now() - delayStart;
   if (!stillConfigured(c.id)) return;
+
+  /** The breakdown so far, plus whatever the order adds. */
+  const timingFor = (sendMs: number | null, trade?: { build?: number; confirm?: number }): CopyTiming => {
+    const d = t.delivery;
+    // Measured from THEIR fill, which is the stopwatch a tester holds. Null
+    // when the trade carried no block time — the answer is then unknown, not
+    // zero, and the line simply does not claim a total.
+    const from = t.tradeAt ?? null;
+    return {
+      feed: d?.feed,
+      detectMs: d?.detectMs ?? null,
+      readMs: d?.readMs ?? null,
+      readTries: d?.readTries,
+      decodeMs: d?.decodeMs ?? null,
+      checkMs,
+      factsMs,
+      delayMs,
+      sendMs,
+      buildMs: trade?.build ?? null,
+      confirmMs: trade?.confirm ?? null,
+      totalMs: from === null ? null : Math.max(0, Date.now() - from),
+    };
+  };
+
+  /** One line per copy, so a benchmark is a log read and not a code change. */
+  const reportTiming = (timing: CopyTiming, mode: 'paper' | 'live'): void => {
+    noteTiming(timing);
+    const who = c.label || (isFomo(c) ? 'crowd' : c.wallet.slice(0, 6));
+    h.log('info', `copy timing ${mode} ${who} ${t.symbol || t.mint.slice(0, 6)}: ${describeCopyTiming(timing)}`);
+    recorder.record('copy_timing', { configId: c.id, mint: t.mint, mode, ...timing });
+  };
 
   const entry = h.priceSol(t.mint, chainOf(c)) ?? t.priceSol;
   if (!(entry > 0)) {
@@ -2158,8 +2401,13 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
       record({ ...base, reason: `not executed — their buy was ${ageText(oldPaper)} old by the time this copy could be sent` });
       return;
     }
-    record({ ...base, state: 'open', entryPriceSol: entry });
+    const paperTiming = timingFor(null);
+    record({ ...base, state: 'open', entryPriceSol: entry, timing: paperTiming });
     h.log('info', `paper-${directionOf(c)} ${c.label || (isFomo(c) ? 'crowd' : c.wallet.slice(0, 6))}: ${base.ourSol} SOL of ${t.symbol}`);
+    // Paper has no order, so the line stops at the checks — which is still
+    // the whole detection half, and the half a tester can benchmark without
+    // spending anything.
+    reportTiming(paperTiming, 'paper');
     recorder.record('copy_open', { configId: c.id, mint: t.mint, mode: 'paper', ourSol: base.ourSol, entry });
     return;
   }
@@ -2203,7 +2451,14 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
   // abandoned — only followed by an exit.
   const flight = buysInFlight.get(key);
   if (flight) flight.submitted = true;
+  const sendStart = Date.now();
   const res = await h.buy(t.mint, base.ourSol, { slippagePct: c.maxSlippagePct, walletId: c.walletId ?? undefined, chain: chainOf(c) });
+  const sendMs = Date.now() - sendStart;
+  const timing = timingFor(sendMs, res.timing);
+  // Reported whatever the outcome: a copy that FAILED slowly is the most
+  // interesting row in a latency benchmark, and one that only logged on
+  // success would hide exactly those.
+  reportTiming(timing, 'live');
   if (!stillConfigured(c.id)) return;
   if (res.ok || res.pending === true) {
     // What was actually spent and actually filled, when the host knows it —
@@ -2222,6 +2477,7 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
       entryPriceSol: fill,
       reason: unconfirmed ? 'broadcast — not confirmed yet' : null,
       signature: res.signature ?? null,
+      timing,
     };
     record(row);
     // How many tokens the buy actually delivered, once the chain says so.
@@ -2674,6 +2930,10 @@ export function markToMarket(mint: string, priceSol: number, chain?: ChainKind, 
     if (t.state !== 'open' || t.mint !== mint || t.entryPriceSol === null) continue;
     if (chain !== undefined && (t.chain ?? 'solana') !== chain) continue;
     t.exitPriceSol = priceSol;
+    // The high-water mark the trailing stop measures from (2026-09-21). An
+    // older row starts at its entry; a restart forgets nothing, since rows
+    // persist with the next record.
+    t.peakPriceSol = Math.max(t.peakPriceSol ?? t.entryPriceSol, priceSol);
   }
   for (const b of Object.values(leaders)) {
     const p = b.positions[mint];
@@ -2701,7 +2961,7 @@ function checkOwnExits(mint: string, priceSol: number, chain: ChainKind | undefi
     if (!c.enabled) continue;
     if (chain !== undefined && chainOf(c) !== chain) continue;
     const x = ownExitsOf(c);
-    if (x.takeProfitPct === null && x.stopLossPct === null && x.maxHoldMin === null) continue;
+    if (x.takeProfitPct === null && x.stopLossPct === null && x.maxHoldMin === null && x.trailingPct === null) continue;
     const key = flightKey(c.id, mint);
     if (ownExiting.has(key)) continue;
     const rows = trades.filter(
@@ -2715,6 +2975,13 @@ function checkOwnExits(mint: string, priceSol: number, chain: ChainKind | undefi
       if (x.takeProfitPct !== null && movePct >= x.takeProfitPct) why = `take-profit +${x.takeProfitPct}% (${tag})`;
       else if (x.stopLossPct !== null && movePct <= -x.stopLossPct) why = `stop-loss −${x.stopLossPct}% (${tag})`;
       else if (x.maxHoldMin !== null && now - r.at >= x.maxHoldMin * 60_000) why = `max hold ${x.maxHoldMin} min (${tag})`;
+      else if (x.trailingPct !== null) {
+        // Armed from entry: the peak is never below the entry, so a position
+        // that only ever fell stops at −X % like a stop-loss would.
+        const peak = Math.max(r.peakPriceSol ?? 0, r.entryPriceSol as number, priceSol);
+        const drop = (1 - priceSol / peak) * 100;
+        if (drop >= x.trailingPct) why = `trailing stop −${x.trailingPct}% from peak (${tag})`;
+      }
       if (why) break;
     }
     if (!why) continue;
@@ -2885,6 +3152,7 @@ function noteCrowdSell(c: CopyConfig, t: WalletTrade, f: ReturnType<typeof fomoR
 
 /** Test seam. */
 export function _reset(): void {
+  timings.length = 0;
   crowd.clear();
   crowdFired.clear();
   crowdSold.clear();

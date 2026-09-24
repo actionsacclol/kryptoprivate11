@@ -70,11 +70,12 @@ export const WORKSPACES: WorkspaceSpec[] = [
     // click — another trader's wallet, a rule you wrote, a schedule. Scripts
     // moved here from Main Engine for that reason: it is not part of the
     // scanner, it just happened to be built alongside it.
-    blurb: 'Everything that trades without you clicking: followed wallets, your own rules, and farming.',
+    blurb: 'Everything that trades without you clicking: followed wallets, your own rules, an AI assistant, and farming.',
     // Copy Simple first (2026-09-20): the three-question follow is the
     // page a newcomer should land on; Copy Trading beside it has every
     // control on the same configs.
-    routes: ['copysimple', 'wallets', 'scripts', 'farming'],
+    // AI connection (MCP) moved here from Settings on 2026-09-23.
+    routes: ['copysimple', 'wallets', 'scripts', 'autocallout', 'pumpaccounts', 'mcp', 'farming'],
     icon: 'automation',
     ready: true,
   },
@@ -100,7 +101,7 @@ export const WORKSPACES: WorkspaceSpec[] = [
   {
     id: 'wallets',
     title: 'Wallet Utilities',
-    blurb: 'Your keys, what reward pools paid them, and the wallet groups you fund and mirror.',
+    blurb: 'Your keys, what reward pools paid them, and the wallet list you fund and copy from.',
     routes: ['wallet', 'walletrobinhood', 'walletbnb', 'swap', 'bridge', 'creator', 'funder'],
     groups: [
       { label: 'Your wallets', routes: ['wallet', 'walletrobinhood', 'walletbnb'] },

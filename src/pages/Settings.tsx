@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react';
 import type { ProbeResult as RpcProbeResult } from '../../electron/engine/rpcProbe';
-import { Card, GhostButton, Page, PrimaryButton, Section, Switch, TextInput } from '../components/common';
+import { Card, Copyable, GhostButton, Page, PrimaryButton, Section, Switch, TextInput } from '../components/common';
 import { MarketDataSettings } from '../components/terminal/MarketDataSettings';
 import { HotkeySettings } from '../components/terminal/HotkeySettings';
 import { useAppState } from '../state/AppStateProvider';
 import { useToast } from '../state/ToastProvider';
+import type { RouteId } from '../components/Sidebar';
 import { BotsPanel } from '../components/terminal/BotsPanel';
 import { AiSettingsPanel } from '../components/terminal/AiSettingsPanel';
 import { CreditMeter } from '../components/terminal/CreditMeter';
 import { RpcKeyWarning } from '../components/terminal/RpcKeyWarning';
 import { EvmSettingsCard } from '../components/terminal/EvmSettingsCard';
-import { feePctLabel, holderFeePctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
+import { feePctLabel, holderFeePctLabel, referralPctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
 import { KRYPTO_HOLDER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
 import { LanguagePicker } from '../components/LanguagePicker';
 import { ThemePicker } from '../components/ThemePicker';
@@ -92,7 +93,7 @@ function RecorderStatsPanel({ enabled }: { enabled: boolean }) {
 }
 
 
-export function SettingsPage() {
+export function SettingsPage({ onNavigate }: { onNavigate?: (r: RouteId) => void } = {}) {
   const { t } = useLocale();
   const { settings, updateSettings, status } = useAppState();
   const toast = useToast();
@@ -104,6 +105,26 @@ export function SettingsPage() {
   const [fastHttp, setFastHttp] = useState(settings.rpc.fastHttpUrl ?? '');
   const [commitment, setCommitment] = useState(settings.rpc.commitment);
   const [dirInput, setDirInput] = useState(settings.recorderDir);
+  // Your own addresses, so naming yourself as your referrer is caught HERE,
+  // where you can still fix it. The signer refuses a self-referral outright
+  // (liveSigner: referrer !== owner) and says nothing, so without this the
+  // field looks accepted and quietly earns nobody anything, forever.
+  const [myAddresses, setMyAddresses] = useState<string[]>([]);
+  // The active signer, which is also what you hand out to be someone else's
+  // referrer — there is no account and no server, so an address is the whole
+  // identity a referral has.
+  const [myActive, setMyActive] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void window.krypt.wallet.list().then((r) => {
+      if (!alive || !r.ok || !r.data) return;
+      setMyAddresses(r.data.map((w) => w.publicKey));
+      setMyActive(r.data.find((w) => w.active)?.publicKey ?? null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const saveDir = (): void => {
     void updateSettings({ recorderDir: dirInput.trim() });
@@ -414,7 +435,36 @@ export function SettingsPage() {
               <>This build has no fee address configured, so Krypt charges nothing on your trades.</>
             )}
           </p>
-          <label className="mt-3 block text-body text-krypt-muted">
+          {/* You as a REFERRER. Until 2026-09-21 the program ran one way only:
+              you could name who referred you, and nothing anywhere told you
+              how to be one or what you would earn. */}
+          {feesEnabled() && (
+            <div className="mt-4 rounded-lg border border-arc-gold/25 bg-arc-gold/5 p-3">
+              <div className="text-value font-semibold text-white">Refer someone else</div>
+              <p className="mt-1 text-body leading-relaxed text-krypt-muted">
+                Give them the address below. When they paste it into this same box, you earn{' '}
+                <span className="font-semibold text-arc-gold">{referralPctLabel()} of every trade they make</span>, paid
+                straight to your wallet in the same transaction as their trade. It comes out of Krypt&apos;s fee, so it
+                never costs them anything extra. There is no sign-up and no account — the address is the whole thing.
+                {' '}
+                {/* Their holding, not yours — this app cannot see it, so the rule
+                    is stated rather than evaluated. */}
+                If they hold ${KRYPTO_TOKEN.symbol} their fee is halved, and your share halves with it.
+              </p>
+              {myActive ? (
+                <div className="mt-2">
+                  <Copyable value={myActive} label="your referral address" />
+                </div>
+              ) : (
+                <p className="mt-2 text-body text-krypt-muted">Make a wallet first — it becomes your referral address.</p>
+              )}
+              <p className="mt-2 text-label text-krypt-muted/70">
+                On Robinhood Chain and BNB it is your EVM address instead, under EVM chains below.
+              </p>
+            </div>
+          )}
+
+          <label className="mt-4 block text-body text-krypt-muted">
             Referrer&apos;s SOL address — whoever sent you here is rewarded automatically as you trade, out of
             Krypt&apos;s share, never as an extra cost to you.
           </label>
@@ -427,10 +477,17 @@ export function SettingsPage() {
           />
           {(() => {
             const why = referralProblem(settings.referrer ?? '', {
-              ownAddresses: [],
+              ownAddresses: myAddresses,
               treasury: TREASURY_ADDRESS,
             });
-            return why ? <p className="mt-1.5 text-body text-rose-300">{why}</p> : null;
+            // The consequence, not just the complaint: an address the signer
+            // will not use is stored happily and pays nobody, which looks
+            // identical to a working referral from here.
+            return why ? (
+              <p className="mt-1.5 text-body text-rose-300">
+                {why} <span className="text-krypt-muted">Until it is fixed, nobody is credited on your trades.</span>
+              </p>
+            ) : null;
           })()}
         </Card>
       </Section>
@@ -455,6 +512,12 @@ export function SettingsPage() {
             onChange={(v) => void updateSettings({ watchOnBuy: v })}
             label="Watch what you buy"
             description="Pin a token to the Watchlist when you buy it by hand. Never unpins anything — selling leaves it there until you remove it."
+          />
+          <Switch
+            checked={settings.alerts.desktopNotifications}
+            onChange={(v) => void updateSettings({ alerts: { ...settings.alerts, desktopNotifications: v } })}
+            label="Desktop notifications"
+            description="Windows pop-ups for runner flags, price alerts, scripts and fills. Off stops only the pop-ups: runner flags, scripts and the in-app list keep working."
           />
           <Switch
             checked={settings.autoStartEngine}
@@ -536,10 +599,142 @@ export function SettingsPage() {
         </Card>
       </Section>
 
+      <Section
+        title="Logs"
+        description="If something goes wrong, this puts the app’s log and what it was doing into one file you can attach when you ask for help. Nothing is sent anywhere — the app has no telemetry, and this only writes a file where you choose."
+      >
+        <LogsPanel />
+      </Section>
+
+      {/* Moved to Automation → AI connection (2026-09-23). A pointer stays
+          here because this is where people who used it before will look. */}
+      <Section title="AI connection" description="Let an AI assistant, like Claude, read this app and — if you allow it — trade through it.">
+        <Card className="flex flex-wrap items-center gap-3">
+          <p className="flex-1 text-body text-krypt-muted">
+            This has moved to its own page: <span className="text-white">Automation → AI connection</span>.
+          </p>
+          {onNavigate && (
+            <GhostButton onClick={() => onNavigate('mcp')} className="!py-1.5 !px-2.5 text-body">
+              Open it
+            </GhostButton>
+          )}
+        </Card>
+      </Section>
+
       <Section title={t('settings.creatorBlocklist')} description="Import known scam / drainer / sniper-ring addresses (one per line, or JSON array). Imported entries are hard-reject risk flags.">
         <BlocklistImporter />
       </Section>
     </Page>
+  );
+}
+
+/**
+ * Logs, and the one button that makes them sendable.
+ *
+ * The app already wrote a good log; what it had no answer for was "how do I
+ * give it to you". The old answer was a path and an instruction to find
+ * app.log yourself, which asks a user to know which of two files matters and
+ * what is inside them. This builds one file and says what is in it BEFORE it
+ * is written — the size is shown up front, because a 6 MB attachment is a
+ * different decision from a 40 KB one.
+ */
+function LogsPanel() {
+  const toast = useToast();
+  const [paths, setPaths] = useState<{ logs: string | null; crashes: string | null } | null>(null);
+  const [size, setSize] = useState<{ bytes: number; truncatedBytes: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  // The user's own description, printed first in the file (2026-09-23). Kept
+  // only in this panel until a button is pressed.
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    void window.krypt.app.logPaths().then((r) => {
+      if (r.ok && r.data) setPaths(r.data);
+    });
+    // Built once so the button can say how big it will be. It is a read of
+    // files the app already owns, so it costs nothing the user pays for.
+    void window.krypt.app.logsPreview().then((r) => {
+      if (r.ok && r.data) setSize({ bytes: r.data.bytes, truncatedBytes: r.data.truncatedBytes });
+    });
+  }, []);
+
+  const run = async (fn: () => Promise<{ ok: boolean; message: string }>): Promise<void> => {
+    setBusy(true);
+    try {
+      const r = await fn();
+      if (r.ok) toast.success(r.message);
+      else if (r.message !== 'Save cancelled') toast.error(r.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const kb = (n: number): string => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`);
+
+  return (
+    <Card className="space-y-3">
+      <label className="block space-y-1">
+        <span className="text-label text-krypt-muted">
+          What went wrong? <span className="text-krypt-muted/60">· optional, goes at the top of the file</span>
+        </span>
+        <textarea
+          value={note}
+          onChange={(e) => setNote(e.target.value.slice(0, 4000))}
+          rows={3}
+          placeholder="What you did, what you expected, what happened instead — and roughly what time."
+          className="w-full resize-y rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-body text-white placeholder:text-krypt-muted/50 outline-none focus:border-krypt-purple/60"
+        />
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <PrimaryButton onClick={() => void run(() => window.krypt.app.logsExport(note))} disabled={busy} className="!py-2.5 !px-4 text-xs">
+          Save logs to a file{size ? ` (${kb(size.bytes)})` : ''}
+        </PrimaryButton>
+        <GhostButton onClick={() => void run(() => window.krypt.app.logsCopy(note))} disabled={busy}>
+          Copy to clipboard
+        </GhostButton>
+        <GhostButton onClick={() => void window.krypt.app.openLogs()} disabled={busy}>
+          Open the logs folder
+        </GhostButton>
+      </div>
+
+      <div className="space-y-1 text-label leading-relaxed text-krypt-muted">
+        <p>
+          <span className="text-white/80">Where to send it:</span> attach the file in our{' '}
+          <button
+            onClick={() => void window.krypt.app.openExternal('https://discord.gg/muzFKR657F')}
+            className="text-krypt-purple underline underline-offset-2 hover:text-white"
+          >
+            Discord
+          </button>
+          . The newest warnings and errors are summed up near the top, so it can be read quickly.
+        </p>
+        <p>
+          <span className="text-white/80">What goes in:</span> the app’s log, your settings with every key and token removed, which
+          features were switched on, how your data providers are doing, and a list of your files by name and size.
+        </p>
+        <p>
+          <span className="text-white/80">What does not:</span> your private key, your seed, any API key, your balances, your holdings
+          and your trade history.
+        </p>
+        <p>
+          The log does name coins you looked at and trades you made — the same things the app shows on screen. Open the file and read it
+          before you send it if that matters to you.
+        </p>
+        {size && size.truncatedBytes > 0 && (
+          <p className="text-amber-300">
+            The log is longer than one file can hold, so the oldest {kb(size.truncatedBytes)} is cut and the newest part kept — which is
+            the part that explains what just happened.
+          </p>
+        )}
+      </div>
+
+      {paths?.logs && (
+        <p className="break-all font-mono text-nano text-krypt-muted/70">
+          {paths.logs}
+          {paths.crashes ? ` · crashes: ${paths.crashes}` : ''}
+        </p>
+      )}
+    </Card>
   );
 }
 

@@ -26,7 +26,7 @@ import {
   encodePumpSwapData,
   pickRotating,
   canonicalPoolFor,
-} from './.pumpswap.mjs';
+} from './.pumpswapbuilder.mjs';
 import {
   ataFor,
   pumpSwapGlobalConfigFor,

@@ -185,4 +185,60 @@ console.log(`feeflow: ${passed}/${passed} tests passed`);
   const fee = splitFee(2_000_000_000, false);
   assert.equal(fee.totalLamports, 10_000_000);
   console.log('ok  relayer sells are billed on estimated proceeds; unbilled only without a price');
+
+  // ── a referrer who is not paid must be TOLD, not silently skipped ──
+  //
+  // There are exactly two ways the transfer disappears after the split has
+  // already allotted it, and until 2026-09-21 both were silent: the recipient
+  // sits below rent-exemption (paying it would revert the trade), or the
+  // transaction is at the 1232-byte limit and the size fit drops the least
+  // important transfer, which is deliberately the referrer. Onboarding tells
+  // a referrer they earn on every trade, so the cases where they do not are
+  // the ones that have to speak.
+  assert.match(src, /referrer not paid \(their wallet is below rent-exemption/, 'a referrer dropped for rent-exemption is reported, not just omitted');
+  assert.match(src, /!safe\.some\(\(t\) => t\.to === referrer\)/, 'and the check that finds that case is the recipient list itself');
+  assert.match(src, /fit\.dropped\.filter/, 'the size fit is asked what it dropped');
+  assert.match(src, /dropped \$\{names\.join\('\+'\)\} \(transaction at the/, 'and a fee transfer lost to the size limit is named in the result');
+  // The note has to OUTLIVE the success summary, which reassigns feeNote from
+  // scratch — writing an unpaid-referral note into feeNote before that line
+  // threw it away, which is how the first version of this fix failed.
+  assert.match(src, /let referralNote = ''/, 'an unpaid referral is noted separately from feeNote');
+  assert.match(src, /feeNote \+= referralNote;/, 'and appended after the summary that rewrites feeNote');
+  assert.ok(
+    src.indexOf("feeNote = `, fee ") < src.indexOf('feeNote += referralNote;'),
+    'the append really is after the line that reassigns feeNote, or the note is lost again',
+  );
+  // And the ordering that decides WHO gets dropped: the referrer goes after
+  // the treasury and after the tip that makes the trade land at all.
+  assert.match(src, /const PRIORITY = \{ treasury: 0, jito: 1, referrer: 2, helius: 3 \}/, 'the drop order is explicit and puts the referrer after the treasury');
+  console.log('ok  a referrer who cannot be paid is reported in both cases, and the drop order is pinned');
+
+  // ── a referrer who is REFUSED outright must be told too ──
+  //
+  // Three settings mistakes make the signer ignore a named referrer: it is
+  // not an address, it is the treasury, or it is the wallet doing the
+  // trading. All three used to pass in silence with the whole fee going to
+  // the treasury, which looks identical to a working referral.
+  assert.match(src, /if \(referrer && !hasReferrer\)/, 'a named referrer the signer refuses is noticed');
+  assert.match(src, /no referrer credited/, 'and the refusal is reported, not swallowed');
+  assert.match(src, /you cannot refer yourself/, 'self-referral is named as such');
+
+  // ── the swap path attaches a fee too, and needed the same two guards ──
+  //
+  // swap.ts builds its own transfers. Until 2026-09-21 it never called
+  // rentSafeTransfers, so a referral cut to a brand-new referrer wallet
+  // could revert the SWAP with InsufficientFundsForRent — a fee failing a
+  // trade is the one outcome this whole layer exists to prevent.
+  const swap = fs.readFileSync(new URL('../electron/engine/swap.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(swap, /rentSafeTransfers/, 'the swap path runs its fee transfers through the rent guard');
+  // Compared on the CALL sites, not the first mention: both names appear in
+  // the import block at the top, where the order means nothing.
+  assert.ok(
+    swap.indexOf('await rentSafeTransfers(') < swap.indexOf('await injectTransfersFit('),
+    'and it runs rent BEFORE the size fit, so a reverting transfer never reaches it',
+  );
+  assert.match(swap, /referrer ignored/, 'the swap path reports a referrer it refuses');
+  assert.match(swap, /below rent-exemption, paying it would revert the swap/, 'and one it cannot pay');
+  assert.match(swap, /fit\.dropped\.length/, 'and one lost to the size limit');
+  console.log('ok  a refused referrer is reported, and the swap path has the rent guard too');
 }

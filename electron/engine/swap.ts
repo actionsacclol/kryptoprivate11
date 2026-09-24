@@ -47,7 +47,7 @@ import { logger } from '../system/logger';
 import { buildPairSwap, quoteSellLamports } from './jupiterRoute';
 import { injectTransfersFit, broadcastAndConfirm, type PlannedTransfer } from './broadcast';
 import { getAccountInfo, getBalance, getTokenBalanceRawForMint, simulateTransaction } from '../chain/rpcClient';
-import { anchorReason, tokenAmount } from './liveSigner';
+import { anchorReason, rentSafeTransfers, tokenAmount } from './liveSigner';
 import { ataFor, TOKEN_PROGRAM, TOKEN_2022_PROGRAM } from '../chain/addresses';
 import { KNOWN_TRADE_PROGRAMS, unknownTopLevelPrograms } from '../system/signPolicy';
 import * as evmRail from '../evm/rail';
@@ -426,14 +426,22 @@ export interface SwapResult {
  * swap against current state and reports what it would do, and nothing is
  * sent. The card uses it so a user sees a real answer before committing.
  */
-export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: boolean): Promise<SwapResult> {
+/**
+ * `walletId` (2026-09-23): swap from one of the user's OTHER wallets — how
+ * USDC callout rewards paid to an account's own wallet get turned into SOL
+ * without first making that wallet the main one. Solana only. It changes
+ * WHO signs and nothing else: the same policy, the same program gate, the
+ * same simulation, loss guard and receipt check, and the same fee.
+ */
+export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: boolean, walletId?: string): Promise<SwapResult> {
   if (isEvm(draft.chain)) {
+    if (walletId) return { ok: false, message: 'Swapping from another wallet is Solana only.' };
     const problems = swapProblems(draft, null);
     if (problems.length) return { ok: false, message: problems[0]! };
     return executeEvm(draft, draft.chain, simulateOnly);
   }
-  const owner = wallet.publicKey();
-  if (!owner) return { ok: false, message: 'No active wallet.' };
+  const owner = walletId ? wallet.publicKeyOf(walletId) : wallet.publicKey();
+  if (!owner) return { ok: false, message: walletId ? 'No such wallet.' : 'No active wallet.' };
   if (!simulateOnly && !deps.live) {
     return { ok: false, message: 'Switch to Live and arm the engine to swap — a swap in Paper is nothing. Nothing was sent.' };
   }
@@ -473,15 +481,41 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
   const hasReferrer = looksLikeSolAddress(referrer) && referrer !== treasury && referrer !== owner && !!treasury;
   const split = treasury && fee.lamports > 0 ? splitFee(fee.lamports, hasReferrer, holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens()))) : { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
 
+  // A referrer was named and refused (not an address, the treasury, or this
+  // very wallet). The whole fee goes to the treasury, which is correct, but
+  // saying nothing looks exactly like a working referral — see liveSigner.
+  if (referrer && !hasReferrer) {
+    logger.warn(
+      `swap: referrer ignored (${!looksLikeSolAddress(referrer) ? 'not a Solana address' : referrer === owner ? 'it is this wallet' : 'it is the fee address'})`,
+    );
+  }
+
   let tx = built.tx;
   const planned: PlannedTransfer[] = [];
   if (split.totalLamports > 0 && treasury) {
-    planned.push({ to: treasury, lamports: split.treasuryLamports, priority: 0 });
-    if (split.referrerLamports > 0) planned.push({ to: referrer, lamports: split.referrerLamports, priority: 1 });
+    // Rent FIRST, size second. A sub-rent transfer to an empty wallet reverts
+    // the whole transaction (InsufficientFundsForRent), so it has to be gone
+    // before the size fit ever sees it. This path skipped the guard entirely
+    // until 2026-09-21: a referral cut to a brand-new referrer wallet could
+    // revert a swap, which is the one thing a fee must never do.
+    const wanted = [{ to: treasury, lamports: split.treasuryLamports }];
+    if (split.referrerLamports > 0) wanted.push({ to: referrer, lamports: split.referrerLamports });
+    const safe = await rentSafeTransfers(wanted, deps.httpUrl);
+    if (safe.length === 0) logger.warn('swap: fee skipped — every recipient is below rent-exemption');
+    else if (split.referrerLamports > 0 && !safe.some((t) => t.to === referrer)) {
+      logger.warn('swap: referrer not paid — their wallet is below rent-exemption, paying it would revert the swap');
+    }
+    for (const t of safe) planned.push({ ...t, priority: t.to === treasury ? 0 : 1 });
+  }
+  if (planned.length > 0) {
     const fit = await injectTransfersFit(tx, owner, planned, deps.httpUrl);
     // A fee that will not fit is dropped, never allowed to fail the swap.
-    if (fit) tx = fit.tx;
-    else logger.warn('swap: platform fee could not be attached — swapping without it');
+    if (fit) {
+      tx = fit.tx;
+      if (fit.dropped.length) {
+        logger.warn(`swap: ${fit.dropped.length} fee transfer(s) dropped to fit the transaction — that share is not paid`);
+      }
+    } else logger.warn('swap: platform fee could not be attached — swapping without it');
   }
 
   const policy = {
@@ -528,7 +562,7 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
     };
   }
 
-  const signed = wallet.signVersionedTransaction(tx, policy);
+  const signed = walletId ? wallet.signVersionedTransactionForWallet(walletId, tx, policy) : wallet.signVersionedTransaction(tx, policy);
   if (!signed.ok || !signed.signed) return { ok: false, message: signed.message };
   const base64 = Buffer.from(signed.signed).toString('base64');
 

@@ -23,7 +23,13 @@ const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
   const app = read('../src/App.tsx');
   assert.ok(/route === 'copysimple' && <CopySimplePage onOpenAdvanced=\{\(\) => navigate\('wallets'\)\} onOpenScout=\{\(\) => navigate\('scout'\)\} \/>/.test(app), 'rendered with its two ways out');
   const ws = read('../src/workspaces.ts');
-  assert.ok(/routes: \['copysimple', 'wallets', 'scripts', 'farming'\]/.test(ws), 'Automation lists it first');
+  // FIRST in Automation, not the whole list: routes get added to that
+  // workspace over time (auto-callout, 2026-09-22) and pinning the exact
+  // array makes this fail for a reason it does not care about.
+  const automation = /routes: \[('copysimple'[^\]]*)\]/.exec(ws);
+  assert.ok(automation, 'the Automation route list is findable');
+  assert.ok(automation[1].startsWith("'copysimple'"), 'Automation lists it first');
+  assert.ok(automation[1].includes("'wallets'"), 'with Copy Trading beside it');
   ok('all four route touches are in place and Copy Simple is the Automation landing page');
 }
 

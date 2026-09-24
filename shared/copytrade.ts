@@ -135,6 +135,35 @@ export interface CopyConfig {
   /** Only copy tokens on these launchpads. Empty = any. */
   onlyPumpfun: boolean;
 
+  // ── Filters every competitor ships and this app lacked (2026-09-21) ──
+  // docs/copy-trade-competitors-2026-09-21.md. All optional; absent or null
+  // is OFF, so every config saved before this day behaves exactly as it did.
+  // Each one is a REFUSAL recorded on the scorecard, and a fact the engine
+  // cannot read fails CLOSED — the same rule as the three filters above.
+  /** Skip tokens under this market cap, USD. */
+  minMarketCapUsd?: number | null;
+  /** Their trade size band, in the chain's coin: a leader buy outside it is
+   *  not copied (a 0.01 SOL probe is not a conviction buy; a 50 SOL one is
+   *  a whale you cannot follow at your size). */
+  minLeaderSol?: number | null;
+  maxLeaderSol?: number | null;
+  /** Token age band at the time of their buy, seconds. */
+  minTokenAgeSec?: number | null;
+  maxTokenAgeSec?: number | null;
+  /** At most this many entries per token for this config; 1 = buy once.
+   *  Skipped rows do not count, exits never do. */
+  maxBuysPerToken?: number | null;
+  /** Never copy these mints / tokens by these creators. */
+  blockedMints?: string[] | null;
+  blockedCreators?: string[] | null;
+  /** A leader sell under this share of their bag is not mirrored, percent —
+   *  a 3 % trim is noise; a copier chasing every trim pays the fee each time. */
+  minLeaderSellPct?: number | null;
+  /** Trailing stop, percent below the highest mark since entry. Armed from
+   *  entry (a position that never rises stops at −X % like a stop-loss).
+   *  Off unless set, on every direction. */
+  exitTrailingPct?: number | null;
+
   /** Wait this long after their trade before copying, ms. */
   delayMs: number;
   maxSlippagePct: number;
@@ -172,6 +201,31 @@ export interface CopyConfig {
 
 /** Applied when a config does not carry `maxCopiesPerMinute`. */
 export const DEFAULT_COPIES_PER_MINUTE = 10;
+/** Blocked mints / creators per config. */
+export const MAX_BLOCKLIST = 100;
+
+/** A blocklist as the engine compares it: trimmed, empties dropped, deduped
+ *  (Solana addresses are case-sensitive, EVM ones are not — both spellings
+ *  are kept, and the engine tests both). Null when nothing is left. */
+export function cleanBlocklist(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const a = v.trim();
+    if (!a || a.length > 64 || out.includes(a)) continue;
+    out.push(a);
+    if (out.length >= MAX_BLOCKLIST) break;
+  }
+  return out.length ? out : null;
+}
+
+/** Is `address` on a blocklist — exact for Solana, case-insensitive for EVM. */
+export function isBlocked(list: string[] | null | undefined, address: string | null | undefined): boolean {
+  if (!list || !list.length || !address) return false;
+  const lower = address.toLowerCase();
+  return list.some((a) => a === address || a.toLowerCase() === lower);
+}
 
 export const directionOf = (c: { direction?: CopyDirection | null }): CopyDirection =>
   c.direction === 'reverse' ? 'reverse' : c.direction === 'fomo' ? 'fomo' : 'copy';
@@ -181,10 +235,12 @@ export const directionOf = (c: { direction?: CopyDirection | null }): CopyDirect
  * config's are off unless set (its leader's sells are its exits). Null =
  * off for that one exit.
  */
-export function ownExitsOf(c: Pick<CopyConfig, 'direction' | 'exitTakeProfitPct' | 'exitStopLossPct' | 'exitMaxHoldMin'>): {
+export function ownExitsOf(c: Pick<CopyConfig, 'direction' | 'exitTakeProfitPct' | 'exitStopLossPct' | 'exitMaxHoldMin' | 'exitTrailingPct'>): {
   takeProfitPct: number | null;
   stopLossPct: number | null;
   maxHoldMin: number | null;
+  /** Never defaulted: a trailing stop is opt-in on every direction. */
+  trailingPct: number | null;
 } {
   const d = directionOf(c);
   const n = (v: number | null | undefined, dflt: number): number | null => {
@@ -195,6 +251,7 @@ export function ownExitsOf(c: Pick<CopyConfig, 'direction' | 'exitTakeProfitPct'
     takeProfitPct: n(c.exitTakeProfitPct, DEFAULT_EXIT_TAKE_PROFIT_PCT),
     stopLossPct: n(c.exitStopLossPct, DEFAULT_EXIT_STOP_LOSS_PCT),
     maxHoldMin: n(c.exitMaxHoldMin, DEFAULT_EXIT_MAX_HOLD_MIN),
+    trailingPct: typeof c.exitTrailingPct === 'number' && Number.isFinite(c.exitTrailingPct) && c.exitTrailingPct > 0 ? c.exitTrailingPct : null,
   };
 }
 
@@ -272,6 +329,9 @@ export interface CopyTrade {
    * history said "closed" over a wallet that still held every token.
    */
   kind?: 'exit';
+  /** Highest mark seen since entry, for the trailing stop (2026-09-21).
+   *  Absent on older rows and read as the entry. */
+  peakPriceSol?: number;
   /** Exit: the copy it came out of. */
   parentId?: string;
   /** Exit: share of what we HELD that this slice actually sold, 1–100.
@@ -288,6 +348,10 @@ export interface CopyTrade {
   realizedSol?: number;
   /** Transaction of a live fill, when there was one. */
   signature?: string | null;
+  /** Where the time went, their fill → ours (2026-09-21). Absent on rows
+   *  written before it existed, and on an exit, which is timed by the
+   *  leader's sell rather than by an entry race. */
+  timing?: CopyTiming;
 
   // ── Quantities (2026-09-15) ────────────────────────────────────────
   //
@@ -385,6 +449,10 @@ export interface CopyWatchStatus {
   unreadable?: number;
   /** Read, but not a copyable swap (transfers, LP moves, claims). */
   notSwap?: number;
+  /** Which subscription the socket rides (2026-09-21): `logs` reads each
+   *  trade back, `tx` (Helius transactionSubscribe, paid plans) receives it
+   *  with the notification. Absent on status built before it. */
+  feed?: 'logs' | 'tx';
 }
 
 export interface CopySnapshot {
@@ -408,6 +476,9 @@ export interface CopySnapshot {
    *  wallets that set holds right now. Zero is an honest zero — a source the
    *  host cannot answer, or a Scout with nothing saved. */
   crowd?: Record<string, { source: FomoSource; wallets: number }>;
+  /** Where the time goes on a copy, this session (2026-09-21). Absent on a
+   *  snapshot built before it existed. */
+  latency?: CopyLatency;
 }
 
 // ── The leader's own record ───────────────────────────────────────────
@@ -655,6 +726,16 @@ export function defaultConfig(wallet: string, label: string, chain: ChainKind = 
     maxMarketCapUsd: null,
     minKryptScore: null,
     onlyPumpfun: false,
+    minMarketCapUsd: null,
+    minLeaderSol: null,
+    maxLeaderSol: null,
+    minTokenAgeSec: null,
+    maxTokenAgeSec: null,
+    maxBuysPerToken: null,
+    blockedMints: null,
+    blockedCreators: null,
+    minLeaderSellPct: null,
+    exitTrailingPct: null,
     delayMs: 0,
     maxSlippagePct: 15,
     copySells: true,
@@ -715,6 +796,35 @@ export function validateConfig(c: Omit<CopyConfig, 'id' | 'createdAt'>): { ok: b
   if (sl !== undefined && sl !== null && (!(sl > 0) || sl > 95)) return { ok: false, message: 'Stop-loss must be between 1% and 95%' };
   const hold = c.exitMaxHoldMin;
   if (hold !== undefined && hold !== null && (!(hold > 0) || hold > 1_440)) return { ok: false, message: 'Max hold must be between 1 and 1440 minutes' };
+  const trail = c.exitTrailingPct;
+  if (trail !== undefined && trail !== null && (!(trail > 0) || trail > 95)) return { ok: false, message: 'Trailing stop must be between 1% and 95%' };
+  // The 2026-09-21 filters. Absent or null is off; a value that is present
+  // must be sane, and a band must not be empty.
+  const opt = (v: number | null | undefined): number | null => (v === undefined || v === null ? null : v);
+  const minMc = opt(c.minMarketCapUsd);
+  if (minMc !== null && !(minMc >= 0)) return { ok: false, message: 'Min market cap must be zero or more' };
+  if (minMc !== null && c.maxMarketCapUsd !== null && c.maxMarketCapUsd !== undefined && minMc > c.maxMarketCapUsd) {
+    return { ok: false, message: 'Min market cap is above your max market cap' };
+  }
+  const minL = opt(c.minLeaderSol);
+  const maxL = opt(c.maxLeaderSol);
+  if (minL !== null && !(minL >= 0)) return { ok: false, message: 'Their minimum trade size must be zero or more' };
+  if (maxL !== null && !(maxL > 0)) return { ok: false, message: 'Their maximum trade size must be greater than zero' };
+  if (minL !== null && maxL !== null && minL > maxL) return { ok: false, message: 'Their minimum trade size is above the maximum' };
+  const minAge = opt(c.minTokenAgeSec);
+  const maxAge = opt(c.maxTokenAgeSec);
+  if (minAge !== null && !(minAge >= 0)) return { ok: false, message: 'Token age must be zero or more' };
+  if (maxAge !== null && !(maxAge > 0)) return { ok: false, message: 'Max token age must be greater than zero' };
+  if (minAge !== null && maxAge !== null && minAge > maxAge) return { ok: false, message: 'Min token age is above the max' };
+  const perToken = opt(c.maxBuysPerToken);
+  if (perToken !== null && (!Number.isInteger(perToken) || perToken < 1 || perToken > 100)) return { ok: false, message: 'Max buys per token must be a whole number from 1 to 100' };
+  for (const [list, what] of [[c.blockedMints, 'token'], [c.blockedCreators, 'creator']] as const) {
+    if (list === undefined || list === null) continue;
+    if (!Array.isArray(list) || list.length > MAX_BLOCKLIST) return { ok: false, message: `At most ${MAX_BLOCKLIST} blocked ${what}s` };
+    if (list.some((a) => typeof a !== 'string' || !a.trim() || a.length > 64)) return { ok: false, message: `A blocked ${what} must be an address` };
+  }
+  const minSell = opt(c.minLeaderSellPct);
+  if (minSell !== null && (!(minSell > 0) || minSell > 100)) return { ok: false, message: 'Mirror sells of at least must be between 1% and 100%' };
   if (isFomo(c)) {
     if (c.fomoSource !== undefined && c.fomoSource !== null && !FOMO_SOURCES.includes(c.fomoSource)) return { ok: false, message: 'Pick which wallets the crowd is' };
     const k = c.fomoMinWallets;
@@ -754,4 +864,156 @@ export function describeConfig(c: CopyConfig): string {
 export function winRate(s: CopyStats): number | null {
   const closed = s.wins + s.losses;
   return closed > 0 ? (s.wins / closed) * 100 : null;
+}
+
+// ── Copy latency (2026-09-21) ─────────────────────────────────────────
+//
+// A tester watching a leader wallet and their copy wallet side by side timed
+// ~5–6 s from the leader's transaction to theirs landing, which on a low-cap
+// launch is enough for the entry to move a long way. The question they could
+// not answer from outside — how much of that is hearing about the trade and
+// how much is placing ours — is the one this record answers.
+//
+// Every field is a DURATION in milliseconds, and every one is nullable
+// because a stage that did not happen or could not be timed must read as
+// unknown rather than as zero (the house rule: an em dash, never a 0). A
+// paper copy has no `sendMs`; a trade delivered whole by `transactionSubscribe`
+// has no `readMs`; a leader transaction with no block time has no `detectMs`.
+
+export interface CopyTiming {
+  /** Which subscription delivered it. `tx` carries the transaction with the
+   *  notification; `logs` carries a signature and costs a read-back. */
+  feed?: 'logs' | 'tx';
+  /**
+   * Their transaction's block time → the notification reaching us.
+   *
+   * This is the chain and the RPC, not us: it includes the wait for
+   * `confirmed`, which is the commitment both subscriptions ask for. Null
+   * when the transaction carried no block time.
+   */
+  detectMs: number | null;
+  /** Reading the transaction back by signature. Null on the `tx` transport,
+   *  which needs no read-back at all. */
+  readMs: number | null;
+  /** How many reads that took. More than 1 means the first answer was "the
+   *  node does not have it yet", and each retry backs off. */
+  readTries?: number;
+  /** Decoding the swap out of the wallet's own balance deltas. */
+  decodeMs: number | null;
+  /** The filters, including the token-facts lookup — a round trip whenever
+   *  the mint is not already cached, which for a fresh launch it is not. */
+  checkMs: number | null;
+  /**
+   * The token-facts lookup ALONE, inside `checkMs`.
+   *
+   * Broken out because it is the one stage in the copier that can make a
+   * network call on a mint nobody has seen before — which a leader's fresh
+   * launch always is — and because a filter block that is otherwise pure
+   * arithmetic should not be able to hide a round trip inside its total.
+   */
+  factsMs: number | null;
+  /** The config's own `delayMs`, honoured as set. Not a cost to fix; here so
+   *  it is not mistaken for one. */
+  delayMs: number | null;
+  /** Our order: handed over until the broadcast came back. Null in paper. */
+  sendMs: number | null;
+  /** Inside `sendMs`, from the signer: building the unsigned transaction. */
+  buildMs?: number | null;
+  /** Inside `sendMs`: first send → landed, failed or expired. */
+  confirmMs?: number | null;
+  /** Their block time → our order done. The number the tester was holding a
+   *  stopwatch to. Null when either end is unknown. */
+  totalMs: number | null;
+}
+
+/** Everything this record can account for, which is every stage but the
+ *  chain's own. Used to show what the breakdown does NOT explain. */
+export function accountedMs(t: CopyTiming): number {
+  return (t.readMs ?? 0) + (t.decodeMs ?? 0) + (t.checkMs ?? 0) + (t.delayMs ?? 0) + (t.sendMs ?? 0);
+}
+
+/**
+ * The breakdown as one line, for the Console and the exported logs.
+ *
+ * Ordered as it happens, so reading left to right is walking the path, and
+ * an unknown stage is left OUT rather than printed as zero — a stage that
+ * did not run and a stage that took no time are not the same fact.
+ */
+export function describeCopyTiming(t: CopyTiming): string {
+  const ms = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${Math.round(n)}ms`);
+  const parts: string[] = [];
+  if (t.detectMs !== null) parts.push(`heard ${ms(t.detectMs)}`);
+  if (t.readMs !== null) parts.push(`read ${ms(t.readMs)}${t.readTries && t.readTries > 1 ? ` (${t.readTries} tries)` : ''}`);
+  if (t.decodeMs !== null) parts.push(`decode ${ms(t.decodeMs)}`);
+  if (t.checkMs !== null) {
+    // The lookup is named inside the checks, not beside them, so the parts
+    // still add up to the whole when read left to right.
+    const facts = t.factsMs !== null ? ` [token facts ${ms(t.factsMs)}]` : '';
+    parts.push(`checks ${ms(t.checkMs)}${facts}`);
+  }
+  if (t.delayMs) parts.push(`your delay ${ms(t.delayMs)}`);
+  if (t.sendMs !== null) {
+    const inner: string[] = [];
+    if (t.buildMs != null) inner.push(`build ${ms(t.buildMs)}`);
+    if (t.confirmMs != null) inner.push(`land ${ms(t.confirmMs)}`);
+    parts.push(`order ${ms(t.sendMs)}${inner.length ? ` [${inner.join(', ')}]` : ''}`);
+  }
+  const head = t.totalMs !== null ? `${ms(t.totalMs)} their fill → ours` : 'timing';
+  return `${head}${t.feed ? ` via ${t.feed}` : ''}: ${parts.join(' · ')}`;
+}
+
+/**
+ * The median of each stage over recent copies.
+ *
+ * A median, not a mean: one copy that waited out a parked RPC would drag an
+ * average somewhere no individual copy ever was, and the question being asked
+ * is "what does this usually cost", not "what is the worst case". `samples`
+ * says how many rows it is built from, so a median of two is not mistaken for
+ * a measurement.
+ *
+ * Every field is null when no sample had that stage — a run entirely on the
+ * `tx` transport has no read-back to report, and reporting 0 would read as
+ * "instant" rather than "did not happen".
+ */
+export interface CopyLatency {
+  samples: number;
+  detectMs: number | null;
+  readMs: number | null;
+  decodeMs: number | null;
+  checkMs: number | null;
+  factsMs: number | null;
+  delayMs: number | null;
+  sendMs: number | null;
+  totalMs: number | null;
+  /** How the samples were delivered, so a median is read against the right
+   *  transport. Both are counted; a mixed run says so. */
+  feeds: { logs: number; tx: number };
+}
+
+function median(xs: number[]): number | null {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
+
+/** Build the summary from whatever timed rows are to hand, newest first. */
+export function copyLatency(rows: CopyTiming[]): CopyLatency {
+  const of = (pick: (t: CopyTiming) => number | null | undefined): number | null =>
+    median(rows.map(pick).filter((n): n is number => typeof n === 'number'));
+  return {
+    samples: rows.length,
+    detectMs: of((t) => t.detectMs),
+    readMs: of((t) => t.readMs),
+    decodeMs: of((t) => t.decodeMs),
+    checkMs: of((t) => t.checkMs),
+    factsMs: of((t) => t.factsMs),
+    delayMs: of((t) => t.delayMs),
+    sendMs: of((t) => t.sendMs),
+    totalMs: of((t) => t.totalMs),
+    feeds: {
+      logs: rows.filter((t) => t.feed === 'logs').length,
+      tx: rows.filter((t) => t.feed === 'tx').length,
+    },
+  };
 }

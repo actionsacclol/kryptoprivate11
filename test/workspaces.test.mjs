@@ -25,14 +25,16 @@ const test = (name, fn) => cases.push({ name, fn });
 
 const ALL = ROUTES.map((r) => r.id);
 
-test('every route in the sidebar has a workspace, except the one delisted on purpose', () => {
+test('every route in the sidebar has a workspace, except the ones delisted on purpose', () => {
   assert.ok(ALL.length > 20, `parsed only ${ALL.length} routes — the RouteId union moved`);
   const unmapped = _unmappedRoutes(ALL);
   // `paper` was delisted in 2026-09-06 when paper round trips moved onto the
   // Trades page. It stays a valid RouteId so old state does not break, and it
-  // is the ONLY route allowed to have no workspace. Anything else here is a
-  // page the user can no longer reach.
-  assert.deepEqual(unmapped, ['paper'], `unreachable from any workspace: ${unmapped.join(', ')}`);
+  // was the only route allowed to have no workspace until 2026-09-22, when the
+  // Copier merged into the Wallet list: `copier` stays a valid RouteId (it
+  // opens the Wallet list) so a pin or saved state does not break. Anything
+  // else here is a page the user can no longer reach.
+  assert.deepEqual(unmapped.sort(), ['copier', 'paper'], `unreachable from any workspace: ${unmapped.join(', ')}`);
 });
 
 test('no route is OWNED by two workspaces', () => {
@@ -184,6 +186,22 @@ test('Farming is reachable but ships with nothing running', () => {
   for (const forbidden of ['live.buy', 'live.sell', 'live.sellToken', 'lab.start', 'setLive']) {
     assert.ok(!src.includes(forbidden), `the preset page must not call ${forbidden}`);
   }
+});
+
+test('the AI connection (MCP) is a page under Automation, and Settings points to it', () => {
+  // Moved out of Settings on 2026-09-23: users did not know it existed.
+  assert.equal(workspaceOf('mcp'), 'automation');
+  assert.ok(routesFor('automation').includes('mcp'));
+  assert.match(sidebarSrc, /\{ id: 'mcp', label: 'AI connection'/);
+  const page = fs.readFileSync(new URL('../src/pages/AiConnection.tsx', import.meta.url), 'utf8');
+  assert.match(page, /<McpPanel \/>/, 'the page carries the panel');
+  assert.match(page, /Model Context Protocol/, 'and says what MCP is in plain words');
+  const settings = fs.readFileSync(new URL('../src/pages/Settings.tsx', import.meta.url), 'utf8');
+  assert.ok(!/<McpPanel/.test(settings), 'one home: Settings does not render the panel too');
+  assert.match(settings, /onNavigate\('mcp'\)/, 'but it points to the new page');
+  const guides = fs.readFileSync(new URL('../src/pages/Guides.tsx', import.meta.url), 'utf8');
+  assert.match(guides, /Open Automation from the Hub\. In the menu on the left, press AI connection\./, 'the guide sends people to the right place');
+  assert.ok(!/Open Settings and find AI connection/.test(guides), 'and not the old one');
 });
 
 test('Guides has a plain-words guide for every tile on the Hub', () => {

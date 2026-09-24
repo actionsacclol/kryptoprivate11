@@ -369,7 +369,8 @@ function showMainWindow(): BrowserWindow {
   win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
     if (level < 2) return;
     const where = sourceId ? ` (${String(sourceId).split('/').pop()}:${line})` : '';
-    logger[level >= 3 ? 'error' : 'warn'](`renderer${where} — ${String(message).slice(0, 400)}`);
+    // Errors keep room for a stack trace (2026-09-23); warnings stay short.
+    logger[level >= 3 ? 'error' : 'warn'](`renderer${where} — ${String(message).slice(0, level >= 3 ? 3000 : 400)}`);
   });
 
   // Reveal robustly: ready-to-show is the ideal trigger, but did-finish-load
@@ -860,6 +861,10 @@ async function bootstrap(): Promise<void> {
         /* a webhook must never affect the alert itself */
       }
     }
+    // The desktop switch governs the Windows pop-up ONLY. Chat pushes and
+    // webhooks above have their own opt-ins; turning pop-ups off must not
+    // silently stop what someone relies on to watch for them.
+    if (!store.load().alerts.desktopNotifications) return;
     if (!Notification.isSupported()) return;
     try {
       const n = new Notification({ title, body, silent: !store.load().alerts.sound });
@@ -911,6 +916,17 @@ async function bootstrap(): Promise<void> {
   // Any disarm — user, breaker, decoder drift, restart — flips the persisted
   // mode to Paper, so the UI and the engine can never disagree about whether
   // real SOL moves. Live is re-entered only through the top-bar switch.
+  // A checked pump upgrade re-arms live (engine.tryReverifyDecoder) through
+  // the SAME two halves as the top-bar switch (live:setLive): arm the
+  // engine, then save Live as the mode — so the top bar tells the truth.
+  getEngine().onRearmAfterUpgrade = () => {
+    const r = getEngine().arm(wallet.exists());
+    if (!r.ok) return r;
+    const cur = store.load();
+    store.update({ execution: { ...cur.execution, liveEnabled: true } });
+    getEngine().announceStatus();
+    return r;
+  };
   getEngine().onDisarm = (reason) => {
     // Losing the wallet is not a mode choice: keep Live as the preference so
     // the next wallet arms straight away (syncLiveMode in wallet:generate).

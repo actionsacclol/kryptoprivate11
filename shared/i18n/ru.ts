@@ -23,7 +23,7 @@ export const ru: Catalogue = {
   'nav.observatory': 'Обсерватория',
   'nav.copyTrading': 'Копитрейдинг',
   'nav.scripts': 'Скрипты',
-  'nav.groupWallets': 'Группы кошельков',
+  'nav.groupWallets': 'Список кошельков',
   'nav.funder': 'Пополнение',
   'nav.launches': 'Запуски',
   'nav.execution': 'Исполнение',

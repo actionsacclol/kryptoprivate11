@@ -162,6 +162,10 @@ export function EvmSettingsCard({
 }) {
   const toast = useToast();
   const { evm: hood } = useEvmState('robinhood');
+  // BNB's wallet too: the referrer is one setting shared by both chains, but
+  // the two chains can hold different wallets, so checking only Robinhood let
+  // a BNB self-referral through to a trade path that silently refuses it.
+  const { evm: bnb } = useEvmState('bnb');
   const [slippage, setSlippage] = useState(settings.evm.slippagePct);
   const [referrer, setReferrer] = useState(settings.evm.referrer ?? '');
 
@@ -171,7 +175,10 @@ export function EvmSettingsCard({
   }, [settings.evm.slippagePct, settings.evm.referrer]);
 
   const saveShared = (): void => {
-    const refProblem = evmReferralProblem(referrer, { self: hood?.wallet.address ?? null });
+    const refProblem = evmReferralProblem(referrer, {
+      self: hood?.wallet.address ?? null,
+      alsoMine: [bnb?.wallet.address ?? null],
+    });
     if (refProblem) {
       toast.error(refProblem);
       return;
