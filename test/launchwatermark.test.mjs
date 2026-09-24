@@ -11,7 +11,11 @@
 
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { DESCRIPTION_BUDGET, LAUNCH_WATERMARK, MAX_DESCRIPTION, hasWatermark, withWatermark } from './.launchgate.mjs';
+import { DESCRIPTION_BUDGET, LAUNCH_WATERMARK, LAUNCH_WATERMARKS, MAX_DESCRIPTION, hasWatermark, withWatermark } from './.launchgate.mjs';
+
+// The mark rotates (2026-09-24): check "ends with SOME variation" + "exactly one".
+const marked = (s) => LAUNCH_WATERMARKS.some((m) => s.endsWith(m));
+const oneMark = (s, body) => s.startsWith(`${body}\n`) && LAUNCH_WATERMARKS.includes(s.slice(`${body}\n`.length));
 
 let passed = 0;
 const ok = (label) => {
@@ -21,15 +25,17 @@ const ok = (label) => {
 const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
 {
-  // On a line of its own, as asked 09-22: "Noibuy is my cool new coin" / "Launched with krypt.cc/bot".
-  assert.equal(LAUNCH_WATERMARK, 'Launched with krypt.cc/bot');
-  assert.equal(withWatermark('a memecoin'), `a memecoin\n${LAUNCH_WATERMARK}`, 'it goes at the end, on the next line');
+  // On a line of its own, as asked 09-22, now a rotated mark: "a memecoin" / <mark>.
+  assert.equal(LAUNCH_WATERMARK, 'Launched with krypt.cc/bot', 'the canonical mark is still the first variation');
+  assert.ok(LAUNCH_WATERMARKS.length >= 4, 'several variations to rotate');
+  assert.ok(LAUNCH_WATERMARKS.every((m) => /krypt|Krypto Bot/i.test(m)), 'every variation names the tool — always discloses');
+  assert.ok(oneMark(withWatermark('a memecoin'), 'a memecoin'), 'it goes at the end, on the next line, one mark');
   // A draft stamped with the OLD mark is re-stamped, never carries both.
-  assert.equal(withWatermark('gm\n\nLaunched using krypt.cc/tools/krypto'), `gm\n${LAUNCH_WATERMARK}`);
+  assert.ok(oneMark(withWatermark('gm\n\nLaunched using krypt.cc/tools/krypto'), 'gm'), 'the legacy mark is stripped, not doubled');
   assert.equal(hasWatermark('gm\n\nLaunched using krypt.cc/tools/krypto'), true, 'coins launched under the old mark are still ours');
-  assert.equal(withWatermark(''), LAUNCH_WATERMARK, 'an empty description becomes just the line');
-  assert.equal(withWatermark('   '), LAUNCH_WATERMARK, 'and so does whitespace');
-  assert.equal(withWatermark('  padded  '), `padded\n${LAUNCH_WATERMARK}`, 'the user text is trimmed, not the line');
+  assert.ok(LAUNCH_WATERMARKS.includes(withWatermark('')), 'an empty description becomes just a mark');
+  assert.ok(LAUNCH_WATERMARKS.includes(withWatermark('   ')), 'and so does whitespace');
+  assert.ok(oneMark(withWatermark('  padded  '), 'padded'), 'the user text is trimmed, not the line');
   ok('the watermark goes at the end of the description');
 }
 
@@ -38,9 +44,9 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // upload; re-running the metadata step, or editing an already-stamped
   // draft, must never stack two copies.
   const once = withWatermark('gm');
-  assert.equal(withWatermark(once), once, 'stamping twice changes nothing');
-  assert.equal(withWatermark(withWatermark(withWatermark('gm'))), once, 'nor three times');
-  assert.equal((once.match(/krypt\.cc\/bot/g) ?? []).length, 1, 'exactly one copy');
+  assert.ok(oneMark(once, 'gm'), 'words, a newline, one mark');
+  assert.ok(oneMark(withWatermark(once), 'gm'), 'stamping twice never doubles the line');
+  assert.ok(oneMark(withWatermark(withWatermark(withWatermark('gm'))), 'gm'), 'nor three times');
   assert.equal(hasWatermark(once), true);
   assert.equal(hasWatermark('gm'), false);
   // A description that MENTIONS the link mid-text is not stamped — only one
@@ -54,7 +60,7 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // form has to count down from what is LEFT — otherwise someone fills the
   // full limit and the stamped version is refused at the upload.
   assert.ok(DESCRIPTION_BUDGET < MAX_DESCRIPTION, 'the budget is smaller than the raw limit');
-  assert.equal(DESCRIPTION_BUDGET, MAX_DESCRIPTION - (LAUNCH_WATERMARK.length + 1), 'it is the limit minus the line and its line break');
+  assert.ok(DESCRIPTION_BUDGET <= MAX_DESCRIPTION - (LAUNCH_WATERMARK.length + 1), 'it reserves the (longest) line and its line break');
   // A description filling the budget exactly still fits once stamped.
   const full = 'x'.repeat(DESCRIPTION_BUDGET);
   assert.ok(withWatermark(full).length <= MAX_DESCRIPTION, 'a full budget still fits after stamping');

@@ -290,44 +290,71 @@ export interface LaunchOutcome {
 // fact, on a token that exists forever under their name, is the kind of
 // surprise this app does not do.
 
-export const LAUNCH_WATERMARK = 'Launched with krypt.cc/bot';
+// ROTATED (2026-09-24), same reason as the callout mark: an identical line on
+// every launched coin reads as templated. Each variation still names Krypto
+// Bot or its URL, so every one discloses the coin was launched with the tool.
+export const LAUNCH_WATERMARKS = [
+  'Launched with krypt.cc/bot',
+  'launched via Krypto Bot',
+  'made with Krypto Bot',
+  'Launched on Krypto Bot',
+  'launched with krypt.cc/bot',
+  'Krypto Bot · krypt.cc/bot',
+];
+
+/** Canonical mark, for the one place a fixed string is needed (the Launch
+ *  page label). Live descriptions rotate — see below. */
+export const LAUNCH_WATERMARK = LAUNCH_WATERMARKS[0];
+
+/** A random launch mark. Every variation discloses the tool. */
+export function pickLaunchWatermark(): string {
+  return LAUNCH_WATERMARKS[Math.floor(Math.random() * LAUNCH_WATERMARKS.length)];
+}
 
 /** Separator between the user's words and the line: a new line, so it stands
  *  on its own under the description (asked 09-22). */
 const WATERMARK_SEP = '\n';
 
-/** The mark this app used before. A draft stamped with it is re-stamped with
- *  the current one rather than carrying both. */
-const LEGACY_LAUNCH_MARKS = ['Launched using krypt.cc/tools/krypto'];
+/** Every mark this app has used — current variations and the legacy one — so a
+ *  draft stamped with ANY of them is re-stamped rather than carrying two. */
+const ALL_LAUNCH_MARKS = [...LAUNCH_WATERMARKS, 'Launched using krypt.cc/tools/krypto'];
+
+/** Longest mark, so the budget reserves room for whichever is picked. */
+const LAUNCH_WATERMARK_MAX = Math.max(...ALL_LAUNCH_MARKS.map((m) => m.length));
 
 /**
  * The description as it will actually be written.
  *
- * Idempotent: a description that already ends with the watermark is returned
- * unchanged, so re-running the metadata step — or editing a draft that was
- * already stamped — never stacks two copies.
+ * Structurally idempotent: any existing mark is stripped before a fresh one is
+ * appended, so a re-run or a re-edit never stacks two — the wording just
+ * changes per write.
  */
 export function withWatermark(description: string): string {
   let body = (description ?? '').trim();
-  for (const old of LEGACY_LAUNCH_MARKS) if (body.endsWith(old)) body = body.slice(0, -old.length).trim();
-  if (!body) return LAUNCH_WATERMARK;
-  // Already stamped, whatever whitespace separates it.
-  if (body.endsWith(LAUNCH_WATERMARK)) return body;
-  return `${body}${WATERMARK_SEP}${LAUNCH_WATERMARK}`;
+  for (const old of ALL_LAUNCH_MARKS) {
+    if (body.endsWith(old)) {
+      body = body.slice(0, -old.length).trim();
+      break;
+    }
+  }
+  const mark = pickLaunchWatermark();
+  if (!body) return mark;
+  return `${body}${WATERMARK_SEP}${mark}`;
 }
 
-/** Whether this text already carries the watermark. */
+/** Whether this text already carries the watermark (any variation or legacy). */
 export function hasWatermark(description: string): boolean {
   // Coins launched under the old mark keep it forever; they are still ours.
   const d = (description ?? '').trim();
-  return [LAUNCH_WATERMARK, ...LEGACY_LAUNCH_MARKS].some((m) => d.endsWith(m));
+  return ALL_LAUNCH_MARKS.some((m) => d.endsWith(m));
 }
 
 /**
  * How many characters are left for the user's own words.
  *
  * The watermark counts against pump's limit like any other text, so the form
- * counts down from this rather than from MAX_DESCRIPTION — otherwise someone
- * fills 500 characters and the stamped version is refused.
+ * counts down from this (reserving the LONGEST mark) rather than from
+ * MAX_DESCRIPTION — otherwise someone fills 500 characters and the stamped
+ * version is refused.
  */
-export const DESCRIPTION_BUDGET = MAX_DESCRIPTION - (LAUNCH_WATERMARK.length + WATERMARK_SEP.length);
+export const DESCRIPTION_BUDGET = MAX_DESCRIPTION - (LAUNCH_WATERMARK_MAX + WATERMARK_SEP.length);

@@ -161,6 +161,7 @@ export interface AutomationHost {
   orders(mint?: string): OrderView[];
   placeOrder(req: NewOrderRequest): Promise<{ ok: boolean; message: string }>;
   cancelOrders(mint: string): { ok: boolean; message: string; cancelled: number };
+  clearCompletedOrders(): { ok: boolean; message: string; cleared: number };
   templates(): Array<{ id: string; name: string }>;
   applyTemplate(mint: string, templateId: string): Promise<{ ok: boolean; message: string }>;
   createAlert(req: NewAlertRequest): { ok: boolean; message: string };
@@ -1586,6 +1587,9 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (!isMint(mint)) return answer(false, undefined, 'cancelOrders: bad mint');
         return result(await act(s, { type: 'cancel_orders' }, await ctxFor(s, mint)));
       }
+      case 'clearCompletedOrders':
+        // Housekeeping, not an action — no budget cost, safe to call every tick.
+        return answer(true, h.clearCompletedOrders());
       case 'templates':
         return answer(true, h.templates());
       case 'applyTemplate': {

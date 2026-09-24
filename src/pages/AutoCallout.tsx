@@ -229,8 +229,9 @@ export function AutoCalloutPage() {
               not the same thing as one someone sat down and wrote, and a reader
               deciding whether to trade on it deserves to know which it is. */}
           <p className="text-label leading-relaxed text-krypt-muted/70">
-            Every one ends with <span className="text-krypt-muted">“{CALLOUT_WATERMARK}”</span>, so anyone reading it
-            knows it was posted automatically rather than written in the moment.
+            Every one ends with a short Krypto Bot credit line — <span className="text-krypt-muted">“{CALLOUT_WATERMARK}”</span> and
+            a few variations, rotated so your posts aren't identical — so anyone reading it knows it was posted
+            automatically rather than written in the moment.
           </p>
           {lines.length > 0 && (
             <p className="text-label leading-relaxed text-krypt-muted/70">

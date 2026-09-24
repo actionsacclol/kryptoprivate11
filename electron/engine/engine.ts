@@ -1087,6 +1087,14 @@ export class SniperEngine {
         if (cancelled) this.emit({ kind: 'orders', snapshot: this.ordersSnapshot() });
         return { ok: true, message: cancelled ? `cancelled ${cancelled} order(s)` : 'no open orders on this token', cancelled };
       },
+      // Prune finished orders (filled/cancelled/expired/failed) so a long-lived
+      // script does not accumulate terminal orders against MAX_ORDERS and
+      // eventually get its new orders refused. Housekeeping, not a trade.
+      clearCompletedOrders: () => {
+        const cleared = advOrders.clearCompleted();
+        if (cleared) this.emit({ kind: 'orders', snapshot: this.ordersSnapshot() });
+        return { ok: true, message: cleared ? `cleared ${cleared} finished order(s)` : 'nothing to clear', cleared };
+      },
       templates: () => templateStore.list().map((t) => ({ id: t.id, name: t.name })),
       applyTemplate: async (mint, templateId) => {
         const t = templateStore.list().find((x) => x.id === templateId);

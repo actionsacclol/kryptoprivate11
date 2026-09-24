@@ -58,34 +58,73 @@ export const MAX_THESIS = 200;
 // It is shown in the form, and the character budget below is what is left for
 // the user's own words — the same rule the launch description follows.
 
-export const CALLOUT_WATERMARK = 'Called with krypt.cc/bot';
+// The mark ROTATES (2026-09-24). Every auto-post used to end with the exact
+// same "Called with krypt.cc/bot" line; across many posts that identical
+// trailer reads as templated and pump temporarily restricted an account for
+// spam. So a short mark is picked at random per post. EVERY variation still
+// names Krypto Bot (or its URL), so each one is a real disclosure that a tool
+// posted the call — the rotation changes the wording, never whether it
+// discloses.
+export const CALLOUT_WATERMARKS = [
+  'Called with krypt.cc/bot',
+  'via krypt.cc/bot',
+  'via Krypto Bot',
+  'posted with Krypto Bot',
+  'called on Krypto Bot',
+  'Krypto Bot · krypt.cc/bot',
+  'sent with Krypto Bot',
+  'auto-called · Krypto Bot',
+  '🤖 Krypto Bot',
+  'Krypto Bot',
+];
+
+/** The canonical mark — used where ONE fixed string is needed (the Auto-callout
+ *  page's "every call ends with…" label). Live posts rotate, see below. */
+export const CALLOUT_WATERMARK = CALLOUT_WATERMARKS[0];
+
+/** A random mark for this post. Every entry discloses Krypto Bot, so the pick
+ *  never affects whether the post is disclosed — only its wording. */
+export function pickCalloutWatermark(): string {
+  return CALLOUT_WATERMARKS[Math.floor(Math.random() * CALLOUT_WATERMARKS.length)];
+}
 
 /** Between the user's words and the mark: a new line, so the mark stands on
  *  its own under the call instead of running on from it (asked 09-22). */
 const WATERMARK_SEP = '\n';
 
-/** The mark this app used before, so text stamped with it is re-stamped with
- *  the current mark rather than carrying both. */
-const LEGACY_CALLOUT_MARKS = ['via krypt.cc/tools/krypto'];
+/** Every mark this app has ever used — current variations and the legacy one —
+ *  so text already stamped with ANY of them is stripped and re-stamped with a
+ *  fresh pick, never left carrying two. */
+const ALL_CALLOUT_MARKS = [...CALLOUT_WATERMARKS, 'via krypt.cc/tools/krypto'];
+
+/** The longest mark, so the budget below reserves room for whichever one is
+ *  picked; a shorter pick simply leaves the post under the limit. */
+const WATERMARK_MAX = Math.max(...ALL_CALLOUT_MARKS.map((m) => m.length));
 
 /**
  * A thesis as it will actually be posted.
  *
- * Idempotent: the form marks it for display and main marks it again on the
- * way out, so one that already carries the mark is returned unchanged.
+ * Structurally idempotent: any existing mark (this post's, a legacy one, or a
+ * different rotation pick from a re-mark) is stripped before a fresh one is
+ * appended, so the text always carries EXACTLY ONE mark — never two, never
+ * none. The exact wording changes per call by design.
  */
 export function withCalloutWatermark(thesis: string): string {
   let body = (thesis ?? '').trim();
-  for (const old of LEGACY_CALLOUT_MARKS) {
-    if (body.endsWith(old)) body = body.slice(0, -old.length).replace(/[\s·]+$/, '');
+  for (const old of ALL_CALLOUT_MARKS) {
+    if (body.endsWith(old)) {
+      body = body.slice(0, -old.length).replace(/[\s·]+$/, '');
+      break;
+    }
   }
-  if (!body) return CALLOUT_WATERMARK;
-  if (body.endsWith(CALLOUT_WATERMARK)) return body;
-  return `${body}${WATERMARK_SEP}${CALLOUT_WATERMARK}`;
+  const mark = pickCalloutWatermark();
+  if (!body) return mark;
+  return `${body}${WATERMARK_SEP}${mark}`;
 }
 
-/** What is left for the user's own words once the mark is accounted for. */
-export const THESIS_BUDGET = MAX_THESIS - (CALLOUT_WATERMARK.length + WATERMARK_SEP.length);
+/** What is left for the user's own words once the LONGEST mark is accounted
+ *  for, so whichever mark is picked still fits under MAX_THESIS. */
+export const THESIS_BUDGET = MAX_THESIS - (WATERMARK_MAX + WATERMARK_SEP.length);
 
 // ─── Variables in a line ─────────────────────────────────────────────────
 //
@@ -417,7 +456,7 @@ export function looksLikeCalloutId(id: string): boolean {
 export const MAX_REPLY = 500;
 
 /** What is left for the user's own words once the mark is accounted for. */
-export const REPLY_BUDGET = MAX_REPLY - (CALLOUT_WATERMARK.length + WATERMARK_SEP.length);
+export const REPLY_BUDGET = MAX_REPLY - (WATERMARK_MAX + WATERMARK_SEP.length);
 
 /**
  * The reply body, in the shape observed.

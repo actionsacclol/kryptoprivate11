@@ -19,6 +19,8 @@ import {
   CALLOUT_BODY_VERSION,
   CALLOUT_CREATE_PATH,
   CALLOUT_WATERMARK,
+  CALLOUT_WATERMARKS,
+  pickCalloutWatermark,
   THESIS_BUDGET,
   withCalloutWatermark,
   SOLANA_CHAIN_ID,
@@ -43,6 +45,13 @@ import {
   fillCallout,
   shortUsd,
 } from './.calloutauto.mjs';
+
+// The mark rotates (2026-09-24), so tests check "ends with SOME variation" and
+// "carries exactly one", not one fixed string.
+const marked = (s) => CALLOUT_WATERMARKS.some((m) => s.endsWith(m));
+// True when `s` is exactly `body`, a newline, then one whole mark and nothing
+// after it — i.e. one mark, no doubling (marks contain no newline).
+const oneMark = (s, body) => s.startsWith(`${body}\n`) && CALLOUT_WATERMARKS.includes(s.slice(`${body}\n`.length));
 
 let passed = 0;
 const ok = (label) => {
@@ -158,13 +167,14 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // the wrong name is a 400 on every buy that reads as a bug in our posting.
   assert.equal(CALLOUT_CREATE_PATH, '/callout/create');
   assert.equal(canPostCallouts(), true, 'posting is possible now that route and body are both known');
-  // The thesis goes out WATERMARKED — see the watermark block below.
-  assert.deepEqual(calloutBody('MINT', 'gm'), {
-    coinMint: 'MINT',
-    thesis: `gm\n${CALLOUT_WATERMARK}`,
-    chainId: SOLANA_CHAIN_ID,
-    version: CALLOUT_BODY_VERSION,
-  });
+  // The thesis goes out WATERMARKED with one rotated mark — see the block below.
+  {
+    const b = calloutBody('MINT', 'gm');
+    assert.equal(b.coinMint, 'MINT');
+    assert.equal(b.chainId, SOLANA_CHAIN_ID);
+    assert.equal(b.version, CALLOUT_BODY_VERSION);
+    assert.ok(oneMark(b.thesis, 'gm'), 'the thesis is the words plus exactly one mark');
+  }
   assert.equal(SOLANA_CHAIN_ID, 1_399_811_149, 'Solana mainnet, as pump names a chain');
   assert.equal(CALLOUT_BODY_VERSION, 2, 'the payload version their client sends');
   assert.equal(MIN_CALLOUT_POSITION_USD, 1, 'and pump’s own floor, in their words');
@@ -174,7 +184,11 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   assert.equal(calloutBody('MINT', ''), null);
   assert.equal(calloutBody('MINT', '   '), null, 'whitespace is not a thesis');
   assert.equal(calloutBody('', 'gm'), null);
-  assert.equal(calloutBody('MINT', 'x'.repeat(MAX_THESIS + 40)).thesis.length, MAX_THESIS, 'a long line is cut');
+  {
+    const cut = calloutBody('MINT', 'x'.repeat(MAX_THESIS + 40)).thesis;
+    assert.ok(cut.length <= MAX_THESIS, 'a long line is cut to fit under the cap');
+    assert.ok(marked(cut), 'and still carries a mark');
+  }
   ok('the request is exactly what pump’s client sends, and refuses to be half-formed');
 }
 
@@ -182,26 +196,32 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // THE WATERMARK. Disclosure before promotion: a callout posted the instant a
   // buy confirms is not the same thing as one someone sat down and wrote, and
   // a reader deciding whether to trade on it deserves to know which it is.
-  // On a line of its own, as asked 09-22: "Holy what a runner" / "Called with krypt.cc/bot".
-  assert.equal(CALLOUT_WATERMARK, 'Called with krypt.cc/bot');
-  assert.equal(withCalloutWatermark('Holy what a runner'), 'Holy what a runner\nCalled with krypt.cc/bot');
+  // The mark ROTATES (2026-09-24) — pump flagged the identical trailer as spam.
+  // Every variation still names Krypto Bot, so each is a real disclosure; the
+  // rotation changes the wording, never whether it discloses.
+  assert.equal(CALLOUT_WATERMARK, 'Called with krypt.cc/bot', 'the canonical mark is still the first variation');
+  assert.ok(CALLOUT_WATERMARKS.length >= 5, 'there are several variations to rotate through');
+  assert.ok(CALLOUT_WATERMARKS.every((m) => /krypt|Krypto Bot/i.test(m)), 'every variation names Krypto Bot or its URL — it always discloses');
+  assert.ok(CALLOUT_WATERMARKS.includes(pickCalloutWatermark()), 'a pick is one of the variations');
+  // On a line of its own, as asked 09-22: "Holy what a runner" / <a mark>.
+  assert.ok(oneMark(withCalloutWatermark('Holy what a runner'), 'Holy what a runner'), 'words, a newline, one mark');
   // Text stamped with the OLD mark is re-stamped, never carries both.
-  assert.equal(withCalloutWatermark('Runner · via krypt.cc/tools/krypto'), 'Runner\nCalled with krypt.cc/bot');
-  // Idempotent — the form shows it and main applies it, so it must never double.
+  assert.ok(oneMark(withCalloutWatermark('Runner · via krypt.cc/tools/krypto'), 'Runner'), 'the legacy mark is stripped, not doubled');
+  // Structurally idempotent — re-marking keeps the body and exactly one mark.
   const once = withCalloutWatermark('Runner');
-  assert.equal(withCalloutWatermark(once), once);
-  assert.equal((once.match(/krypt\.cc/g) ?? []).length, 1);
+  assert.ok(oneMark(once, 'Runner'));
+  assert.ok(oneMark(withCalloutWatermark(once), 'Runner'), 're-marking never doubles the mark');
   // Applied on the way OUT, so nothing can post an unmarked one.
-  assert.ok(calloutBody('MINT', 'Runner').thesis.endsWith(CALLOUT_WATERMARK), 'the posted thesis carries it');
-  // The budget leaves room: a line filling it still fits once marked, and
-  // still ENDS with the mark rather than losing its tail to the cap.
+  assert.ok(marked(calloutBody('MINT', 'Runner').thesis), 'the posted thesis carries a mark');
+  // The budget leaves room for the LONGEST mark: a line filling it still fits
+  // once marked, and still ENDS with a mark rather than losing its tail.
   assert.ok(THESIS_BUDGET < MAX_THESIS);
   const full = calloutBody('MINT', 'x'.repeat(THESIS_BUDGET)).thesis;
-  assert.ok(full.length <= MAX_THESIS, 'a full line still fits');
-  assert.ok(full.endsWith(CALLOUT_WATERMARK), 'and the mark survives the cap');
+  assert.ok(full.length <= MAX_THESIS, 'a full line still fits under the cap, whichever mark is picked');
+  assert.ok(marked(full), 'and the mark survives the cap');
   // The form counts against the budget, not the raw cap.
   assert.equal(thesesOf('y'.repeat(MAX_THESIS + 50))[0].length, THESIS_BUDGET, 'a long line is cut to the budget');
-  ok('every callout is marked as automatic, once, with room left for the mark');
+  ok('every callout is marked as automatic, once, with a rotated mark and room left for it');
 }
 
 {
@@ -331,7 +351,7 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // so a reply is how a call is followed up. Observed 2026-09-22:
   //   POST /callout/<uuid>/replies   { "content": "…" }   69 bytes
   assert.equal(calloutReplyPath('df0ef615-21b0-43d8-a7f3-9a9a2b1163f3'), '/callout/df0ef615-21b0-43d8-a7f3-9a9a2b1163f3/replies');
-  assert.deepEqual(replyBody('hi'), { content: 'hi\nCalled with krypt.cc/bot' }, 'a reply is marked like a call');
+  assert.ok(oneMark(replyBody('hi').content, 'hi'), 'a reply is marked like a call — words, a newline, one rotated mark');
   assert.equal(replyBody('   '), null, 'an empty reply is not a reply');
   const captured = 'Working on some insane tek right now. krypto never dies';
   assert.equal(JSON.stringify({ content: captured }).length, 69, 'byte for byte the captured body');
@@ -345,7 +365,7 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   }
   // The budget leaves room for the mark, same rule as a thesis.
   assert.ok(REPLY_BUDGET < MAX_REPLY);
-  assert.ok(replyBody('y'.repeat(REPLY_BUDGET)).content.endsWith(CALLOUT_WATERMARK), 'a full reply keeps its mark');
+  assert.ok(marked(replyBody('y'.repeat(REPLY_BUDGET)).content), 'a full reply keeps its mark');
   ok('a reply is one field, marked, and its id can only ever be a UUID');
 }
 
@@ -522,10 +542,10 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // watermark must survive an over-length thesis rather than being sliced off.
   const long = 'this coin is mooning '.repeat(30); // ~630 chars
   const body = calloutBody('SomeMint1111111111111111111111111111111111', long);
-  assert.ok(String(body.thesis).endsWith(CALLOUT_WATERMARK), 'the disclosure survives a long callout');
+  assert.ok(marked(String(body.thesis)), 'the disclosure survives a long callout');
   assert.ok(String(body.thesis).length <= MAX_THESIS, 'and the whole thing stays within pump’s cap');
   const rep = replyBody(long);
-  assert.ok(String(rep.content).endsWith(CALLOUT_WATERMARK), 'the disclosure survives a long reply');
+  assert.ok(marked(String(rep.content)), 'the disclosure survives a long reply');
   assert.ok(String(rep.content).length <= MAX_REPLY);
   ok('the watermark is never the part truncated, however long the text');
 }

@@ -115,6 +115,11 @@ export function profileUpdates(next: PumpProfileDraft, current: PumpProfileDraft
 // idempotent, so re-saving a bio pump already holds changes nothing. The form
 // edits the user's words only and shows the line beneath them.
 
+// NOT rotated, on purpose. A bio is a PERSISTENT profile field, not a repeated
+// post — so it is not a post-spam vector, and a mark that changed on every save
+// would make re-saving a profile a real update to pump (churn) instead of the
+// no-op it should be. If several accounts reading identically is ever a
+// concern, give them different bio TEXT; the mark stays fixed.
 export const BIO_WATERMARK = 'Using krypt.cc/bot';
 const BIO_SEP = '\n';
 
