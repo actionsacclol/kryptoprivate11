@@ -173,7 +173,11 @@ const put = (walletId, address, at, username = null) => auth._put({ walletId, ad
   try {
     const T0 = 10 ** 13;
     auth.refreshNamesSoon(T0);
-    for (let i = 0; i < 50 && !auth.status().sessions.find((s) => s.walletId === 'n2')?.username; i++) await new Promise((r) => setTimeout(r, 20));
+    // The FIRST pass re-reads everyone, and AddrBlank is the SECOND id, so it is
+    // fetched only after the 1.5 s inter-request gap. Poll well past that gap —
+    // ~5 s max, breaking the instant it fills — so the wait never expires before
+    // the fetch on a fast or idle machine (this raced at 1 s in CI, 2026-09-24).
+    for (let i = 0; i < 250 && !auth.status().sessions.find((s) => s.walletId === 'n2')?.username; i++) await new Promise((r) => setTimeout(r, 20));
     assert.equal(auth.status().sessions.find((s) => s.walletId === 'n2').username, 'FoundLater', 'the blank name is filled in');
     // The first pass after start reads everyone (names may have changed while
     // the app was closed); wait for it to finish its 1.5 s spacing.
