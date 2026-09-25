@@ -202,7 +202,9 @@ export interface AutomationHost {
   ): Promise<{ ok: boolean; message: string; thesis?: string; address?: string; calloutId?: string | null; replyId?: string | null }>;
   /** POST one embed to a Discord webhook. The URL comes from the script's own
    *  `webhook` answer, resolved in this module, never from the sandbox. */
-  discord(webhookUrl: string, embed: ScriptEmbed): Promise<{ ok: boolean; message: string }>;
+  discord(webhookUrl: string, embed: ScriptEmbed): Promise<{ ok: boolean; message: string; messageId?: string }>;
+  /** Replace the embed on a message this webhook posted (a call's outcome). */
+  discordEdit(webhookUrl: string, messageId: string, embed: ScriptEmbed): Promise<{ ok: boolean; message: string }>;
   /** Follow / unfollow a pump user, like / unlike a callout, as one of the
    *  user's accounts. Same `wallet` rule as callout. Never throws. */
   pumpSocial(
@@ -1807,6 +1809,36 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         const r = await h.discord(url, built.embed);
         // Never the URL: its last segment is the webhook's password.
         slog(s, r.ok ? 'info' : 'warn', `discord → ${redactWebhook(url)}: ${r.ok ? (built.embed.title ?? 'posted') : r.message}`);
+        // The id lets the script edit this post later — to show how a call
+        // ended ON the call (2026-09-25). Null when Discord did not say.
+        return answer(true, { ok: r.ok, message: r.message, messageId: r.messageId ?? null });
+      }
+      case 'discordEdit': {
+        // Edit, never delete (2026-09-25): a call that went badly is updated to
+        // SAY so, not removed — a channel that only keeps its winners misleads
+        // everyone reading it. Same webhook-setting rule and paper rule as a post.
+        const [field, messageId, embedIn] = args;
+        const key = typeof field === 'string' ? field.trim() : '';
+        const { coerceInputs, parseInputs } = await import('@shared/scriptInputs');
+        const specs = parseInputs(s.code).specs;
+        if (!key || specs[key]?.type !== 'webhook') {
+          return answer(false, undefined, `discordEdit: "${key.slice(0, 40)}" is not one of this script's webhook settings`);
+        }
+        const { isMessageId } = await import('@shared/webhook');
+        if (!isMessageId(messageId)) return answer(false, undefined, 'discordEdit: that is not a Discord message id (use the messageId bot.discord returned)');
+        if (s.mode === 'paper') {
+          slog(s, 'info', 'PAPER discord edit — nothing changed');
+          return answer(true, { ok: true, message: 'paper: nothing was edited' });
+        }
+        const url = String(coerceInputs(specs, s.inputs ?? {})[key] ?? '');
+        if (!url) return answer(true, { ok: false, message: `${specs[key].label} is not set` });
+        const built = scriptEmbed(embedIn, s.name, false);
+        if ('error' in built) return answer(false, undefined, `discordEdit: ${built.error}`);
+        if (rateLimited(s, rtFor(s), Date.now())) {
+          return answer(false, undefined, `discordEdit: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        }
+        const r = await h.discordEdit(url, messageId, built.embed);
+        slog(s, r.ok ? 'info' : 'warn', `discord edit → ${redactWebhook(url)}: ${r.ok ? (built.embed.title ?? 'edited') : r.message}`);
         return answer(true, { ok: r.ok, message: r.message });
       }
       // Follows and likes (asked 09-22, for scripting). Public, like a

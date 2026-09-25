@@ -299,7 +299,7 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   const at = engine.indexOf('callout: async (mint, thesis, who) =>');
   // Wide enough to reach calloutReply below it: the wallet-trading handlers
   // sit between the two, and this block is about both callout senders.
-  const h = at < 0 ? '' : engine.slice(at, at + 3000);
+  const h = at < 0 ? '' : engine.slice(at, at + 3600);
   assert.ok(h.length > 0, 'the engine implements it');
   assert.match(h, /this\.pumpAccountFor\(who\)/, 'the account is resolved in main');
   assert.match(h, /postNow\(pick\.walletId, mint, text[,)]/, 'and the resolved id is what posts');

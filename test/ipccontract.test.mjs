@@ -67,6 +67,13 @@ const CHANNELS = {
   'launch:upload': ['filePath', 'fields'],
   'launch:preview': ['raw'],
   'launch:send': ['raw'],
+  // $Krypto Mode (2026-09-25).
+  'kryptoMode:pause': ['id'],
+  'kryptoMode:resume': ['id'],
+  'kryptoMode:goLive': ['id'],
+  'kryptoMode:sellAll': ['id'],
+  'kryptoMode:withdraw': ['id'],
+  'kryptoMode:remove': ['id'],
 };
 
 for (const [channel, expected] of Object.entries(CHANNELS)) {

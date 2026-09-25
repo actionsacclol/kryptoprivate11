@@ -27,6 +27,8 @@
 //     where the second is the ephemeral mint this app generated seconds ago
 //     for this launch. See signPolicy.checkLaunchSigners.
 
+import type { KryptoOptions } from './kryptoMode';
+
 export type LaunchChain = 'solana' | 'robinhood';
 
 export const LAUNCH_CHAINS: LaunchChain[] = ['solana', 'robinhood'];
@@ -196,6 +198,11 @@ export interface LaunchDraft {
   cashback: boolean;
   /** Robinhood: creator fee in basis points, 0–MAX_CREATOR_TAX_BPS. */
   creatorTaxBps: number;
+  /**
+   * Solana: $Krypto Mode — the coin's own trading bot, declared in its
+   * description (shared/kryptoMode.ts). Off unless asked for.
+   */
+  krypto: KryptoOptions;
 }
 
 export function emptyDraft(chain: LaunchChain): LaunchDraft {
@@ -213,6 +220,8 @@ export function emptyDraft(chain: LaunchChain): LaunchDraft {
     mayhem: false,
     cashback: false,
     creatorTaxBps: 100,
+    // Inlined rather than imported: kryptoMode.ts imports this file.
+    krypto: { enabled: false, driver: 'strategy', strategy: 'ladder', budgetSol: 0.1, live: false },
   };
 }
 
@@ -245,6 +254,7 @@ export function draftProblems(d: LaunchDraft): string[] {
   if (!Number.isFinite(d.devBuy) || d.devBuy < min) {
     out.push(`Your own first buy must be at least ${min} — a launch nobody bought, including you, is not a launch.`);
   }
+  if (d.krypto?.enabled && d.chain !== 'solana') out.push('Krypto Mode is Solana only.');
   if (d.chain === 'robinhood') {
     const bps = d.creatorTaxBps;
     if (!Number.isInteger(bps) || bps < 0 || bps > MAX_CREATOR_TAX_BPS) {

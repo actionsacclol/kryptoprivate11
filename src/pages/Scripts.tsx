@@ -578,6 +578,16 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                       ) : null}
                     </div>
                   )}
+                  {/* A block that does not parse leaves the script with NO
+                      settings — the Settings button hides and bot.input reads
+                      blank. Say why, or it looks like the button just vanished
+                      (2026-09-24: a 27-field script over a 24 cap). */}
+                  {inputs.error && (
+                    <p className="flex items-start gap-1.5 text-label text-rose-300">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      <span>This script's settings could not be read, so it has none: {inputs.error}</span>
+                    </p>
+                  )}
                   {dirty && <p className="text-label text-amber-200/90">Unsaved changes. Arming waits for a save; saving a live script restarts it with the new settings.</p>}
                 </Card>
 

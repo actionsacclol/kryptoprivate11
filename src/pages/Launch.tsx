@@ -13,7 +13,7 @@
 // button and what refuses the launch cannot drift apart.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, Coins, ImagePlus, Loader2, Rocket, Wallet } from 'lucide-react';
+import { AlertTriangle, Bot, Check, Coins, ImagePlus, Loader2, Rocket, Wallet } from 'lucide-react';
 import {
   BLOCKER_TEXT,
   LAUNCH_CHAINS,
@@ -33,6 +33,19 @@ import {
 } from '@shared/launch';
 import { useAppState } from '../state/AppStateProvider';
 import { LaunchStats } from '../components/terminal/LaunchStats';
+import { KryptoSessions } from '../components/terminal/KryptoSessions';
+import {
+  KRYPTO_DISCLOSURE_MAX,
+  KRYPTO_DRIVERS,
+  KRYPTO_DRIVER_TEXT,
+  KRYPTO_MAX_BUDGET_SOL,
+  KRYPTO_MIN_BUDGET_SOL,
+  KRYPTO_STRATEGIES,
+  KRYPTO_STRATEGY_TEXT,
+  kryptoDisclosure,
+  kryptoOptionProblems,
+  type KryptoOptions,
+} from '@shared/kryptoMode';
 import { useToast } from '../state/ToastProvider';
 import { cls } from '../utils/format';
 import { Empty, Field } from '../components/common';
@@ -116,7 +129,9 @@ export function Launch() {
   // the user goes to before ever pressing Launch twice. Per-viewer, in
   // localStorage — the truth is on chain; this is the map to it.
   const [attempts, setAttempts] = useState<LaunchAttempt[]>(() => loadAttempts());
-  const [tab, setTab] = useState<'new' | 'mine' | 'stats'>('new');
+  const [tab, setTab] = useState<'new' | 'mine' | 'stats' | 'krypto'>('new');
+  // The bot wallet the last pin declared (null = no Krypto Mode in that pin).
+  const [kryptoAddress, setKryptoAddress] = useState<string | null>(null);
   const [busy, setBusy] = useState<'' | 'image' | 'upload' | 'preview' | 'send'>('');
   const [checked, setChecked] = useState<string | null>(null);
   const [created, setCreated] = useState<{ token: string; chain: LaunchChain; note?: string } | null>(null);
@@ -177,6 +192,17 @@ export function Launch() {
     setChecked(null);
   }, []);
 
+  // Krypto Mode is written INTO the pinned description, so switching it on
+  // or off after pinning makes the pin stale exactly like editing the words.
+  const setKrypto = useCallback((patch: Partial<KryptoOptions>) => {
+    setDraft((d) => ({
+      ...d,
+      krypto: { ...d.krypto, ...patch },
+      metadataUri: 'enabled' in patch && patch.enabled !== d.krypto.enabled ? '' : d.metadataUri,
+    }));
+    setChecked(null);
+  }, []);
+
   const save = useCallback(
     async (next: Partial<LaunchConfig>) => {
       const merged = { ...cfg, ...next };
@@ -203,7 +229,7 @@ export function Launch() {
     [cfg, chain, activeId, evmActiveId, pickedSol, pickedEvm, liveReady],
   );
 
-  const problems = draftProblems(draft);
+  const problems = [...draftProblems(draft), ...(chain === 'solana' ? kryptoOptionProblems(draft.krypto) : [])];
   const canSend = ready.ready && problems.length === 0 && busy === '';
 
   const pickImage = useCallback(async () => {
@@ -237,18 +263,24 @@ export function Launch() {
         twitter: draft.twitter.trim(),
         telegram: draft.telegram.trim(),
         website: draft.website.trim(),
+        kryptoMode: chain === 'solana' && draft.krypto.enabled,
       });
       if (!r.ok || !r.data) {
         toast.error(r.message);
         return;
       }
       setDraft((d) => ({ ...d, imageUrl: r.data!.imageUrl, metadataUri: r.data!.metadataUri }));
+      setKryptoAddress(r.data.kryptoAddress ?? null);
       setChecked(null);
-      toast.success('Image and details pinned to IPFS. Nothing has been created yet.');
+      toast.success(
+        r.data.kryptoAddress
+          ? 'Pinned to IPFS, with the Krypto Mode bot wallet named in the description. Nothing has been created yet.'
+          : 'Image and details pinned to IPFS. Nothing has been created yet.',
+      );
     } finally {
       setBusy('');
     }
-  }, [image, draft, toast]);
+  }, [image, draft, chain, toast]);
 
   const preview = useCallback(async () => {
     setBusy('preview');
@@ -342,6 +374,7 @@ export function Launch() {
           ['new', 'Launch'],
           ['mine', `My launches${attempts.length ? ` (${attempts.length})` : ''}`],
           ['stats', 'Stats'],
+          ['krypto', 'Krypto Mode'],
         ] as const).map(([id, label]) => (
           <button
             key={id}
@@ -357,6 +390,8 @@ export function Launch() {
       </div>
 
       {tab === 'stats' && <LaunchStats attempts={attempts} />}
+
+      {tab === 'krypto' && <KryptoSessions />}
 
       {tab === 'mine' && (
         <div className="space-y-3">
@@ -573,6 +608,15 @@ export function Launch() {
             Every coin launched here ends with{' '}
             <span className="text-krypt-muted">“{LAUNCH_WATERMARK}”</span>. It is written into the token's own
             metadata, so it travels with the coin.
+            {chain === 'solana' && draft.krypto.enabled && (
+              <>
+                {' '}
+                Krypto Mode adds one more line naming the bot’s wallet
+                {draft.description.length > DESCRIPTION_BUDGET - KRYPTO_DISCLOSURE_MAX
+                  ? ` — your text is cut to ${DESCRIPTION_BUDGET - KRYPTO_DISCLOSURE_MAX} characters to make room.`
+                  : '.'}
+              </>
+            )}
           </p>
         </div>
 
@@ -595,7 +639,7 @@ export function Launch() {
             <p className="mt-0.5 text-label leading-relaxed text-krypt-muted">
               {image ? image.name : 'PNG, JPG, GIF or WebP. This is the only thing most people will ever see of your token.'}
             </p>
-            {image && !draft.imageUrl && (
+            {image && (!draft.imageUrl || !draft.metadataUri) && (
               <button
                 onClick={() => void upload()}
                 disabled={busy !== '' || draft.name.trim() === '' || draft.symbol.trim() === ''}
@@ -605,7 +649,7 @@ export function Launch() {
                 Pin to IPFS
               </button>
             )}
-            {draft.imageUrl && (
+            {draft.imageUrl && draft.metadataUri && (
               <div className="mt-1.5 flex items-center gap-1.5 text-label text-emerald-300">
                 <Check className="h-3 w-3" /> Pinned. Nothing has been created yet.
               </div>
@@ -657,6 +701,96 @@ export function Launch() {
                 </span>
               </button>
             ))}
+
+            {/* ── $Krypto Mode ─────────────────────────────────────────── */}
+            <div className={cls('rounded-lg border p-3', draft.krypto.enabled ? 'border-krypt-purple/40 bg-krypt-purple/[0.07]' : 'border-white/10 bg-white/[0.02]')}>
+              <button onClick={() => setKrypto({ enabled: !draft.krypto.enabled })} className="flex w-full items-start gap-2.5 text-left">
+                <span className={cls('mt-0.5 h-3.5 w-3.5 shrink-0 rounded border', draft.krypto.enabled ? 'border-krypt-purple bg-krypt-purple/40' : 'border-white/20')} />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 text-body font-semibold text-white/90">
+                    <Bot className="h-3.5 w-3.5 text-krypt-purple" /> $Krypto Mode
+                  </span>
+                  <span className="block text-label leading-relaxed text-krypt-muted">
+                    Your coin gets its own trading bot from the moment it launches, run by a built-in strategy, your AI key, or an AI
+                    over MCP. It trades from a new wallet made for it, and <span className="text-white/80">that wallet is written
+                    into the coin’s description</span>, like mayhem mode is on-chain: anyone can see the bot and every trade it makes.
+                    Turn it on before you pin.
+                  </span>
+                </span>
+              </button>
+              {draft.krypto.enabled && (
+                <div className="mt-3 space-y-3">
+                  <Field label="Who drives it">
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {KRYPTO_DRIVERS.map((d) => (
+                        <button
+                          key={d}
+                          onClick={() => setKrypto({ driver: d })}
+                          className={cls('rounded-lg border px-2 py-1.5 text-body transition', draft.krypto.driver === d ? 'border-krypt-purple/60 bg-krypt-purple/20 text-white' : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10')}
+                        >
+                          {KRYPTO_DRIVER_TEXT[d].label}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                  <p className="-mt-1.5 text-label leading-relaxed text-krypt-muted">{KRYPTO_DRIVER_TEXT[draft.krypto.driver].help}</p>
+                  {draft.krypto.driver === 'strategy' && (
+                    <div className="space-y-1.5">
+                      {KRYPTO_STRATEGIES.map((st) => (
+                        <button
+                          key={st}
+                          onClick={() => setKrypto({ strategy: st })}
+                          className={cls('flex w-full items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition', draft.krypto.strategy === st ? 'border-krypt-purple/60 bg-krypt-purple/15' : 'border-white/10 bg-white/[0.02] hover:bg-white/5')}
+                        >
+                          <span className={cls('mt-1 h-2.5 w-2.5 shrink-0 rounded-full border', draft.krypto.strategy === st ? 'border-krypt-purple bg-krypt-purple' : 'border-white/30')} />
+                          <span className="min-w-0">
+                            <span className="block text-body font-semibold text-white/90">{KRYPTO_STRATEGY_TEXT[st].label}</span>
+                            <span className="block text-label leading-relaxed text-krypt-muted">{KRYPTO_STRATEGY_TEXT[st].help}</span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <Field label="Budget (SOL)" hint={`${KRYPTO_MIN_BUDGET_SOL}–${KRYPTO_MAX_BUDGET_SOL}, the most the bot has in play at once`}>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min={KRYPTO_MIN_BUDGET_SOL}
+                      max={KRYPTO_MAX_BUDGET_SOL}
+                      value={draft.krypto.budgetSol}
+                      onChange={(e) => setKrypto({ budgetSol: Number(e.target.value) })}
+                      className={cls(inputCls, 'font-mono')}
+                    />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {([
+                      [false, 'Start on paper', 'Simulated at the live price. Go live from the Krypto Mode tab when you are happy.'],
+                      [true, 'Start live', `Funds ${draft.krypto.budgetSol} SOL from the launch wallet into the bot wallet right after launch.`],
+                    ] as const).map(([live, label, why]) => (
+                      <button
+                        key={label}
+                        onClick={() => setKrypto({ live })}
+                        className={cls('rounded-lg border px-3 py-2 text-left transition', draft.krypto.live === live ? 'border-krypt-purple/60 bg-krypt-purple/15' : 'border-white/10 bg-white/[0.02] hover:bg-white/5')}
+                      >
+                        <span className="block text-body font-semibold text-white/90">{label}</span>
+                        <span className="block text-label leading-relaxed text-krypt-muted">{why}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/20 p-2.5 text-label leading-relaxed text-krypt-muted">
+                    <div className="mb-1 font-semibold text-white/80">This line goes into the description:</div>
+                    <div className="break-all font-mono text-white/70">
+                      {kryptoDisclosure(kryptoAddress && draft.metadataUri ? kryptoAddress : '<the bot wallet — made when you pin>')}
+                    </div>
+                    <div className="mt-1.5">
+                      Every trade goes through the normal trade path: 0.5% fee, your live limits and breakers. The bot never trades
+                      faster than every 15 seconds, never buys back within a minute of a sell, and stops at 20 trades an hour, so it
+                      manages a position rather than making volume.
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <div className="mt-3">

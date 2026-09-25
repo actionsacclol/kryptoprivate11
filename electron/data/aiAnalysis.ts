@@ -15,6 +15,7 @@ import {
   type AiSettings,
 } from '@shared/ai';
 import type { TokenDetail, TokenSummary } from '@shared/market';
+import { KRYPTO_AI_SYSTEM_PROMPT } from '@shared/kryptoMode';
 
 export interface AiResult {
   ok: boolean;
@@ -62,6 +63,28 @@ export async function analyze(
   }
 }
 
+/**
+ * $Krypto Mode's AI driver: the facts block (public market facts + the bot's
+ * own book, built by kryptoFacts — no key, no address) → the model's raw
+ * reply. Parsing and every limit are the caller's (shared/kryptoMode.ts).
+ */
+export async function askKrypto(ai: AiSettings, facts: string): Promise<{ ok: boolean; message: string; text?: string }> {
+  const provider = activeProvider(ai);
+  if (!provider) return { ok: false, message: 'No AI key is set (Settings → AI).' };
+  const prompt = `Decide the bot's next move and reply with ONLY the JSON object described.
+
+${facts}`;
+  try {
+    const r =
+      provider === 'openai'
+        ? await callOpenAI(ai.openaiKey.trim(), ai.openaiModel.trim() || 'gpt-4o-mini', prompt, KRYPTO_AI_SYSTEM_PROMPT)
+        : await callAnthropic(ai.anthropicKey.trim(), ai.anthropicModel.trim() || 'claude-sonnet-5', prompt, KRYPTO_AI_SYSTEM_PROMPT);
+    return r.ok ? { ok: true, message: 'ok', text: r.text } : { ok: false, message: r.message };
+  } catch (err) {
+    return { ok: false, message: `AI request failed: ${(err as Error).message}` };
+  }
+}
+
 /** Cheap sanity check that a key works, for the settings panel. */
 export async function verifyKey(provider: AiProvider, key: string, model: string): Promise<AiResult> {
   const trimmed = key.trim();
@@ -84,14 +107,14 @@ interface CallResult {
   message: string;
 }
 
-async function callOpenAI(key: string, model: string, userPrompt: string): Promise<CallResult> {
+async function callOpenAI(key: string, model: string, userPrompt: string, system = AI_SYSTEM_PROMPT): Promise<CallResult> {
   const res = await fetch(OPENAI_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
     body: JSON.stringify({
       model,
       messages: [
-        { role: 'system', content: AI_SYSTEM_PROMPT },
+        { role: 'system', content: system },
         { role: 'user', content: userPrompt },
       ],
       temperature: 0.4,
@@ -109,7 +132,7 @@ async function callOpenAI(key: string, model: string, userPrompt: string): Promi
   return { ok: !!text, text, message: text ? 'ok' : 'empty response' };
 }
 
-async function callAnthropic(key: string, model: string, userPrompt: string): Promise<CallResult> {
+async function callAnthropic(key: string, model: string, userPrompt: string, system = AI_SYSTEM_PROMPT): Promise<CallResult> {
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
     headers: {
@@ -120,7 +143,7 @@ async function callAnthropic(key: string, model: string, userPrompt: string): Pr
     body: JSON.stringify({
       model,
       max_tokens: 700,
-      system: AI_SYSTEM_PROMPT,
+      system,
       messages: [{ role: 'user', content: userPrompt }],
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS),

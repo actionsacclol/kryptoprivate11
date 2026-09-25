@@ -271,3 +271,27 @@ export function calloutEmbed(f: CalloutEmbedFacts): ScriptEmbed {
   const embed = 'embed' in built ? built.embed : { title: raw.title, timestamp: new Date().toISOString() };
   return { ...embed, footer: { text: 'krypt.cc/bot · Krypto Bot auto-callout' } };
 }
+
+/** A Discord message id: a snowflake, digits only. It becomes a path segment,
+ *  so nothing else is accepted. */
+export function isMessageId(v: unknown): v is string {
+  return typeof v === 'string' && /^\d{15,25}$/.test(v);
+}
+
+/**
+ * The URL for one webhook call (2026-09-25, call outcomes):
+ *   • no message id → the post URL with `?wait=true`, so Discord answers with
+ *     the message it created (and its id) instead of a bare 204;
+ *   • a message id → `/messages/<id>`, to EDIT that one message.
+ * Any other query (a `thread_id`) is kept, so a thread post edits in its thread.
+ * Only ever called on a URL `webhookUrlProblem` already passed.
+ */
+export function webhookCallUrl(raw: string, messageId?: string): string {
+  const u = new URL(raw.trim());
+  const parts = u.pathname.split('/').filter(Boolean);
+  const i = parts.indexOf('webhooks');
+  u.pathname = `/${parts.slice(0, i + 3).join('/')}${messageId ? `/messages/${messageId}` : ''}`;
+  if (messageId) u.searchParams.delete('wait');
+  else u.searchParams.set('wait', 'true');
+  return u.toString();
+}

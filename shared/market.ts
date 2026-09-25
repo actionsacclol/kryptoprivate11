@@ -170,6 +170,11 @@ export function windowExceedsAge(createdAt: number | null, w: StatsWindow, nowMs
  */
 export interface TokenSummary {
   /**
+   * The $Krypto Mode bot wallet this coin's metadata declares (a creator's
+   * public trading bot — shared/kryptoMode.ts). Absent/null = none declared.
+   */
+  kryptoBot?: string | null;
+  /**
    * Which chain this row lives on. Absent means Solana (every row written
    * before 2026-09-08). On Robinhood Chain `mint` is the 0x token address and
    * `priceSol` is the price in ETH — the field names stayed so every panel

@@ -1678,6 +1678,7 @@ async function buildSummary(mint: string, build: BuildOptions = { identity: true
       if (links) {
         const before = s.socials;
         s = merge(s, metadataPatch(mint, links));
+        if (links.kryptoBot) s.kryptoBot = links.kryptoBot;
         // `merge` keeps the first source that ANSWERED, and a provider that
         // answered "none" counts; when the values on screen came from the
         // file, say so.
@@ -1685,6 +1686,12 @@ async function buildSummary(mint: string, build: BuildOptions = { identity: true
           s.sources.socials = 'metadata';
         }
       }
+    } else if (uri) {
+      // Socials already known, so the file is not waited on — but a declared
+      // Krypto Mode bot is read from it whenever it is cached (the early
+      // fetch above caches it), so the label shows by the next refresh.
+      const cached = metadataLinksIfCached(uri);
+      if (cached?.kryptoBot) s.kryptoBot = cached.kryptoBot;
     }
   } else {
     // Network data off: the chain and this session's own tape are the whole

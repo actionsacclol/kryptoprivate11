@@ -11,7 +11,8 @@
 //      the redacted form, so a screenshot or a pasted log cannot leak it.
 
 import assert from 'node:assert/strict';
-import { MAX_WEBHOOK_CHARS, calloutEmbed, publicTokenUrl, redactWebhook, scriptEmbed, webhookUrlProblem } from './.webhook.mjs';
+import fs from 'node:fs';
+import { MAX_WEBHOOK_CHARS, calloutEmbed, isMessageId, publicTokenUrl, redactWebhook, scriptEmbed, webhookCallUrl, webhookUrlProblem } from './.webhook.mjs';
 
 const ID = '123456789012345678';
 const TOKEN = 'S3cr3t-tok3n_ThatMustNeverLeak';
@@ -145,6 +146,27 @@ const GOOD = `https://discord.com/api/webhooks/${ID}/${TOKEN}`;
   assert.deepEqual(u.fields.slice(0, 4).map((f) => f.value), ['—', '—', '—', '—'], 'unknown is an em dash, never 0');
   assert.equal(u.url, `https://pump.fun/coin/${MINT}`, 'no callout id → the coin page');
   console.log('ok  the callout embed matches the script’s layout, honest about unknowns');
+}
+
+{
+  // Call outcomes (2026-09-25): a post asks Discord for the message back so
+  // the script can EDIT it later; an edit targets exactly one message.
+  const MSG = '1300000000000000001';
+  assert.equal(webhookCallUrl(GOOD), `${GOOD}?wait=true`, 'a post waits for the message id');
+  assert.equal(webhookCallUrl(GOOD, MSG), `${GOOD}/messages/${MSG}`, 'an edit names one message');
+  assert.equal(webhookCallUrl(`${GOOD}?thread_id=42`, MSG), `${GOOD}/messages/${MSG}?thread_id=42`, 'a thread post is edited in its thread');
+  assert.equal(webhookCallUrl(`${GOOD}/`), `${GOOD}?wait=true`, 'a trailing slash does not become a bad path');
+  assert.ok(isMessageId(MSG));
+  for (const bad of ['', '12', '../../x', '1300000000000000001/../', 42, null, 'abc123456789012345']) assert.ok(!isMessageId(bad), `not an id: ${String(bad)}`);
+  // Edit only — nothing in the app can DELETE a Discord message.
+  const hook = fs.readFileSync(new URL('../electron/system/discordWebhook.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(hook, /method: 'DELETE'|'DELETE'/, 'no delete path');
+  const autos = fs.readFileSync(new URL('../electron/engine/automation.ts', import.meta.url), 'utf8');
+  const edit = autos.slice(autos.indexOf("case 'discordEdit': {"), autos.indexOf("case 'follow':"));
+  assert.ok(edit.includes("s.mode === 'paper'") && edit.indexOf("s.mode === 'paper'") < edit.indexOf('paper: nothing was edited'), 'a paper script edits nothing');
+  assert.ok(edit.indexOf("s.mode === 'paper'") < edit.indexOf('h.discordEdit('), 'and the paper check comes before the edit');
+  assert.ok(edit.includes("specs[key]?.type !== 'webhook'"), 'only the script’s own webhook settings');
+  console.log('ok  posts return their id; edits name one message; there is no delete');
 }
 
 console.log('webhook: all tests passed');

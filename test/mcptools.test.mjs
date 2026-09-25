@@ -25,7 +25,7 @@ let answers;
 
 function setup(over = {}) {
   tools._reset();
-  calls = { buys: [], sells: [], orders: [], cancels: [], reads: [] };
+  calls = { buys: [], sells: [], orders: [], cancels: [], reads: [], krypto: [] };
   answers = { buy: { ok: true, message: 'bought' }, sell: { ok: true, message: 'sold' }, order: { ok: true, message: 'armed' }, ...over.answers };
   const read = (name) => async (...args) => {
     calls.reads.push({ name, args });
@@ -62,6 +62,11 @@ function setup(over = {}) {
     placeOrder: async (req, paper) => {
       calls.orders.push({ req, paper });
       return answers.order;
+    },
+    kryptoSessions: read('kryptoSessions'),
+    kryptoTrade: async (mint, side, amount, live) => {
+      calls.krypto.push({ mint, side, amount, live });
+      return { ok: true, message: 'krypto ok' };
     },
     cancelOrders: async (mint) => {
       calls.cancels.push(mint);
@@ -335,4 +340,26 @@ function setup(over = {}) {
   ok('the four readers pass their arguments, default as documented, and tell an empty answer apart from an unread one');
 }
 
-console.log(`\nmcptools: ${passed}/10 passed`);
+// ── $Krypto Mode ─────────────────────────────────────────────────────────
+{
+  setup();
+  budget = { maxBuySol: 0.1, hourlyCapSol: 0.5, maxTradesPerMinute: 60 };
+  access = 'read';
+  assert.equal((await tools.call('get_krypto_sessions', {})).ok, true, 'reading sessions is a read tool');
+  const ro = await tools.call('krypto_mode_trade', { mint: MINT, side: 'buy', amount: 0.01 });
+  assert.equal(ro.ok, false, 'a read-only connection cannot trade a bot');
+  assert.equal(calls.krypto.length, 0);
+  access = 'paper';
+  assert.equal((await tools.call('krypto_mode_trade', { mint: MINT, side: 'buy', amount: 0.01 })).ok, true);
+  assert.equal(calls.krypto.at(-1).live, false, 'a paper connection says so, and kryptoMode refuses it a live session');
+  access = 'live';
+  assert.equal((await tools.call('krypto_mode_trade', { mint: MINT, side: 'sell', amount: 150 })).ok, false, 'a sell over 100% is refused, not clipped');
+  assert.equal((await tools.call('krypto_mode_trade', { mint: MINT, side: 'dump', amount: 1 })).ok, false);
+  assert.equal((await tools.call('krypto_mode_trade', { mint: MINT, side: 'buy', amount: 5 })).ok, false, 'the connection budget applies too (0.1 SOL per buy)');
+  const good = await tools.call('krypto_mode_trade', { mint: MINT, side: 'buy', amount: 0.05 });
+  assert.equal(good.ok, true);
+  assert.deepEqual(calls.krypto.at(-1), { mint: MINT, side: 'buy', amount: 0.05, live: true });
+  ok('krypto_mode_trade: trade tier, both budgets, strict arguments, paper connections flagged');
+}
+
+console.log(`\nmcptools: ${passed}/11 passed`);

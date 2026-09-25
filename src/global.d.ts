@@ -1,3 +1,4 @@
+import type { KryptoSession } from '@shared/kryptoMode';
 import type { WalletWithdrawResult, AppSettings, BacktestTrade, EngineEvent, EngineSnapshot, ExecutionSnapshot, HistorySummary, IpcResult, LiveState, WalletHolding, WalletInfo, WalletSummary, WatchedWallet } from '@shared/types';
 import type {
   CandleInterval,
@@ -480,8 +481,8 @@ declare global {
         pickImage: (purpose?: 'token' | 'profile') => Promise<IpcResult<{ handle: string; name: string; dataUrl: string } | null>>;
         upload: (
           handle: string,
-          fields: { name: string; symbol: string; description: string; twitter: string; telegram: string; website: string },
-        ) => Promise<IpcResult<{ imageUrl: string; metadataUri: string }>>;
+          fields: { name: string; symbol: string; description: string; twitter: string; telegram: string; website: string; kryptoMode?: boolean },
+        ) => Promise<IpcResult<{ imageUrl: string; metadataUri: string; description: string; kryptoAddress: string | null }>>;
         /** Creator fees accrued by the launch wallet, across every coin it
          *  launched. `claimableLamports` is the balance ABOVE the vault's
          *  rent — null means unknown, never zero. */
@@ -508,6 +509,15 @@ declare global {
         >;
         preview: (draft: LaunchDraft) => Promise<IpcResult<LaunchOutcome>>;
         send: (draft: LaunchDraft) => Promise<IpcResult<LaunchOutcome>>;
+      };
+      kryptoMode: {
+        list: () => Promise<IpcResult<{ sessions: KryptoSession[]; failure: string | null }>>;
+        pause: (id: string) => Promise<IpcResult<void>>;
+        resume: (id: string) => Promise<IpcResult<void>>;
+        goLive: (id: string) => Promise<IpcResult<void>>;
+        sellAll: (id: string) => Promise<IpcResult<void>>;
+        withdraw: (id: string) => Promise<IpcResult<void>>;
+        remove: (id: string) => Promise<IpcResult<void>>;
       };
       evm: {
         state: (chain: EvmChainKind) => Promise<IpcResult<EvmState>>;

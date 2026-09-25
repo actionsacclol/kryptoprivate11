@@ -924,7 +924,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
     steps: [
       'Pick the chain on New first. The Runner, Price tick, Order changed and Alert fired triggers are Solana only, and so are the order, alert and template actions.',
       'Start a rule, start a script, or start from an example. For AI-written code, paste Reference → Copy AI prompt into the assistant. That prompt is generated from the same tables the app runs on.',
-      'Declare settings in an @inputs block: a JSON object inside a comment at the top, up to 24 fields. Read them as bot.input.<name>.',
+      'Declare settings in an @inputs block: a JSON object inside a comment at the top, up to 32 fields. Read them as bot.input.<name>.',
       'Set the budget: Max per trade, Buys per day, Daily loss stop, Open positions, Actions / min.',
       'Run on paper. The log gives the first failed condition for rules and each refusal reason for trades.',
       'Switch to Live and press On. The confirmation names the per-trade, per-day and loss limits. Saving as live disarms the script, and On only works on a saved script with no unsaved edits.',

@@ -78,6 +78,10 @@ export interface McpToolsHost {
   sell(mint: string, percent: number, paper: boolean, chain: Chain): Promise<{ ok: boolean; message: string }>;
   placeOrder(req: McpOrderRequest, paper: boolean): Promise<{ ok: boolean; message: string }>;
   cancelOrders(mint: string): Promise<{ ok: boolean; message: string; cancelled?: number }>;
+  /** $Krypto Mode sessions (electron/engine/kryptoMode.ts). */
+  kryptoSessions(): Promise<unknown>;
+  /** A trade for an MCP-driven Krypto Mode session. `live` = this connection may spend. */
+  kryptoTrade(mint: string, side: 'buy' | 'sell', amount: number, live: boolean): Promise<{ ok: boolean; message: string }>;
   /** The chain the Scout tools default to when a call names none. */
   defaultChain(): Chain;
   log(level: 'info' | 'warn' | 'error', line: string): void;
@@ -332,6 +336,8 @@ export async function call(name: string, args: Record<string, unknown>): Promise
       );
     case 'get_orders':
       return done('Advanced orders waiting to fire.', await h.orders());
+    case 'get_krypto_sessions':
+      return done('Krypto Mode sessions. Each bot wallet is declared in its coin’s description.', await h.kryptoSessions());
     case 'get_trade_history': {
       const limit = readNumber(args, 'limit', { min: 1, max: 100, dflt: 25 });
       if (!limit.ok) return fail(limit.why);
@@ -407,6 +413,24 @@ export async function call(name: string, args: Record<string, unknown>): Promise
       }
       const r = await h.placeOrder({ mint: m.mint, kind: kind.value, triggerBasis: basis.value, triggerValue: value.value, amount: amount.value }, paper);
       h.log(r.ok ? 'info' : 'warn', `MCP order ${kind.value} on ${m.mint.slice(0, 8)}…: ${r.message}`);
+      return r.ok ? done(r.message) : fail(r.message);
+    }
+    case 'krypto_mode_trade': {
+      if (!canTrade(access)) return fail('This connection is read only.');
+      const m = readMint(args, 'solana');
+      if (!m.ok) return fail(m.why);
+      const side = readEnum(args, 'side', ['buy', 'sell'] as const, null);
+      if (!side.ok) return fail(side.why);
+      const amt = readNumber(args, 'amount', { required: true, min: 0, max: side.value === 'sell' ? 100 : undefined });
+      if (!amt.ok) return fail(amt.why);
+      // The connection's own budget first (the same one buy_token meets),
+      // then the session's guard inside kryptoMode — both have to agree.
+      const now = Date.now();
+      const gate = checkMcpTrade({ kind: side.value, amount: amt.value }, access, h.budget(), attempts, now);
+      if (!gate.ok) return fail(gate.reason);
+      note(side.value, side.value === 'buy' ? amt.value : 0, now);
+      const r = await h.kryptoTrade(m.mint, side.value, amt.value, !paper);
+      h.log(r.ok ? 'info' : 'warn', `MCP Krypto Mode ${side.value} ${amt.value} on ${m.mint.slice(0, 8)}…: ${r.message}`);
       return r.ok ? done(r.message) : fail(r.message);
     }
     case 'cancel_orders': {

@@ -99,6 +99,8 @@ export interface MetadataLinks {
   telegram: string | null;
   website: string | null;
   image: string | null;
+  /** The $Krypto Mode bot wallet the description declares, or null. */
+  kryptoBot: string | null;
 }
 
 /** One resolved metadata file: the fingerprint and the links, from one fetch.
@@ -262,6 +264,7 @@ function extractLinks(json: Record<string, unknown>): MetadataLinks {
     telegram: urlOrNull(pick('telegram')),
     website: urlOrNull(pick('website')),
     image: urlOrNull(json.image),
+    kryptoBot: parseKryptoDisclosure(json.description),
   };
 }
 
@@ -395,4 +398,5 @@ export function parkedGatewaysForTest(): string[] {
  *  string, so it is worth pinning. */
 export function candidateUrlsForTest(uri: string): string[] {
   return candidateUrls(uri);
-}
+}import { parseKryptoDisclosure } from '@shared/kryptoMode';
+

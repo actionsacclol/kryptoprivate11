@@ -20,7 +20,9 @@ import type { AiAnalysis } from '@shared/ai';
 import * as wallet from './system/wallet';
 import * as fund from './engine/fund';
 import * as lab from '@shared/lab';
-import { getBalance } from './chain/rpcClient';
+import { getBalance, getTokenBalanceForMint } from './chain/rpcClient';
+import * as kryptoMode from './engine/kryptoMode';
+import { kryptoOptionsOf, withKryptoDisclosure } from '@shared/kryptoMode';
 import * as bots from './system/bots';
 import * as heliusBudget from './system/heliusBudget';
 import * as integrityGuard from './system/integrityGuard';
@@ -1450,6 +1452,23 @@ export function registerIpc(): void {
       return { configs: snap.configs, stats: snap.stats, liveExecutable: snap.liveExecutable, liveBlockedReason: snap.liveBlockedReason };
     },
     orders: async () => getEngine().ordersSnapshot(),
+    kryptoSessions: async () =>
+      kryptoMode.list().map((s) => ({
+        mint: s.mint,
+        symbol: s.symbol,
+        botWallet: s.address,
+        driver: s.driver,
+        strategy: s.driver === 'strategy' ? s.strategy : null,
+        mode: s.mode,
+        status: s.status,
+        budgetSol: s.budgetSol,
+        netSpentSol: s.netSpentSol,
+        tokensHeld: s.tokensHeld,
+        lastPriceSol: s.lastPriceSol,
+        note: s.note,
+        trades: s.trades.slice(0, 10).map((t) => ({ at: t.at, side: t.side, sol: t.sol, pct: t.pct, ok: t.ok, reason: t.reason, by: t.by })),
+      })),
+    kryptoTrade: (mint, side, amount, live) => kryptoMode.tradeFromMcp(mint, side, amount, live),
     trades: async (limit) => getEngine().tradeHistory().slice(0, limit),
     // `hostBuy` / `hostSell` are the same pair user scripts reach, so the EVM
     // routing, the paper book and the live rails are one implementation with
@@ -1649,8 +1668,120 @@ export function registerIpc(): void {
       mayhem: d.mayhem === true,
       cashback: d.cashback === true,
       creatorTaxBps: Math.round(Number(d.creatorTaxBps)),
+      // Solana only; anywhere else it is off whatever was sent.
+      krypto: d.chain === 'solana' ? kryptoOptionsOf(d.krypto) : kryptoOptionsOf(null),
     };
   };
+
+  // ── $Krypto Mode ───────────────────────────────────────────────────
+  // A launched coin's declared bot (electron/engine/kryptoMode.ts). The host
+  // is the engine's ordinary trade path + the fund module; nothing here is a
+  // shortcut around a gate.
+  kryptoMode.init(app.getPath('userData'), {
+    now: () => Date.now(),
+    priceSol: (mint) => getEngine().kryptoPrice(mint),
+    market: (mint) => {
+      const m = market.summaryIfCached(mint);
+      return {
+        symbol: m?.symbol ?? '',
+        ageSec: m?.createdAt ? Math.max(0, (Date.now() - m.createdAt) / 1000) : null,
+        marketCapUsd: m?.marketCapUsd ?? null,
+        holders: m?.holders ?? null,
+        change5mPct: m?.stats?.['5m']?.priceChangePct ?? null,
+      };
+    },
+    liveBlocked: () => getEngine().kryptoLiveBlocked(),
+    buy: (walletId, mint, sol) => getEngine().kryptoBuy(walletId, mint, sol),
+    sell: (walletId, mint, pct) => getEngine().kryptoSell(walletId, mint, pct),
+    balances: async (address, mint) => {
+      const url = store.load().rpc.httpUrl;
+      const [b, t] = await Promise.all([getBalance(url, address).catch(() => null), getTokenBalanceForMint(url, address, mint).catch(() => null)]);
+      return {
+        lamports: b && b.ok && typeof b.data === 'number' ? b.data : null,
+        tokens: t && t.ok && typeof t.data === 'number' ? t.data : null,
+      };
+    },
+    fund: async (fromWalletId, toAddress, lamports) => {
+      const st = store.load();
+      const r = await fund.fundWallets(st.rpc.execHttpUrl ?? st.rpc.httpUrl, [{ publicKey: toAddress, lamports }], fromWalletId);
+      return { ok: r.ok, message: r.message };
+    },
+    collect: async (walletId, toWalletId) => {
+      const st = store.load();
+      const [r] = await fund.collectToActive(st.rpc.execHttpUrl ?? st.rpc.httpUrl, [walletId], toWalletId);
+      return r ? { ok: r.ok, message: r.message } : { ok: false, message: 'nothing was collected' };
+    },
+    ask: async (facts) => {
+      const ai = store.load().ai;
+      const { activeProvider, askKrypto } = await import('./data/aiAnalysis');
+      if (!activeProvider(ai)) return null;
+      return askKrypto(ai, facts);
+    },
+    watch: (mint) => {
+      try {
+        getEngine().watchPumpMint(mint);
+      } catch {
+        /* the engine is not up yet; the loop's price read still works */
+      }
+    },
+    emit: (sessions) => sendToWindows({ kind: 'krypto', sessions }),
+    log: (level, line) => logger[level](line),
+  });
+  kryptoMode.startLoop();
+
+  /** The bot wallet for a Krypto Mode upload: an unused declared one if there
+   *  is one (so re-pinning an edited draft does not mint a new wallet each
+   *  time), else a fresh wallet made for this coin. */
+  const kryptoBotWallet = (symbol: string): { walletId: string; address: string } | { error: string } => {
+    const reuse = kryptoMode.unusedDeclaredWallet();
+    if (reuse && wallet.publicKeyOf(reuse.walletId) === reuse.address) return { walletId: reuse.walletId, address: reuse.address };
+    const g = wallet.generate(`Krypto Mode · ${symbol || 'new coin'}`);
+    if (!g.ok || !g.publicKey) return { error: `Could not make the Krypto Mode wallet: ${g.message}` };
+    syncLiveMode();
+    refreshScoutOwnership();
+    const id = wallet.list().find((w) => w.publicKey === g.publicKey)?.id;
+    if (!id) return { error: 'The Krypto Mode wallet was made but could not be found again.' };
+    return { walletId: id, address: g.publicKey };
+  };
+
+  ipcMain.handle('kryptoMode:list', () => ok('ok', { sessions: kryptoMode.list(), failure: kryptoMode.failure() }));
+  const kryptoId = (id: unknown): string | null => (typeof id === 'string' && /^km_[a-z0-9_]{1,40}$/.test(id) ? id : null);
+  ipcMain.handle('kryptoMode:pause', (_e, id: unknown) => {
+    const k = kryptoId(id);
+    if (!k) return fail('Bad session id');
+    const r = kryptoMode.setStatus(k, 'paused');
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoMode:resume', (_e, id: unknown) => {
+    const k = kryptoId(id);
+    if (!k) return fail('Bad session id');
+    const r = kryptoMode.setStatus(k, 'running');
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoMode:goLive', async (_e, id: unknown) => {
+    const k = kryptoId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoMode.goLive(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoMode:sellAll', async (_e, id: unknown) => {
+    const k = kryptoId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoMode.sellAll(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoMode:withdraw', async (_e, id: unknown) => {
+    const k = kryptoId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoMode.withdraw(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoMode:remove', (_e, id: unknown) => {
+    const k = kryptoId(id);
+    if (!k) return fail('Bad session id');
+    const r = kryptoMode.remove(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
 
   const launchDeps = (): LaunchDeps => {
     const s = store.load();
@@ -1957,7 +2088,7 @@ export function registerIpc(): void {
     const filePath = typeof handle === 'string' ? pickedImages.get(handle) : undefined;
     if (!filePath) return fail('No image chosen — pick one first');
     if (!store.load().launch.enabled) return fail('Launching is switched off for this install.');
-    const f = fields as Partial<MetadataFields> | null;
+    const f = fields as (Partial<MetadataFields> & { kryptoMode?: unknown }) | null;
     const str = (v: unknown, cap: number): string => (typeof v === 'string' ? v.slice(0, cap) : '');
     // The same caps the form enforces (shared/launch.ts), not looser ones.
     // The watermark is applied HERE, not taken from the renderer, so every
@@ -1966,15 +2097,24 @@ export function registerIpc(): void {
     // The form shows the stamped text, so this is a guarantee rather than a
     // surprise (shared/launch.ts).
     const { withWatermark } = await import('@shared/launch');
+    // $Krypto Mode: the bot's wallet is named in the description HERE, in
+    // main, before the pin — so a coin with a Krypto Mode bot always says so.
+    const bot = f?.kryptoMode === true ? kryptoBotWallet(str(f?.symbol, MAX_SYMBOL)) : null;
+    if (bot && 'error' in bot) return fail(bot.error);
+    const words = str(f?.description, MAX_DESCRIPTION);
+    const description = (bot ? withKryptoDisclosure(words, bot.address) : withWatermark(words)).slice(0, MAX_DESCRIPTION);
     const r = await uploadLaunchMetadata(filePath, {
       name: str(f?.name, MAX_NAME),
       symbol: str(f?.symbol, MAX_SYMBOL),
-      description: withWatermark(str(f?.description, MAX_DESCRIPTION)).slice(0, MAX_DESCRIPTION),
+      description,
       twitter: str(f?.twitter, 300),
       telegram: str(f?.telegram, 300),
       website: str(f?.website, 300),
     });
-    return 'error' in r ? fail(r.error) : ok('pinned', r);
+    if ('error' in r) return fail(r.error);
+    // Only a file this app stamped can start a bot (kryptoMode.start).
+    if (bot) kryptoMode.declare(r.metadataUri, bot.walletId, bot.address);
+    return ok('pinned', { ...r, description, kryptoAddress: bot ? bot.address : null });
   });
 
   /**
@@ -2339,6 +2479,19 @@ export function registerIpc(): void {
         const { launchWalletId } = await import('@shared/launch');
         const wid = launchWalletId(store.load().launch, 'solana');
         if (wid) getEngine().calloutAfterLaunch(wid, r.token, draft.devBuy);
+      }
+      // $Krypto Mode starts once the coin exists — and only on a metadata
+      // file this app stamped with the bot's wallet (start() refuses others).
+      if (r.ok && r.token && draft.chain === 'solana' && draft.krypto.enabled) {
+        const { launchWalletId } = await import('@shared/launch');
+        const km = await kryptoMode.start({
+          mint: r.token,
+          symbol: draft.symbol.trim(),
+          metadataUri: draft.metadataUri,
+          launchWalletId: launchWalletId(store.load().launch, 'solana'),
+          options: draft.krypto,
+        });
+        r.message = `${r.message} Krypto Mode: ${km.message}`;
       }
       // A failure still carries the outcome: a hash on a timed-out receipt
       // is the one thing the user needs, and `fail()` would throw it away.

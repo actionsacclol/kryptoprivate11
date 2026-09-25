@@ -696,6 +696,18 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                   Not taped
                 </span>
               )}
+              {s?.kryptoBot && (
+                // A declared creator bot (shared/kryptoMode.ts) — named on the
+                // page for the same reason it is named in the description:
+                // anyone deciding whether to trade this should know a bot does.
+                <button
+                  onClick={() => void window.krypt.app.openExternal(`https://solscan.io/account/${s.kryptoBot}`)}
+                  className="rounded-full border border-krypt-purple/40 bg-krypt-purple/15 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-white/90 hover:bg-krypt-purple/25"
+                  title={`This coin's description declares a Krypto Mode trading bot: wallet ${s.kryptoBot}. It buys and sells this coin. Click to see its trades.`}
+                >
+                  Krypto Mode bot
+                </button>
+              )}
               {heldOverAt !== null && (
                 // A throttled provider no longer blanks this page: the last
                 // good numbers are held over instead (see the grace tier in

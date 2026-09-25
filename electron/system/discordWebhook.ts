@@ -29,7 +29,7 @@
 // public fact about a public token.
 
 import { request } from 'undici';
-import { webhookUrlProblem, type ScriptEmbed } from '@shared/webhook';
+import { isMessageId, webhookCallUrl, webhookUrlProblem, type ScriptEmbed } from '@shared/webhook';
 
 // The URL rules live in shared/webhook.ts so the IPC validator and the
 // renderer can import them without pulling undici in behind them. Re-exported
@@ -54,6 +54,9 @@ export interface WebhookFlag {
 export interface WebhookResult {
   ok: boolean;
   message: string;
+  /** The Discord message a script post created — kept so the script can
+   *  edit it later (a call's outcome). Absent when Discord did not say. */
+  messageId?: string;
 }
 
 /**
@@ -101,22 +104,48 @@ export async function postEmbed(webhookUrl: string, embed: ScriptEmbed): Promise
   if (problem) return { ok: false, message: problem };
   const url = webhookUrl.trim();
   if (!url) return { ok: false, message: 'no webhook set' };
-  return send(url, { username: 'Krypto Bot', allowed_mentions: { parse: [] as string[] }, embeds: [embed] }, 'this post was dropped');
+  // ?wait=true: Discord then returns the message it created, id included.
+  return send(webhookCallUrl(url), { username: 'Krypto Bot', allowed_mentions: { parse: [] as string[] }, embeds: [embed] }, 'this post was dropped', 'POST');
 }
 
-async function send(url: string, payload: unknown, droppedWhat: string): Promise<WebhookResult> {
+/**
+ * Replace the embed on one message this webhook posted — how a script shows a
+ * call's outcome on the call itself. A webhook can only edit its OWN
+ * messages (Discord's rule), so there is nothing else this can reach.
+ */
+export async function editEmbed(webhookUrl: string, messageId: string, embed: ScriptEmbed): Promise<WebhookResult> {
+  const problem = webhookUrlProblem(webhookUrl);
+  if (problem) return { ok: false, message: problem };
+  const url = webhookUrl.trim();
+  if (!url) return { ok: false, message: 'no webhook set' };
+  if (!isMessageId(messageId)) return { ok: false, message: 'not a Discord message id' };
+  return send(webhookCallUrl(url, messageId), { allowed_mentions: { parse: [] as string[] }, embeds: [embed] }, 'this edit was dropped', 'PATCH');
+}
+
+async function send(url: string, payload: unknown, droppedWhat: string, method: 'POST' | 'PATCH' = 'POST'): Promise<WebhookResult> {
   try {
     const res = await request(url, {
-      method: 'POST',
+      method,
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
       headersTimeout: TIMEOUT_MS,
       bodyTimeout: TIMEOUT_MS,
     });
-    // Discord answers 204 with no body on success.
+    // 204 with no body for a plain post; 200 + the message for ?wait=true
+    // and for an edit. Only the id is read — nothing else from the body.
     const code = res.statusCode;
+    if (code === 200) {
+      let messageId: string | undefined;
+      try {
+        const body = (await res.body.json()) as { id?: unknown };
+        if (isMessageId(body?.id)) messageId = body.id;
+      } catch {
+        /* sent; the id is just unknown */
+      }
+      return { ok: true, message: method === 'PATCH' ? 'edited' : 'sent', messageId };
+    }
     res.body.dump().catch(() => undefined);
-    if (code >= 200 && code < 300) return { ok: true, message: 'sent' };
+    if (code >= 200 && code < 300) return { ok: true, message: method === 'PATCH' ? 'edited' : 'sent' };
     if (code === 401 || code === 403 || code === 404) {
       return { ok: false, message: `Discord rejected the webhook (${code}) — it may have been deleted or the URL is wrong` };
     }

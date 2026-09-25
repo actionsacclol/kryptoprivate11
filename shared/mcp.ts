@@ -366,6 +366,35 @@ export const MCP_TOOLS: McpToolSpec[] = [
     destructive: false,
   },
   {
+    name: 'get_krypto_sessions',
+    title: 'Krypto Mode sessions',
+    description:
+      'The Krypto Mode bots on coins this app launched: each one’s coin, its PUBLICLY DECLARED bot wallet, who drives it (strategy, AI key or MCP), paper or live, budget, holdings and recent trades. Only sessions driven by MCP take krypto_mode_trade.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    tier: 'read',
+    readOnly: true,
+    destructive: false,
+  },
+  {
+    name: 'krypto_mode_trade',
+    title: 'Trade a Krypto Mode bot',
+    description:
+      'Buy or sell for a Krypto Mode session set to be driven over MCP — from its own declared wallet, inside its budget. The bot is public: trade the position, never to make volume. Refused when it is too soon after the last trade (15 s), a buy within a minute of a sell, over the budget, or 20 trades in an hour. A paper connection cannot trade a live session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mint: SOL_MINT,
+        side: str('buy or sell.', { enum: ['buy', 'sell'] }),
+        amount: num('SOL to spend for a buy, or the percent of the bot’s bag to sell (1–100).', { exclusiveMinimum: 0 }),
+      },
+      required: ['mint', 'side', 'amount'],
+      additionalProperties: false,
+    },
+    tier: 'trade',
+    readOnly: false,
+    destructive: false,
+  },
+  {
     name: 'cancel_orders',
     title: 'Cancel orders',
     description: 'Cancel every armed advanced order on one Solana token.',

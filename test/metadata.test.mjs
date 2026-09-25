@@ -167,8 +167,20 @@ const hostOf = (u) => new URL(u).hostname;
     telegram: 'https://t.me/source',
     website: 'https://source.network/',
     image: 'https://ipfs.io/ipfs/bafkreicyl6eewcnjazi4zbis2nvicw7n7bnhkazbosd2a26zfgmoxz3kry',
+    kryptoBot: null,
   });
   console.log('ok  links read off the file, top level and extensions');
+}
+
+// $Krypto Mode (2026-09-25): a declared creator bot is read off the
+// description, so the token page can label the coin.
+{
+  const bot = 'KryptoBot1111111111111111111111111111111111';
+  const d = `gm\nKrypto Mode: this coin has a public trading bot, wallet ${bot}. It buys and sells this coin.\nLaunched with krypt.cc/bot`;
+  assert.equal(links({ description: d }).kryptoBot, bot);
+  assert.equal(links({ description: 'Krypto Mode: wallet not-an-address' }).kryptoBot, null);
+  assert.equal(links({ description: 42 }).kryptoBot, null);
+  console.log('ok  a declared Krypto Mode bot is read off the description');
 }
 
 // Nothing is guessed: a handle is not a link, `x` stands in for twitter, an

@@ -4,6 +4,7 @@
 // `electron/**`; everything crosses via window.krypt.* using these types.
 // ──────────────────────────────────────────────────────────────────────
 
+import type { KryptoSession } from './kryptoMode';
 import { DEFAULT_DATA_SETTINGS, type DataSettings } from './market';
 import { DEFAULT_ALERT_SETTINGS, type AlertSettings } from './alerts';
 import { DEFAULT_HOTKEYS, type HotkeySettings } from './hotkeys';
@@ -958,6 +959,8 @@ export type EngineEvent =
   | { kind: 'position'; position: PaperPosition }
   | { kind: 'positionUpdate'; position: PaperPosition }
   | { kind: 'toast'; level: 'info' | 'success' | 'warn' | 'error'; message: string }
+  /** $Krypto Mode sessions changed (electron/engine/kryptoMode.ts). */
+  | { kind: 'krypto'; sessions: KryptoSession[] }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; line: string; at: number }
   /** Advanced-order list changed (created, triggered, filled, cancelled). */
   | { kind: 'orders'; snapshot: import('./orders').OrdersSnapshot }

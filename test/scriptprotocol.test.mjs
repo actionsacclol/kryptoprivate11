@@ -53,6 +53,17 @@ test('the sandbox page locks itself down and exposes only bot', () => {
   assert.ok(EVENT_TIMEOUT_MS <= 5_000 && MIN_INTERVAL_S >= 5, 'a runaway handler is short-lived; a timer cannot spin');
 });
 
+// 2026-09-25: links/security/creator/analyze were allowed and handled in main
+// since 3.1.0 but never put on `bot`, so `bot.creator` was undefined in every
+// script and a serial-dev filter silently waved rugs through. Every allowed
+// method must be reachable from the harness.
+test('every allowed method is on the sandbox bot', () => {
+  const html = sandboxPageHtml();
+  const body = html.slice(html.indexOf('const bot = Object.freeze({'));
+  const missing = SCRIPT_METHODS.filter((m) => !new RegExp(`\\n\\s+(get )?${m}\\s*[:(]`).test(body));
+  assert.deepEqual(missing, [], `bot is missing: ${missing.join(', ')}`);
+});
+
 for (const c of cases) {
   try {
     c.fn();

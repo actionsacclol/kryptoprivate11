@@ -1170,6 +1170,10 @@ export class SniperEngine {
         const { postEmbed } = await import('../system/discordWebhook');
         return postEmbed(url, embed);
       },
+      discordEdit: async (url, messageId, embed) => {
+        const { editEmbed } = await import('../system/discordWebhook');
+        return editEmbed(url, messageId, embed);
+      },
       // Follows and likes, from the same account a callout would post from.
       pumpSocial: async (action, target, who) => {
         const pick = this.pumpAccountFor(who);
@@ -4709,6 +4713,33 @@ export class SniperEngine {
       costSol: res.simulatedLossSol ?? null,
       stage: res.stage ?? null,
     };
+  }
+
+  // ── $Krypto Mode (electron/engine/kryptoMode.ts) ─────────────────
+  //
+  // A launched coin's declared bot trades through the Wallet Lab path: signed
+  // by the bot's own wallet, the full pipeline (fee, breakers, per-trade cap),
+  // recorded in the ledger under that wallet. No shortcut of its own.
+
+  kryptoBuy(walletId: string, mint: string, sol: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }> {
+    return this.labBuy(walletId, mint, sol);
+  }
+
+  kryptoSell(walletId: string, mint: string, pct: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }> {
+    return this.labSell(walletId, mint, pct);
+  }
+
+  /** Price for a bot decision: the free local reads, then one market read. */
+  async kryptoPrice(mint: string): Promise<number | null> {
+    return this.cheapPriceSol(mint) ?? (await this.paperFillPrice(mint));
+  }
+
+  /** Why a Krypto Mode live trade cannot run right now, or null. */
+  kryptoLiveBlocked(): string | null {
+    const s = this.getSettings();
+    if (!s.execution.liveEnabled) return 'live execution is switched off';
+    if (!this.armed) return 'the engine is not armed';
+    return this.liveBreakerReason();
   }
 
   /** A sell (default the whole bag) signed by a SPECIFIC wallet. */

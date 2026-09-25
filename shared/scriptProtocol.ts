@@ -61,6 +61,7 @@ export const SCRIPT_METHODS = [
   'wallets',
   'calloutReply',
   'discord',
+  'discordEdit',
   'follow',
   'unfollow',
   'like',
@@ -309,6 +310,12 @@ export function sandboxPageHtml(): string {
      */
     discord: (field, embed) => call('discord', [str(field ?? ''), embed ?? {}]),
     /**
+     * Replace the embed on a message bot.discord posted — pass the messageId
+     * it returned. For showing how a call ended on the call itself. Edit
+     * only: there is deliberately no delete.
+     */
+    discordEdit: (field, messageId, embed) => call('discordEdit', [str(field ?? ''), str(messageId ?? ''), embed ?? {}]),
+    /**
      * Follow / unfollow a pump.fun user (a wallet address, a pump user id or a
      * pump.fun/profile link) as one of your accounts. Solana only. Same third
      * argument as callout: left out, the trading wallet's account acts.
@@ -333,6 +340,10 @@ export function sandboxPageHtml(): string {
     price: (mint) => call('price', [mint]),
     token: (mint) => call('token', [mint]),
     market: (mint) => call('market', [mint]),
+    links: (mint) => call('links', [mint]),
+    security: (mint) => call('security', [mint]),
+    creator: (mint) => call('creator', [mint]),
+    analyze: (mint) => call('analyze', [mint]),
     positions: () => call('positions', []),
     orders: (mint) => call('orders', mint === undefined ? [] : [mint]),
     runners: () => call('runners', []),

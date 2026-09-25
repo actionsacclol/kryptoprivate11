@@ -334,7 +334,7 @@ const api = {
   },
   launch: {
     pickImage: (purpose?: 'token' | 'profile') => ipcRenderer.invoke('launch:pickImage', purpose ?? 'token'),
-    upload: (filePath: string, fields: Record<string, string>) => ipcRenderer.invoke('launch:upload', filePath, fields),
+    upload: (filePath: string, fields: Record<string, string | boolean>) => ipcRenderer.invoke('launch:upload', filePath, fields),
     /** Creator fees this install's launch wallet has accrued, across every
      *  coin it launched — the vault is per creator, not per token. */
     fees: () => ipcRenderer.invoke('launch:fees'),
@@ -344,6 +344,16 @@ const api = {
     claimFees: () => ipcRenderer.invoke('launch:claimFees'),
     preview: (draft: LaunchDraft) => ipcRenderer.invoke('launch:preview', draft),
     send: (draft: LaunchDraft) => ipcRenderer.invoke('launch:send', draft),
+  },
+  /** $Krypto Mode sessions — a launched coin's declared bot. */
+  kryptoMode: {
+    list: () => ipcRenderer.invoke('kryptoMode:list'),
+    pause: (id: string) => ipcRenderer.invoke('kryptoMode:pause', id),
+    resume: (id: string) => ipcRenderer.invoke('kryptoMode:resume', id),
+    goLive: (id: string) => ipcRenderer.invoke('kryptoMode:goLive', id),
+    sellAll: (id: string) => ipcRenderer.invoke('kryptoMode:sellAll', id),
+    withdraw: (id: string) => ipcRenderer.invoke('kryptoMode:withdraw', id),
+    remove: (id: string) => ipcRenderer.invoke('kryptoMode:remove', id),
   },
 
   evm: {

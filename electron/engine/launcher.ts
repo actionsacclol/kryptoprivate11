@@ -26,6 +26,7 @@
 // Either way the creator's own buy is billed exactly like any other buy. A
 // signing path that costs nothing is a thing to be exploited, not a feature.
 
+import { kryptoOptionProblems } from '@shared/kryptoMode';
 import { draftProblems, launchWalletId, type LaunchChain, type LaunchConfig, type LaunchDraft, type LaunchOutcome } from '@shared/launch';
 import { getBalance } from '../chain/rpcClient';
 import * as wallet from '../system/wallet';
@@ -75,6 +76,8 @@ export interface LaunchDeps {
 const CREATE_COST_LAMPORTS = 12_000_000;
 /** The first buy's own overhead: platform fee, a token account, tips. */
 const BUY_OVERHEAD_LAMPORTS = 5_000_000;
+/** The bot wallet's fee headroom (kryptoMode FEE_HEADROOM_LAMPORTS) + the transfer. */
+const KRYPTO_FUND_OVERHEAD_LAMPORTS = 16_000_000;
 
 /** Why this draft cannot be sent, or null when it can. Shared by both paths. */
 export function refuse(draft: LaunchDraft, deps: LaunchDeps): string | null {
@@ -89,7 +92,7 @@ export function refuse(draft: LaunchDraft, deps: LaunchDeps): string | null {
   if (chain === 'solana' && !deps.liveReady) {
     return 'Your own first buy runs through the normal trade path, so turn live execution on and arm the engine before launching.';
   }
-  const problems = draftProblems(draft);
+  const problems = [...draftProblems(draft), ...(draft.krypto ? kryptoOptionProblems(draft.krypto) : [])];
   if (problems.length > 0) return problems[0]!;
   return null;
 }
@@ -139,11 +142,15 @@ export async function launch(draft: LaunchDraft, deps: LaunchDeps, simulateOnly:
       if (!pub) return { ok: false, message: 'The launch wallet no longer exists. Pick one on the Launch page.' };
       const bal = await getBalance(deps.httpUrl, pub);
       if (!bal.ok || bal.data === undefined) return { ok: false, message: `Could not read the launch wallet's balance: ${bal.message}. Nothing is created.` };
-      const need = lamports(draft.devBuy) + CREATE_COST_LAMPORTS + BUY_OVERHEAD_LAMPORTS;
+      // A Krypto Mode bot that starts live is funded from this same wallet
+      // straight after the launch — so it has to be affordable NOW, or the
+      // coin exists with a bot that silently fell back to paper.
+      const bot = draft.krypto?.enabled && draft.krypto.live ? lamports(draft.krypto.budgetSol) + KRYPTO_FUND_OVERHEAD_LAMPORTS : 0;
+      const need = lamports(draft.devBuy) + CREATE_COST_LAMPORTS + BUY_OVERHEAD_LAMPORTS + bot;
       if (bal.data < need) {
         return {
           ok: false,
-          message: `The launch wallet holds ${(bal.data / 1e9).toFixed(4)} SOL; the create plus your ${draft.devBuy} SOL first buy needs about ${(need / 1e9).toFixed(4)}. Nothing is created.`,
+          message: `The launch wallet holds ${(bal.data / 1e9).toFixed(4)} SOL; the create plus your ${draft.devBuy} SOL first buy${bot ? ` and the ${draft.krypto.budgetSol} SOL Krypto Mode budget` : ''} needs about ${(need / 1e9).toFixed(4)}. Nothing is created.`,
         };
       }
     } catch (e) {
