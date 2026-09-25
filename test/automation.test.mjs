@@ -759,6 +759,8 @@ test('advanced orders: a PAPER script notes them; a LIVE script places them, and
   assert.equal(h2.calls.orders.length, 1);
   assert.equal(h2.calls.orders[0].kind, 'limit_buy');
   assert.equal(auto._runtimeOf(live.id).buysToday, 1, 'a limit buy spends a buy');
+  // 09-24: the placement line read like a fill ("take profit +100% sell 50% on X").
+  assert.ok(auto.snapshot().logs[live.id].some((l) => l.line.startsWith('armed limit buy 0.05 SOL at $20000 mcap on COPY')), 'a placed order says it was ARMED, not that it traded');
   auto.onSandboxMessage(live.id, { t: 'call', id: 2, method: 'order', args: [{ mint: MINT, kind: 'limit_buy', triggerBasis: 'mcap_usd', triggerValue: 20000, amount: 0.5 }] });
   await tick();
   assert.equal(h2.calls.orders.length, 1, 'over the per-trade cap: refused');

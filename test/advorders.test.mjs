@@ -460,6 +460,64 @@ test('two rungs on one mint do not both size off the same balance', async () => 
   assert.equal(h.calls.sells.length, 2, 'the second rung fires once the first is done');
 });
 
+test('a filled 100% stop expires the take-profit rungs it left behind', async () => {
+  // 09-24: a stop sold KIM and MEMELESS, and their 2x/4x rungs stayed ARMED
+  // for hours on coins nobody held — a rug never reaches 2x, so the rungs
+  // never fired, never hit the empty-bag check, and piled up toward the cap.
+  const h = setup();
+  const stop = mk('stop_loss', 60, { ref: 0.001, amount: 100 });
+  mk('take_profit', 100, { ref: 0.001, amount: 50 });
+  mk('take_profit', 300, { ref: 0.001, amount: 50 });
+  mk('limit_buy', 0.0001, { amount: 0.1 });
+  assert.ok(stop.ok);
+
+  ord.onTick({ mint: MINT, priceSol: 0.0003, mcapUsd: null }); // −70%: the stop fires
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  const by = (k) => ord.all().filter((o) => o.kind === k).map((o) => o.state);
+  assert.deepEqual(by('stop_loss'), ['filled']);
+  assert.deepEqual(by('take_profit'), ['expired', 'expired'], 'the rungs are closed with the position');
+  assert.match(ord.all().find((o) => o.kind === 'take_profit').note, /Position closed/);
+  assert.equal(h.calls.buys.length, 0);
+  assert.notEqual(by('limit_buy')[0], 'expired', 'a limit buy is a new position, not this one');
+});
+
+test('a partial or unconfirmed sell leaves the other rungs armed', async () => {
+  // 50% leaves a bag the other rung still protects.
+  let h = setup();
+  mk('take_profit', 100, { ref: 0.001, amount: 50 });
+  mk('stop_loss', 60, { ref: 0.001, amount: 100 });
+  ord.onTick({ mint: MINT, priceSol: 0.0021, mcapUsd: null });
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(ord.all().map((o) => o.state).sort(), ['armed', 'filled']);
+
+  // A 100% sell that was broadcast but not confirmed may not have landed —
+  // stripping the position's other orders then would leave it naked.
+  h = setup({ sellResult: { ok: false, pending: true, message: 'unconfirmed', signature: 'sigpending' } });
+  mk('stop_loss', 60, { ref: 0.001, amount: 100 });
+  mk('take_profit', 100, { ref: 0.001, amount: 50 });
+  ord.onTick({ mint: MINT, priceSol: 0.0003, mcapUsd: null });
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(ord.all().find((o) => o.kind === 'take_profit').state, 'armed');
+});
+
+test('closing one wallet\'s position leaves another wallet\'s orders alone', async () => {
+  const h = setup();
+  mk('stop_loss', 60, { ref: 0.001, amount: 100 });
+  mk('take_profit', 100, { ref: 0.001, amount: 50 });
+  // The rung was written on a different wallet (rule 7) — it is not this
+  // position's, so closing this one says nothing about that bag.
+  ord._load(ord.all().map((o) => (o.kind === 'take_profit' ? { ...o, owner: 'WalletBBB1111111111111111111111111111111111' } : o)));
+  ord.onTick({ mint: MINT, priceSol: 0.0003, mcapUsd: null });
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(h.calls.sells.length, 1);
+  assert.notEqual(ord.all().find((o) => o.kind === 'take_profit').state, 'expired');
+});
+
 test('an order that was mid-flight at shutdown is NOT auto-resumed', () => {
   setup();
   ord._load([

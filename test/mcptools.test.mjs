@@ -144,6 +144,22 @@ function setup(over = {}) {
   ok('a paper connection passes paper all the way down, reads the paper book, and is not held to the spending caps');
 }
 
+// ── a read-only connection reads the book the APP is using ───────────────
+// 09-24: a read-only connection on a live app read the paper book and said
+// the wallet held nothing while it held a coin.
+{
+  setup({ walletInfo: { appMode: 'live' } });
+  access = 'read';
+  assert.deepEqual((await tools.call('get_positions', {})).data, { paper: false, chain: 'solana' }, 'live app: the real book');
+  setup({ walletInfo: { appMode: 'paper' } });
+  access = 'read';
+  assert.deepEqual((await tools.call('get_positions', {})).data, { paper: true, chain: 'solana' }, 'paper app: the paper book');
+  setup({ walletInfo: {} });
+  access = 'read';
+  assert.equal((await tools.call('get_positions', {})).data.paper, true, 'an unknown app mode never claims the live book');
+  ok('a read-only connection reads the book the app is using, not always the paper one');
+}
+
 // ── live spending is bounded, and reserved before the app is asked ───────
 {
   setup();
@@ -319,4 +335,4 @@ function setup(over = {}) {
   ok('the four readers pass their arguments, default as documented, and tell an empty answer apart from an unread one');
 }
 
-console.log(`\nmcptools: ${passed}/9 passed`);
+console.log(`\nmcptools: ${passed}/10 passed`);

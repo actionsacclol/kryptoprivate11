@@ -164,8 +164,8 @@ export interface RunnerFlag {
    *  84.99 SOL for a classic one, and mixed graduates held a median 0.008×
    *  of the flag price an hour later (labeler + reviewer r3). */
   regime?: 'classic' | 'mixed' | 'unknown';
-  /** A pump mayhem-mode coin, from its create-event reserves (engine/curve.ts
-   *  mayhemFromReserves). Null when they could not be read. */
+  /** A pump mayhem-mode coin, from the create event's is_mayhem_mode byte
+   *  (engine/pumpDecoder.ts). Null on a layout without it. */
   mayhem?: boolean | null;
 }
 

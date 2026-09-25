@@ -29,7 +29,7 @@ import { decodeCpiEventData, decodeLogsEx, logsMentionPumpTrade, PUMP_PROGRAM_ID
 import { staticChecks, checkMint, hasHardReject } from './risk';
 import { computeScore } from './scoring';
 import { buyerAcceleration } from './flowWindow';
-import { curveProgressPct, curveProgressTokenPct, mayhemFromReserves, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, CURVE_COMPLETE_VIRTUAL_TOKENS } from './curve';
+import { curveProgressPct, curveProgressTokenPct, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, CURVE_COMPLETE_VIRTUAL_TOKENS } from './curve';
 import { oddsFeaturesFromTrades, scoreOdds } from '@shared/odds';
 import type { LaunchTrade } from '@shared/launchintel';
 import { runnerVerdict, runnerNotification, pruneRunners, markCreatorSold, windowAllowed, RunnerRateLimit, ODDS_TAPE_CAP, RUNNER_TTL_MS, type RunnerFlag } from '@shared/runners';
@@ -5586,12 +5586,14 @@ export class SniperEngine {
   private onCreate(ev: PumpCreateEvent, n: LogNotification): void {
     if (this.tokens.has(ev.mint)) return;
     const s = this.getSettings();
-    // Curve variant, free off the create event's reserves — a mayhem coin
-    // starts at hundreds of virtual SOL rather than the standard 30. Refused
+    // Curve variant, free off the create event's own is_mayhem_mode byte
+    // (pumpDecoder). Not the reserves: mayhem curves START at the standard
+    // 30 virtual SOL too, which is why this filter never matched before
+    // 2026-09-24. Unknown (an older layout) is not "standard". Refused
     // BEFORE anything is tracked: a launch the user does not want to see
     // should not take a slot, a mint check, an eval window or a scorer pass.
     // 'all' is the default and this is then never reached.
-    const isMayhem = mayhemFromReserves(ev.virtualSolReserves);
+    const isMayhem = ev.isMayhem;
     if (!passesMayhemFilter(isMayhem, s.strategy.mayhemFilter)) {
       this.counters.seen++;
       this.counters.filtered++;
@@ -6286,7 +6288,7 @@ export class SniperEngine {
         netInflowSol: t.row.flow.netInflowSol,
         tradesSeen: report.tradesSeen,
         regime: report.regime,
-        mayhem: mayhemFromReserves(t.createEvent.virtualSolReserves),
+        mayhem: t.createEvent.isMayhem,
         creatorSoldAt: null,
       };
       t.flagged = true;

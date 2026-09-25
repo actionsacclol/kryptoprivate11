@@ -61,7 +61,40 @@ const PK_D = Buffer.alloc(32, 4);
   assert.equal(ev.kind, 'create');
   assert.notEqual(ev.creator, ev.user, 'extended layout: creator is its own field');
   assert.equal(ev.virtualSolReserves, 30000000000n);
+  assert.equal(ev.isMayhem, null, 'a layout that stops before is_mayhem_mode is unknown, not standard');
   console.log('ok  create (extended layout)');
+}
+
+// ── CreateEvent: is_mayhem_mode, off two REAL mainnet creates (2026-09-24) ──
+// Both curves started at exactly 30 virtual SOL, so the reserves-based guess
+// this replaced called every coin standard — the runner flag's `mayhem` and
+// the Execution page's mayhem filter never matched once. The byte after
+// token_program is the flag; the curve's byte 81 agreed on both coins.
+{
+  const { readFileSync } = await import('node:fs');
+  const fx = JSON.parse(readFileSync(new URL('./fixtures/create-mayhem.json', import.meta.url), 'utf8'));
+  const may = decodeEventData(fx.mayhem.eventB64);
+  const std = decodeEventData(fx.standard.eventB64);
+  assert.equal(may.mint, fx.mayhem.mint);
+  assert.equal(std.mint, fx.standard.mint);
+  assert.equal(may.virtualSolReserves, std.virtualSolReserves, 'the reserves cannot tell them apart');
+  assert.equal(may.isMayhem, true, 'CHIPS is a mayhem coin');
+  assert.equal(std.isMayhem, false, 'FanFee is standard');
+
+  // A byte that is neither 0 nor 1 is not trusted either way.
+  // On the wire (09-24): 83 bytes follow token_total_supply — token_program
+  // (32), then is_mayhem_mode (1), then fields the decoder does not read.
+  const bad = Buffer.from(fx.standard.eventB64, 'base64');
+  const at = bad.length - 83 + 32;
+  assert.equal(bad[at], 0, 'the offset lands on the flag');
+  bad[at] = 7;
+  assert.equal(decodeEventData(bad.toString('base64')).isMayhem, null);
+
+  // The engine reads the flag, never the reserves.
+  const eng = readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  assert.ok(!/mayhemFromReserves/.test(eng), 'the reserves-based guess is gone');
+  assert.ok(/const isMayhem = ev\.isMayhem;/.test(eng) && /mayhem: t\.createEvent\.isMayhem,/.test(eng), 'filter and runner flag both use the decoded byte');
+  console.log('ok  create: is_mayhem_mode decoded from real mayhem + standard creates');
 }
 
 // ── TradeEvent ──

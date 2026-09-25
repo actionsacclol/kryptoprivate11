@@ -233,11 +233,16 @@ export async function call(name: string, args: Record<string, unknown>): Promise
             : 'This connection is in LIVE mode — trades spend real funds. Say so when you report a trade.';
       return done(said, { ...info, mode, access });
     }
-    case 'get_positions':
+    case 'get_positions': {
+      // A read-only connection has no book of its own — it cannot trade — so
+      // it reads the one the APP is using. Until 2026-09-24 it read the paper
+      // book, and a live app holding a coin reported no positions at all.
+      const book = canTrade(access) ? paper : (await h.walletInfo()).appMode !== 'live';
       return done(
-        `Open ${paper ? 'paper ' : ''}positions on ${chainLabel(chain)}. A null value is one the app cannot price right now, not zero.`,
-        await h.positions(paper, chain),
+        `Open ${book ? 'paper ' : ''}positions on ${chainLabel(chain)}. A null value is one the app cannot price right now, not zero.`,
+        await h.positions(book, chain),
       );
+    }
     case 'get_token': {
       const m = readMint(args, chain);
       if (!m.ok) return fail(m.why);

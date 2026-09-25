@@ -1004,7 +1004,9 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
         rt.buysToday += 1;
         rt.opened.set(mint, { costSol: (rt.opened.get(mint)?.costSol ?? 0) + Number(amount), at: now });
       }
-      slog(s, r.ok ? 'info' : 'warn', `${describeAction(action)} on ${what}: ${r.message}`);
+      // "armed" / "NOT armed" up front: "take profit +100% sell 50% on X" read as a
+      // sale that happened (09-24) when it was only the order being placed.
+      slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'armed' : 'NOT armed'} ${describeAction(action)} on ${what}: ${r.message}`);
       recorder.record('script_order', { scriptId: s.id, name: s.name, mint, kind, basis, triggerValue, amount, ok: r.ok });
       if (r.ok) changed();
       return r;
@@ -1628,7 +1630,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           rt.opened.set(orderMint, { costSol: (prev?.costSol ?? 0) + amount, at: Date.now() });
           persist();
           }
-          slog(s, r.ok ? 'info' : 'warn', `order ${kind} on ${ctx.symbol || orderMint.slice(0, 8)}: ${r.message}`);
+          slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'armed' : 'NOT armed'} order ${kind} on ${ctx.symbol || orderMint.slice(0, 8)}: ${r.message}`);
           return result(r);
         });
       }

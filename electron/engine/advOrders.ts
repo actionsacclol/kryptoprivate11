@@ -601,6 +601,7 @@ async function execute(o: AdvOrder): Promise<void> {
     if (res.ok) {
       finish(o, 'filled', res.message, res.signature ?? null);
       h.toast('success', `${o.symbol || 'Order'} filled: ${describeOrder(o)}`);
+      if (!isBuyKind(o.kind) && o.amount >= 100) expireSiblingSells(o);
     } else if (res.pending && res.signature) {
       // Broadcast but unconfirmed, and not provably dead. NOT a failure: the
       // tx may land, and the ledger is watching the signature. The order stays
@@ -635,6 +636,37 @@ async function execute(o: AdvOrder): Promise<void> {
   } finally {
     inFlight.delete(o.id);
     if (!isBuyKind(o.kind)) sellInFlightMints.delete(o.mint);
+  }
+}
+
+/**
+ * A CONFIRMED 100% sell closed the position, so every other sell order on it
+ * — same mint, same wallet — can no longer be met. Without this a stop that
+ * fired left its take-profit rungs armed forever on a coin nobody held (a
+ * 2x rung on a rugged coin never triggers, so the empty-bag check in
+ * `execute` never ran), and they piled up against MAX_ORDERS until new
+ * ladders were refused (KIM, MEMELESS on 2026-09-24).
+ *
+ * Only on `filled`: a `triggered`/pending sell may not have landed, and
+ * expiring its siblings then would strip a position of its protection.
+ * Buys are left alone — a limit buy is a new position, not this one.
+ */
+function expireSiblingSells(closer: AdvOrder): void {
+  let n = 0;
+  for (const s of orders) {
+    if (s === closer || s.mint !== closer.mint || isBuyKind(s.kind)) continue;
+    if (s.state !== 'armed' && s.state !== 'paused') continue;
+    if ((s.owner ?? null) !== (closer.owner ?? null)) continue;
+    s.state = 'expired';
+    s.note = `Position closed by ${describeOrder(closer)} — nothing left to sell.`;
+    s.updatedAt = Date.now();
+    recorder.record('order_result', { id: s.id, mint: s.mint, kind: s.kind, state: 'expired', signature: null, note: 'sibling of a filled 100% sell' });
+    n += 1;
+  }
+  if (n) {
+    persistNow();
+    host?.log('info', `expired ${n} other sell order(s) on ${closer.symbol || closer.mint.slice(0, 8)} — the position was closed`);
+    host?.changed();
   }
 }
 

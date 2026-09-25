@@ -36,6 +36,9 @@ export interface PumpCreateEvent {
   creator: string; // falls back to `user` on older layouts
   virtualTokenReserves: bigint | null;
   virtualSolReserves: bigint | null;
+  /** pump's own `is_mayhem_mode`, carried by the event after token_program.
+   *  Null on layouts that predate it — unknown, never "standard". */
+  isMayhem: boolean | null;
 }
 
 export interface PumpTradeEvent {
@@ -178,15 +181,28 @@ function decodeCreate(body: Buffer): PumpCreateEvent {
   const mint = r.pubkey();
   const bondingCurve = r.pubkey();
   const user = r.pubkey();
-  // Newer layouts append: creator, timestamp, virtual reserves, supply.
+  // Newer layouts append: creator, timestamp, virtual reserves, real token
+  // reserves, supply, token_program, is_mayhem_mode.
   let creator = user;
   let virtualTokenReserves: bigint | null = null;
   let virtualSolReserves: bigint | null = null;
+  let isMayhem: boolean | null = null;
   if (r.remaining() >= 32) creator = r.pubkey();
   if (r.remaining() >= 8) r.i64(); // timestamp — chain time comes from the tx anyway
   if (r.remaining() >= 16) {
     virtualTokenReserves = r.u64();
     virtualSolReserves = r.u64();
+  }
+  // The mayhem flag is the ONLY create-time sign of a mayhem coin: on
+  // 2026-09-24 mayhem and standard curves both started at exactly 30 virtual
+  // SOL, so the reserves-based guess this replaced never said mayhem once
+  // (test/fixtures/create-mayhem.json). A byte other than 0/1 is not trusted.
+  if (r.remaining() >= 8 + 8 + 32 + 1) {
+    r.u64(); // real_token_reserves
+    r.u64(); // token_total_supply
+    r.pubkey(); // token_program
+    const b = r.u8();
+    isMayhem = b === 1 ? true : b === 0 ? false : null;
   }
   return {
     kind: 'create',
@@ -199,6 +215,7 @@ function decodeCreate(body: Buffer): PumpCreateEvent {
     creator,
     virtualTokenReserves,
     virtualSolReserves,
+    isMayhem,
   };
 }
 
