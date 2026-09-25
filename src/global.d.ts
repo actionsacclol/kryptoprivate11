@@ -380,6 +380,8 @@ declare global {
         remove: (id: string) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
         setEnabled: (id: string, enabled: boolean) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
         killSwitch: (on: boolean) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+        /** Reset one script's stats and saved state; no id = every script plus paper trades. */
+        reset: (id?: string) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
         /** Pick a script file. Null data = cancelled. Nothing is saved. */
         openFile: () => Promise<IpcResult<{ name: string; code: string } | null>>;
       };
@@ -390,6 +392,8 @@ declare global {
         summary: (opts?: { stale?: boolean }) => Promise<IpcResult<PortfolioSummary>>;
         history: () => Promise<IpcResult<TradeHistoryRow[]>>;
         export: (format: 'csv' | 'json') => Promise<IpcResult>;
+        /** Clear every paper position and paper round trip, and start paper scripts over. */
+        resetPaper: () => Promise<IpcResult>;
       };
       gifs: {
         /** Search one provider. Returns preview URLs already proxied. */

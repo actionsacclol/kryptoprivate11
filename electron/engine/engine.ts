@@ -28,6 +28,7 @@ import { fetchSocials, metadataLinksIfCached, type TokenSocials } from './metada
 import { decodeCpiEventData, decodeLogsEx, logsMentionPumpTrade, PUMP_PROGRAM_ID, type PumpCreateEvent, type PumpEvent, type PumpTradeEvent } from './pumpDecoder';
 import { staticChecks, checkMint, hasHardReject } from './risk';
 import { computeScore } from './scoring';
+import { buyerAcceleration } from './flowWindow';
 import { curveProgressPct, curveProgressTokenPct, mayhemFromReserves, spotPriceSol, INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, CURVE_COMPLETE_VIRTUAL_TOKENS } from './curve';
 import { oddsFeaturesFromTrades, scoreOdds } from '@shared/odds';
 import type { LaunchTrade } from '@shared/launchintel';
@@ -119,7 +120,17 @@ interface TrackedTrade {
 interface TrackedToken {
   row: LaunchRow;
   createEvent: PumpCreateEvent;
+  /** Rolling window for short-horizon reads (marketFor's last 5 s). It is
+   *  trimmed on busy coins, so no since-detection figure may be summed from it. */
   trades: TrackedTrade[];
+  /** Since-detection counters, never trimmed — what the flow's buys, sells,
+   *  volumes and distinct sellers report. */
+  totals: { buys: number; sells: number; buyVolumeSol: number; sellVolumeSol: number };
+  sellers: Set<string>;
+  /** Buys received inside the evaluation window only. buyerAcceleration is
+   *  read from these, so it settles when the window closes and a trim of
+   *  `trades` cannot empty its first half. */
+  evalBuys: { at: number; user: string }[];
   buyersBySol: Map<string, number>;
   /** Net token balance per wallet (buys add, sells subtract) — token-weighted
    *  concentration + bundle detection (scorer v2). */
@@ -1061,6 +1072,7 @@ export class SniperEngine {
         return r.analysis;
       },
       positions: (mode, chain) => this.scriptPositions(mode, chain),
+      heldMints: (mode, chain) => this.scriptHeldMints(mode, chain),
       wallet: (chain) => {
         // `walletSol` on an EVM script is that chain's own coin and that
         // chain's own address. Returning the Solana balance would have a rule
@@ -2187,8 +2199,11 @@ export class SniperEngine {
         this.emit({ kind: 'paper', mint, side: 'buy' });
         return { ...res, message: `Paper position opened — ${tokensText} for ${res.simulatedCostSol.toFixed(4)} SOL (simulated fill)` };
       }
+      // Not booked is not bought. This used to hand back the simulation's ok
+      // with the refusal tacked on, so a script recorded a position the book
+      // never held and its next sell was refused (report, 2026-09-24).
       this.log('warn', `PAPER buy not booked: ${opened.message}`);
-      return { ...res, message: `${res.message} — ${opened.message}` };
+      return { ...res, ok: false, stage: 'validate', message: `Paper buy not booked — ${opened.message}` };
     }
     // The simulation could not run or reverted. That is a fact about this
     // wallet or this RPC, not about whether the trade was worth practising,
@@ -3116,6 +3131,30 @@ export class SniperEngine {
    * cost; a holding the ledger never saw bought has no cost, no PnL, and
    * a rule on either does not fire (honest null).
    */
+  /**
+   * What a script's registry is pruned against: the mints held, or null when
+   * the read failed. Deliberately wider than scriptPositions — a holding with
+   * a mint warning is left out of positions but is still HELD, and pruning it
+   * would strand it the same way a failed read did.
+   */
+  private async scriptHeldMints(mode: 'paper' | 'live', chain: ChainKind = 'solana'): Promise<Set<string> | null> {
+    if (mode === 'paper') {
+      if (paperBook.failure()) return null;
+      return new Set(paperBook.list().filter((p) => (p.chain ?? 'solana') === chain).map((p) => p.mint));
+    }
+    if (chain !== 'solana') {
+      if (!this.evmCopy?.positions) return null;
+      try {
+        return new Set((await this.evmCopy.positions(chain)).map((h) => h.token));
+      } catch {
+        return null;
+      }
+    }
+    const h = await this.holdings();
+    if (!h.ok || !h.data) return null;
+    return new Set(h.data.filter((x) => x.uiAmount > 0).map((x) => x.mint));
+  }
+
   private async scriptPositions(mode: 'paper' | 'live', chain: ChainKind = 'solana'): Promise<ScriptPosition[]> {
     // A script sees ONLY its own chain's positions. Without this an EVM
     // script's "sell everything" enumerates Solana bags, and a Solana script
@@ -3196,6 +3235,17 @@ export class SniperEngine {
       });
     }
     return out;
+  }
+
+  /** Clear the paper book (every chain). The caller resets paper scripts. */
+  resetPaperBook(): { ok: boolean; message: string } {
+    const r = paperBook.reset();
+    if (r.ok) {
+      this.log('info', r.message);
+      recorder.record('paper_reset', { open: r.open, closed: r.closed });
+      this.emit({ kind: 'paper', mint: '', side: 'sell' });
+    }
+    return r;
   }
 
   copySnapshot(): import('@shared/copytrade').CopySnapshot {
@@ -5577,6 +5627,9 @@ export class SniperEngine {
       row,
       createEvent: ev,
       trades: [],
+      totals: { buys: 0, sells: 0, buyVolumeSol: 0, sellVolumeSol: 0 },
+      sellers: new Set(),
+      evalBuys: [],
       buyersBySol: new Map(),
       tokensByUser: new Map(),
       firstBuyAtByUser: new Map(),
@@ -5855,10 +5908,16 @@ export class SniperEngine {
     const cutoff = n.receivedAt - TRADE_WINDOW_MS;
     while (t.trades.length > 0 && t.trades[0].at < cutoff && t.trades.length > 400) t.trades.shift();
     if (ev.isBuy) {
+      t.totals.buys++;
+      t.totals.buyVolumeSol += sol;
+      if (n.receivedAt <= t.evalDeadline) t.evalBuys.push({ at: n.receivedAt, user: ev.user });
       t.buyersBySol.set(ev.user, (t.buyersBySol.get(ev.user) ?? 0) + sol);
       t.tokensByUser.set(ev.user, (t.tokensByUser.get(ev.user) ?? 0) + tokens);
       if (!t.firstBuyAtByUser.has(ev.user)) t.firstBuyAtByUser.set(ev.user, n.receivedAt);
     } else {
+      t.totals.sells++;
+      t.totals.sellVolumeSol += sol;
+      t.sellers.add(ev.user);
       t.tokensByUser.set(ev.user, (t.tokensByUser.get(ev.user) ?? 0) - tokens);
       if (ev.user === t.createEvent.creator && !t.dumpRecorded) {
         t.dumpRecorded = true;
@@ -5921,7 +5980,6 @@ export class SniperEngine {
   private refreshFlow(t: TrackedToken): void {
     const now = Date.now();
     const windowStart = t.row.detectedAt;
-    const trades = t.trades;
     const flow: LiveFlow = emptyFlow();
     flow.creatorSold = t.row.flow.creatorSold;
     let topBuyer = 0;
@@ -5930,26 +5988,19 @@ export class SniperEngine {
       totalBuySol += solAmt;
       if (solAmt > topBuyer) topBuyer = solAmt;
     }
-    const half = windowStart + (Math.min(now, t.evalDeadline) - windowStart) / 2;
-    const buyersFirstHalf = new Set<string>();
-    const buyersSecondHalf = new Set<string>();
-    const sellers = new Set<string>();
-    for (const tr of trades) {
-      if (tr.isBuy) {
-        flow.buys++;
-        flow.buyVolumeSol += tr.sol;
-        if (tr.at <= half) buyersFirstHalf.add(tr.user);
-        else buyersSecondHalf.add(tr.user);
-      } else {
-        flow.sells++;
-        flow.sellVolumeSol += tr.sol;
-        sellers.add(tr.user);
-      }
-    }
+    // Counts are since detection. They used to be summed from `trades`, which
+    // is trimmed past 400 trades, so on a busy coin buys and volumes could
+    // fall while uniqueBuyers (never trimmed) kept rising.
+    flow.buys = t.totals.buys;
+    flow.sells = t.totals.sells;
+    flow.buyVolumeSol = t.totals.buyVolumeSol;
+    flow.sellVolumeSol = t.totals.sellVolumeSol;
+    // Acceleration is an evaluation-window figure. It used to put every
+    // post-window buyer in the "second half" and lose its first half to the
+    // trim, so a kept coin's ratio climbed for as long as it was watched.
     flow.uniqueBuyers = t.buyersBySol.size;
     flow.netInflowSol = flow.buyVolumeSol - flow.sellVolumeSol;
-    flow.buyerAcceleration =
-      buyersFirstHalf.size > 0 ? buyersSecondHalf.size / buyersFirstHalf.size : buyersSecondHalf.size > 0 ? 2 : 0;
+    flow.buyerAcceleration = buyerAcceleration(t.evalBuys, windowStart, t.evalDeadline, now);
     flow.topBuyerShare = totalBuySol > 0 ? topBuyer / totalBuySol : 0;
     // SOL-side on purpose: the entry gates (entryCurveMin/MaxPct), the score's
     // timing band, user rules, alerts and the backtest history all read this
@@ -5957,7 +6008,7 @@ export class SniperEngine {
     // real completion condition) is used by the odds judge and the runner
     // flag only, where it is labelled "supply sold".
     flow.curveProgressPct = curveProgressPct(t.virtualSolReserves);
-    flow.distinctSellers = sellers.size;
+    flow.distinctSellers = t.sellers.size;
 
     // Token-weighted concentration + early-buyer (bundle) share. Only positive
     // net balances count as "held"; the SOL-weighted top-buyer share proved

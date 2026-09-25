@@ -1532,4 +1532,145 @@ test('the Script monitor widget exists, shows metrics and the log, and new panel
   assert.match(load, /setItem\(STORE_KEY[\s\S]{0,80}setItem\(SEEN_KEY/, 'the merged set and the seen-list are written together');
 });
 
+// ── The orphaned live buy (user report, 2026-09-24) ─────────────────────
+// A live buy landed, the wallet held the tokens, and every sell after it was
+// refused in 0.0 s with "this script does not hold it". The position poll
+// pruned the script's registry against a holdings read that had failed or
+// trailed the buy, and a failed read answered as an EMPTY wallet.
+
+const LIVE_BUDGET = { maxSolPerTrade: 0.1, maxBuysPerDay: 20, maxLossSolPerDay: 1, maxOpenPositions: 5, maxActionsPerMinute: 60 };
+const withClock = async (offsetMs, fn) => {
+  const real = Date.now;
+  Date.now = () => real() + offsetMs;
+  try {
+    return await fn();
+  } finally {
+    Date.now = real;
+  }
+};
+
+test('a fresh live buy survives a holdings read that has not caught up, and can be sold', async () => {
+  const h = setup();
+  // The wallet read trails the landed buy: it knows nothing yet.
+  h.heldMints = async () => new Set();
+  h.book.live = [];
+  h.buy = async (mint, sol, mode) => {
+    h.calls.buys.push({ mint, sol, mode });
+    return { ok: true, message: 'Landed' }; // …and NOT in the book yet
+  };
+  const s = saved(codeScript({ name: 'rapid', mode: 'live', budget: LIVE_BUDGET }));
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.03] });
+  await tick();
+  await auto.pollPositions();
+  assert.deepEqual(auto._runtimeOf(s.id).opened, [MINT], 'the poll did not prune a buy the RPC has not shown yet');
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100] });
+  await tick(30);
+  assert.equal(h.calls.sells.length, 1, 'the sell went to the chain instead of being refused');
+  assert.equal(h.calls.sells[0].pct, 100, 'selling what was asked, since the basis is not read yet');
+});
+
+test('a FAILED holdings read never prunes, however old the position', async () => {
+  const h = setup();
+  h.heldMints = async () => null;
+  const s = saved(codeScript({ name: 'rapid', mode: 'live', budget: LIVE_BUDGET }));
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.03] });
+  await tick();
+  await withClock(10 * 60_000, () => auto.pollPositions());
+  assert.deepEqual(auto._runtimeOf(s.id).opened, [MINT], 'unknown is not "sold"');
+});
+
+test('a position really gone from a read that WORKED is pruned once the grace has passed', async () => {
+  const h = setup();
+  h.heldMints = async () => new Set();
+  const s = saved(codeScript({ name: 'rapid', mode: 'live', budget: LIVE_BUDGET }));
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.03] });
+  await tick();
+  await withClock(auto.OPEN_GRACE_MS + 1_000, () => auto.pollPositions());
+  assert.deepEqual(auto._runtimeOf(s.id).opened, [], 'sold by hand is still noticed');
+  // Past the grace the old refusal stands — it is true now.
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100] });
+  await tick(30);
+  assert.equal(h.calls.sells.length, 0);
+});
+
+test('a bag bought with another wallet is never pruned against the active wallet, and a full sell releases it', async () => {
+  const h = setup();
+  h.heldMints = async () => new Set();
+  const OTHER = 'Other1111111111111111111111111111111111111';
+  const walletCalls = [];
+  h.walletBuy = async (address, mint, sol) => (walletCalls.push(['buy', address, mint, sol]), { ok: true, message: 'bought' });
+  h.walletSell = async (address, mint, pct) => (walletCalls.push(['sell', address, mint, pct]), { ok: true, message: 'sold' });
+  const s = saved(codeScript({ name: 'multi', mode: 'live', budget: LIVE_BUDGET }));
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.03, OTHER] });
+  await tick();
+  assert.equal(walletCalls.length, 1, 'the named-wallet buy went out');
+  await withClock(10 * 60_000, () => auto.pollPositions());
+  assert.deepEqual(auto._runtimeOf(s.id).opened, [MINT], 'the active wallet says nothing about another wallet’s bag');
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100, OTHER] });
+  await tick(30);
+  assert.deepEqual(walletCalls.at(-1), ['sell', OTHER, MINT, 100]);
+  assert.deepEqual(auto._runtimeOf(s.id).opened, [], 'a full exit from that wallet ends the claim');
+});
+
+test('reset paper trades: paper scripts start over, live scripts are untouched', async () => {
+  const h = setup();
+  h.heldMints = async (mode) => new Set(h.book[mode].map((p) => p.mint));
+  const paper = saved(codeScript({ name: 'p', mode: 'paper', budget: LIVE_BUDGET }));
+  const live = saved(codeScript({ name: 'l', mode: 'live', budget: LIVE_BUDGET }));
+  auto.setEnabled(paper.id, true);
+  auto.setEnabled(live.id, true);
+  auto.onSandboxMessage(paper.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.02] });
+  await tick(30);
+  assert.equal(auto.forgetPaper(), 1, 'one paper script started over');
+  const p = auto._runtimeOf(paper.id);
+  assert.deepEqual(p.opened, []);
+  assert.equal(p.buysToday, 0);
+  assert.equal(p.realizedToday, 0);
+  assert.deepEqual(auto._runtimeOf(live.id).opened, [MINT2], 'live keeps its position');
+  assert.equal(auto._runtimeOf(live.id).buysToday, 1, 'and its day');
+});
+
+test('a paper buy the book refused is reported as a failure, not a position', () => {
+  const src = fs.readFileSync('electron/engine/engine.ts', 'utf8').split(String.fromCharCode(13)).join('');
+  const refused = src.indexOf('PAPER buy not booked: ${opened.message}`);');
+  assert.ok(refused > 0, 'the refusal is logged');
+  assert.ok(src.slice(refused, refused + 200).includes('return { ...res, ok: false,'), 'not booked is not bought');
+  const held = src.slice(src.indexOf('private async scriptHeldMints'), src.indexOf('private async scriptPositions'));
+  assert.ok(held.includes('if (!h.ok || !h.data) return null;'), 'a failed holdings read is null, never an empty set');
+});
+
+test('reset a script: its own saved totals go; a live script keeps its positions and today’s budget', async () => {
+  const h = setup();
+  h.heldMints = async (mode) => new Set(h.book[mode].map((p) => p.mint));
+  const live = saved(codeScript({ name: 'scorenow', mode: 'live', budget: LIVE_BUDGET }));
+  const paper = saved(codeScript({ name: 'p', mode: 'paper', budget: LIVE_BUDGET }));
+  auto.setEnabled(live.id, true);
+  auto.setEnabled(paper.id, true);
+  // What scorenow does: running totals in its saved state, painted into the widget.
+  auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'setState', args: [{ counts: { buys: 29, callouts: 23 } }] });
+  auto.onSandboxMessage(live.id, { t: 'stats', values: { Buys: 29 } });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.02] });
+  auto.onSandboxMessage(paper.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.02] });
+  await tick(30);
+  assert.deepEqual(auto._runtimeOf(live.id).kv, { counts: { buys: 29, callouts: 23 } }, 'setup: the totals are saved');
+
+  assert.equal(auto.resetScript(live.id).ok, true);
+  const l = auto._runtimeOf(live.id);
+  assert.deepEqual(l.kv, {}, 'the script’s own saved totals are gone');
+  assert.equal(auto.snapshot().metrics[live.id].length, 0, 'and the widget');
+  assert.deepEqual(l.opened, [MINT], 'but it can still sell what it holds');
+  assert.equal(l.buysToday, 1, 'and today’s buy still counts against its cap');
+
+  auto.resetScript(paper.id);
+  const pp = auto._runtimeOf(paper.id);
+  assert.deepEqual(pp.opened, [], 'paper forgets its positions');
+  assert.equal(pp.buysToday, 0, 'and its day');
+  assert.equal(auto.resetScript('nope').ok, false);
+});
+
 await run();

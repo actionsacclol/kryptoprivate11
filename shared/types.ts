@@ -704,6 +704,10 @@ export interface RiskFlag {
   hard: boolean;
 }
 
+/** A launch's order flow. Counts are since detection — raw wallet addresses,
+ *  nothing merged for linked wallets, bundles or wash trades — and stop moving
+ *  at the decision unless the launch stays tracked (held, runner-flagged or
+ *  subscribed). */
 export interface LiveFlow {
   uniqueBuyers: number;
   buys: number;
@@ -711,12 +715,14 @@ export interface LiveFlow {
   buyVolumeSol: number;
   sellVolumeSol: number;
   netInflowSol: number;
-  /** Buyers in the second half of the window vs the first half. */
+  /** Distinct buyers in the second half of the EVALUATION window over the
+   *  first half; 2 when only the second half has buyers. Settles when the
+   *  window closes. */
   buyerAcceleration: number;
   topBuyerShare: number;
   creatorSold: boolean;
   curveProgressPct: number;
-  /** Distinct wallets that sold in the window (sell-pressure signal). */
+  /** Distinct wallets that sold since detection (sell-pressure signal). */
   distinctSellers: number;
   /** Largest single wallet's share of circulating tokens (0..1). */
   topHolderTokenShare: number;

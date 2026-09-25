@@ -511,7 +511,7 @@ export function SettingsPage({ onNavigate }: { onNavigate?: (r: RouteId) => void
             checked={settings.watchOnBuy}
             onChange={(v) => void updateSettings({ watchOnBuy: v })}
             label="Watch what you buy"
-            description="Pin a token to the Watchlist when you buy it by hand. Never unpins anything — selling leaves it there until you remove it."
+            description="Pin a token to the Watchlist when you buy it by hand, and unpin it once a sell leaves you holding none. A partial sell keeps the pin."
           />
           <Switch
             checked={settings.alerts.desktopNotifications}

@@ -9,6 +9,7 @@ import { PnlCard, type CardSubject } from '../components/terminal/PnlCard';
 import { EvmPortfolioCard } from '../components/terminal/EvmPortfolioCard';
 import { useTerminal } from '../state/TerminalProvider';
 import { EvmFillsSection } from '../components/terminal/EvmFillsSection';
+import { ResetPaperButton } from '../components/ResetPaperButton';
 import { type ChainKind, EVM_CHAIN_META, isEvmChain } from '@shared/evm';
 import { useToast } from '../state/ToastProvider';
 import { cachedPortfolio, rememberPortfolio } from '../state/routeCache';
@@ -225,6 +226,8 @@ function SolanaPortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chai
             <Download className="h-3.5 w-3.5" />
             Solana JSON
           </GhostButton>
+          {/* Only when there is paper to clear. */}
+          {((data?.paper.positions.length ?? 0) > 0 || history.some((r) => r.paper)) && <ResetPaperButton onDone={() => void load({ stale: false })} />}
           <button
             onClick={() => void load()}
             className="h-9 w-9 rounded-lg border border-white/10 bg-white/5 flex items-center justify-center text-krypt-muted hover:text-white transition"

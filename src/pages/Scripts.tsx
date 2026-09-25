@@ -16,7 +16,7 @@
 import { ScriptInputsDialog, useScriptInputs } from '../components/terminal/ScriptInputsDialog';
 import { inputsProblem } from '@shared/scriptInputs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, BookOpen, Clipboard, Code2, FolderOpen, ListChecks, Play, Plus, Power, Settings2, Trash2 } from 'lucide-react';
+import { AlertTriangle, BookOpen, Clipboard, Code2, Eraser, FolderOpen, ListChecks, Play, Plus, Power, RotateCcw, Settings2, Trash2 } from 'lucide-react';
 import { nativeSymbolOf, type ChainKind } from '@shared/evm';
 import {
   ALERT_KINDS,
@@ -282,6 +282,33 @@ export function ScriptsPage() {
     }
   };
 
+  // Reset one script, or (no script) every script plus paper trades. A
+  // script's totals are usually its OWN saved state (bot.setState), so this
+  // clears that, not just the widget. Live scripts keep their open positions
+  // and today's budget — see automation.resetScript.
+  const resetScripts = async (s: UserScript | null): Promise<void> => {
+    const kept = 'Live scripts keep the positions they still hold (so they can still sell them) and today’s buys and loss, which their daily limits count.';
+    const okGo = await modal.confirm({
+      title: s ? `Reset "${s.name}"` : 'Reset everything',
+      message: s
+        ? `Clear "${s.name}"’s stats, saved state (everything it stored with bot.setState), log and once-per-token memory?${s.mode === 'paper' ? ' Its paper positions and today’s paper numbers are cleared too.' : `
+
+${kept}`}${s.enabled && s.kind === 'code' ? ' It is running, so it restarts fresh.' : ''}`
+        : `Reset every script (paper and live) — stats, saved state, logs, memory — and clear every paper trade on every chain?
+
+${kept} Live trades and copy trading are not touched. A copy of the old paper record is saved as paper-positions.backup.json.`,
+      confirmLabel: s ? 'Reset script' : 'Reset everything',
+      destructive: true,
+    });
+    if (!okGo) return;
+    const r = await window.krypt.automation.reset(s?.id);
+    if (!r.ok) toast.error(r.message);
+    else {
+      toast.success(r.message);
+      if (r.data) setSnap(r.data);
+    }
+  };
+
   const killSwitch = async (on: boolean): Promise<void> => {
     if (on) {
       const okGo = await modal.confirm({ title: 'Kill switch', message: 'Turn every script off now? Nothing can be enabled again until the switch is lifted.', confirmLabel: 'Stop everything', destructive: true });
@@ -300,6 +327,10 @@ export function ScriptsPage() {
       title="Scripts"
       subtitle="Your own rules and code, each under a budget. Paper first; live is a separate, confirmed switch."
       actions={
+        <div className="flex items-center gap-2">
+        <GhostButton onClick={() => void resetScripts(null)} className="!py-2 !px-3 text-xs">
+          <Eraser className="h-3.5 w-3.5" /> Reset everything
+        </GhostButton>
         <div className="flex rounded-lg border border-white/10 overflow-hidden" role="tablist" aria-label="Scripts views">
           {VIEWS.map(([id, label, Icon]) => (
             <button
@@ -315,6 +346,7 @@ export function ScriptsPage() {
               <Icon className="h-3.5 w-3.5" /> {label}
             </button>
           ))}
+        </div>
         </div>
       }
     >
@@ -519,6 +551,11 @@ export function ScriptsPage() {
                     <PrimaryButton onClick={() => void save()} disabled={busy} className="!py-2 text-xs">
                       {busy ? 'Saving…' : draft.id ? 'Save changes' : 'Save (paper, off)'}
                     </PrimaryButton>
+                    {current && (
+                      <GhostButton onClick={() => void resetScripts(current)} className="!py-2 text-xs">
+                        <RotateCcw className="h-3.5 w-3.5" /> Reset stats
+                      </GhostButton>
+                    )}
                     {current && (
                       <GhostButton destructive onClick={() => void removeScript(current)} className="!py-2 text-xs">
                         <Trash2 className="h-3.5 w-3.5" /> Delete

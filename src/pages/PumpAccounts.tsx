@@ -27,7 +27,7 @@
 // in) and which do not (Make).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BadgeCheck, Heart, HeartOff, KeyRound, Loader2, LogIn, LogOut, Pencil, RefreshCw, UserMinus, UserPlus, Users } from 'lucide-react';
+import { BadgeCheck, Heart, HeartOff, KeyRound, Loader2, LogIn, LogOut, Pencil, PlayCircle, RefreshCw, UserMinus, UserPlus, Users } from 'lucide-react';
 import {
   PUMP_SESSION_DAYS,
   isWebOnlyAccount,
@@ -43,6 +43,7 @@ import { REFERRAL_NOTICE } from '@shared/pumpReferral';
 import { LookupNote, ProfileEditor } from '../components/terminal/PumpAccountsSection';
 import { Card, GhostButton, Page, PrimaryButton, Section, TextInput } from '../components/common';
 import { useToast } from '../state/ToastProvider';
+import { PUMP_QUICKSTART_URL } from '../guideVideos';
 import { cls, fmtAgo, shortAddr } from '../utils/format';
 import type { WalletSummary } from '@shared/types';
 import { loadPumpStatus } from '../state/pumpStatus';
@@ -215,6 +216,15 @@ export function PumpAccountsPage() {
     <Page
       title="pump.fun accounts"
       subtitle="Every wallet's account in one place — sign them in, name them, and see what pump says about your calls."
+      actions={
+        // Through main like every other link: the renderer never navigates.
+        <span title="Watch the pump.fun quickstart on YouTube — opens in your browser">
+          <GhostButton onClick={() => void window.krypt.app.openExternal(PUMP_QUICKSTART_URL)}>
+            <PlayCircle className="h-3.5 w-3.5" />
+            pump.fun quickstart
+          </GhostButton>
+        </span>
+      }
     >
       {/* Disclosed where accounts are made, as the trade fee is before a trade
           (shared/pumpReferral.ts, terms › Fees). */}

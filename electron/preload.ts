@@ -200,6 +200,8 @@ const api = {
     remove: (id: string) => ipcRenderer.invoke('automation:remove', id),
     setEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('automation:setEnabled', id, enabled),
     killSwitch: (on: boolean) => ipcRenderer.invoke('automation:killSwitch', on),
+    /** Reset one script's stats and saved state; no id = every script plus paper trades. */
+    reset: (id?: string) => ipcRenderer.invoke('automation:reset', id),
     /** Pick a .js file; its text comes back as a draft, never a path. */
     openFile: () => ipcRenderer.invoke('automation:openFile'),
   },
@@ -214,6 +216,7 @@ const api = {
     summary: (opts?: { stale?: boolean }) => ipcRenderer.invoke('portfolio:summary', opts),
     history: () => ipcRenderer.invoke('portfolio:history'),
     export: (format: 'csv' | 'json') => ipcRenderer.invoke('portfolio:export', format),
+    resetPaper: () => ipcRenderer.invoke('paper:reset'),
   },
   gifs: {
     search: (provider: 'giphy' | 'tenor', query: string) => ipcRenderer.invoke('gifs:search', provider, query),

@@ -12,13 +12,19 @@
 // `SECTION_GUIDES` is keyed by workspace id and pinned by
 // test/workspaces.test.mjs: every workspace on the Hub has a guide here, so
 // adding a workspace without one fails a test rather than leaving a hole.
+//
+// The Advanced switch (2026-09-24) swaps every card for its power-user
+// version from guidesAdvanced.ts: the mechanics, defaults and limits, read
+// from the code. test/guides.test.mjs fails if a card has no advanced twin.
 
 import { useEffect, useRef, useState } from 'react';
-import { BookOpen, Bot, Code2, Coins, Compass, Cpu, KeyRound, LayoutGrid, Megaphone, Percent, Rocket, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
+import { AtSign, BookOpen, Bot, Code2, Coins, Compass, Cpu, KeyRound, LayoutGrid, Megaphone, Percent, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
 import { WORKSPACES, type WorkspaceId } from '../workspaces';
 import { Card, Page } from '../components/common';
 import { GuidePanel } from '../components/GuidePanel';
 import { cls } from '../utils/format';
+import { PUMP_QUICKSTART_URL } from '../guideVideos';
+import { ADVANCED_GUIDES, type AdvancedGuide } from './guidesAdvanced';
 
 export interface SectionGuide {
   /** One or two short sentences. */
@@ -27,6 +33,26 @@ export interface SectionGuide {
   steps: string[];
   /** Things that lose money or keys. Short. */
   careful: string[];
+  /** A video walk-through, opened in the system browser. */
+  video?: { url: string; label: string };
+}
+
+/** Whether the Advanced switch is on. A per-viewer convenience, so browser
+ *  storage, and it must never break the page if storage is refused. */
+const ADVANCED_KEY = 'krypt.guides.advanced.v1';
+function readAdvanced(): boolean {
+  try {
+    return localStorage.getItem(ADVANCED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function writeAdvanced(on: boolean): void {
+  try {
+    localStorage.setItem(ADVANCED_KEY, on ? '1' : '0');
+  } catch {
+    /* the switch still works for this visit */
+  }
 }
 
 const ICONS: Partial<Record<WorkspaceId, LucideIcon>> = {
@@ -101,7 +127,7 @@ export const PUMP_EXPORT_GUIDE: SectionGuide = {
     'Click your profile picture at the top right, then choose View Wallet.',
     'Press Export Wallet. Confirm it is you if it asks. (On the phone app: Profile, then the menu, then Settings, then Export Wallet.)',
     'Copy the private key it shows — a long line of letters and numbers.',
-    'In Krypto Bot, open Automation, then Wallet list. Paste the key into the Import box and press Import.',
+    'In Krypto Bot, open Automation, then pump.fun accounts. Paste the key under Bring an existing account and press Import and sign in.',
     'Done. That account is now in the app: it can trade and post, and it no longer needs pump.fun sign-in to work.',
   ],
   careful: [
@@ -109,6 +135,28 @@ export const PUMP_EXPORT_GUIDE: SectionGuide = {
     'Anyone who has this key controls that wallet and everything in it. Paste it only into Krypto Bot, and never share it or put it in a chat or screenshot.',
     'This is the way to keep using a pump.fun account here after pump changes its web sign-in on 25 September. Importing counts toward your 15 wallets.',
   ],
+};
+
+/**
+ * pump.fun: what an account is here, in one card, with krypt cc's quickstart
+ * video (2026-09-24). The same video is on the pump.fun accounts page.
+ */
+export const PUMP_GUIDE: SectionGuide = {
+  what: 'On pump.fun, an account is a wallet. Every wallet in this app can have its own pump.fun account, with its own name, followers and callouts.',
+  steps: [
+    'Open Automation, then pump.fun accounts. Every wallet you have is listed there.',
+    'Under Accounts to make, press Create account on a wallet that has none yet. It costs nothing and sends no transaction.',
+    'Under Already on pump.fun, press Sign in to log in to a wallet’s existing account as it is.',
+    'Give the account a name. You can type one per line to name several at once.',
+    'Already have a pump.fun account with followers? Use Bring an existing account and paste that wallet’s key.',
+    'A sign-in lasts about two weeks. The Sessions list shows how long each has left. Press Renew before it runs out.',
+  ],
+  careful: [
+    'Callouts, follows and likes are public and under that account’s name.',
+    'When a sign-in runs out, callouts from that account stop until you sign in again.',
+    'Accounts made or signed in here are referred on pump.fun by kryptcc. pump pays Krypt a share of that account’s callout rewards, taken from the account’s share.',
+  ],
+  video: { url: PUMP_QUICKSTART_URL, label: 'Watch the pump.fun quickstart' },
 };
 
 /** Standalone deep-dive guides for the higher-stakes features, added
@@ -181,7 +229,7 @@ export const FEES_GUIDE: SectionGuide = {
     'The Solana network also charges a tiny fee per transaction — that goes to the network, not to us.',
   ],
   careful: [
-    'Accounts you make through the app are referred on pump.fun by kryptcc. It is disclosed and costs you nothing extra.',
+    'Accounts made or signed in through the app are referred on pump.fun by kryptcc. pump pays Krypt a share of the callout rewards they earn, out of the account’s share. Trading costs nothing extra.',
     'A launch needs a dev buy — your own first buy of the coin — so launching is billed like any buy.',
     'Not financial advice, and nothing here predicts a price. Only trade what you can afford to lose.',
   ],
@@ -197,7 +245,7 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
       'Type an amount of SOL and press Buy.',
       'To sell, press Sell. Pick a percent, or 100% to sell all of it.',
       'Orders lets you set a stop loss. That sells for you if the price drops to a number you choose.',
-      'Watchlist keeps coins you want to come back to. Wire shows news about the coins.',
+      'Watchlist keeps coins you want to come back to. Wire shows whether the data sources are working.',
     ],
     careful: [
       'A dash (—) means the app does not know something. It is not a zero.',
@@ -284,7 +332,7 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
   layout: {
     what: 'Your own screen, made of widgets. You choose which ones are on it and where they go.',
     steps: [
-      'Press Add panel and pick a box, like Chart, Wallet, Links or Games.',
+      'Press Panels and tick a box, like Chart, Wallet, Links or Games.',
       'Drag a box by its title bar to move it. Pull the corner to resize it.',
       'Open a coin anywhere and the Chart and Links boxes follow it.',
     ],
@@ -299,7 +347,7 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
       'Legal: the terms, the privacy page and the risk page. Everything the app sends is listed there.',
     ],
     careful: [
-      'Live execution is a switch here too. Off means nothing can spend money.',
+      'Paper or Live is the switch in the top bar, one per chain. Paper means nothing can spend money.',
       'Market data can be turned off. Then charts and prices stop.',
     ],
   },
@@ -310,50 +358,108 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
   },
 };
 
-function GuideCard({ id, title, guide, icon: Icon }: { id: string; title: string; guide: SectionGuide; icon?: LucideIcon }) {
+function Bullets({ lines, tone = 'muted' }: { lines: string[]; tone?: 'muted' | 'amber' }) {
   return (
-    <Card className="scroll-mt-4 space-y-3" >
-      <div id={`guide-${id}`} className="flex items-center gap-2">
+    <ul className="space-y-1">
+      {lines.map((line, i) => (
+        <li key={i} className="flex gap-2 text-note leading-relaxed text-krypt-muted">
+          <span className={cls('mt-[7px] h-1 w-1 flex-shrink-0 rotate-45', tone === 'amber' ? 'bg-amber-300/80' : 'bg-krypt-purple/80')} />
+          <span>{line}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Steps({ steps }: { steps: string[] }) {
+  return (
+    <ol className="space-y-1.5">
+      {steps.map((step, i) => (
+        <li key={i} className="flex gap-2.5 text-note leading-relaxed text-krypt-muted">
+          <span className="mt-px flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-krypt-purple/40 bg-krypt-purple/15 font-mono text-label text-white">{i + 1}</span>
+          <span>{step}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function GuideCard({
+  id,
+  title,
+  guide,
+  icon: Icon,
+  advanced,
+}: {
+  id: string;
+  title: string;
+  guide: SectionGuide;
+  icon?: LucideIcon;
+  /** Set when the Advanced switch is on: the card shows this instead. */
+  advanced?: AdvancedGuide | null;
+}) {
+  const careful = advanced ? advanced.careful : guide.careful;
+  return (
+    <Card className="scroll-mt-4 space-y-3">
+      <div id={`guide-${id}`} className="flex flex-wrap items-center gap-2">
         {Icon && (
           <span className="rounded-lg border border-white/10 bg-white/5 p-1.5 text-krypt-pink">
             <Icon className="h-4 w-4" />
           </span>
         )}
         <h2 className="font-display text-value font-semibold text-white">{title}</h2>
+        {advanced && <span className="rounded border border-krypt-purple/40 bg-krypt-purple/15 px-1.5 py-px text-label uppercase tracking-label text-white/80">Advanced</span>}
+        {guide.video && (
+          // Through main, never a bare href: the renderer must not navigate.
+          <button
+            onClick={() => void window.krypt.app.openExternal(guide.video!.url)}
+            title="Opens YouTube in your browser"
+            className="ml-auto flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-label text-krypt-muted transition hover:border-krypt-purple/50 hover:text-white"
+          >
+            <PlayCircle className="h-3.5 w-3.5" />
+            {guide.video.label}
+          </button>
+        )}
       </div>
-      <p className="text-note leading-relaxed text-white/85">{guide.what}</p>
+      <p className="text-note leading-relaxed text-white/85">{advanced ? advanced.what : guide.what}</p>
       <div>
-        <div className="mb-1 text-label uppercase tracking-label text-krypt-muted">Do this</div>
-        <ol className="space-y-1.5">
-          {guide.steps.map((step, i) => (
-            <li key={i} className="flex gap-2.5 text-note leading-relaxed text-krypt-muted">
-              <span className="mt-px flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-krypt-purple/40 bg-krypt-purple/15 font-mono text-label text-white">{i + 1}</span>
-              <span>{step}</span>
-            </li>
-          ))}
-        </ol>
+        <div className="mb-1 text-label uppercase tracking-label text-krypt-muted">{advanced ? 'Workflow' : 'Do this'}</div>
+        <Steps steps={advanced ? advanced.steps : guide.steps} />
       </div>
-      {guide.careful.length > 0 && (
+      {advanced?.details.map((d) => (
+        <div key={d.heading}>
+          <div className="mb-1 text-label uppercase tracking-label text-krypt-muted">{d.heading}</div>
+          <Bullets lines={d.lines} />
+        </div>
+      ))}
+      {careful.length > 0 && (
         <div>
           <div className="mb-1 text-label uppercase tracking-label text-amber-300/90">Careful</div>
-          <ul className="space-y-1">
-            {guide.careful.map((line, i) => (
-              <li key={i} className="flex gap-2 text-note leading-relaxed text-krypt-muted">
-                <span className="mt-[7px] h-1 w-1 flex-shrink-0 rotate-45 bg-amber-300/80" />
-                <span>{line}</span>
-              </li>
-            ))}
-          </ul>
+          <Bullets lines={careful} tone="amber" />
         </div>
       )}
     </Card>
   );
 }
 
+/** The standalone cards after the per-workspace ones, in page order. */
+const EXTRA_GUIDES: { id: string; title: string; guide: SectionGuide; icon: LucideIcon }[] = [
+  { id: 'copy-trading', title: 'Copy trading', guide: COPY_TRADING_GUIDE, icon: Users },
+  { id: 'scripts-deep', title: 'Scripts', guide: SCRIPTS_GUIDE, icon: Code2 },
+  { id: 'pumpfun', title: 'pump.fun accounts', guide: PUMP_GUIDE, icon: AtSign },
+  { id: 'callouts', title: 'Callouts', guide: CALLOUTS_GUIDE, icon: Megaphone },
+  { id: 'callout-rewards', title: 'Callout rewards', guide: CALLOUT_REWARDS_GUIDE, icon: Coins },
+  { id: 'fees', title: 'Fees & referral', guide: FEES_GUIDE, icon: Percent },
+  { id: 'ai', title: 'AI connection', guide: AI_CONNECTION_GUIDE, icon: Bot },
+  { id: 'pump-export', title: 'Export a pump.fun wallet', guide: PUMP_EXPORT_GUIDE, icon: KeyRound },
+];
+
 export function GuidesPage() {
   const sections = WORKSPACES.filter((w) => w.id !== 'guides');
   const [active, setActive] = useState<string>('start');
+  const [advanced, setAdvanced] = useState<boolean>(readAdvanced);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const adv = (id: string): AdvancedGuide | null => (advanced ? ADVANCED_GUIDES[id] ?? null : null);
 
   // The left list follows the scroll, so the reader always knows where they
   // are — no other state, nothing saved.
@@ -378,54 +484,58 @@ export function GuidesPage() {
     setActive(id);
   };
 
+  const toggle = (): void => {
+    const next = !advanced;
+    setAdvanced(next);
+    writeAdvanced(next);
+  };
+
+  const navButton = (id: string, label: string) => (
+    <button key={id} onClick={() => jump(id)} className={cls('w-full rounded-md px-3 py-2 text-left text-body font-semibold transition', active === id ? 'bg-krypt-purple/20 text-white' : 'text-krypt-muted hover:text-white')}>
+      {label}
+    </button>
+  );
+
   return (
-    <Page title="Guides" subtitle="How each part of the app works, in plain words. Start at the top if this is your first time.">
+    <Page
+      title="Guides"
+      subtitle={
+        advanced
+          ? 'Advanced: how each part works under the hood — defaults, limits and the settings that change them.'
+          : 'How each part of the app works, in plain words. Start at the top if this is your first time.'
+      }
+      actions={
+        <button
+          type="button"
+          role="switch"
+          aria-checked={advanced}
+          onClick={toggle}
+          title="Swap every guide for its power-user version"
+          className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-body font-semibold text-white/90 transition hover:border-white/20"
+        >
+          Advanced
+          <span className={cls('relative h-5 w-9 rounded-full transition', advanced ? 'bg-krypt-gradient' : 'bg-white/10')}>
+            <span className={cls('absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition', advanced ? 'left-[18px]' : 'left-0.5')} />
+          </span>
+        </button>
+      }
+    >
       <div className="grid gap-4 lg:grid-cols-[220px_1fr] items-start">
         <div ref={listRef} className="lg:sticky lg:top-0 space-y-1">
-          <button onClick={() => jump('start')} className={cls('w-full rounded-md px-3 py-2 text-left text-body font-semibold transition', active === 'start' ? 'bg-krypt-purple/20 text-white' : 'text-krypt-muted hover:text-white')}>
-            Start here
-          </button>
-          {sections.map((w) => (
-            <button key={w.id} onClick={() => jump(w.id)} className={cls('w-full rounded-md px-3 py-2 text-left text-body font-semibold transition', active === w.id ? 'bg-krypt-purple/20 text-white' : 'text-krypt-muted hover:text-white')}>
-              {w.title}
-            </button>
-          ))}
-          {(
-            [
-              ['copy-trading', 'Copy trading'],
-              ['scripts-deep', 'Scripts'],
-              ['callouts', 'Callouts'],
-              ['callout-rewards', 'Callout rewards'],
-              ['fees', 'Fees & referral'],
-            ] as const
-          ).map(([id, label]) => (
-            <button key={id} onClick={() => jump(id)} className={cls('w-full rounded-md px-3 py-2 text-left text-body font-semibold transition', active === id ? 'bg-krypt-purple/20 text-white' : 'text-krypt-muted hover:text-white')}>
-              {label}
-            </button>
-          ))}
-          <button onClick={() => jump('ai')} className={cls('w-full rounded-md px-3 py-2 text-left text-body font-semibold transition', active === 'ai' ? 'bg-krypt-purple/20 text-white' : 'text-krypt-muted hover:text-white')}>
-            AI connection
-          </button>
-          <button onClick={() => jump('pump-export')} className={cls('w-full rounded-md px-3 py-2 text-left text-body font-semibold transition', active === 'pump-export' ? 'bg-krypt-purple/20 text-white' : 'text-krypt-muted hover:text-white')}>
-            Export a pump.fun wallet
-          </button>
-          <button onClick={() => jump('more')} className={cls('w-full rounded-md px-3 py-2 text-left text-body font-semibold transition', active === 'more' ? 'bg-krypt-purple/20 text-white' : 'text-krypt-muted hover:text-white')}>
-            More detail
-          </button>
+          {navButton('start', 'Start here')}
+          {sections.map((w) => navButton(w.id, w.title))}
+          {EXTRA_GUIDES.map((g) => navButton(g.id, g.title))}
+          {navButton('more', 'More detail')}
         </div>
 
         <div className="space-y-4 max-w-3xl">
-          <GuideCard id="start" title="Start here" guide={START_GUIDE} icon={BookOpen} />
+          <GuideCard id="start" title="Start here" guide={START_GUIDE} icon={BookOpen} advanced={adv('start')} />
           {sections.map((w) => (
-            <GuideCard key={w.id} id={w.id} title={w.title} guide={SECTION_GUIDES[w.id as Exclude<WorkspaceId, 'hub'>]} icon={ICONS[w.id]} />
+            <GuideCard key={w.id} id={w.id} title={w.title} guide={SECTION_GUIDES[w.id as Exclude<WorkspaceId, 'hub'>]} icon={ICONS[w.id]} advanced={adv(w.id)} />
           ))}
-          <GuideCard id="copy-trading" title="Copy trading" guide={COPY_TRADING_GUIDE} icon={Users} />
-          <GuideCard id="scripts-deep" title="Scripts" guide={SCRIPTS_GUIDE} icon={Code2} />
-          <GuideCard id="callouts" title="Callouts" guide={CALLOUTS_GUIDE} icon={Megaphone} />
-          <GuideCard id="callout-rewards" title="Callout rewards" guide={CALLOUT_REWARDS_GUIDE} icon={Coins} />
-          <GuideCard id="fees" title="Fees & referral" guide={FEES_GUIDE} icon={Percent} />
-          <GuideCard id="ai" title="AI connection" guide={AI_CONNECTION_GUIDE} icon={Bot} />
-          <GuideCard id="pump-export" title="Export a pump.fun wallet" guide={PUMP_EXPORT_GUIDE} icon={KeyRound} />
+          {EXTRA_GUIDES.map((g) => (
+            <GuideCard key={g.id} id={g.id} title={g.title} guide={g.guide} icon={g.icon} advanced={adv(g.id)} />
+          ))}
           <div id="guide-more" className="scroll-mt-4">
             <GuidePanel />
           </div>

@@ -144,6 +144,31 @@ export function noteSymbol(mint: string, symbol: string): void {
   save();
 }
 
+/**
+ * Start the paper record over: every open paper position and every closed
+ * paper round trip, on every chain (user ask, 2026-09-24 — "it can get messy
+ * when testing scripts").
+ *
+ * The old book is copied to paper-positions.backup.json first, so one reset
+ * is recoverable by hand. Refused while the book is unreadable: that file is
+ * the thing the read-only rule protects, and a reset would write over it.
+ */
+export function reset(): { ok: boolean; message: string; open: number; closed: number } {
+  if (loadFailure) return { ok: false, message: `Paper trading is read-only — ${loadFailure}`, open: 0, closed: 0 };
+  const open = book.open.length;
+  const closed = book.closed.length;
+  if (filePath) {
+    try {
+      fs.writeFileSync(path.join(path.dirname(filePath), 'paper-positions.backup.json'), JSON.stringify(book, null, 2), 'utf8');
+    } catch {
+      return { ok: false, message: 'Could not back up the paper record first, so it was not reset.', open: 0, closed: 0 };
+    }
+  }
+  book = emptyPaperBook();
+  save();
+  return { ok: true, message: `Paper record reset — ${open} open and ${closed} closed paper trades cleared.`, open, closed };
+}
+
 /** Test hook. */
 export function _load(b: PaperBook): void {
   book = b;

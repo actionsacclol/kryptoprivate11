@@ -3713,6 +3713,17 @@ export function registerIpc(): void {
     return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
   });
 
+  // "Reset all paper trades": the paper book on every chain, then every paper
+  // script's own registry and day, so neither points at the cleared record.
+  // Copy trading keeps its own paper reset (copy:resetPaper); live is never
+  // touched. No arguments — there is nothing for the renderer to choose.
+  ipcMain.handle('paper:reset', () => {
+    const r = getEngine().resetPaperBook();
+    if (!r.ok) return fail(r.message);
+    const scripts = automation.forgetPaper();
+    return ok(scripts ? `${r.message} ${scripts} paper script${scripts === 1 ? '' : 's'} started over.` : r.message);
+  });
+
   // ── user automation: rules and scripts ───────────────────────────
   ipcMain.handle('automation:list', () => ok('ok', automation.snapshot()));
 
@@ -3828,6 +3839,23 @@ export function registerIpc(): void {
     if (typeof id !== 'string' || !id) return fail('Invalid id');
     const r = automation.remove(id);
     return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
+  });
+
+  // Reset one script's record, or — with no id — every script AND the paper
+  // book: the Scripts page's "reset everything" (user ask, 2026-09-24). Live
+  // scripts keep their open positions and today's budget either way
+  // (automation.resetScript says why).
+  ipcMain.handle('automation:reset', (_e, id: unknown) => {
+    if (id !== undefined && id !== null && (typeof id !== 'string' || !id)) return fail('Invalid id');
+    if (typeof id === 'string') {
+      const r = automation.resetScript(id);
+      return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
+    }
+    const list = automation.all();
+    for (const s of list) automation.resetScript(s.id);
+    const paper = getEngine().resetPaperBook();
+    const tail = paper.ok ? paper.message : `Paper trades were not reset: ${paper.message}`;
+    return ok(`${list.length} script${list.length === 1 ? '' : 's'} reset (live scripts keep their open positions and today’s budget). ${tail}`, automation.snapshot());
   });
 
   ipcMain.handle('automation:setEnabled', (_e, id: unknown, enabled: unknown) => {

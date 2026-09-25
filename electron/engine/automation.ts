@@ -157,6 +157,13 @@ export interface AutomationHost {
   analyze(mint: string, chain?: ChainKind): Promise<AiAnalysis>;
   /** Open positions in a mode. */
   positions(mode: ScriptMode, chain?: ChainKind): Promise<ScriptPosition[]>;
+  /**
+   * The mints the active wallet (or the paper book) holds, or NULL when the
+   * read failed. `positions` answers a failed read with an empty list, which
+   * is fine for display and wrong for deciding a script sold something.
+   * Optional so a test host can leave it out; `reconcileOpened` then skips.
+   */
+  heldMints?(mode: ScriptMode, chain?: ChainKind): Promise<Set<string> | null>;
   wallet(chain?: ChainKind): { sol: number | null; address: string | null };
   orders(mint?: string): OrderView[];
   placeOrder(req: NewOrderRequest): Promise<{ ok: boolean; message: string }>;
@@ -234,6 +241,15 @@ export interface AutomationHost {
  *  a runaway script cannot raise its own ceiling. */
 const AI_ANALYSES_PER_HOUR = 20;
 
+/** A position this script opened. `wallet` is set when it was bought with one
+ *  of the user's OTHER wallets (by address): the active wallet's holdings say
+ *  nothing about it, so it is never pruned against them. */
+interface OpenedEntry {
+  costSol: number;
+  at: number;
+  wallet?: string;
+}
+
 interface Runtime {
   dayKey: string;
   buysToday: number;
@@ -250,7 +266,7 @@ interface Runtime {
   /** Timestamps of AI analyses in the last hour — they spend the user's key. */
   analyses: number[];
   /** Positions this script opened (or placed a limit buy for): mint → cost. */
-  opened: Map<string, { costSol: number; at: number }>;
+  opened: Map<string, OpenedEntry>;
   /** Mints the script asked to stream ticks for. */
   subscribed: Set<string>;
   /**
@@ -294,7 +310,7 @@ interface PersistedRuntime {
   /** Per-mint cooldown clocks. Without these a restart is a free reset of
    *  every `cooldownSec`, which is a wall the user set. */
   lastFireAt?: Record<string, number>;
-  opened: Record<string, { costSol: number; at: number }>;
+  opened: Record<string, OpenedEntry>;
   subscribed?: string[];
   kv: Record<string, unknown>;
 }
@@ -776,13 +792,36 @@ function rateLimited(s: UserScript, rt: Runtime, now: number): boolean {
   return false;
 }
 
+/**
+ * How long a fresh buy is kept in the registry without the wallet showing it.
+ *
+ * The holdings read is plain HTTP, shared for 2 s, and can trail a buy that
+ * the exec lane has already seen land. Pruning on the first read that missed
+ * the coin is exactly the orphan a user reported (2026-09-24): the buy landed,
+ * the next position poll ran before the RPC caught up, the script forgot the
+ * mint, and every sell after that — named wallet and sellAll included — was
+ * refused with "this script does not hold it" while the tokens sat in the
+ * wallet.
+ */
+export const OPEN_GRACE_MS = 90_000;
+
 /** Drop positions the script opened that are no longer held (sold by hand,
- *  stopped out by an order) so the open-position cap reflects reality. */
+ *  stopped out by an order) so the open-position cap reflects reality.
+ *
+ *  Only on a read that WORKED, only after the grace, and never for a bag in
+ *  another wallet. A failed read is not an empty wallet: before this, one
+ *  refused getTokenAccountsByOwner cleared every script's registry at once. */
 async function reconcileOpened(s: UserScript, rt: Runtime): Promise<void> {
   const h = host;
-  if (!h) return;
-  const held = new Set((await h.positions(s.mode, scriptChain(s))).map((p) => p.mint));
-  for (const mint of [...rt.opened.keys()]) if (!held.has(mint) && !host?.orders(mint).some((o) => o.kind === 'limit_buy' && (o.state === 'armed' || o.state === 'paused'))) rt.opened.delete(mint);
+  if (!h?.heldMints || rt.opened.size === 0) return;
+  const held = await h.heldMints(s.mode, scriptChain(s));
+  if (!held) return;
+  const now = Date.now();
+  for (const [mint, e] of [...rt.opened]) {
+    if (held.has(mint) || e.wallet || now - e.at < OPEN_GRACE_MS) continue;
+    if (h.orders(mint).some((o) => o.kind === 'limit_buy' && (o.state === 'armed' || o.state === 'paused'))) continue;
+    rt.opened.delete(mint);
+  }
 }
 
 function refuse(s: UserScript, why: string): ActResult {
@@ -1034,7 +1073,12 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   if (!rt.opened.has(mint)) return refuse(s, `sell ${what}: this script does not hold it`);
   const held = await h.positions(s.mode, scriptChain(s));
   const before = held.find((p) => p.mint === mint);
-  if (!before) return refuse(s, `sell ${what}: nothing held in ${s.mode} mode`);
+  // A live buy this script made moments ago may not be in the holdings read
+  // yet. The sell reads the balance itself when it builds, so let it go and
+  // let the chain answer; it sells the percentage asked for, the same branch
+  // an unknown basis takes below. Past the grace, absence means gone.
+  const fresh = s.mode === 'live' && Date.now() - (rt.opened.get(mint)?.at ?? 0) < OPEN_GRACE_MS;
+  if (!before && !fresh) return refuse(s, `sell ${what}: nothing held in ${s.mode} mode`);
   if (s.mode === 'live') {
     const blocked = h.liveBlockedReason(scriptChain(s));
     if (blocked) return refuse(s, `sell ${what}: not executed — ${blocked}`);
@@ -1053,7 +1097,7 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   // An UNKNOWN wallet basis means the script cannot work out its own share, so
   // it sells the percentage it asked for rather than guessing a ratio — the
   // same branch an unreconciled Solana position already took.
-  const walletCost = before.costSol;
+  const walletCost = before ? before.costSol : null;
   if (walletCost !== null && Number.isFinite(walletCost) && walletCost > 0 && ourCost > 0) {
     const ratio = Math.min(1, ourCost / walletCost);
     pctOfWallet = Math.max(1, Math.min(100, Math.round(pct * ratio)));
@@ -1067,7 +1111,7 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
     const realized =
       typeof r.realizedSol === 'number' && Number.isFinite(r.realizedSol)
         ? r.realizedSol
-        : typeof before.pnlSol === 'number'
+        : typeof before?.pnlSol === 'number'
           ? before.pnlSol * (pct / 100)
           : null;
     if (realized !== null) rt.realizedToday += realized;
@@ -1467,7 +1511,7 @@ async function walletTrade(
       // the SCRIPT spends, not about which key signed it.
       rt.buysToday += 1;
       const prev = rt.opened.get(mint);
-      rt.opened.set(mint, { costSol: (prev?.costSol ?? 0) + amount, at: Date.now() });
+      rt.opened.set(mint, { costSol: (prev?.costSol ?? 0) + amount, at: Date.now(), wallet: address });
       persist();
     }
     slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'bought' : 'buy failed'} ${amount} SOL of ${label} as ${who}…: ${r.message}`);
@@ -1482,6 +1526,12 @@ async function walletTrade(
     return { ok: true, message: 'paper: nothing was sold' };
   }
   const r = await h.walletSell(address, mint, amount);
+  // A full exit from the wallet that bought it ends the script's claim; the
+  // active-wallet prune never sees this bag, so nothing else would.
+  if (r.ok && amount >= 100 && rt.opened.get(mint)?.wallet === address) {
+    rt.opened.delete(mint);
+    persist();
+  }
   slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'sold' : 'sell failed'} ${Math.round(amount)}% of ${label} as ${who}…: ${r.message}`);
   return { ok: r.ok, message: r.message };
 }
@@ -2150,6 +2200,85 @@ export function _reset(): void {
   loadFailure = null;
   killSwitch = false;
   filePath = '';
+}
+
+/**
+ * The paper record was reset: every PAPER script forgets the positions it
+ * opened and starts its day over (buys, sells, realised), so its budget and
+ * loss stop measure the fresh record rather than the one just cleared. Live
+ * scripts are not touched.
+ */
+export function forgetPaper(): number {
+  let n = 0;
+  for (const s of scripts) {
+    if (s.mode !== 'paper') continue;
+    const rt = rtFor(s);
+    rt.opened.clear();
+    rt.buysToday = 0;
+    rt.sellsToday = 0;
+    rt.realizedToday = 0;
+    n += 1;
+  }
+  for (const k of [...peaks.keys()]) if (k.startsWith('paper:')) peaks.delete(k);
+  if (n) {
+    persist();
+    changed();
+  }
+  return n;
+}
+
+/**
+ * Start one script's record over (user ask, 2026-09-24: "everytime i run it
+ * it shows the total stats and past stuff"). That history is mostly the
+ * script's OWN: it keeps running totals in bot.setState and paints them back
+ * into the widget on every start, so clearing the widget alone changes
+ * nothing. Cleared: saved state (bot.getState), the widget, the log, the
+ * last error, once-per-token and cooldown memory, and this run's callout
+ * memory. A running code script is restarted so its in-memory variables go
+ * too.
+ *
+ * Paper and live differ on purpose:
+ *   - paper also forgets its positions and starts its day over;
+ *   - live KEEPS the positions it still holds — forgetting them is exactly
+ *     the orphan that made sells fail with "this script does not hold it" —
+ *     and keeps today's buys and realised loss, because those are what its
+ *     daily buy cap and loss stop count. A reset must not buy a second day.
+ */
+export function resetScript(id: string): { ok: boolean; message: string } {
+  const s = scripts.find((x) => x.id === id);
+  if (!s) return { ok: false, message: 'Script not found' };
+  const rt = rtFor(s);
+  rt.kv = {};
+  rt.metrics.clear();
+  rt.log = [];
+  rt.lastError = null;
+  rt.lastErrorAt = null;
+  rt.errorsInARow = 0;
+  rt.firedMints.clear();
+  rt.lastFireAt.clear();
+  rt.calledOut.clear();
+  if (s.mode === 'paper') {
+    rt.opened.clear();
+    rt.buysToday = 0;
+    rt.sellsToday = 0;
+    rt.realizedToday = 0;
+    for (const k of [...peaks.keys()]) if (k.startsWith('paper:')) peaks.delete(k);
+  }
+  slog(s, 'info', s.mode === 'paper' ? 'reset — saved state, stats, log and paper positions cleared' : 'reset — saved state, stats and log cleared; open live positions and today’s budget kept');
+  if (s.kind === 'code' && s.enabled && rt.running) {
+    void stopCode(s, 'reset').then(() => {
+      if (s.enabled && !killSwitch) void startCode(s);
+    });
+  }
+  persist();
+  changed();
+  return {
+    ok: true,
+    message:
+      s.mode === 'paper'
+        ? `"${s.name}" reset — its stats, saved state, log and paper positions are cleared.`
+        : `"${s.name}" reset — its stats, saved state and log are cleared. Open live positions and today’s budget (${rt.buysToday} buys, ${rt.realizedToday.toFixed(4)} realised) are kept.`,
+  };
 }
 
 export function _runtimeOf(id: string): { opened: string[]; firedMints: string[]; realizedToday: number; buysToday: number; kv: Record<string, unknown>; subscribed: string[]; atTimers: string[] } | null {
