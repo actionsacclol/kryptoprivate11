@@ -9,6 +9,7 @@ import { useToast } from '../state/ToastProvider';
 import { cls, shortAddr } from '../utils/format';
 import { useLocale } from '../state/useLocale';
 import { fmtNative } from '../utils/evm';
+import { ProfileBadge } from './terminal/ProfilesPanel';
 
 // The command rail. Left: search and the app-wide CHAIN SWITCH — Solana |
 // Robinhood | BNB. Every terminal screen (Discover, the token page, the
@@ -241,7 +242,7 @@ function WalletReadout() {
   );
 }
 
-export function TopBar({ search, onOpenAutomation, onOpenRunners, onHub }: { search?: ReactNode; onOpenAutomation: () => void; onOpenRunners?: () => void; onHub?: () => void }) {
+export function TopBar({ search, onOpenAutomation, onOpenRunners, onOpenProfiles, onHub }: { search?: ReactNode; onOpenAutomation: () => void; onOpenRunners?: () => void; onOpenProfiles?: () => void; onHub?: () => void }) {
   const { status, runners } = useAppState();
   const recentRunners = runners.filter((r) => Date.now() - r.flaggedAt < 3_600_000).length;
 
@@ -306,6 +307,9 @@ export function TopBar({ search, onOpenAutomation, onOpenRunners, onHub }: { sea
       </div>
 
       <div className="flex items-center gap-4">
+        {/* Which profile this window is, beside the money controls it
+            governs — two instances side by side must never be confused. */}
+        <ProfileBadge onManage={onOpenProfiles} />
         <ModeToggle />
         <Divider />
         <WalletReadout />

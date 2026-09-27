@@ -41,6 +41,7 @@ import {
   withMarket,
   marketFactsFromSummary,
   scriptLinksFromSummary,
+  mergeSnapshot,
 } from './.automationshared.mjs';
 import { SCRIPT_METHODS } from './.scriptprotocol.mjs';
 
@@ -699,6 +700,56 @@ test('order snapshots become order events only when a state CHANGES to a termina
   assert.equal(evs[0].payload.orderAmount, 100);
 });
 
+// 2026-09-25 10:36: a restart paused WAIFU/PGPU's stop and take-profits and
+// the script never heard — the orders diff treats a first sighting as its
+// baseline. On start, a live script is TOLD (never resumed for it).
+test('a live script starting up is told about paused orders on the coins it holds, and nothing is resumed', async () => {
+  const h = setup();
+  const c = saved(codeScript({ mode: 'live' }));
+  // The script buys MINT (so it holds it), then the app restarts it.
+  auto.setEnabled(c.id, true);
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'ready' });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  await tick(30);
+  assert.deepEqual(auto._runtimeOf(c.id).opened, [MINT]);
+  auto.setEnabled(c.id, false);
+  await tick();
+  const ord = (id, mint, kind, state) => ({ id, mint, symbol: 'COPY', kind, state, triggerBasis: 'pct', triggerValue: 100, amount: 50 });
+  h.calls.orders = [
+    ord('p1', MINT, 'take_profit', 'paused'),
+    ord('p2', MINT, 'stop_loss', 'paused'),
+    ord('p3', MINT2, 'take_profit', 'paused'), // a coin this script does not hold
+    ord('a1', MINT, 'take_profit', 'armed'),
+  ];
+  auto.setEnabled(c.id, true);
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'ready' });
+  await tick(30);
+  const evs = h.calls.dispatched.filter((d) => d.name === 'order');
+  assert.deepEqual(evs.map((e) => [e.payload.orderKind, e.payload.orderState]).sort(), [['stop_loss', 'paused'], ['take_profit', 'paused']]);
+  assert.ok(evs.every((e) => e.payload.mint === MINT), 'only the coin the script holds');
+  assert.deepEqual(h.calls.orders.map((o) => o.state), ['paused', 'paused', 'paused', 'armed'], 'nothing resumed');
+  assert.ok(auto.snapshot().logs[c.id].some((l) => /2 order\(s\) on 1 coin\(s\) this script holds came back PAUSED/.test(l.line)));
+
+  // A paper script places no real orders, so it has none to be told about.
+  const h2 = setup();
+  const p = saved(codeScript({ mode: 'paper' }));
+  auto.setEnabled(p.id, true);
+  await tick();
+  auto.onSandboxMessage(p.id, { t: 'ready' });
+  auto.onSandboxMessage(p.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  await tick(30);
+  auto.setEnabled(p.id, false);
+  await tick();
+  h2.calls.orders = [ord('p1', MINT, 'take_profit', 'paused')];
+  auto.setEnabled(p.id, true);
+  await tick();
+  auto.onSandboxMessage(p.id, { t: 'ready' });
+  await tick(30);
+  assert.equal(h2.calls.dispatched.filter((d) => d.name === 'order').length, 0);
+});
+
 test('an alert firing (lastFiredAt moved) reaches alert rules with its kind and threshold', async () => {
   const h = setup();
   const s = saved(rulesScript({}, { trigger: 'alert', conditions: [{ field: 'alertKind', op: 'eq', value: 'mcap_above' }], actions: [{ type: 'notify', message: '{symbol} crossed {alertThreshold}' }], oncePerMint: false, cooldownSec: 0 }));
@@ -1091,6 +1142,35 @@ test('a script sells its OWN slice, not the whole wallet bag', async () => {
   await tick(30);
   assert.equal(h.calls.sells.length, 1, 'the sell went through');
   assert.equal(h.calls.sells[0].pct, 2, '100% of a 0.02/1.0 share is 2% of the wallet holding');
+});
+
+// 09-25: every timed exit of a bag only the script bought sold 92–99% — its
+// share was the REQUESTED 0.0165 SOL against the wallet's all-in 0.01711
+// (priority fee + ATA rent), and the dust cost more to sell than it was worth.
+test('a live script\'s share is priced from the chain, so "sell 100%" of its own bag sells all of it', async () => {
+  const budget = { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 10, maxOpenPositions: 50, maxActionsPerMinute: 100 };
+  const run = async (walletCost, chainSpent) => {
+    const h = setup({ buyResult: { ok: true, message: 'bought', signature: 'SIG1' } });
+    const seen = [];
+    h.spentSolFor = (sigs) => { seen.push(sigs); return chainSpent; };
+    const c = saved(codeScript({ mode: 'live', budget }));
+    auto.setEnabled(c.id, true);
+    await tick();
+    auto.onSandboxMessage(c.id, { t: 'ready' });
+    auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.0165] });
+    await tick(30);
+    h.book.live.push(h.pos(MINT, walletCost));
+    auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100] });
+    await tick(30);
+    return { pct: h.calls.sells[0]?.pct, seen };
+  };
+  const own = await run(0.01711, 0.01711);
+  assert.equal(own.pct, 100, 'all of a bag only the script bought');
+  assert.deepEqual(own.seen, [['SIG1']], 'priced from the buy the script made');
+  const handAdded = await run(0.01711 + 1.0, 0.01711);
+  assert.equal(handAdded.pct, 2, 'a hand-added bag is still protected');
+  const unreconciled = await run(0.01711, null);
+  assert.equal(unreconciled.pct, 96, 'no chain price yet: the requested SOL stands in, as before');
 });
 
 test('a share too small to round to a percent can still exit', async () => {
@@ -1618,6 +1698,45 @@ test('a bag bought with another wallet is never pruned against the active wallet
   assert.deepEqual(auto._runtimeOf(s.id).opened, [], 'a full exit from that wallet ends the claim');
 });
 
+// Krypto Trader stage 3 (critic #6): a live session's (wallet, coin) pair is
+// its own. A script buy into it — from the active wallet or a named one — is
+// refused with the session named; a paper script (no wallet touched) and
+// another coin are not.
+test('LIVE: a Krypto Trader claim refuses a script buy on that coin, active or named wallet', async () => {
+  const h = setup();
+  const OTHER = 'Other1111111111111111111111111111111111111';
+  const walletCalls = [];
+  const asked = [];
+  h.walletBuy = async (address, mint, sol) => (walletCalls.push(['buy', address, mint, sol]), { ok: true, message: 'bought' });
+  auto.setTraderClaimCheck((ref, mint) => {
+    asked.push(ref);
+    return mint === MINT ? 'a live Krypto Trader session (KT, kt_abc) trades this coin from wallet Wa11et…' : null;
+  });
+  try {
+    const s = saved(codeScript({ name: 'claims', mode: 'live', budget: LIVE_BUDGET }));
+    auto.setEnabled(s.id, true);
+    auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+    await tick();
+    assert.equal(h.calls.buys.length, 0, 'the active-wallet buy is refused');
+    assert.match(h.calls.replies[0].value.message, /Krypto Trader session \(KT, kt_abc\)/, 'and the refusal names the session');
+    assert.deepEqual(asked[0], { walletId: null }, 'bot.buy is checked against the ACTIVE wallet');
+    auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.02, OTHER] });
+    await tick();
+    assert.equal(walletCalls.length, 0, 'a named-wallet buy is refused too');
+    assert.deepEqual(asked.at(-1), { address: OTHER }, 'checked against the NAMED wallet');
+    auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'buy', args: [MINT2, 0.02] });
+    await tick();
+    assert.equal(h.calls.buys.length, 1, 'another coin buys');
+    const p = saved(codeScript({ name: 'paperclaims', mode: 'paper', budget: LIVE_BUDGET }));
+    auto.setEnabled(p.id, true);
+    auto.onSandboxMessage(p.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+    await tick();
+    assert.equal(h.calls.buys.length, 2, 'a paper script touches no wallet, so no claim applies');
+  } finally {
+    auto.setTraderClaimCheck(null);
+  }
+});
+
 test('reset paper trades: paper scripts start over, live scripts are untouched', async () => {
   const h = setup();
   h.heldMints = async (mode) => new Set(h.book[mode].map((p) => p.mint));
@@ -1673,6 +1792,50 @@ test('reset a script: its own saved totals go; a live script keeps its positions
   assert.deepEqual(pp.opened, [], 'paper forgets its positions');
   assert.equal(pp.buysToday, 0, 'and its day');
   assert.equal(auto.resetScript('nope').ok, false);
+});
+
+
+// 2026-09-25: a 78 KB script hit the 64 KB cap. The cap protected the live
+// update, which carried every script's full code on every log line — so the
+// live update no longer carries code, and the cap went up.
+// 2026-09-26: the cap is gone entirely — a 1 MB script saves.
+test('live updates carry no code; the window keeps its own; there is no size cap', () => {
+  assert.ok(saved(codeScript({ name: 'Huge', code: `// ${'x'.repeat(1024 * 1024)}
+bot.on('launch', () => {})` })), 'a 1 MB script saves');
+  const big = saved(codeScript({ name: 'Big', code: `// ${'x'.repeat(100 * 1024)}
+bot.on('launch', () => {})` }));
+  assert.ok(big, 'a 100 KB script saves');
+  const full = auto.snapshot();
+  const live = auto.snapshot(false);
+  assert.ok(full.scripts.find((x) => x.id === big.id).code.length > 100 * 1024, 'a full read carries the code');
+  assert.equal(live.codeOmitted, true);
+  assert.ok(live.scripts.every((x) => x.code === ''), 'a live update carries none');
+  const m = mergeSnapshot(full, live);
+  assert.equal(m.stale, false);
+  assert.equal(m.snap.scripts.find((x) => x.id === big.id).code, full.scripts.find((x) => x.id === big.id).code, 'the window keeps the code it had');
+  const unseen = mergeSnapshot(null, live);
+  assert.equal(unseen.stale, true, 'a script the window never saw means: re-read the list');
+  const edited = { ...full, scripts: full.scripts.map((x) => (x.id === big.id ? { ...x, updatedAt: x.updatedAt - 1 } : x)) };
+  const e = mergeSnapshot(edited, live);
+  assert.equal(e.stale, true, 'saved since → re-read');
+  assert.ok(e.snap.scripts.find((x) => x.id === big.id).code.length > 0, 'but never blanks code it has in the meantime');
+  assert.deepEqual(mergeSnapshot(null, full).snap, full, 'a full read passes straight through');
+  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  assert.ok(eng.includes("snapshot: automation.snapshot(false)"), 'the engine sends the codeless snapshot live');
+});
+
+// 2026-09-27: with pump.fun parking this IP, bot.creator answered null for
+// 25 of 37 classic flags, and a script that refuses unknown creators skipped
+// them all. The host now falls back to Jupiter audit counts - both or none.
+test('bot.creator falls back to Jupiter audit counts when pump is silent', () => {
+  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  const i = eng.indexOf('creator: async (mint, chain) => {');
+  assert.ok(i > 0, 'the host method exists');
+  const body = eng.slice(i, i + 3000);
+  assert.ok(body.includes('launchIntel.creatorHistory(creator)'), 'pump first');
+  assert.ok(body.includes('audit.devMints'), 'then Jupiter mints');
+  assert.ok(body.includes('audit.devMigrations'), 'and graduations');
+  assert.ok(body.includes("if (typeof g !== 'number' || !Number.isFinite(g) || g < 0) return null;"), 'no graduation count = no record, never a made-up 0');
 });
 
 await run();

@@ -49,6 +49,8 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
   // was running and the card said "Nothing running" — it only counted
   // followed wallets). Null until read; the kill switch means none run.
   const [scripts, setScripts] = useState<{ running: number; live: number; killed: boolean } | null>(null);
+  // Krypto Trader sessions that are running: null = not read (a dash), never 0.
+  const [traders, setTraders] = useState<{ running: number; live: number } | null>(null);
   const [liteBusy, setLiteBusy] = useState(false);
 
   // "Laggy?" — Lite mode. The same switch as Settings › Display "Reduce
@@ -96,6 +98,14 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
         setScripts({ running: r.data.killSwitch ? 0 : on.length, live: r.data.killSwitch ? 0 : on.filter((x) => x.mode === 'live').length, killed: r.data.killSwitch && on.length > 0 });
       })
       .catch(() => undefined);
+    void window.krypt.kryptoTrader
+      .list()
+      .then((r) => {
+        if (!alive || !r.ok || !r.data || !Array.isArray(r.data.sessions)) return;
+        const on = r.data.sessions.filter((x) => x.status === 'running');
+        setTraders({ running: on.length, live: on.filter((x) => x.mode === 'live').length });
+      })
+      .catch(() => undefined);
     return () => {
       alive = false;
     };
@@ -115,12 +125,15 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
       case 'automation': {
         // Followed wallets AND running scripts, each only when it was read.
         // An em dash still means "could not read it", never zero.
-        if (copyCount === null && scripts === null) return { line: '—', tone: 'idle' };
+        if (copyCount === null && scripts === null && traders === null) return { line: '—', tone: 'idle' };
         const parts: string[] = [];
         if (copyCount !== null && copyCount > 0) parts.push(`${copyCount} wallet${copyCount === 1 ? '' : 's'} followed`);
         if (scripts !== null && scripts.running > 0) {
           const paper = scripts.running - scripts.live;
           parts.push(`${scripts.running} script${scripts.running === 1 ? '' : 's'} running${scripts.live === 0 ? ' (paper)' : paper > 0 ? ` (${scripts.live} live)` : ' (live)'}`);
+        }
+        if (traders !== null && traders.running > 0) {
+          parts.push(`${traders.running} Krypto Trader session${traders.running === 1 ? '' : 's'}${traders.live === 0 ? ' (paper)' : ` (${traders.live} live)`}`);
         }
         if (parts.length) return { line: parts.join(' · '), tone: 'live' };
         if (scripts?.killed) return { line: 'Kill switch on — scripts stopped', tone: 'idle' };

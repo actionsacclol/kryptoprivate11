@@ -20,8 +20,22 @@ import type { AiAnalysis } from '@shared/ai';
 import * as wallet from './system/wallet';
 import * as fund from './engine/fund';
 import * as lab from '@shared/lab';
-import { getBalance, getTokenBalanceForMint } from './chain/rpcClient';
+import { getAccountInfo, getBalance, getTokenBalanceForMint } from './chain/rpcClient';
 import * as kryptoMode from './engine/kryptoMode';
+import * as kryptoTrader from './engine/kryptoTrader';
+import type { TraderEvmHost, TraderLedgerFill, TraderMarket } from './engine/kryptoTrader';
+import { EMPTY_MARKET_FACTS, TRADER_ID_RE, TRADER_OWN_COIN_MESSAGE, TRADER_OWN_COIN_MESSAGE_EVM, traderOptionsOf, type TraderFit, type TraderLimits, type TraderMarketFacts, type TraderParamsByPreset } from '@shared/kryptoTrader';
+import * as evmLedger from './evm/ledger';
+import { readTraderMarket } from './evm/traderMarket';
+import { walletVisibleOn, type EvmFill } from '@shared/evm';
+import { traderFit } from '@shared/botStrategy';
+import { curveRegime } from '@shared/odds';
+import * as pumpChain from './data/pumpChain';
+import * as advOrders from './engine/advOrders';
+import * as copyTrade from './engine/copyTrade';
+import * as ledger from './engine/ledger';
+import { curveProgressTokenPct } from './engine/curve';
+import { parseMintExtensions } from './engine/mintExtensions';
 import { kryptoOptionsOf, withKryptoDisclosure } from '@shared/kryptoMode';
 import * as bots from './system/bots';
 import * as heliusBudget from './system/heliusBudget';
@@ -35,7 +49,9 @@ import * as mcpServer from './system/mcpServer';
 import * as diagnostics from './system/diagnostics';
 import * as httpLayer from './data/http';
 import * as mcpTools from './engine/mcpTools';
-import { MCP_ACCESS_LEVELS, MCP_PORT_MAX, MCP_PORT_MIN, mcpAddCommand, mcpJsonConfig, type McpAccess } from '@shared/mcp';
+import { setTraderClaimCheck } from './engine/traderClaims';
+import { MCP_ACCESS_LEVELS, MCP_PORT_MAX, MCP_PORT_MIN, mcpAddCommand, mcpJsonConfig, mcpServerNameFor, type McpAccess } from '@shared/mcp';
+import * as profiles from './system/profiles';
 import { sourceFor as scoutSourceFor } from './engine/scoutScanSources';
 import * as evmWallet from './evm/evmWallet';
 import { SCOUT_CHAINS, SCOUT_SCAN_HOURS, SCOUT_SORTS, applyScoutFilters, emptyRow, rankScout, scoutFiltersAllOn, summarise, type ScoutChain, type ScoutScanHours, type ScoutSort, type ScoutWindow } from '@shared/walletScout';
@@ -43,6 +59,7 @@ import * as evmDiscover from './evm/discover';
 import * as evmMarket from './evm/market';
 import * as merkl from './data/providers/merkl';
 import * as callouts from './data/providers/pumpCallouts';
+import { newestFirst } from '@shared/callouts';
 import { REPLY_BUDGET, THESIS_BUDGET } from '@shared/calloutAuto';
 import { nameListProblem } from '@shared/pumpStats';
 
@@ -134,7 +151,7 @@ import { validateAlert, type NewAlertRequest } from '@shared/alerts';
 import { toCsv } from '@shared/portfolio';
 import { cleanBlocklist, validateConfig, type CopyConfig, FOMO_WALLET, type FomoSource } from '@shared/copytrade';
 import * as automation from './engine/automation';
-import { MAX_ACTIONS, MAX_CODE_BYTES, MAX_CONDITIONS, type RuleAction, type RuleCondition, type RuleSet } from '@shared/automation';
+import { MAX_ACTIONS, MAX_CONDITIONS, type RuleAction, type RuleCondition, type RuleSet } from '@shared/automation';
 import { coerceInputs, parseInputs } from '@shared/scriptInputs';
 
 let engine: SniperEngine | null = null;
@@ -368,6 +385,60 @@ export function registerIpc(): void {
 
   ipcMain.handle('app:version', () => ok('ok', app.getVersion()));
 
+  // ── Profiles (2026-09-26) ────────────────────────────────────────────
+  // Isolated copies of the app, one userData folder each. The rules are in
+  // shared/profiles.ts; the disk work in system/profiles.ts. Every handler
+  // takes an ID (validated against the registry there), never a path.
+  const retitle = (): void => {
+    const t = profiles.title();
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed() && w.webContents.session === session.defaultSession) w.setTitle(t);
+    }
+  };
+  ipcMain.handle('profiles:list', () => ok('ok', profiles.view()));
+  ipcMain.handle('profiles:create', (_e, name: unknown) => {
+    const r = profiles.create(name);
+    if (r.ok) {
+      logger.info(`profiles: created ${r.id}`);
+      retitle();
+    }
+    return r.ok ? ok(r.message, profiles.view()) : fail(r.message);
+  });
+  ipcMain.handle('profiles:duplicate', (_e, name: unknown, copyWallets: unknown) => {
+    // The in-memory settings are the newest, but only when they were read: a
+    // profile running on defaults because its file is unreadable would hand
+    // the clone defaults dressed up as a copy.
+    if (store.failure()) return fail('This profile’s settings could not be read, so there is nothing reliable to copy. Create a blank profile instead.');
+    const r = profiles.duplicate(name, copyWallets === true, store.load());
+    if (!r.ok) return fail(r.message);
+    logger.info(`profiles: duplicated this profile as ${r.id}${copyWallets === true ? ' WITH wallets' : ''}${r.skipped?.length ? ` (skipped: ${r.skipped.join('; ')})` : ''}`);
+    retitle();
+    const note = r.skipped?.length ? ` Not copied: ${r.skipped.join('; ')}.` : '';
+    return ok(`${r.message}${note}`, profiles.view());
+  });
+  ipcMain.handle('profiles:rename', (_e, id: unknown, name: unknown) => {
+    const r = profiles.rename(id, name);
+    if (r.ok) retitle();
+    return r.ok ? ok(r.message, profiles.view()) : fail(r.message);
+  });
+  ipcMain.handle('profiles:remove', async (_e, id: unknown) => {
+    const r = await profiles.remove(id, (p) => shell.trashItem(p));
+    if (r.ok) {
+      logger.info(`profiles: removed ${String(id)} (to the Recycle Bin)`);
+      retitle();
+    }
+    return r.ok ? ok(r.message, profiles.view()) : fail(r.message);
+  });
+  ipcMain.handle('profiles:open', (_e, id: unknown) => {
+    const r = profiles.open(id, app.isPackaged, app.getAppPath());
+    if (r.ok) logger.info(`profiles: opening ${String(id)}`);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('profiles:shortcut', (_e, id: unknown) => {
+    const r = profiles.shortcut(id, app.isPackaged, app.getAppPath(), app.getPath('desktop'), (lnk, o) => shell.writeShortcutLink(lnk, 'create', o));
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+
   // Is there a newer build? `status` is free and answers from memory;
   // `check` may leave the machine, and is rate-limited inside the module.
   // Neither downloads or installs anything — see shared/version.ts.
@@ -457,6 +528,10 @@ export function registerIpc(): void {
       out.push(`advanced orders ${getEngine().ordersSnapshot().orders.filter((o) => o.state === 'armed').length} armed`);
     } catch {
       /* same */
+    }
+    {
+      const p = profiles.currentProfile();
+      out.push(`profile         ${p.id === null ? 'Default' : `"${p.name}" (${p.id})`}`);
     }
     out.push(`wallets         ${wallet.list().length} Solana, ${evmWallet.list('robinhood').length} Robinhood, ${evmWallet.list('bnb').length} BNB`);
     out.push(`AI connection   ${s.mcp.enabled ? `on, ${s.mcp.access}${mcpServer.isRunning() ? `, listening on ${mcpServer.status().port}` : ', NOT listening'}` : 'off'}`);
@@ -725,6 +800,8 @@ export function registerIpc(): void {
 
   ipcMain.handle('engine:kill', () => {
     const r = getEngine().killSwitch();
+    // Both kill switches pause every Krypto Trader session (critic #9).
+    kryptoTrader.pauseAll('the kill switch');
     // The kill switch is the "stop everything" button: it must also take
     // every EVM chain back to Paper, or the reply "live execution disarmed"
     // would be false for a user who is live on Robinhood or BNB.
@@ -837,6 +914,8 @@ export function registerIpc(): void {
       // Nothing kept for the old signer may show for the new one.
       getEngine().clearWalletCaches();
       broadcast({ kind: 'walletSwitched', publicKey: wallet.publicKey() ?? null });
+      // Orders and engine positions sell the ACTIVE wallet: re-check Trader claims.
+      kryptoTrader.onWalletSwitched(wallet.info().id ?? null);
     }
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
@@ -966,6 +1045,11 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle('wallet:remove', (_e, id: unknown) => {
+    // A Krypto Trader session's wallet cannot go while the session is not
+    // stopped and empty — checked BEFORE the disarm below, so a refused
+    // removal disarms nothing (critic #16).
+    const traderBlock = kryptoTrader.walletRemoveBlocked(typeof id === 'string' && id ? id : (wallet.info().id ?? ''));
+    if (traderBlock) return fail(traderBlock);
     // Disarm FIRST and unconditionally. Removing any wallet can promote a
     // different one to active, and staying armed across that change is the
     // same hazard `wallet:select` refuses outright.
@@ -1426,9 +1510,11 @@ export function registerIpc(): void {
         : evmScanner.flagged(chain).slice(0, limit),
     // Null rather than an empty list when pump is not answering: "no callouts"
     // and "we could not ask" are different answers and the tool says which.
+    // The tool promises "newest first"; the feed arrives in pump's
+    // recommendation rank, so it is sorted here (2026-09-26).
     callouts: async (limit) => {
       const rows = await callouts.calloutFeed();
-      return rows ? rows.slice(0, limit) : null;
+      return rows ? newestFirst(rows).slice(0, limit) : null;
     },
     scoutBoard: async (chain, window, limit, onlyWorthALook) => {
       const rows = rankScout(
@@ -1469,6 +1555,12 @@ export function registerIpc(): void {
         trades: s.trades.slice(0, 10).map((t) => ({ at: t.at, side: t.side, sol: t.sol, pct: t.pct, ok: t.ok, reason: t.reason, by: t.by })),
       })),
     kryptoTrade: (mint, side, amount, live) => kryptoMode.tradeFromMcp(mint, side, amount, live),
+    // Krypto Trader: read the sessions, act for an MCP-driven one. Nothing
+    // here creates, funds, starts, resumes or configures a session.
+    traderSessions: async () => kryptoTrader.mcpList(),
+    traderSession: async (id) => kryptoTrader.mcpDetail(id),
+    traderGate: (id) => kryptoTrader.mcpGate(id),
+    traderAct: (id, intent, expectedSeq) => kryptoTrader.submit(id, intent, 'mcp', expectedSeq),
     trades: async (limit) => getEngine().tradeHistory().slice(0, limit),
     // `hostBuy` / `hostSell` are the same pair user scripts reach, so the EVM
     // routing, the paper book and the live rails are one implementation with
@@ -1545,11 +1637,17 @@ export function registerIpc(): void {
 
   const mcpPayload = (): Record<string, unknown> => {
     const m = store.load().mcp;
+    const server = mcpServer.status();
+    // The port actually bound when listening, and a server name per profile:
+    // two profiles side by side are two servers, and one name would make the
+    // second `claude mcp add` overwrite the first in the client's config.
+    const port = server.running && server.port ? server.port : m.port;
+    const name = mcpServerNameFor(profiles.currentId());
     return {
       settings: m,
-      server: mcpServer.status(),
-      command: m.token ? mcpAddCommand(m.port, m.token) : '',
-      json: m.token ? mcpJsonConfig(m.port, m.token) : '',
+      server,
+      command: m.token ? mcpAddCommand(port, m.token, name) : '',
+      json: m.token ? mcpJsonConfig(port, m.token, name) : '',
     };
   };
 
@@ -1666,7 +1764,7 @@ export function registerIpc(): void {
       website: str(d.website, 300),
       devBuy: Number(d.devBuy),
       mayhem: d.mayhem === true,
-      cashback: d.cashback === true,
+      holderRewards: d.holderRewards === true,
       creatorTaxBps: Math.round(Number(d.creatorTaxBps)),
       // Solana only; anywhere else it is off whatever was sent.
       krypto: d.chain === 'solana' ? kryptoOptionsOf(d.krypto) : kryptoOptionsOf(null),
@@ -1679,7 +1777,7 @@ export function registerIpc(): void {
   // shortcut around a gate.
   kryptoMode.init(app.getPath('userData'), {
     now: () => Date.now(),
-    priceSol: (mint) => getEngine().kryptoPrice(mint),
+    priceSol: (mint) => getEngine().botPrice(mint),
     market: (mint) => {
       const m = market.summaryIfCached(mint);
       return {
@@ -1690,9 +1788,9 @@ export function registerIpc(): void {
         change5mPct: m?.stats?.['5m']?.priceChangePct ?? null,
       };
     },
-    liveBlocked: () => getEngine().kryptoLiveBlocked(),
-    buy: (walletId, mint, sol) => getEngine().kryptoBuy(walletId, mint, sol),
-    sell: (walletId, mint, pct) => getEngine().kryptoSell(walletId, mint, pct),
+    liveBlocked: (side) => getEngine().botLiveBlocked(side ?? 'buy'),
+    buy: (walletId, mint, sol) => getEngine().botBuy(walletId, mint, sol),
+    sell: (walletId, mint, pct) => getEngine().botSell(walletId, mint, pct),
     balances: async (address, mint) => {
       const url = store.load().rpc.httpUrl;
       const [b, t] = await Promise.all([getBalance(url, address).catch(() => null), getTokenBalanceForMint(url, address, mint).catch(() => null)]);
@@ -1711,11 +1809,11 @@ export function registerIpc(): void {
       const [r] = await fund.collectToActive(st.rpc.execHttpUrl ?? st.rpc.httpUrl, [walletId], toWalletId);
       return r ? { ok: r.ok, message: r.message } : { ok: false, message: 'nothing was collected' };
     },
-    ask: async (facts) => {
+    ask: async (facts, goal) => {
       const ai = store.load().ai;
       const { activeProvider, askKrypto } = await import('./data/aiAnalysis');
       if (!activeProvider(ai)) return null;
-      return askKrypto(ai, facts);
+      return askKrypto(ai, facts, goal);
     },
     watch: (mint) => {
       try {
@@ -1776,10 +1874,647 @@ export function registerIpc(): void {
     const r = await kryptoMode.withdraw(k);
     return r.ok ? ok(r.message) : fail(r.message);
   });
+  ipcMain.handle('kryptoMode:setLimits', (_e, id: unknown, patch: unknown) => {
+    const k = kryptoId(id);
+    if (!k) return fail('Bad session id');
+    if (!patch || typeof patch !== 'object') return fail('Nothing to change');
+    const r = kryptoMode.setLimits(k, patch as { limits?: unknown; goal?: unknown; budgetSol?: unknown });
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
   ipcMain.handle('kryptoMode:remove', (_e, id: unknown) => {
     const k = kryptoId(id);
     if (!k) return fail('Bad session id');
     const r = kryptoMode.remove(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+
+  // ── Krypto Trader ──────────────────────────────────────────────────
+  // One coin, one of the user's wallets, a preset or an AI
+  // (electron/engine/kryptoTrader.ts). The host is the engine's ordinary
+  // trade path; nothing here is a shortcut around a gate. The fit check is
+  // computed HERE, in main (shared/botStrategy.ts traderFit), from the pump
+  // chain read + the market summary — the renderer only shows it.
+  /** One batched read for many mints: pump coins from the chain (4 s cache,
+   *  33 mints per RPC call), anything else from the engine's timed price. */
+  const traderMarkets = async (mints: string[]): Promise<Map<string, TraderMarket | null>> => {
+    const url = store.load().rpc.httpUrl;
+    const pump = mints.filter((m) => pumpChain.looksLikePumpMint(m));
+    const read = pump.length ? await pumpChain.readMany(url, pump).catch(() => new Map<string, pumpChain.PumpChainCoin | null>()) : new Map<string, pumpChain.PumpChainCoin | null>();
+    const out = new Map<string, TraderMarket | null>();
+    for (const m of mints) {
+      const c = read.get(m) ?? null;
+      if (c) {
+        const onCurve = !c.curve.complete;
+        out.set(m, {
+          priceSol: c.priceSol,
+          priceAt: c.priceSol !== null ? c.readAt : null,
+          venue: c.pool ? 'pool' : onCurve ? 'curve' : null,
+          curvePct: onCurve ? curveProgressTokenPct(c.curve.vTok) : null,
+          // R: the curve's virtual SOL, or the PumpSwap QUOTE VAULT — not the
+          // event's poolQuoteReserves, which reads 0.793× on classic pools.
+          depthSol: c.pool ? Number(c.pool.quoteLamports) / 1e9 : onCurve ? Number(c.curve.vSol) / 1e9 : null,
+          decimals: c.decimals,
+          // A complete curve whose pool could not be read is "unknown", not
+          // gone: nothing here can tell those apart yet, so it never stops out.
+          poolGone: false,
+        });
+        continue;
+      }
+      let p: { priceSol: number; at: number } | null = null;
+      try {
+        p = getEngine().priceSolWithAge(m);
+      } catch {
+        p = null;
+      }
+      out.set(m, p ? { priceSol: p.priceSol, priceAt: p.at, venue: null, curvePct: null, depthSol: null, decimals: null, poolGone: false } : null);
+    }
+    return out;
+  };
+
+  /** Numbers for the AI/MCP facts: the cached market summary + 5-minute
+   *  candles. No text field — the facts never carry what a creator wrote. */
+  const traderMarketFacts = async (mint: string): Promise<TraderMarketFacts> => {
+    const sum = market.summaryIfCached(mint) ?? (await market.summary(mint).catch(() => null));
+    if (!sum) return { ...EMPTY_MARKET_FACTS };
+    const s5 = sum.stats?.['5m'];
+    const h1 = sum.stats?.['1h'];
+    const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    let closes: number[] = [];
+    let lo: number | null = null;
+    let hi: number | null = null;
+    try {
+      const series = await market.candlesFast(mint, '5m', 13);
+      // Candles priced in USD are turned into SOL with the summary's own
+      // ratio; with no ratio they are left out rather than mislabelled.
+      const k = series.unit === 'sol' ? 1 : num(sum.priceSol) !== null && num(sum.priceUsd) ? (sum.priceSol as number) / (sum.priceUsd as number) : null;
+      if (k !== null) {
+        const bars = series.candles.slice(-12);
+        closes = bars.map((c) => c.close * k).filter((x) => Number.isFinite(x) && x > 0);
+        if (bars.length) {
+          lo = Math.min(...bars.map((c) => c.low * k));
+          hi = Math.max(...bars.map((c) => c.high * k));
+        }
+      }
+    } catch {
+      /* no candles: nulls */
+    }
+    const v5 = num(s5?.volumeUsd);
+    const v1 = num(h1?.volumeUsd);
+    return {
+      marketCapUsd: num(sum.marketCapUsd),
+      holders: num(sum.holders),
+      top10Pct: num(sum.top10Pct),
+      change5mPct: num(s5?.priceChangePct),
+      change15mPct: null,
+      change1hPct: num(h1?.priceChangePct),
+      change6hPct: num(sum.stats?.['6h']?.priceChangePct),
+      change24hPct: num(sum.stats?.['24h']?.priceChangePct),
+      range1hLowSol: lo !== null && Number.isFinite(lo) && lo > 0 ? lo : null,
+      range1hHighSol: hi !== null && Number.isFinite(hi) && hi > 0 ? hi : null,
+      vol5mVs1hAvg: v5 !== null && v1 !== null && v1 > 0 ? v5 / (v1 / 12) : null,
+      buys5m: num(s5?.buys),
+      sells5m: num(s5?.sells),
+      closes5mSol: closes,
+    };
+  };
+
+  const userWalletAddresses = (): Set<string> => new Set(wallet.list().map((w) => w.publicKey));
+
+  const traderFitFor = async (mint: string, o: { budgetSol: number; limits: TraderLimits; walletId: string | null; params?: unknown; preset?: string }): Promise<TraderFit> => {
+    const url = store.load().rpc.httpUrl;
+    const [mk] = [(await traderMarkets([mint])).get(mint) ?? null];
+    const coin = pumpChain.readIfCached(mint);
+    const sum = await market.summary(mint).catch(() => null);
+    let transferFeeBps: number | null = null;
+    let defaultFrozen: boolean | null = null;
+    const acc = await getAccountInfo(url, mint).catch(() => null);
+    if (acc && acc.ok && acc.data) {
+      const ext = parseMintExtensions(acc.data.data);
+      if (ext) {
+        transferFeeBps = ext.transferFeeBps ?? 0;
+        defaultFrozen = ext.defaultFrozen;
+      }
+    }
+    const h1 = sum?.stats?.['1h'];
+    const creator = coin?.curve.creator ?? sum?.creator ?? null;
+    const regime = mk?.venue === 'curve' && coin ? curveRegime(Number(coin.curve.vSol), Number(coin.curve.vTok)) : mk?.venue === 'curve' ? 'unknown' : null;
+    const supply = coin ? Number(coin.supplyRaw) / 10 ** coin.decimals : sum?.totalSupply ?? null;
+    const tokenReserve = coin ? (coin.pool ? Number(coin.pool.baseRaw) : Number(coin.curve.vTok)) / 10 ** coin.decimals : null;
+    const holderRate = kryptoHolding.holderRateApplies();
+    const preset = (['trim', 'steps', 'dips', 'hold'] as const).find((p) => p === o.preset);
+    let maxLive: number | null = null;
+    try {
+      maxLive = getEngine().maxLiveSol();
+    } catch {
+      maxLive = null;
+    }
+    const fitOut = traderFit({
+      now: Date.now(),
+      mint,
+      venue: mk?.venue === 'curve' ? 'curve' : mk?.venue === 'pool' ? 'pumpswap' : null,
+      regime,
+      curvePct: mk?.curvePct ?? null,
+      depthSol: mk?.depthSol ?? null,
+      tokenReserve,
+      supply,
+      createdAt: sum?.createdAt ?? null,
+      devPct: sum?.devHoldingPct ?? null,
+      top10Pct: sum?.top10Pct ?? null,
+      sniperPct: sum?.sniperPct ?? null,
+      bundledPct: sum?.bundledPct ?? null,
+      trades1h: h1 && h1.buys !== null && h1.sells !== null ? h1.buys + h1.sells : null,
+      vol1hUsd: h1?.volumeUsd ?? null,
+      vol6hUsd: sum?.stats?.['6h']?.volumeUsd ?? null,
+      vol24hUsd: sum?.stats?.['24h']?.volumeUsd ?? null,
+      organic1hUsd: h1?.organicVolumeUsd ?? null,
+      creatorLaunches: sum?.audit?.devMints ?? null,
+      creatorGraduations: sum?.audit?.devMigrations ?? null,
+      creatorKnown: !!creator,
+      kryptScore: sum?.kryptScore ?? null,
+      notSellable: sum?.audit?.notSellable ?? null,
+      transferFeeBps,
+      defaultFrozen,
+      ownCoin: o.walletId ? await traderOwnCoin(mint, o.walletId, creator, sum?.kryptoBot ?? null) : null,
+      holderRate,
+      maxLiveSol: maxLive,
+      budgetSol: o.budgetSol,
+      limits: o.limits,
+      params: preset && o.params && typeof o.params === 'object' ? ({ [preset]: o.params } as Partial<TraderParamsByPreset>) : undefined,
+    });
+    if (o.walletId) fitOut.notes.push(...otherWalletNotes(mint, o.walletId));
+    return fitOut;
+  };
+
+  /**
+   * Critic #12: the wash pattern across the user's OWN wallets. A session
+   * selling while another of the user's wallets holds or automates the same
+   * coin is the round trip between one's own wallets the launchpad research
+   * names. Shown on the fit card before Start (not a refusal: the claims
+   * check refuses the session's own wallet; these are the others).
+   * "Holds" is this app's own record (ledger fills per wallet), not an RPC
+   * read per wallet on every keystroke.
+   */
+  const otherWalletNotes = (mint: string, walletId: string): string[] => {
+    const own = wallet.publicKeyOf(walletId);
+    const names = new Map(wallet.list().map((w) => [w.publicKey, w.label || `${w.publicKey.slice(0, 6)}…`]));
+    const net = new Map<string, bigint>();
+    for (const f of ledger.all()) {
+      if (f.mint !== mint || !f.wallet || f.wallet === own || f.state !== 'reconciled' || f.tokenDeltaRaw === null || !names.has(f.wallet)) continue;
+      try {
+        net.set(f.wallet, (net.get(f.wallet) ?? 0n) + BigInt(f.tokenDeltaRaw));
+      } catch {
+        /* a malformed amount is not a holding */
+      }
+    }
+    const out: string[] = [];
+    for (const [addr, n] of net) if (n > 0n) out.push(`Your wallet ${names.get(addr)} holds this coin (from this app's trade records). A session selling while another of your wallets holds or buys the same coin trades against yourself — the wash pattern.`);
+    for (const o of automation.openedOn(mint)) {
+      if (o.wallet !== null && o.wallet !== own) out.push(`The script "${o.script}" holds this coin in another of your wallets (${names.get(o.wallet) ?? `${o.wallet.slice(0, 6)}…`}).`);
+    }
+    return out;
+  };
+
+  /** M9: the user's own coin. A Krypto Mode session on it, a creator or a
+   *  declared bot that is one of the user's wallets, or a wallet Krypto Mode
+   *  declared — a bot on your own coin must be declared, and only Krypto
+   *  Mode declares one. */
+  const traderOwnCoin = async (mint: string, walletId: string, creator: string | null, kryptoBot: string | null): Promise<string | null> => {
+    if (kryptoMode.list().some((s) => s.mint === mint)) return TRADER_OWN_COIN_MESSAGE;
+    const mine = userWalletAddresses();
+    if (creator && mine.has(creator)) return TRADER_OWN_COIN_MESSAGE;
+    if (kryptoBot && mine.has(kryptoBot)) return TRADER_OWN_COIN_MESSAGE;
+    if (kryptoMode.declaredWallets().includes(walletId)) return TRADER_OWN_COIN_MESSAGE;
+    return null;
+  };
+
+  // ── Krypto Trader on BNB and Robinhood Chain (stage 4) ─────────────
+  // The EVM rail, chain-first on every call. The wallet is one of THAT
+  // chain's (walletVisibleOn: made for it, pre-split, or its signer — never
+  // one made for the other chain). Sells are EXACT base units (the rail's
+  // amountRaw); fills come from the EVM ledger's receipt reconciliation.
+  // A Solana ledger fill as a session reads it: only meta.err proves "did
+  // not land" — "not found after N rounds" can be an RPC outage.
+  const solTraderFill = (f: ledger.Fill): TraderLedgerFill => ({
+    signature: f.signature,
+    wallet: f.wallet,
+    mint: f.mint,
+    side: f.side,
+    at: f.at,
+    state: f.state,
+    tokenDeltaRaw: f.tokenDeltaRaw,
+    solDeltaLamports: f.solDeltaLamports,
+    decimals: f.decimals,
+    feeLamports: f.feeLamports,
+    failed: f.state === 'unreconciled' && f.note === ledger.FAILED_ON_CHAIN_NOTE,
+    note: f.note,
+  });
+  const evmTraderFill = (f: EvmFill): TraderLedgerFill => ({
+    signature: f.hash,
+    wallet: f.wallet,
+    mint: f.token,
+    side: f.side,
+    at: f.at,
+    state: f.state,
+    tokenDeltaRaw: f.tokenDeltaRaw,
+    solDeltaLamports: null,
+    decimals: f.decimals,
+    feeLamports: null,
+    chain: f.chain,
+    nativeDeltaWei: f.nativeDeltaWei,
+    feeWei: f.feeWei,
+    gasWei: f.gasWei,
+    // Only a reverted receipt proves "did not land"; any other unreconciled
+    // row (proceeds unreadable, receipt never found) is unprovable.
+    failed: f.state === 'unreconciled' && f.note === evmLedger.REVERTED_NOTE,
+    note: f.note,
+  });
+  const evmSymbols = new Map<string, string>();
+  const evmTraderWallet = (chain: EvmChainKind, walletId: string): string | null => {
+    const w = evmWallet.list(chain).find((x) => x.id === walletId);
+    return w && walletVisibleOn(w, chain) ? w.address.toLowerCase() : null;
+  };
+  const evmTraderBlocked = (chain: EvmChainKind): string | null => {
+    const s = store.load();
+    if (!s.evm[chain].enabled) return `${EVM_CHAIN_META[chain].name} is switched off in Settings`;
+    if (!evmRail.armed(chain)) return `${EVM_CHAIN_META[chain].name} is in Paper — arm it on its wallet page`;
+    return null;
+  };
+  const evmTraderMarkets = async (chain: EvmChainKind, tokens: string[]): Promise<Map<string, TraderMarket | null>> => {
+    const out = new Map<string, TraderMarket | null>();
+    await Promise.all(
+      tokens.map(async (t) => {
+        const r = await readTraderMarket(chain, t).catch(() => null);
+        out.set(
+          t,
+          r && !r.untradable
+            ? { priceSol: r.priceNative, priceAt: r.priceAt, venue: r.venue, curvePct: r.curvePct, depthSol: r.depthNative, decimals: r.decimals, poolGone: false }
+            : null,
+        );
+      }),
+    );
+    return out;
+  };
+  const evmTraderOwnCoin = (chain: EvmChainKind, deployer: string | null): string | null => {
+    if (!deployer) return null;
+    const mine = new Set(evmWallet.list(chain).map((w) => w.address.toLowerCase()));
+    return mine.has(deployer.toLowerCase()) ? TRADER_OWN_COIN_MESSAGE_EVM : null;
+  };
+  /** Critic #12 on an EVM chain: the user's OTHER wallets on this chain that
+   *  hold the coin, from the EVM ledger (this app's own record). */
+  const evmOtherWalletNotes = (chain: EvmChainKind, token: string, own: string | null): string[] => {
+    const net = new Map<string, bigint>();
+    const mine = new Map(evmWallet.list(chain).map((w) => [w.address.toLowerCase(), w.label || `${w.address.slice(0, 8)}…`]));
+    for (const f of evmLedger.all()) {
+      if (f.chain !== chain || f.token !== token || f.state !== 'reconciled' || f.tokenDeltaRaw === null || f.wallet === own || !mine.has(f.wallet)) continue;
+      try {
+        net.set(f.wallet, (net.get(f.wallet) ?? 0n) + BigInt(f.tokenDeltaRaw));
+      } catch {
+        /* a malformed amount is not a holding */
+      }
+    }
+    const out: string[] = [];
+    for (const [addr, n] of net) if (n > 0n) out.push(`Your wallet ${mine.get(addr)} holds this coin (from this app's trade records). A session selling while another of your wallets holds or buys the same coin trades against yourself — the wash pattern.`);
+    return out;
+  };
+  const evmTraderFit = async (chain: EvmChainKind, token: string, o: { budgetSol: number; limits: TraderLimits; walletId: string | null; params?: unknown; preset?: string }): Promise<TraderFit> => {
+    const t = token.toLowerCase();
+    const [read, sum] = await Promise.all([readTraderMarket(chain, t), evmRail.summary(chain, t).catch(() => null)]);
+    if (sum?.symbol) evmSymbols.set(`${chain}:${t}`, sum.symbol);
+    const h1 = sum?.stats?.['1h'];
+    const preset = (['trim', 'steps', 'dips', 'hold'] as const).find((p) => p === o.preset);
+    const sym = EVM_CHAIN_META[chain].nativeSymbol;
+    const fitOut = traderFit({
+      now: Date.now(),
+      mint: t,
+      chain,
+      venue: read.untradable ? null : read.venue,
+      venueLabel: read.venueLabel,
+      venueRefusal: read.untradable
+        ? /quoted in/i.test(read.untradable)
+          ? `Not ${sym}-quoted: ${read.untradable} Krypto Trader sizes every trade against a ${sym} pool depth, so it cannot run here.`
+          : read.untradable
+        : null,
+      regime: null,
+      curvePct: read.curvePct,
+      depthSol: read.depthNative,
+      tokenReserve: read.tokenReserve,
+      supply: read.supply,
+      createdAt: read.createdAt ?? sum?.createdAt ?? null,
+      devPct: sum?.devHoldingPct ?? null,
+      top10Pct: sum?.top10Pct ?? null,
+      sniperPct: null,
+      bundledPct: null,
+      trades1h: h1 && h1.buys !== null && h1.sells !== null ? h1.buys + h1.sells : null,
+      vol1hUsd: h1?.volumeUsd ?? null,
+      vol6hUsd: sum?.stats?.['6h']?.volumeUsd ?? null,
+      vol24hUsd: sum?.stats?.['24h']?.volumeUsd ?? null,
+      organic1hUsd: null,
+      creatorLaunches: null,
+      creatorGraduations: null,
+      creatorKnown: !!read.deployer,
+      kryptScore: null,
+      notSellable: null,
+      transferFeeBps: null,
+      defaultFrozen: null,
+      ownCoin: o.walletId ? evmTraderOwnCoin(chain, read.deployer) : null,
+      holderRate: kryptoHolding.holderRateApplies(),
+      maxLiveSol: null,
+      budgetSol: o.budgetSol,
+      limits: o.limits,
+      params: preset && o.params && typeof o.params === 'object' ? ({ [preset]: o.params } as Partial<TraderParamsByPreset>) : undefined,
+    });
+    if (o.walletId) fitOut.notes.push(...evmOtherWalletNotes(chain, t, evmTraderWallet(chain, o.walletId)));
+    return fitOut;
+  };
+  const evmTraderFacts = async (chain: EvmChainKind, token: string): Promise<TraderMarketFacts> => {
+    const sum = await evmRail.summary(chain, token).catch(() => null);
+    if (!sum) return { ...EMPTY_MARKET_FACTS };
+    const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const s5 = sum.stats?.['5m'];
+    const h1 = sum.stats?.['1h'];
+    let closes: number[] = [];
+    let lo: number | null = null;
+    let hi: number | null = null;
+    try {
+      // EVM candles are USD; turned into the native coin with the summary's
+      // own ratio, or left out rather than mislabelled.
+      const series = await evmRail.candles(chain, token, '5m', 13);
+      const k = series.unit === 'sol' ? 1 : num(sum.priceSol) !== null && num(sum.priceUsd) ? (sum.priceSol as number) / (sum.priceUsd as number) : null;
+      if (k !== null) {
+        const bars = series.candles.slice(-12);
+        closes = bars.map((c) => c.close * k).filter((x) => Number.isFinite(x) && x > 0);
+        if (bars.length) {
+          lo = Math.min(...bars.map((c) => c.low * k));
+          hi = Math.max(...bars.map((c) => c.high * k));
+        }
+      }
+    } catch {
+      /* no candles: nulls */
+    }
+    const v5 = num(s5?.volumeUsd);
+    const v1 = num(h1?.volumeUsd);
+    return {
+      marketCapUsd: num(sum.marketCapUsd),
+      holders: num(sum.holders),
+      top10Pct: num(sum.top10Pct),
+      change5mPct: num(s5?.priceChangePct),
+      change15mPct: null,
+      change1hPct: num(h1?.priceChangePct),
+      change6hPct: num(sum.stats?.['6h']?.priceChangePct),
+      change24hPct: num(sum.stats?.['24h']?.priceChangePct),
+      range1hLowSol: lo !== null && Number.isFinite(lo) && lo > 0 ? lo : null,
+      range1hHighSol: hi !== null && Number.isFinite(hi) && hi > 0 ? hi : null,
+      vol5mVs1hAvg: v5 !== null && v1 !== null && v1 > 0 ? v5 / (v1 / 12) : null,
+      buys5m: num(s5?.buys),
+      sells5m: num(s5?.sells),
+      closes5mSol: closes,
+    };
+  };
+  const traderEvmHost: TraderEvmHost = {
+    markets: evmTraderMarkets,
+    fit: evmTraderFit,
+    symbol: (chain, token) => evmSymbols.get(`${chain}:${token.toLowerCase()}`) ?? '',
+    buyBlocked: evmTraderBlocked,
+    // EVM has no loss breakers: only "switched off" and "not armed" hold a sell.
+    exitBlocked: evmTraderBlocked,
+    // The EVM rails have no app-wide per-trade cap (copy's bridge answers
+    // null too); the session's budget, depth cap and room are the caps.
+    maxLive: () => null,
+    walletAddress: evmTraderWallet,
+    buy: async (chain, walletId, token, amountNative) => {
+      if (!evmTraderWallet(chain, walletId)) return { ok: false, message: `not one of your ${EVM_CHAIN_META[chain].name} wallets`, signature: null, stage: 'route', sentSol: null };
+      const r = await evmRail.buy(chain, token, amountNative, false, { walletId });
+      // A disarmed chain SIMULATES and answers ok — that is not a buy.
+      if (r.simulated) return { ok: false, message: `not sent — ${EVM_CHAIN_META[chain].name} is not armed (simulated only)`, signature: null, stage: r.stage, sentSol: null };
+      return { ok: r.ok, message: r.message, signature: r.hash ?? null, stage: r.stage, sentSol: r.amountIn ? Number(BigInt(r.amountIn)) / 1e18 : null };
+    },
+    sellExact: async (chain, walletId, token, amountRaw) => {
+      if (!evmTraderWallet(chain, walletId)) return { ok: false, message: `not one of your ${EVM_CHAIN_META[chain].name} wallets`, signature: null, stage: 'route', soldRaw: null };
+      // `amountRaw` wins over the percent in the rail: EXACTLY these base
+      // units (four.meme floors to its 1e9 quantum), refused above the balance.
+      const r = await evmRail.sell(chain, token, 100, false, { walletId, amountRaw });
+      if (r.simulated) return { ok: false, message: `not sent — ${EVM_CHAIN_META[chain].name} is not armed (simulated only)`, signature: null, stage: r.stage, soldRaw: null };
+      return { ok: r.ok, message: r.message, signature: r.hash ?? null, stage: r.stage, soldRaw: r.amountIn ?? null };
+    },
+    fill: async (chain, hash) => {
+      const f = await evmRail.settledFill(chain, hash);
+      if (!f || f.state !== 'reconciled' || f.tokenDeltaRaw === null || f.nativeDeltaWei === null) return null;
+      const raw = BigInt(f.tokenDeltaRaw);
+      return { tokensRaw: (raw < 0n ? -raw : raw).toString(), decimals: f.decimals, nativeDeltaWei: f.nativeDeltaWei, feeWei: f.feeWei, gasWei: f.gasWei };
+    },
+    ledgerFill: (chain, hash) => {
+      const f = evmLedger.all().find((x) => x.chain === chain && x.hash.toLowerCase() === hash.toLowerCase());
+      return f ? evmTraderFill(f) : null;
+    },
+    tokenBalanceRaw: async (chain, walletId, token) => {
+      if (!evmTraderWallet(chain, walletId)) return null;
+      return (await evmRail.tokensOf(chain, token, walletId))?.raw ?? null;
+    },
+    // Reconcile after a crash: the EVM ledger records a fill the moment it is
+    // broadcast, so the hash is there; its receipt settles it. On BNB the
+    // receipt comes from the receipts endpoint — publicnode serves none.
+    // The in-flight trade is the row on ITS side nearest its time, never a
+    // hash the session already booked or called a hand trade — not the
+    // newest row, which may be the user's own trade after the restart.
+    findTrade: async (chain, walletId, token, sinceMs, match) => {
+      const addr = evmTraderWallet(chain, walletId);
+      if (!addr) return undefined;
+      const skip = new Set(match.skip.map((x) => x.toLowerCase()));
+      const rows = evmLedger
+        .forWallet(chain, addr)
+        .filter((f) => f.token === token.toLowerCase() && f.at >= sinceMs && f.side === match.side && !skip.has(f.hash.toLowerCase()))
+        .sort((a, b) => Math.abs(a.at - match.near) - Math.abs(b.at - match.near));
+      if (!rows.length) return null;
+      const f = rows[0];
+      if (f.state === 'unreconciled' && f.note === evmLedger.REVERTED_NOTE) return { signature: f.hash, side: f.side, tokensRaw: '0', nativeDeltaWei: '0', decimals: f.decimals, failed: true };
+      if (f.state !== 'reconciled' || f.tokenDeltaRaw === null || f.nativeDeltaWei === null) return undefined;
+      const raw = BigInt(f.tokenDeltaRaw);
+      return { signature: f.hash, side: f.side, tokensRaw: (raw < 0n ? -raw : raw).toString(), nativeDeltaWei: f.nativeDeltaWei, decimals: f.decimals };
+    },
+    ownCoin: async (chain, token) => evmTraderOwnCoin(chain, (await readTraderMarket(chain, token).catch(() => null))?.deployer ?? null),
+    claims: (chain, walletId, token) => {
+      const out: string[] = [];
+      const t = token.toLowerCase();
+      if (copyTrade.openMints(chain).some((m) => m.toLowerCase() === t)) out.push('an open copy-trade position on this coin');
+      const addr = evmTraderWallet(chain, walletId);
+      const active = evmWallet.address(chain)?.toLowerCase() ?? null;
+      for (const o of automation.openedOn(token).concat(t !== token ? automation.openedOn(t) : [])) {
+        if (o.wallet === null ? addr !== null && addr === active : o.wallet.toLowerCase() === addr) out.push(`the script "${o.script}" holds this coin in this wallet`);
+      }
+      return out;
+    },
+    recentFills: (chain, token, sinceMs) => evmLedger.all().filter((f) => f.chain === chain && f.token === token.toLowerCase() && f.at >= sinceMs).map(evmTraderFill),
+    // EVM prices are read on demand each tick (readTraderMarket); nothing to subscribe.
+    watch: () => {},
+    marketFacts: evmTraderFacts,
+  };
+
+  kryptoTrader.init(app.getPath('userData'), {
+    now: () => Date.now(),
+    markets: traderMarkets,
+    fit: traderFitFor,
+    symbol: (mint) => market.summaryIfCached(mint)?.symbol ?? pumpChain.readIfCached(mint)?.symbol ?? '',
+    buyBlocked: () => getEngine().botLiveBlocked('buy'),
+    exitBlocked: () => getEngine().botLiveBlocked('sell'),
+    maxLiveSol: () => getEngine().maxLiveSol(),
+    walletAddress: (walletId) => wallet.publicKeyOf(walletId),
+    activeWalletId: () => wallet.list().find((w) => w.active)?.id ?? null,
+    buy: async (walletId, mint, sol) => {
+      const r = await getEngine().botBuy(walletId, mint, sol);
+      return { ok: r.ok, message: r.message, signature: r.signature, stage: r.stage ?? null, sentSol: r.sentSol ?? null };
+    },
+    sellClaim: (walletId, mint, claimRaw) => getEngine().botSellClaim(walletId, mint, claimRaw),
+    fill: (signature) => getEngine().botFill(signature),
+    ledgerFill: (signature) => {
+      const f = ledger.all().find((x) => x.signature === signature);
+      return f ? solTraderFill(f) : null;
+    },
+    tokenBalanceRaw: (walletId, mint) => getEngine().tokenBalanceRaw(walletId, mint),
+    findTrade: (walletId, mint, sinceMs, match) => getEngine().botFindTrade(walletId, mint, sinceMs, match),
+    ownCoin: async (mint, walletId) => {
+      const coin = pumpChain.readIfCached(mint);
+      const sum = market.summaryIfCached(mint);
+      return traderOwnCoin(mint, walletId, coin?.curve.creator ?? sum?.creator ?? null, sum?.kryptoBot ?? null);
+    },
+    claims: (walletId, mint) => {
+      const out: string[] = [];
+      const address = wallet.publicKeyOf(walletId);
+      const active = wallet.list().find((w) => w.active)?.id ?? null;
+      // Orders and the engine's own positions sell the ACTIVE wallet's
+      // balance whatever wallet was active when they were placed (critic #6).
+      if (walletId === active) {
+        const orders = advOrders.all().filter((o) => o.mint === mint && (o.state === 'armed' || o.state === 'paused'));
+        if (orders.length) out.push(`${orders.length} armed or paused order(s) on this coin sell the active wallet`);
+        try {
+          if (getEngine().holdsLiveMint(mint)) out.push('the engine holds an auto position on this coin in the active wallet');
+        } catch {
+          /* engine not up: no positions */
+        }
+      }
+      // Conservative: an open copy row on this coin, whichever wallet.
+      if (copyTrade.openMints('solana').includes(mint)) out.push('an open copy-trade position on this coin');
+      for (const o of automation.openedOn(mint)) {
+        if (o.wallet === null ? walletId === active : o.wallet === address) out.push(`the script "${o.script}" holds this coin in this wallet`);
+      }
+      if (kryptoMode.list().some((s) => s.mint === mint)) out.push('a Krypto Mode session on this coin');
+      return out;
+    },
+    recentFills: (mint, sinceMs) => ledger.all().filter((f) => f.mint === mint && f.at >= sinceMs),
+    watch: (mint) => {
+      try {
+        getEngine().watchPumpMint(mint);
+      } catch {
+        /* the engine is not up yet; the loop's chain read still works */
+      }
+    },
+    marketFacts: (mint) => traderMarketFacts(mint),
+    askTrader: async (facts, model, style) => {
+      const ai = store.load().ai;
+      const { askTrader } = await import('./data/aiAnalysis');
+      const r = await askTrader(ai, facts, { model, style });
+      // No key for the model: say so as "no key", which the session shows.
+      if (r.provider === null) return null;
+      return { ok: r.ok, message: r.message, text: r.text, model: r.model, usd: r.usd, refusal: r.refusal, cutOff: r.cutOff };
+    },
+    emit: (sessions) => sendToWindows({ kind: 'kryptoTrader', sessions }),
+    log: (level, line) => logger[level](line),
+    evm: traderEvmHost,
+  });
+  // Scripts, copy trading, orders and MCP buy_token ask this before they buy
+  // a coin or arm an order on it (electron/engine/traderClaims.ts): a live
+  // session's (wallet, coin) pair is its own. Manual buttons never ask.
+  setTraderClaimCheck((ref, mint) => {
+    const chain: ChainKind = ref.chain ?? 'solana';
+    const address =
+      chain === 'solana'
+        ? (ref.address ?? (ref.walletId ? wallet.publicKeyOf(ref.walletId) : (wallet.list().find((w) => w.active)?.publicKey ?? null)))
+        : (ref.address ?? (ref.walletId ? evmWallet.addressOf(ref.walletId) : evmWallet.address(chain)));
+    if (!address) return null;
+    const s = kryptoTrader.claimOn(address, mint, chain);
+    return s
+      ? `a live Krypto Trader session (${s.symbol || `${mint.slice(0, 6)}…`}, ${s.id}) trades this coin from wallet ${address.slice(0, 6)}…; pause it and sell its bag first, or trade this coin by hand`
+      : null;
+  });
+  // Every settled fill: the session's own unsettled trades get booked, and a
+  // trade on a session's (wallet, mint) that is not the session's pauses it.
+  ledger.onSettled((f) => kryptoTrader.onLedgerFill(solTraderFill(f)));
+  // The same on BNB / Robinhood, from the EVM ledger (tagged with its chain).
+  evmLedger.onSettled((f) => kryptoTrader.onLedgerFill(evmTraderFill(f)));
+  kryptoTrader.startLoop();
+
+  const traderId = (id: unknown): string | null => (typeof id === 'string' && TRADER_ID_RE.test(id) ? id : null);
+  ipcMain.handle('kryptoTrader:list', () => ok('ok', { sessions: kryptoTrader.list(), failure: kryptoTrader.failure() }));
+  ipcMain.handle('kryptoTrader:fit', async (_e, mint: unknown, opts: unknown) => {
+    const o = traderOptionsOf({ ...(opts && typeof opts === 'object' ? opts : {}), mint });
+    if (o.chain === 'solana' ? typeof mint !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint) : !isEvmAddress(o.mint)) {
+      return fail(o.chain === 'solana' ? 'Paste a valid Solana coin address.' : `Paste a valid ${EVM_CHAIN_META[o.chain].name} coin address (0x…).`);
+    }
+    try {
+      const fo = { budgetSol: o.budgetSol, limits: o.limits, walletId: o.walletId || null, params: o.params, preset: o.preset };
+      const f = o.chain === 'solana' ? await traderFitFor(o.mint, fo) : await evmTraderFit(o.chain, o.mint, fo);
+      return ok('ok', f);
+    } catch (err) {
+      return fail(`Could not check this coin: ${(err as Error).message}`);
+    }
+  });
+  ipcMain.handle('kryptoTrader:open', async (_e, raw: unknown) => {
+    // traderOptionsOf rebuilds every field and drops the rest — including any
+    // live flag or goal: a session always opens on paper.
+    const r = await kryptoTrader.open(raw);
+    return r.ok ? ok(r.message, r.session) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:pause', (_e, id: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = kryptoTrader.pause(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:resume', async (_e, id: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoTrader.resume(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:goLive', async (_e, id: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoTrader.goLive(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:sellAll', async (_e, id: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoTrader.sellAll(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:setEnvelope', (_e, id: unknown, patch: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = kryptoTrader.setEnvelope(k, patch);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:setLimits', (_e, id: unknown, patch: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = kryptoTrader.setLimits(k, patch);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:remove', (_e, id: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = kryptoTrader.remove(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:reconcile', async (_e, id: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoTrader.reconcile(k);
+    return r.ok ? ok(r.message) : fail(r.message);
+  });
+  ipcMain.handle('kryptoTrader:adopt', async (_e, id: unknown) => {
+    const k = traderId(id);
+    if (!k) return fail('Bad session id');
+    const r = await kryptoTrader.adopt(k);
     return r.ok ? ok(r.message) : fail(r.message);
   });
 
@@ -2631,6 +3366,10 @@ export function registerIpc(): void {
   ipcMain.handle('evm:wallet:remove', (_e, chain: unknown, id: unknown) => {
     const c = chainOf(chain);
     if (!c) return fail('Unknown chain');
+    // A Krypto Trader session on BNB / Robinhood trades from this wallet:
+    // refused BEFORE anything is removed or disarmed (critic #16).
+    const traderBlock = kryptoTrader.walletRemoveBlocked(typeof id === 'string' && id ? id : (evmRail.wallet.info(c).id ?? ''), 'evm');
+    if (traderBlock) return fail(traderBlock);
     try {
       const r = evmRail.wallet.remove(typeof id === 'string' && id ? id : undefined);
       return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
@@ -4033,7 +4772,6 @@ export function registerIpc(): void {
     if (!file) return ok('cancelled', null);
     try {
       const bytes = await readFile(file);
-      if (bytes.length > MAX_CODE_BYTES) return fail(`That file is ${Math.ceil(bytes.length / 1024)} KB; a script can be ${MAX_CODE_BYTES / 1024} KB at most.`);
       const name = path.basename(file).replace(/\.(m?js|txt)$/i, '').slice(0, 60) || 'Script';
       return ok('opened', { name, code: bytes.toString('utf8').replace(/\r\n/g, '\n') });
     } catch (err) {
@@ -4043,6 +4781,7 @@ export function registerIpc(): void {
 
   ipcMain.handle('automation:killSwitch', (_e, on: unknown) => {
     const r = automation.setKillSwitch(on === true);
+    if (on === true) kryptoTrader.pauseAll('the automation kill switch');
     return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
   });
 

@@ -6,7 +6,19 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Bot, Loader2 } from 'lucide-react';
-import { KRYPTO_DRIVER_TEXT, KRYPTO_STRATEGY_TEXT, type KryptoSession } from '@shared/kryptoMode';
+import {
+  DEFAULT_KRYPTO_LIMITS,
+  KRYPTO_DRIVER_TEXT,
+  KRYPTO_GOAL_TEXT,
+  KRYPTO_LIMIT_BOUNDS,
+  KRYPTO_LIMIT_TEXT,
+  KRYPTO_STRATEGY_TEXT,
+  kryptoUnpaced,
+  type KryptoDriver,
+  type KryptoGoal,
+  type KryptoLimits,
+  type KryptoSession,
+} from '@shared/kryptoMode';
 import { useToast } from '../../state/ToastProvider';
 import { cls } from '../../utils/format';
 import { Empty } from '../common';
@@ -18,6 +30,7 @@ export function KryptoSessions() {
   const [sessions, setSessions] = useState<KryptoSession[] | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState<string>('');
+  const [editing, setEditing] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -83,7 +96,8 @@ export function KryptoSessions() {
                 </div>
                 <span className="text-label text-krypt-muted">
                   {KRYPTO_DRIVER_TEXT[s.driver].label}
-                  {s.driver === 'strategy' ? ` · ${KRYPTO_STRATEGY_TEXT[s.strategy].label}` : ''}
+                  {s.driver === 'strategy' ? ` · ${KRYPTO_STRATEGY_TEXT[s.strategy].label}` : ` · ${KRYPTO_GOAL_TEXT[s.goal ?? 'position'].label}`}
+                  {kryptoUnpaced(s.limits ?? DEFAULT_KRYPTO_LIMITS) ? ' · unpaced' : ''}
                 </span>
               </div>
               <div className="mt-1.5 select-all break-all font-mono text-label text-krypt-muted">bot wallet {s.address}</div>
@@ -129,11 +143,126 @@ export function KryptoSessions() {
                 {s.tokensHeld > 0 && <Btn onClick={() => void act(s.id, 'sellAll')} busy={b('sellAll')}>Sell all &amp; stop</Btn>}
                 {s.status === 'stopped' && s.mode === 'live' && <Btn onClick={() => void act(s.id, 'withdraw')} busy={b('withdraw')}>Send SOL back to launch wallet</Btn>}
                 {s.status === 'stopped' && <Btn onClick={() => void act(s.id, 'remove')} busy={b('remove')}>Remove</Btn>}
+                <Btn onClick={() => setEditing(editing === s.id ? null : s.id)} busy={false}>
+                  {editing === s.id ? 'Close settings' : 'Settings'}
+                </Btn>
               </div>
+              {editing === s.id && (
+                <SessionSettings
+                  key={s.id}
+                  s={s}
+                  onSaved={() => void window.krypt.kryptoMode.list().then((l) => l.ok && l.data && setSessions(l.data.sessions))}
+                />
+              )}
             </div>
           );
         })
       )}
+    </div>
+  );
+}
+
+/**
+ * The creator's pacing and goal. Every limit is theirs; 0 turns a pacing
+ * limit off. Used on the Launch form and on a running bot.
+ */
+export function KryptoLimitsFields({
+  limits,
+  goal,
+  driver,
+  onChange,
+}: {
+  limits: KryptoLimits;
+  goal: KryptoGoal;
+  driver: KryptoDriver;
+  onChange: (patch: { limits?: KryptoLimits; goal?: KryptoGoal }) => void;
+}) {
+  const keys = (Object.keys(KRYPTO_LIMIT_BOUNDS) as (keyof KryptoLimits)[]).filter((k) => k !== 'aiEverySec' || driver === 'ai');
+  return (
+    <div className="space-y-2">
+      {driver !== 'strategy' && (
+        <div className="grid grid-cols-2 gap-1.5">
+          {(Object.keys(KRYPTO_GOAL_TEXT) as KryptoGoal[]).map((g) => (
+            <button
+              key={g}
+              onClick={() => onChange({ goal: g })}
+              className={cls('rounded-lg border px-3 py-2 text-left transition', goal === g ? 'border-krypt-purple/60 bg-krypt-purple/15' : 'border-white/10 bg-white/[0.02] hover:bg-white/5')}
+            >
+              <span className="block text-body font-semibold text-white/90">{KRYPTO_GOAL_TEXT[g].label}</span>
+              <span className="block text-label leading-relaxed text-krypt-muted">{KRYPTO_GOAL_TEXT[g].help}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        {keys.map((k) => (
+          <label key={k} className="block">
+            <span className="block text-label text-krypt-muted">{KRYPTO_LIMIT_TEXT[k].label}</span>
+            <input
+              type="number"
+              min={KRYPTO_LIMIT_BOUNDS[k][0]}
+              max={KRYPTO_LIMIT_BOUNDS[k][1]}
+              value={limits[k]}
+              onChange={(e) => onChange({ limits: { ...limits, [k]: Math.max(KRYPTO_LIMIT_BOUNDS[k][0], Math.round(Number(e.target.value) || 0)) } })}
+              className="mt-0.5 w-full rounded-md border border-white/10 bg-black/30 px-2 py-1 font-mono text-body text-white/90 outline-none focus:border-krypt-purple/50"
+            />
+            <span className="block text-micro text-krypt-muted/70">{KRYPTO_LIMIT_TEXT[k].help}</span>
+          </label>
+        ))}
+      </div>
+      {kryptoUnpaced(limits) && (
+        <p className="rounded-lg border border-amber-400/25 bg-amber-400/[0.07] p-2 text-label leading-relaxed text-amber-100/85">
+          No pacing: the bot can trade as fast as it decides. The wallet is still named in the description, but trading
+          at that speed to move the price is what regulators and pump.fun&apos;s terms treat as manipulation, and that
+          risk is the launcher&apos;s. Your call.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SessionSettings({ s, onSaved }: { s: KryptoSession; onSaved: () => void }) {
+  const toast = useToast();
+  const [limits, setLimits] = useState<KryptoLimits>(s.limits ?? DEFAULT_KRYPTO_LIMITS);
+  const [goal, setGoal] = useState<KryptoGoal>(s.goal ?? 'position');
+  const [budget, setBudget] = useState<number>(s.budgetSol);
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    setSaving(true);
+    try {
+      const r = await window.krypt.kryptoMode.setLimits(s.id, { limits, goal, budgetSol: budget });
+      if (r.ok) toast.success(r.message);
+      else toast.error(r.message);
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-white/10 bg-black/20 p-2.5">
+      <label className="block">
+        <span className="block text-label text-krypt-muted">Budget (SOL)</span>
+        <input
+          type="number"
+          step="0.01"
+          value={budget}
+          onChange={(e) => setBudget(Number(e.target.value))}
+          className="mt-0.5 w-full rounded-md border border-white/10 bg-black/30 px-2 py-1 font-mono text-body text-white/90 outline-none focus:border-krypt-purple/50"
+        />
+        {s.mode === 'live' && <span className="block text-micro text-krypt-muted/70">Live: the wallet only holds what was funded; a bigger budget reaches as far as its SOL does.</span>}
+      </label>
+      <KryptoLimitsFields
+        limits={limits}
+        goal={goal}
+        driver={s.driver}
+        onChange={(p) => {
+          if (p.limits) setLimits(p.limits);
+          if (p.goal) setGoal(p.goal);
+        }}
+      />
+      <Btn onClick={() => void save()} busy={saving} strong>
+        Save settings
+      </Btn>
     </div>
   );
 }

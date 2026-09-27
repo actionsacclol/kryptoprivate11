@@ -436,6 +436,16 @@ test('resume leaves an order written on another wallet paused', () => {
   assert.match(r.message, /check/i, 'the count says some orders still need the user');
 });
 
+test('an order paused mid-execution reads as interrupted; a plain restart pause does not', () => {
+  // Scripts re-place restart-paused orders from bot.orders(); the one that
+  // was executing when the app stopped may have landed and must be told apart.
+  const base = { mint: MINT, symbol: 'T', kind: 'take_profit', triggerValue: 100, triggerBasis: 'pct', amount: 50,
+    referencePriceSol: 0.001, peakPriceSol: null, owner: WALLET, createdAt: 1, updatedAt: 1, triggeredAt: null, signature: null, expiresAt: null };
+  assert.equal(ord.wasInterrupted({ ...base, state: 'paused', note: 'The app closed while this order was executing. Check your wallet before resuming.' }), true);
+  assert.equal(ord.wasInterrupted({ ...base, state: 'paused', note: 'Paused when the app restarted — review and resume.' }), false);
+  assert.equal(ord.wasInterrupted({ ...base, state: 'filled', note: 'The app closed while this order was executing. Check your wallet before resuming.' }), false);
+});
+
 test('two rungs on one mint do not both size off the same balance', async () => {
   // ordertemplates pins that a take-profit ladder sells a share of what is
   // LEFT (40 then 50). Both rungs size off a balance read at build time, so

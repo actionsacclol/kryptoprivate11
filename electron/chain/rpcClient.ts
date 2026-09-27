@@ -888,10 +888,11 @@ export async function getSignaturesForAddress(
   httpUrl: string,
   address: string,
   limit: number,
+  before?: string,
 ): Promise<RpcResult<ConfirmedSignatureInfo[]>> {
   return call<ConfirmedSignatureInfo[]>(httpUrl, 'getSignaturesForAddress', [
     address,
-    { limit, commitment: 'confirmed' },
+    before ? { limit, commitment: 'confirmed', before } : { limit, commitment: 'confirmed' },
   ]);
 }
 

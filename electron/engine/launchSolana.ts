@@ -54,7 +54,8 @@ export interface LaunchSolanaRequest {
   /** Pinned metadata JSON. pump reads name, symbol and image out of it. */
   uri: string;
   mayhem: boolean;
-  cashback: boolean;
+  /** Creator fee to holders instead of the creator (pump holder rewards). */
+  holderRewards: boolean;
 }
 
 export interface LaunchSolanaResult {
@@ -118,7 +119,9 @@ export async function launchSolana(req: LaunchSolanaRequest, simulateOnly: boole
       uri: req.uri,
       creator,
       mayhem: req.mayhem,
-      cashback: req.cashback,
+      // No new cashback coins since 2026-09-12; holder rewards replaced them.
+      cashback: false,
+      holderReward: req.holderRewards,
     };
     const msg = new TransactionMessage({
       payerKey: creator,

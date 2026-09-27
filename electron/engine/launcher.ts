@@ -166,7 +166,7 @@ export async function launch(draft: LaunchDraft, deps: LaunchDeps, simulateOnly:
       symbol: draft.symbol.trim(),
       uri: draft.metadataUri,
       mayhem: draft.mayhem,
-      cashback: draft.cashback,
+      holderRewards: draft.holderRewards,
     },
     simulateOnly,
   );

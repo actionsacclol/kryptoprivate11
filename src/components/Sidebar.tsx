@@ -25,7 +25,7 @@ import {
   Telescope,
   BookMarked,
   BookOpen,
-  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout, UserPlus, AtSign, Bot } from 'lucide-react';
+  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout, UserPlus, AtSign, Bot, CandlestickChart, Layers } from 'lucide-react';
 import { groupsFor, workspaceSpec, type WorkspaceId } from '../workspaces';
 import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
@@ -59,6 +59,7 @@ export type RouteId =
   | 'pumpaccounts'
   | 'orders'
   | 'copysimple'
+  | 'trader'
   | 'wallets'
   | 'scripts'
   | 'farming'
@@ -81,6 +82,7 @@ export type RouteId =
   | 'strategy'
   | 'console'
   | 'settings'
+  | 'profiles'
   | 'about'
   | 'legal';
 
@@ -139,6 +141,9 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   // Copy Trading, which keeps every control.
   { id: 'copysimple', label: 'Copy Simple', hint: 'Paste a wallet, pick an amount, follow on paper', icon: UserPlus },
   { id: 'wallets', label: 'Copy Trading', i18n: 'nav.copyTrading', hint: "Follow other traders' wallets — every control", icon: Users },
+  // Krypto Trader (2026-09-25): Krypto Mode for any coin — one coin, one of
+  // your wallets, a preset or an AI, paper first. No market-cap/volume goal.
+  { id: 'trader', label: 'Krypto Trader', hint: 'Trade one coin from one wallet with a preset or an AI — paper first', icon: CandlestickChart },
   { id: 'scripts', label: 'Scripts', i18n: 'nav.scripts', hint: 'Your own rules and code, under a budget — paper first', icon: Code2 },
   { id: 'farming', label: 'Farming', hint: 'Not built yet — what it would be, and what has to be true first', icon: Sprout },
   // Moved out of Settings (2026-09-23): nobody found it there, and an AI
@@ -179,6 +184,7 @@ export const LAYOUT_ROUTES: RouteSpec[] = [
 
 export const SYSTEM_ROUTES: RouteSpec[] = [
   { id: 'settings', label: 'Settings', i18n: 'nav.settings', icon: Settings },
+  { id: 'profiles', label: 'Profiles', hint: 'Separate copies of the app that run side by side', icon: Layers },
   { id: 'about', label: 'About', i18n: 'nav.about', icon: Sparkles },
   { id: 'legal', label: 'Legal', i18n: 'nav.legal', hint: 'Terms, privacy, risk disclosure', icon: Scale },
 ];

@@ -44,6 +44,7 @@ function RunnerRow({
   held,
   busy,
   onOpen,
+  onOpenTrader,
   onToggleWatch,
   onBuy,
   onSell,
@@ -68,6 +69,8 @@ function RunnerRow({
   /** 'buy' or 'sell' while an order for THIS row is in flight. */
   busy: 'buy' | 'sell' | null;
   onOpen: () => void;
+  /** "Open in Krypto Trader" — the form, prefilled. Nothing starts from here. */
+  onOpenTrader?: () => void;
   onToggleWatch: () => void;
   onBuy: () => void;
   onSell: () => void;
@@ -214,6 +217,18 @@ function RunnerRow({
         >
           <Star className="h-4 w-4" fill={watched ? 'currentColor' : 'none'} />
         </button>
+        {onOpenTrader && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenTrader();
+            }}
+            title="Open in Krypto Trader — trade it from one of your wallets with a preset, paper first"
+            className="rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-body text-krypt-muted hover:text-white hover:bg-white/10 transition"
+          >
+            Trader
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -233,7 +248,7 @@ function RunnerRow({
  * the Observatory's flags on Robinhood Chain and BNB. Until 2026-09-11 it
  * showed Solana whatever was active, and the EVM flags had no page.
  */
-export function RunnersPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
+export function RunnersPage({ onOpenToken, onOpenTrader }: { onOpenToken: (mint: string, chain?: ChainKind) => void; onOpenTrader?: (mint: string) => void }) {
   const { chain } = useTerminal();
   if (isEvmChain(chain)) {
     return (
@@ -242,10 +257,10 @@ export function RunnersPage({ onOpenToken }: { onOpenToken: (mint: string, chain
       </Page>
     );
   }
-  return <SolanaRunnersPage onOpenToken={onOpenToken} />;
+  return <SolanaRunnersPage onOpenToken={onOpenToken} onOpenTrader={onOpenTrader} />;
 }
 
-function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => void }) {
+function SolanaRunnersPage({ onOpenToken, onOpenTrader }: { onOpenToken: (mint: string) => void; onOpenTrader?: (mint: string) => void }) {
   const { runners, launches, settings, status, refreshFromEngine } = useAppState();
   const term = useTerminal();
   const toast = useToast();
@@ -448,6 +463,7 @@ function SolanaRunnersPage({ onOpenToken }: { onOpenToken: (mint: string) => voi
                 onSell={() => void quickSell(r)}
                 watched={term.isWatched(r.mint)}
                 onOpen={() => onOpenToken(r.mint)}
+                onOpenTrader={onOpenTrader ? () => onOpenTrader(r.mint) : undefined}
                 onToggleWatch={() => term.toggleWatch(r.mint)}
               />
             ))}

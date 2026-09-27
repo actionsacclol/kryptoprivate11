@@ -103,6 +103,31 @@ try {
   out('DOM order:', JSON.stringify(order));
   check('the header card (name, Save) sits above the settings and the editor', order.name >= 0 && order.save > order.name && order.kind > order.save && (order.rules < 0 || order.rules > order.kind), `name ${order.name} < save ${order.save} < kind ${order.kind} < rules ${order.rules}`);
   await shot('scripts-view-editor');
+  // No horizontal page scroll, and the header card's controls on screen
+  // (2026-09-26: a running script's long log lines widened the editor column
+  // past the window and pushed Settings / the arm switch / Save off it). A
+  // probe line — one long unbroken string, the shape of a SCORE row — is
+  // appended to the editor column for the measurement and removed after.
+  const fit = await evaluate(`(() => {
+    const h1 = [...document.querySelectorAll('main h1')].find((h) => h.textContent.trim() === 'Scripts');
+    const root = h1 && h1.closest('.flex.flex-col');
+    const scroller = root && [...root.children].find((c) => getComputedStyle(c).overflowX === 'auto');
+    const name = document.querySelector('main input[aria-label="Script name"]');
+    const column = name && name.closest('.space-y-4');
+    if (!scroller || !column) return null;
+    const probe = document.createElement('div');
+    probe.className = 'font-mono text-body whitespace-pre-wrap break-words'; // the OLD log line's wrapping: the column must hold it anyway
+    probe.textContent = 'SCORE' + JSON.stringify({ mint: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU'.repeat(8) });
+    column.appendChild(probe);
+    const save = [...column.querySelectorAll('button')].find((b) => /^Save/.test(b.textContent.trim()));
+    const box = scroller.getBoundingClientRect();
+    const r = { scrollW: scroller.scrollWidth, clientW: scroller.clientWidth, saveRight: save ? Math.round(save.getBoundingClientRect().right) : null, boxRight: Math.round(box.right) };
+    probe.remove();
+    return r;
+  })()`);
+  out('fit:', JSON.stringify(fit));
+  check('the editor never scrolls the page sideways', !!fit && fit.scrollW <= fit.clientW + 1, JSON.stringify(fit));
+  check('Save stays on screen', !!fit && fit.saveRight != null && fit.saveRight <= fit.boxRight, JSON.stringify(fit));
 
   // Reference, all four sections render.
   check('Reference opens', await click(inScope('Reference', VIEWS)));

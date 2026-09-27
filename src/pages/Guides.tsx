@@ -108,6 +108,7 @@ export const AI_CONNECTION_GUIDE: SectionGuide = {
     'Live means an AI can buy and sell with your real money on its own. Nobody has shown that an AI trades this app profitably. Start on Paper and read what it did.',
     'It can never take your money out. There is no withdraw, no transfer and no send — the only thing it can do with your funds is trade them, and the coins land back in your own wallet.',
     'It also cannot change any setting, see your key, or hand the app something to sign. It asks; the app decides and builds the trade the same way the buttons do, with the same fee.',
+    'It can drive a Krypto Trader session only if you picked MCP as that session’s driver, and only inside its budget and limits. It can never start, fund, resume or change a session, and a Paper connection cannot move a live one.',
     'Turning the switch off closes the door immediately, even in the middle of a conversation.',
   ],
 };

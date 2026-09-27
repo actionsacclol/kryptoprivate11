@@ -56,14 +56,18 @@ const MINT = 'Coin1111111111111111111111111111111111pump';
   const on = { ...K.DEFAULT_KRYPTO_OPTIONS, enabled: true };
   assert.deepEqual(K.kryptoOptionProblems(on), []);
   assert.equal(K.kryptoOptionProblems({ ...on, budgetSol: 0.001 }).length, 1);
-  assert.equal(K.kryptoOptionProblems({ ...on, budgetSol: 99 }).length, 1);
-  const parsed = K.kryptoOptionsOf({ enabled: true, driver: 'evil', strategy: 'x', budgetSol: 'nope', live: 'yes' });
+  assert.equal(K.kryptoOptionProblems({ ...on, budgetSol: 101 }).length, 1);
+  assert.deepEqual(K.kryptoOptionProblems({ ...on, budgetSol: 99 }), [], 'up to 100 SOL');
+  const parsed = K.kryptoOptionsOf({ enabled: true, driver: 'evil', strategy: 'x', budgetSol: 'nope', live: 'yes', goal: 'moon' });
   assert.equal(parsed.driver, 'strategy');
   assert.equal(parsed.strategy, 'ladder');
   assert.equal(parsed.live, false, 'live only when literally true');
+  assert.equal(parsed.goal, 'position', 'an unknown goal is the position goal');
+  assert.deepEqual(parsed.limits, K.DEFAULT_KRYPTO_LIMITS, 'no limits sent = the defaults');
   assert.equal(K.DEFAULT_KRYPTO_OPTIONS.live, false, 'paper by default');
   ok('options: paper by default, malformed input falls back, budget bounded');
 }
+
 
 // ── strategies ────────────────────────────────────────────────────────────
 const view = (o = {}) => ({
@@ -139,7 +143,7 @@ const view = (o = {}) => ({
   assert.equal(K.checkKryptoIntent(buy, view({ lastTradeAt: 1_000_000 - 5_000, lastSide: 'buy' })).ok, false, 'pacing');
   const rebuy = K.checkKryptoIntent(buy, view({ lastTradeAt: 1_000_000 - 30_000, lastSide: 'sell' }));
   assert.equal(rebuy.ok, false);
-  assert.match(rebuy.reason, /buying back/);
+  assert.match(rebuy.reason, /no-buy-back window/);
   assert.ok(K.checkKryptoIntent(buy, view({ lastTradeAt: 1_000_000 - 61_000, lastSide: 'sell' })).ok);
   const busy = Array.from({ length: 20 }, (_, i) => 1_000_000 - (i + 1) * 60_000);
   assert.equal(K.checkKryptoIntent(buy, view({ recentTrades: busy })).ok, false, 'hourly cap');
@@ -159,12 +163,37 @@ const view = (o = {}) => ({
   ok('AI replies parse strictly; the facts carry no address and no invented zeros');
 }
 
+// ── the creator's limits (09-25: "limits should be up to user") ─────────────
+{
+  const off = K.kryptoLimitsOf({ minGapSec: 0, noRebuySec: 0, maxTradesPerHour: 0, aiEverySec: 1 });
+  assert.equal(off.minGapSec, 0);
+  assert.equal(off.maxTradesPerHour, 0);
+  assert.equal(off.aiEverySec, 5, 'the AI cadence has a 5 s floor (it spends the key)');
+  assert.ok(K.kryptoUnpaced(off));
+  assert.ok(!K.kryptoUnpaced(K.DEFAULT_KRYPTO_LIMITS));
+  assert.equal(K.kryptoLimitsOf({ minGapSec: -5, maxTradesPerHour: 'x' }).minGapSec, 0, 'clamped, not refused');
+  assert.equal(K.kryptoLimitsOf({ maxTradesPerHour: 'x' }).maxTradesPerHour, 20, 'junk → default');
+  const buy = { action: 'buy', sol: 0.01, reason: 'x' };
+  const busy = Array.from({ length: 200 }, (_, i) => 1_000_000 - (i + 1) * 1_000);
+  const tight = { lastTradeAt: 1_000_000 - 1_000, lastSide: 'sell', recentTrades: busy };
+  assert.equal(K.checkKryptoIntent(buy, view(tight)).ok, false, 'defaults still pace');
+  assert.ok(K.checkKryptoIntent(buy, view(tight), off).ok, 'with every limit at 0, a buy a second after a sell, 200 trades deep, goes');
+  const r = K.checkKryptoIntent({ action: 'buy', sol: 5, reason: 'x' }, view({ netSpentSol: 0.08 }), off);
+  assert.ok(Math.abs(r.intent.sol - 0.02) < 1e-9, 'the budget is still the budget');
+  assert.match(K.checkKryptoIntent(buy, view({ lastTradeAt: 1_000_000 - 3_000, lastSide: 'buy' }), { ...off, minGapSec: 10 }).reason, /10 s gap/, 'each limit works alone');
+  assert.equal(K.kryptoAiPrompt('support'), K.KRYPTO_AI_SUPPORT_PROMPT);
+  assert.equal(K.kryptoAiPrompt('position'), K.KRYPTO_AI_SYSTEM_PROMPT);
+  assert.match(K.KRYPTO_AI_SUPPORT_PROMPT, /PUBLICLY DECLARED/, 'the support prompt still tells the model the bot is public');
+  ok('limits: each one the creator’s, 0 = off; the budget stays; goal picks the prompt');
+}
+
 // ── the session manager ───────────────────────────────────────────────────
 function fakeHost(o = {}) {
   const h = {
     t: 10_000_000,
     price: 1e-7,
     blocked: null,
+    breaker: null,
     chain: { lamports: 0, tokens: 0 },
     buys: [],
     sells: [],
@@ -173,7 +202,7 @@ function fakeHost(o = {}) {
     now: () => h.t,
     priceSol: async () => h.price,
     market: () => ({ symbol: 'KM', ageSec: 60, marketCapUsd: 5000, holders: 10, change5mPct: 3 }),
-    liveBlocked: () => h.blocked,
+    liveBlocked: (side) => h.blocked ?? (side === 'sell' ? null : h.breaker ?? null),
     buy: async (walletId, mint, sol) => {
       h.buys.push({ walletId, mint, sol });
       h.chain.lamports -= Math.round(sol * 1.01 * 1e9);
@@ -366,6 +395,69 @@ const OPTS = { enabled: true, driver: 'strategy', strategy: 'ladder', budgetSol:
   ok('persistence: a corrupt file is never overwritten; a good one round-trips');
 }
 
+// ── a running bot's settings are the creator's to change ─────────────────
+{
+  M._reset();
+  const h = fakeHost();
+  M.init('', h);
+  M.declare('https://x/meta', 'W1', BOT);
+  const r = await M.start({ mint: MINT, symbol: 'KM', metadataUri: 'https://x/meta', launchWalletId: 'L', options: { ...OPTS, driver: 'mcp', limits: { minGapSec: 0, noRebuySec: 0, maxTradesPerHour: 0, aiEverySec: 5 } } });
+  assert.deepEqual(r.session.limits, { minGapSec: 0, noRebuySec: 0, maxTradesPerHour: 0, aiEverySec: 5 }, 'launch limits carried into the session');
+  // Unpaced: buy, sell, buy again in the same second — the creator's call.
+  assert.ok((await M.tradeFromMcp(MINT, 'buy', 0.02, false)).ok);
+  assert.ok((await M.tradeFromMcp(MINT, 'sell', 50, false)).ok);
+  assert.ok((await M.tradeFromMcp(MINT, 'buy', 0.01, false)).ok, 'no pacing when the creator turned it off');
+  // Turn a limit back on while it runs.
+  assert.ok(M.setLimits(r.session.id, { limits: { minGapSec: 30 }, goal: 'support', budgetSol: 0.5 }).ok);
+  const s2 = M.list()[0];
+  assert.equal(s2.limits.minGapSec, 30);
+  assert.equal(s2.limits.noRebuySec, 0, 'a patch changes only what it names');
+  assert.equal(s2.goal, 'support');
+  assert.equal(s2.budgetSol, 0.5);
+  assert.equal((await M.tradeFromMcp(MINT, 'buy', 0.01, false)).ok, false, 'the new gap applies at once');
+  assert.equal(M.setLimits(r.session.id, { budgetSol: 1000 }).ok, false, 'the budget stays bounded');
+  ok('settings: launch limits carry over; 0 = unpaced; edits apply to a running bot');
+}
+
+
+// ── K1: breakers block buys, never sells; K3: listed at startup ──────────
+{
+  M._reset();
+  const h = fakeHost();
+  M.init('', h);
+  M.declare('https://x/meta', 'W1', BOT);
+  await M.start({ mint: MINT, symbol: 'KM', metadataUri: 'https://x/meta', launchWalletId: 'L', options: { ...OPTS, live: true } });
+  await M.tick();
+  assert.equal(h.buys.length, 1);
+  // A loss breaker trips: buys wait, the 2x rung still sells.
+  h.breaker = 'live session loss limit';
+  h.t += 20_000;
+  h.price = 2.5e-7;
+  await M.tick();
+  assert.equal(h.sells.length, 1, 'a breaker never traps the bot in its bag');
+  const src = fs.readFileSync(new URL('../electron/engine/kryptoMode.ts', import.meta.url), 'utf8');
+  assert.ok(src.includes('h.liveBlocked(intent.action)'), 'execute asks the gate for ITS side');
+  const engine = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  const gate = engine.slice(engine.indexOf('  botLiveBlocked('), engine.indexOf('  botLiveBlocked(') + 400);
+  assert.ok(gate.includes("side === 'buy' ? this.liveBreakerReason() : null"), 'the engine gate applies breakers to buys only');
+  ok('K1: a tripped breaker holds buys, never the bot’s sells');
+}
+{
+  const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const dialog = main.indexOf('const stores:');
+  assert.ok(main.indexOf('kryptoMode.load(') > 0 && main.indexOf('kryptoMode.load(') < dialog, 'the file is read before the startup dialog');
+  assert.ok(main.slice(dialog, dialog + 1500).includes('kryptoMode.failure()'), 'and an unreadable one is listed in it');
+  M._reset();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'km-'));
+  fs.writeFileSync(path.join(dir, 'krypto-mode.json'), '{bad');
+  M.load(dir);
+  assert.ok(M.failure(), 'load() alone reports the failure');
+  M.init(dir, fakeHost());
+  assert.ok(M.failure(), 'init after load does not clear it');
+  M._reset();
+  ok('K3: Krypto Mode’s unreadable file is on the startup dialog');
+}
+
 // ── the wiring, read from source ──────────────────────────────────────────
 {
   const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
@@ -380,12 +472,14 @@ const OPTS = { enabled: true, driver: 'strategy', strategy: 'ladder', budgetSol:
   assert.equal(ipc.split('kryptoMode.start(').length - 1, 1, 'and from nowhere else');
   const engine = src('../electron/engine/engine.ts');
   const body = (name) => engine.slice(engine.indexOf(`  ${name}(`), engine.indexOf(`  ${name}(`) + 300);
-  assert.ok(body('kryptoBuy').includes('return this.labBuy('), 'a bot buy is the ordinary wallet-lab buy');
-  assert.ok(body('kryptoSell').includes('return this.labSell('), 'and a bot sell the ordinary sell');
+  assert.ok(body('botBuy').includes('return this.labBuy('), 'a bot buy is the ordinary wallet-lab buy');
+  assert.ok(body('botSell').includes('return this.labSell('), 'and a bot sell the ordinary sell');
   const launch = src('../shared/launch.ts');
-  assert.ok(launch.includes("krypto: { enabled: false, driver: 'strategy', strategy: 'ladder', budgetSol: 0.1, live: false }"), 'a new draft has Krypto Mode off, and paper');
+  const draft = launch.slice(launch.indexOf('    krypto: {'), launch.indexOf('    krypto: {') + 400);
+  assert.ok(draft.includes('enabled: false,') && draft.includes('live: false,'), 'a new draft has Krypto Mode off, and paper');
+  assert.ok(draft.includes('maxTradesPerHour: 20'), 'and starts with the default pacing (the creator can change it)');
   ok('wiring: stamped before the pin, declared after it, started only by the launch, traded through the normal path');
 }
 
-console.log(`kryptomode: ${passed}/14 passed`);
-if (passed !== 14) process.exitCode = 1;
+console.log(`kryptomode: ${passed}/18 passed`);
+if (passed !== 18) process.exitCode = 1;

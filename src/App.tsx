@@ -5,6 +5,7 @@ import { ensureRouteCacheSubscribed } from './state/routeCache';
 import { landingRouteOf, routesFor, workspaceOf, type WorkspaceId } from './workspaces';
 import { loadPinned } from './panels/pinned';
 import { setChartToken } from './panels/chartToken';
+import { setTraderPrefill } from './state/traderPrefill';
 import { Hub } from './pages/Hub';
 import { AppBackdrop, BACKDROP_FULL, BACKDROP_QUIET } from './components/viz/LiquidMetal';
 import { ROUTE_LOADERS, prefetchRoute, prefetchWhenIdle } from './routeLoaders';
@@ -58,6 +59,7 @@ const Positions = lazy(() => ROUTE_LOADERS.paper().then((m) => ({ default: m.Pos
 const PortfolioPage = lazy(() => ROUTE_LOADERS.positions().then((m) => ({ default: m.PortfolioPage })));
 const WalletsPage = lazy(() => ROUTE_LOADERS.wallets().then((m) => ({ default: m.WalletsPage })));
 const CopySimplePage = lazy(() => ROUTE_LOADERS.copysimple().then((m) => ({ default: m.CopySimplePage })));
+const KryptoTraderPage = lazy(() => ROUTE_LOADERS.trader().then((m) => ({ default: m.KryptoTraderPage })));
 const Execution = lazy(() => ROUTE_LOADERS.execution().then((m) => ({ default: m.Execution })));
 const History = lazy(() => ROUTE_LOADERS.history().then((m) => ({ default: m.History })));
 const Backtest = lazy(() => ROUTE_LOADERS.backtest().then((m) => ({ default: m.Backtest })));
@@ -70,6 +72,7 @@ const Strategy = lazy(() => ROUTE_LOADERS.strategy().then((m) => ({ default: m.S
 const Console = lazy(() => ROUTE_LOADERS.console().then((m) => ({ default: m.Console })));
 const SettingsPage = lazy(() => ROUTE_LOADERS.settings().then((m) => ({ default: m.SettingsPage })));
 const About = lazy(() => ROUTE_LOADERS.about().then((m) => ({ default: m.About })));
+const ProfilesPage = lazy(() => ROUTE_LOADERS.profiles().then((m) => ({ default: m.ProfilesPage })));
 
 // Fetched in the background once the first screen has settled, most-visited
 // first: the click that opens one of these then needs no network round trip.
@@ -151,6 +154,16 @@ export default function App() {
   }, []);
 
   const toHub = useCallback(() => setWorkspace('hub'), []);
+
+  /** "Open in Krypto Trader" (Token and Runners pages): hand the coin to the
+   *  form, then go there. The page takes the mint once, on mount. */
+  const openTrader = useCallback(
+    (mint: string, chain?: ChainKind) => {
+      setTraderPrefill(mint, chain ?? 'solana');
+      navigate('trader');
+    },
+    [navigate],
+  );
 
   // Opening a token is a route change plus a mint — the token page is the
   // only route that carries state, so it lives here rather than in a router.
@@ -323,7 +336,7 @@ export default function App() {
       <div className="flex flex-1 min-w-0 min-h-0">
       <div className="flex flex-col flex-1 min-w-0 relative">
         <IntegrityBanner />
-        <TopBar search={<TokenSearch onOpen={openToken} />} onOpenAutomation={() => navigate('dashboard')} onOpenRunners={() => navigate('runners')} onHub={onHub ? undefined : toHub} />
+        <TopBar search={<TokenSearch onOpen={openToken} />} onOpenAutomation={() => navigate('dashboard')} onOpenRunners={() => navigate('runners')} onOpenProfiles={() => navigate('profiles')} onHub={onHub ? undefined : toHub} />
         {isPending && (
           <div
             className="pointer-events-none absolute left-0 right-0 top-0 z-30 h-0.5 bg-krypt-purple/80 animate-pulse"
@@ -381,11 +394,11 @@ export default function App() {
                 <div className="h-full animate-ink">
                   {route === 'token' && openMint && (
                     isEvmChain(openChain) && isEvmAddress(openMint)
-                      ? <EvmTokenPage chain={openChain} address={openMint} onBack={() => navigate('discover')} />
-                      : <TokenPage mint={openMint} onBack={() => navigate('discover')} />
+                      ? <EvmTokenPage chain={openChain} address={openMint} onBack={() => navigate('discover')} onOpenTrader={openTrader} />
+                      : <TokenPage mint={openMint} onBack={() => navigate('discover')} onOpenTrader={openTrader} />
                   )}
                   {route === 'watchlist' && <WatchlistPage onOpenToken={openToken} />}
-                  {route === 'runners' && <RunnersPage onOpenToken={openToken} />}
+                  {route === 'runners' && <RunnersPage onOpenToken={openToken} onOpenTrader={openTrader} />}
                   {route === 'wire' && <WirePage onOpenToken={openToken} />}
                   {route === 'creator' && <CreatorPage onOpenToken={openToken} />}
                   {route === 'funder' && <FunderPage onOpenToken={openToken} />}
@@ -403,6 +416,7 @@ export default function App() {
                   {route === 'legal' && <LegalPage />}
                   {route === 'copysimple' && <CopySimplePage onOpenAdvanced={() => navigate('wallets')} onOpenScout={() => navigate('scout')} />}
                   {route === 'wallets' && <WalletsPage />}
+                  {route === 'trader' && <KryptoTraderPage />}
                   {route === 'scripts' && <ScriptsPage />}
                   {route === 'execution' && <Execution />}
                   {route === 'history' && <History />}
@@ -422,6 +436,7 @@ export default function App() {
                   {route === 'console' && <Console />}
                   {route === 'settings' && <SettingsPage onNavigate={navigate} />}
                   {route === 'about' && <About />}
+                  {route === 'profiles' && <ProfilesPage />}
                 </div>
               </Suspense>
             </div>

@@ -48,7 +48,7 @@ const CURVE_COPY: Record<EvmChainKind, { title: string; graduates: string; note:
   },
 };
 
-export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; address: string; onBack: () => void }) {
+export function EvmTokenPage({ chain, address, onBack, onOpenTrader }: { chain: EvmChainKind; address: string; onBack: () => void; onOpenTrader?: (address: string, chain: EvmChainKind) => void }) {
   const toast = useToast();
   const meta = EVM_CHAIN_META[chain];
   const sym = meta.nativeSymbol;
@@ -235,6 +235,18 @@ export function EvmTokenPage({ chain, address, onBack }: { chain: EvmChainKind; 
                 DexScreener
                 <ExternalLink className="h-3 w-3" />
               </button>
+              {/* Krypto Trader on this chain (stage 4): opens its form with
+                  this coin and chain filled in. Nothing starts until Start
+                  (paper) there. */}
+              {onOpenTrader && (
+                <button
+                  onClick={() => onOpenTrader(address, chain)}
+                  title={`Trade this coin from one of your ${meta.name} wallets with a preset or an AI — paper first`}
+                  className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
+                >
+                  Open in Krypto Trader
+                </button>
+              )}
               {/* The token's own links and its launchpad page (four.meme,
                   Pons), up here where a trader looks first (2026-09-20). */}
               {tokenLinks(chain, address, s?.launchpad ?? null, s?.socials ?? null).map((l) => (

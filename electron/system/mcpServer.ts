@@ -146,7 +146,9 @@ export function start(h: McpServerHost, port: number): Promise<{ ok: boolean; me
     s.on('error', (err) => {
       const why =
         (err as NodeJS.ErrnoException).code === 'EADDRINUSE'
-          ? `port ${port} is already in use — pick another`
+          ? // Most often another Krypto Bot profile running beside this one
+            // (each profile has its own port; two set to one collide).
+            `port ${port} is already in use — another Krypto Bot profile or another program may be on it. Pick another port`
           : ((err as Error).message ?? 'could not listen');
       message = why;
       h.log('warn', `MCP: ${why}`);

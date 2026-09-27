@@ -43,6 +43,9 @@ import {
 import type { DeliveryTiming } from './walletWatcher';
 import { FEE_BPS } from '@shared/fees';
 import * as recorder from './recorder';
+import { traderClaimFor } from './traderClaims';
+// Re-exported for the test bundle, which has its own copy of the module.
+export { setTraderClaimCheck } from './traderClaims';
 
 const FILE = 'copytrade.json';
 const MAX_TRADES = 2_000;
@@ -2418,6 +2421,19 @@ async function copyOnce(c: CopyConfig, t: WalletTrade, base: CopyTrade, h: CopyH
     record({ ...base, reason: `not executed — ${blocked}` });
     h.toast('warn', `Copy skipped — ${blocked}`);
     return;
+  }
+  // A live Krypto Trader session holds this coin in the wallet this config
+  // buys from (its own, or the active one): a copy would mix bags, and the
+  // session would pause on the fill. Refused with the session named.
+  // Every chain: on BNB / Robinhood the pair is (chain, this config's wallet
+  // or the chain's signer, coin) — stage 4.
+  {
+    const claim = chainOf(c) === 'solana' ? traderClaimFor({ walletId: c.walletId ?? null }, t.mint) : traderClaimFor({ walletId: c.walletId ?? null, chain: chainOf(c) }, t.mint);
+    if (claim) {
+      record({ ...base, reason: `not executed — ${claim}` });
+      h.toast('warn', `Copy skipped — ${claim}`);
+      return;
+    }
   }
   // House rule 2: a budget is a refusal, not a clamp. Automation refuses over
   // the live cap; a copy that silently shrank to fit would report a size it

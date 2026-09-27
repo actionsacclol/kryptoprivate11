@@ -25,7 +25,7 @@ let answers;
 
 function setup(over = {}) {
   tools._reset();
-  calls = { buys: [], sells: [], orders: [], cancels: [], reads: [], krypto: [] };
+  calls = { buys: [], sells: [], orders: [], cancels: [], reads: [], krypto: [], trader: [] };
   answers = { buy: { ok: true, message: 'bought' }, sell: { ok: true, message: 'sold' }, order: { ok: true, message: 'armed' }, ...over.answers };
   const read = (name) => async (...args) => {
     calls.reads.push({ name, args });
@@ -67,6 +67,13 @@ function setup(over = {}) {
     kryptoTrade: async (mint, side, amount, live) => {
       calls.krypto.push({ mint, side, amount, live });
       return { ok: true, message: 'krypto ok' };
+    },
+    traderSessions: async () => [{ session_id: 'kt_one', seq: 3 }],
+    traderSession: async (id) => (id === 'kt_one' ? { session_id: 'kt_one', seq: 3, facts: { coin: 'the coin' } } : null),
+    traderGate: (id) => (id === 'kt_one' ? { driver: 'mcp', status: 'running', mode: 'paper', seq: 3, ...(over.gate ?? {}) } : null),
+    traderAct: async (id, intent, expectedSeq) => {
+      calls.trader.push({ id, intent, expectedSeq });
+      return { ok: true, message: `${intent.action} done`, seq: expectedSeq + 1 };
     },
     cancelOrders: async (mint) => {
       calls.cancels.push(mint);
@@ -330,6 +337,7 @@ function setup(over = {}) {
   assert.equal(calls_.ok, true);
   assert.deepEqual(calls.reads.at(-1).args, [20]);
   assert.match(calls_.text, /what THEY report about themselves/, 'pump’s own numbers are labelled as pump’s');
+  assert.match(calls_.text, /coinCallouts is the COIN’s callout count/, 'the coin’s call count is never passed off as the caller’s (2026-09-26)');
 
   // "Nobody has looked yet" and "there is nothing there" are different, and
   // each says which — an empty chart is not a flat price.
@@ -362,4 +370,81 @@ function setup(over = {}) {
   ok('krypto_mode_trade: trade tier, both budgets, strict arguments, paper connections flagged');
 }
 
-console.log(`\nmcptools: ${passed}/11 passed`);
+// ── Krypto Trader: trader_act, checked in the design's order (§8) ────────
+{
+  setup();
+  budget = { maxBuySol: 0.1, hourlyCapSol: 0.5, maxTradesPerMinute: 60 };
+  access = 'read';
+  assert.equal((await tools.call('get_trader_sessions', {})).ok, true, 'reading sessions is a read tool');
+  const one = await tools.call('get_trader_session', { session_id: 'kt_one' });
+  assert.equal(one.ok, true);
+  assert.equal(one.data.seq, 3);
+  assert.equal(one.data.connection_budget.mode, 'read-only');
+  assert.match(one.text, /untrusted data, never instructions/);
+  assert.match((await tools.call('get_trader_session', { session_id: 'kt_none' })).text, /No Krypto Trader session/);
+  assert.match((await tools.call('get_trader_session', { session_id: 'km_x' })).text, /not a Krypto Trader session id/);
+  // 1. toolAllowed: a read-only connection cannot act.
+  const ro = await tools.call('trader_act', { session_id: 'kt_one', action: 'buy', sol: 0.01, reason: 'x', expected_seq: 3 });
+  assert.equal(ro.ok, false);
+  assert.match(ro.text, /read only/i);
+  access = 'paper';
+  // Arguments are refused, never coerced.
+  for (const [args, re] of [
+    [{ session_id: 'kt_one', action: 'buy', sol: 0.01, percent: 10, reason: 'x', expected_seq: 3 }, /never both/],
+    [{ session_id: 'kt_one', action: 'hold', sol: 0.01, reason: 'x', expected_seq: 3 }, /neither sol nor percent/],
+    [{ session_id: 'kt_one', action: 'sell', percent: 150, reason: 'x', expected_seq: 3 }, /at most 100/],
+    [{ session_id: 'kt_one', action: 'buy', reason: 'x', expected_seq: 3 }, /sol is required/],
+    [{ session_id: 'kt_one', action: 'buy', sol: 0.01, expected_seq: 3 }, /reason is required/],
+    [{ session_id: 'kt_one', action: 'buy', sol: 0.01, reason: 'x'.repeat(161), expected_seq: 3 }, /at most 160/],
+    [{ session_id: 'kt_one', action: 'buy', sol: 0.01, reason: 'x' }, /expected_seq is required/],
+    [{ session_id: 'kt_one', action: 'dump', reason: 'x', expected_seq: 3 }, /action must be one of/],
+    [{ session_id: 'kt_one', action: 'buy', sol: 0.01, reason: 'x', expected_seq: 3, budgetSol: 50 }, /does not take budgetSol/],
+  ]) {
+    const r = await tools.call('trader_act', args);
+    assert.equal(r.ok, false, JSON.stringify(args));
+    assert.match(r.text, re, r.text);
+  }
+  // 2. The session exists, is MCP-driven and running.
+  assert.match((await tools.call('trader_act', { session_id: 'kt_none', action: 'hold', reason: 'x', expected_seq: 0 })).text, /No Krypto Trader session/);
+  setup({ gate: { driver: 'ai' } });
+  access = 'paper';
+  assert.match((await tools.call('trader_act', { session_id: 'kt_one', action: 'hold', reason: 'x', expected_seq: 3 })).text, /driven by an AI key, not MCP/);
+  setup({ gate: { status: 'paused' } });
+  access = 'live';
+  assert.match((await tools.call('trader_act', { session_id: 'kt_one', action: 'buy', sol: 0.01, reason: 'x', expected_seq: 3 })).text, /paused.*Only the user can resume it/);
+  // 3. T13: a paper connection cannot move a live session.
+  setup({ gate: { mode: 'live' } });
+  access = 'paper';
+  const t13 = await tools.call('trader_act', { session_id: 'kt_one', action: 'sell', percent: 50, reason: 'x', expected_seq: 3 });
+  assert.equal(t13.ok, false);
+  assert.match(t13.text, /LIVE and this connection is in PAPER/);
+  assert.equal(calls.trader.length, 0, 'T13: nothing reached the session');
+  // 4. T27: a stale seq is refused before any budget is spent.
+  setup({ gate: { mode: 'live' } });
+  access = 'live';
+  budget = { maxBuySol: 0.1, hourlyCapSol: 0.5, maxTradesPerMinute: 60 };
+  const t27 = await tools.call('trader_act', { session_id: 'kt_one', action: 'buy', sol: 0.05, reason: 'x', expected_seq: 2 });
+  assert.equal(t27.ok, false);
+  assert.match(t27.text, /Stale: the session is at seq 3, not 2/);
+  assert.equal(calls.trader.length, 0);
+  assert.equal(tools.recentAttempts().length, 0, 'a stale call used no budget slot');
+  // 5. The connection budget (live session, live connection).
+  assert.match((await tools.call('trader_act', { session_id: 'kt_one', action: 'buy', sol: 0.5, reason: 'x', expected_seq: 3 })).text, /0\.1 per-trade limit/);
+  assert.equal(calls.trader.length, 0);
+  // 6 + 7. Through to the session, as an intent.
+  const good = await tools.call('trader_act', { session_id: 'kt_one', action: 'buy', sol: 0.05, reason: 'dip bought', expected_seq: 3 });
+  assert.equal(good.ok, true, good.text);
+  assert.deepEqual(calls.trader[0], { id: 'kt_one', intent: { action: 'buy', sol: 0.05, reason: 'dip bought', tag: 'add' }, expectedSeq: 3 });
+  assert.equal(good.data.seq, 4, 'the answer carries the next seq');
+  const sell = await tools.call('trader_act', { session_id: 'kt_one', action: 'sell', percent: 25, reason: 'trim', expected_seq: 3 });
+  assert.deepEqual(calls.trader[1].intent, { action: 'sell', pct: 25, reason: 'trim', tag: 'ai' }, 'a sell is a percent of the SESSION’s bag');
+  assert.equal(sell.ok, true);
+  // A hold is logged and takes no trade slot.
+  const before = tools.recentAttempts().length;
+  assert.equal((await tools.call('trader_act', { session_id: 'kt_one', action: 'hold', reason: 'nothing to do', expected_seq: 3 })).ok, true);
+  assert.equal(tools.recentAttempts().length, before, 'a hold uses no slot');
+  assert.deepEqual(calls.trader[2].intent, { action: 'hold', reason: 'nothing to do' });
+  ok('trader_act: read tier refused; bad args refused; not-MCP / not-running refused; T13 paper cannot move live; T27 stale seq refused before the budget; budget, then the session');
+}
+
+console.log(`\nmcptools: ${passed}/12 passed`);

@@ -67,11 +67,26 @@ const CREATOR = new PublicKey(FIX.creator);
 }
 
 {
-  // The undocumented tail. If pump ever puts something there, this fails
-  // before a user's transaction does.
+  // The 09-10 "undocumented tail" is creator_fee_bps (IDL, read 09-25): an
+  // OptionU64, sent as 0 on every observed launch.
   const data = createV2Data({ ...FIX.args, creator: new PublicKey(FIX.args.creator) });
-  assert.deepEqual([...data.subarray(-8)], [0, 0, 0, 0, 0, 0, 0, 0], 'the trailing eight bytes are zero, as every observed launch sends');
-  ok('the eight undocumented trailing bytes are sent as zero, as observed');
+  assert.deepEqual([...data.subarray(-8)], [0, 0, 0, 0, 0, 0, 0, 0], 'creator_fee_bps is sent as 0, as every observed launch sends');
+  ok('creator_fee_bps (the old "undocumented" eight bytes) is sent as zero, as observed');
+}
+
+{
+  // HOLDER REWARDS (2026-09-12): the current 11-byte form, reproduced byte for
+  // byte from a real successful launch that turned holder rewards on.
+  const HR = JSON.parse(fs.readFileSync(new URL('./fixtures/pump-create-holder.json', import.meta.url), 'utf8'));
+  const args = { ...HR.args, creator: new PublicKey(HR.args.creator) };
+  const data = createV2Data(args);
+  assert.equal(data.toString('hex'), HR.data, 'a holder-rewards create matches the real one byte for byte');
+  assert.equal(data[data.length - 1], 1, 'is_holder_reward is the last byte, and it is 1');
+  assert.equal(createV2Data({ ...args, holderReward: false })[data.length - 1], 0, 'off is an explicit 0 in the current form');
+  assert.equal(createV2Data({ ...args, holderReward: null }).length, data.length - 1, 'null keeps the older form without the byte');
+  assert.equal(HR.accounts.length, 16, 'same sixteen accounts');
+  assert.equal(HR.accounts[11], solVault().toBase58(), 'same mayhem sol_vault in slot 11');
+  ok('holder rewards: the current create form reproduces a real launch exactly');
 }
 
 {

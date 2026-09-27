@@ -143,14 +143,34 @@ message swallowed.
 
 ## 7. The tools
 
-Thirteen read, four trade. Read first in the catalogue, so an agent listing
-them meets the ways of looking before the ways of spending.
+Sixteen read, six trade (as of 2026-09-25). Read first in the catalogue, so
+an agent listing them meets the ways of looking before the ways of spending.
 
 `get_wallet` · `get_positions` · `get_token` · `find_tokens` ·
 `get_wallet_scores` · `get_wallet_record` · `get_copy_configs` · `get_orders` ·
 `get_trade_history` · `get_chart` · `get_token_links` · `get_runner_alerts` ·
-`get_callouts` — then `buy_token` · `sell_token` · `place_order` ·
-`cancel_orders`.
+`get_callouts` · `get_trader_sessions` · `get_trader_session` ·
+`get_krypto_sessions` — then `buy_token` · `sell_token` · `place_order` ·
+`krypto_mode_trade` · `trader_act` · `cancel_orders`.
+
+### Krypto Trader (2026-09-25)
+
+`get_trader_sessions` / `get_trader_session {session_id}` read the sessions;
+the second returns the facts the session trades on (numbers only — the coin
+is "the coin", no creator-written text), the envelope, `seq`, the last 20
+fills and what is left of both budgets, and its description says token text
+from `get_token` is creator-written and untrusted. `trader_act {session_id,
+action, sol?, percent?, reason, expected_seq}` is the trade tier, checked in
+this order: `toolAllowed`; the session exists, `driver === 'mcp'` and it is
+running; a live session needs a live connection (a paper connection cannot
+move a live session); `expected_seq` equals the session's `seq`;
+`checkMcpTrade` (the connection budget, reserved first; a paper session is
+held to the rate limit only); then the session's own guard
+(`checkTraderIntent`) under its lock, logged `by: 'mcp'`. A hold is logged
+and takes no trade slot. **No tool creates, funds, starts, resumes or
+configures a session**, pinned in `test/mcp.test.mjs`; `krypto_mode_trade`
+never reaches a Trader session (it looks up Krypto Mode sessions by mint).
+Design: docs/krypto-trader-2026-09-25.md §8.
 
 **Three chains, where the app has three.** Trades, positions, token lookups,
 the Discover lists, the Scout tools and the runner alerts all take a `chain`

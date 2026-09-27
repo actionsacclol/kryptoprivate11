@@ -31,6 +31,7 @@ const fill = (over = {}) => ({
   tokenDeltaRaw: over.tokenDeltaRaw ?? null,
   decimals: over.decimals ?? 6,
   feeLamports: over.feeLamports ?? null,
+  rentLamports: over.rentLamports,
   state: over.state ?? 'reconciled',
   note: over.note ?? null,
   wallet: over.wallet === undefined ? null : over.wallet,
@@ -84,6 +85,57 @@ test('sells accumulate proceeds and tokens sold', () => {
   assert.equal(b.receivedSol, 3);
   assert.equal(b.tokensBought, 2000);
   assert.equal(b.tokensSold, 1000);
+});
+
+// The anchor for percentage orders is a PRICE: the HDL buy of 2026-09-26 sent
+// 16,424,118 lamports, of which 1,005,000 was the network fee and 1,513,840
+// the new token account's rent — the all-in figure put a "+100%" take-profit
+// at ~2.4x the fill. PnL keeps the all-in cost.
+test('entrySpentSol takes the fee and the rent deposit out; spentSol keeps them', () => {
+  ledger._reset();
+  ledger._load([
+    fill({ side: 'buy', solDeltaLamports: -16_424_118, tokenDeltaRaw: '178383000000', feeLamports: 1_005_000, rentLamports: 1_513_840 }),
+  ]);
+  const b = ledger.basisByMint().get(MINT);
+  assert.equal(b.spentSol, 16_424_118 / LAM, 'PnL cost stays all-in');
+  assert.equal(Math.round(b.entrySpentSol * LAM), 13_905_278);
+});
+
+test('a fill recorded before rent was tracked still drops its known fee, and a fee-less one drops nothing', () => {
+  ledger._reset();
+  ledger._load([
+    fill({ side: 'buy', solDeltaLamports: -2 * LAM, tokenDeltaRaw: '2000000000', feeLamports: 5_000 }),
+    fill({ id: 'b2', side: 'buy', solDeltaLamports: -1 * LAM, tokenDeltaRaw: '1000000000' }),
+  ]);
+  const b = ledger.basisByMint().get(MINT);
+  assert.equal(Math.round(b.entrySpentSol * LAM), 3 * LAM - 5_000);
+});
+
+test('entrySpentSol resets with the episode like spentSol', () => {
+  ledger._reset();
+  ledger._load([
+    fill({ id: 'a', at: 1, side: 'buy', solDeltaLamports: -1 * LAM, tokenDeltaRaw: '1000000000', feeLamports: 10_000 }),
+    fill({ id: 'b', at: 2, side: 'sell', solDeltaLamports: 1 * LAM, tokenDeltaRaw: '-1000000000' }),
+    fill({ id: 'c', at: 3, side: 'buy', solDeltaLamports: -0.5 * LAM, tokenDeltaRaw: '100000000', feeLamports: 10_000 }),
+  ]);
+  const b = ledger.basisByMint().get(MINT);
+  assert.equal(Math.round(b.entrySpentSol * LAM), 0.5 * LAM - 10_000);
+});
+
+test('rentLockedFor counts only token accounts the fill CREATED for the owner and mint', () => {
+  const OWNER = 'Owner1111111111111111111111111111111111111';
+  const meta = {
+    preBalances: [100, 0, 2_039_280, 0],
+    postBalances: [50, 1_513_840, 2_039_280, 2_039_280],
+    postTokenBalances: [
+      { accountIndex: 1, mint: MINT, owner: OWNER },   // new ATA -> rent
+      { accountIndex: 2, mint: MINT, owner: OWNER },   // existed already
+      { accountIndex: 3, mint: MINT, owner: 'Someone' }, // not ours
+    ],
+  };
+  assert.equal(ledger.rentLockedFor(meta, MINT, OWNER), 1_513_840);
+  assert.equal(ledger.rentLockedFor({ ...meta, postTokenBalances: null }, MINT, OWNER), null);
+  assert.equal(ledger.rentLockedFor(meta, OTHER, OWNER), 0);
 });
 
 // ── Position PnL ──────────────────────────────────────────────────────

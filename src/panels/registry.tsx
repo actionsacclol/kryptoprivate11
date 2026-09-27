@@ -24,7 +24,7 @@ import type { Candle } from '@shared/market';
 import type { AdvOrder, OrdersSnapshot } from '@shared/orders';
 import type { TradeHistoryRow } from '@shared/portfolio';
 import type { EvmFill } from '@shared/evm';
-import { scriptChain, type ScriptSnapshot } from '@shared/automation';
+import { mergeSnapshot, scriptChain, type ScriptSnapshot } from '@shared/automation';
 import type { ScriptStatValue } from '@shared/scriptProtocol';
 import { chainOf, leaderTooFast, type CopySnapshot } from '@shared/copytrade';
 import type { Alert } from '@shared/alerts';
@@ -946,7 +946,14 @@ function ScriptsBody(): ReactNode {
       if (alive && r.ok && r.data) setSnap(r.data);
     });
     const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'automation') setSnap(ev.snapshot);
+      if (ev.kind === 'automation') {
+        // Live updates carry no code; keep what is on screen (mergeSnapshot).
+        setSnap((prev) => {
+          const m = mergeSnapshot(prev, ev.snapshot);
+          if (m.stale) queueMicrotask(() => void window.krypt.automation.list().then((r) => r.ok && r.data && setSnap(r.data)));
+          return m.snap;
+        });
+      }
     });
     return () => {
       alive = false;
@@ -1539,7 +1546,14 @@ function useScriptSnapshot(): ScriptSnapshot | null {
       if (alive && r.ok && r.data) setSnap(r.data);
     });
     const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'automation') setSnap(ev.snapshot);
+      if (ev.kind === 'automation') {
+        // Live updates carry no code; keep what is on screen (mergeSnapshot).
+        setSnap((prev) => {
+          const m = mergeSnapshot(prev, ev.snapshot);
+          if (m.stale) queueMicrotask(() => void window.krypt.automation.list().then((r) => r.ok && r.data && setSnap(r.data)));
+          return m.snap;
+        });
+      }
     });
     return () => {
       alive = false;

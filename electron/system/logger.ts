@@ -30,6 +30,9 @@ export interface LogLine {
 export const LOG_FILE = 'app.log';
 export const LOG_MAX_BYTES = 5 * 1024 * 1024;
 const FLUSH_MS = 250;
+/** Cap on unflushed text (characters). Only reached when the disk refuses
+ *  writes for a long time; then the oldest buffered lines are dropped. */
+const PENDING_MAX_CHARS = 2 * 1024 * 1024;
 
 // ─── Pure helpers (tested offline) ────────────────────────────────────
 
@@ -108,6 +111,14 @@ function takePending(): string {
 }
 
 function flushAsync(): void {
+  // This runs FROM the timer, so the timer is spent: forget it before any
+  // early return. It used to survive the `writing` return below, and a timer
+  // that fired while a slow append was still in flight (AV scan, busy disk)
+  // left a dead handle in `timer` — `schedule()` then refused to arm a new one
+  // forever, the file went silent for the rest of the session and `pending`
+  // grew without bound (app.log stopped at 09-26 02:16 while the app ran on).
+  timer = null;
+  // A write in flight re-schedules from its own `finally` when it lands.
   if (!sinkFile || !pending || writing) return;
   const chunk = takePending();
   const bytes = Buffer.byteLength(chunk, 'utf8');
@@ -191,6 +202,11 @@ function push(level: Level, rawLine: string): void {
   }
   if (sinkFile) {
     pending += formatLine(entry);
+    // A disk that stays unwritable must not turn the buffer into a leak:
+    // keep the newest lines (the ones a crash report needs) and say so.
+    if (pending.length > PENDING_MAX_CHARS) {
+      pending = `${formatLine({ at: entry.at, level: 'warn', line: 'log buffer overflowed — older lines dropped' })}${pending.slice(-PENDING_MAX_CHARS / 2)}`;
+    }
     schedule();
   }
   // eslint-disable-next-line no-console

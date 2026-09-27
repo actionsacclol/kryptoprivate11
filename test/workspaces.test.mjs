@@ -188,6 +188,27 @@ test('Farming is reachable but ships with nothing running', () => {
   }
 });
 
+test('Krypto Trader is a page under Automation, reached from the Token and Runners pages', () => {
+  // 2026-09-25: Krypto Mode generalised to any coin. It acts without a click,
+  // so it lives in Automation, beside Scripts.
+  assert.equal(workspaceOf('trader'), 'automation');
+  const automation = routesFor('automation');
+  assert.ok(automation.includes('trader'), 'Automation lists it');
+  assert.equal(automation.indexOf('trader') + 1, automation.indexOf('scripts'), 'right before Scripts');
+  assert.match(sidebarSrc, /\{ id: 'trader', label: 'Krypto Trader'/, 'the sidebar row is called Krypto Trader');
+  const loaders = fs.readFileSync(new URL('../src/routeLoaders.ts', import.meta.url), 'utf8');
+  assert.match(loaders, /trader: \(\) => import\('\.\/pages\/KryptoTrader'\)/, 'the loader exists');
+  const app = fs.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(app, /route === 'trader' && <KryptoTraderPage \/>/, 'App renders it');
+  // "Open in Krypto Trader": the coin is handed over, then the route opens.
+  assert.match(app, /setTraderPrefill\(mint, chain \?\? 'solana'\);\s*navigate\('trader'\)/, 'openTrader hands the coin (and its chain) over and navigates');
+  assert.match(app, /<EvmTokenPage [^\n]*onOpenTrader=\{openTrader\}/, 'the EVM token page gets the link too (stage 4)');
+  assert.match(app, /<TokenPage [^\n]*onOpenTrader=\{openTrader\}/, 'the Token page gets the link');
+  assert.match(app, /<RunnersPage [^\n]*onOpenTrader=\{openTrader\}/, 'the Runners page gets the link');
+  const token = fs.readFileSync(new URL('../src/pages/Token.tsx', import.meta.url), 'utf8');
+  assert.match(token, /Open in Krypto Trader/);
+});
+
 test('the AI connection (MCP) is a page under Automation, and Settings points to it', () => {
   // Moved out of Settings on 2026-09-23: users did not know it existed.
   assert.equal(workspaceOf('mcp'), 'automation');
@@ -249,6 +270,20 @@ test('workspaceOf never throws, whatever it is handed', () => {
   assert.equal(typeof workspaceOf('not-a-route'), 'string');
 });
 
+test('Profiles is its own page in the Settings & Legal sidebar, not a Settings section', () => {
+  // 2026-09-26, user: "profiles should have its own section on the left side of settings panel".
+  assert.equal(workspaceOf('profiles'), 'system');
+  assert.deepEqual(routesFor('system'), ['settings', 'profiles', 'about', 'legal']);
+  assert.match(sidebarSrc, /\{ id: 'profiles', label: 'Profiles'/);
+  const page = fs.readFileSync(new URL('../src/pages/Profiles.tsx', import.meta.url), 'utf8');
+  assert.match(page, /<ProfilesPanel \/>/, 'the page carries the panel');
+  const settings = fs.readFileSync(new URL('../src/pages/Settings.tsx', import.meta.url), 'utf8');
+  assert.ok(!/ProfilesPanel/.test(settings), 'one home: Settings no longer renders it');
+  const app = fs.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(app, /route === 'profiles' && <ProfilesPage \/>/);
+  assert.match(app, /onOpenProfiles=\{\(\) => navigate\('profiles'\)\}/, "the top-bar badge's Manage opens it");
+});
+
 const run = async () => {
   for (const c of cases) {
     try {
@@ -264,3 +299,4 @@ const run = async () => {
 };
 
 await run();
+

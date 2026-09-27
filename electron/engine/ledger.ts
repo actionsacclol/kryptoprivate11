@@ -57,6 +57,14 @@ export interface Fill {
   decimals: number | null;
   /** Network fee in lamports, as reported by the transaction. */
   feeLamports: number | null;
+  /**
+   * Lamports this fill locked into token accounts it CREATED for the wallet
+   * (the ATA rent a first buy pays). A deposit, not a cost: closing the
+   * account on a full sell returns it. Kept apart so a percentage order can
+   * be anchored on the PRICE paid rather than on price + deposit — see
+   * `entrySpentSol`. Absent/null on fills recorded before it existed.
+   */
+  rentLamports?: number | null;
   state: 'pending' | 'reconciled' | 'unreconciled';
   note: string | null;
   /**
@@ -236,6 +244,10 @@ export function recordFill(
   return fill;
 }
 
+/** The note on a fill the chain PROVES did not land (meta.err). Krypto
+ *  Trader reads it: every other unreconciled row is unprovable, not failed. */
+export const FAILED_ON_CHAIN_NOTE = 'Transaction failed on chain';
+
 async function reconcile(fill: Fill, httpUrl: string, owner: string): Promise<void> {
   if (reconciling.has(fill.id)) return;
   reconciling.add(fill.id);
@@ -258,7 +270,7 @@ async function reconcileOnce(fill: Fill, httpUrl: string, owner: string): Promis
     if (!meta) continue;
     if (meta.err) {
       fill.state = 'unreconciled';
-      fill.note = 'Transaction failed on chain';
+      fill.note = FAILED_ON_CHAIN_NOTE;
       persist();
       settled(fill);
       return;
@@ -276,6 +288,7 @@ async function reconcileOnce(fill: Fill, httpUrl: string, owner: string): Promis
       }
     }
     fill.feeLamports = Number.isFinite(meta.fee) ? (meta.fee as number) : null;
+    fill.rentLamports = rentLockedFor(meta, fill.mint, owner);
 
     // Token delta for this mint, summed across the owner's token accounts.
     const sumFor = (entries: typeof meta.preTokenBalances): bigint => {
@@ -315,6 +328,34 @@ async function reconcileOnce(fill: Fill, httpUrl: string, owner: string): Promis
   fill.note = `Transaction not found after ${MAX_RECONCILE_ROUNDS} rounds — it did not land`;
   persist();
   settled(fill);
+}
+
+/**
+ * Lamports moved into the owner's token accounts for `mint` that did not
+ * exist before this transaction (pre-balance 0) — the rent deposit of an ATA
+ * the fill created. 0 when it created none, null when the balances needed to
+ * tell are missing. `accountIndex` indexes the same full key list (static +
+ * ALT) as pre/postBalances, so no key resolution is needed here.
+ */
+export function rentLockedFor(
+  meta: {
+    preBalances?: number[];
+    postBalances?: number[];
+    postTokenBalances?: Array<{ accountIndex: number; mint: string; owner?: string }> | null;
+  },
+  mint: string,
+  owner: string,
+): number | null {
+  if (!meta.preBalances || !meta.postBalances || !meta.postTokenBalances) return null;
+  let rent = 0;
+  for (const e of meta.postTokenBalances) {
+    if (e.mint !== mint || (e.owner && e.owner !== owner)) continue;
+    const pre = meta.preBalances[e.accountIndex];
+    const post = meta.postBalances[e.accountIndex];
+    if (!Number.isFinite(pre) || !Number.isFinite(post)) return null;
+    if (pre === 0 && post > 0) rent += post;
+  }
+  return rent;
 }
 
 let reconcileInFlight = false;
@@ -370,6 +411,15 @@ export interface MintBasis {
   // (user reports, 2026-09-13).
   /** SOL actually spent on buys in this episode, fees included. */
   spentSol: number;
+  /**
+   * The same buys with the network fee and the token-account rent deposit
+   * taken back out: what was paid for the TOKENS. The price anchor for
+   * percentage orders. `spentSol` stays the all-in cost that PnL is measured
+   * against; anchoring a "+100%" take-profit on it (which on a 0.016 SOL buy
+   * carries ~0.0025 SOL of priority fee + rent) put the rung at ~2.4x the
+   * real fill, and a "−40%" stop at −29% (user report, 2026-09-26).
+   */
+  entrySpentSol: number;
   /** SOL actually received from sells in this episode, fees deducted. */
   receivedSol: number;
   /** Tokens bought in this episode, in whole units. */
@@ -469,7 +519,7 @@ export function basisByMint(
     let b = out.get(f.mint);
     if (!b) {
       b = {
-        mint: f.mint, symbol: f.symbol, spentSol: 0, receivedSol: 0,
+        mint: f.mint, symbol: f.symbol, spentSol: 0, entrySpentSol: 0, receivedSol: 0,
         tokensBought: 0, tokensSold: 0, buys: 0, sells: 0,
         firstAt: null, lastAt: null, unreconciled: 0,
         lifetimeSpentSol: 0, lifetimeReceivedSol: 0,
@@ -499,6 +549,11 @@ export function basisByMint(
       b.lifetimeBuys += 1;
       // solDelta is negative on a buy; spend is its magnitude.
       b.spentSol += Math.max(0, -sol);
+      // Fee and rent come out only when known; an unknown one stays in, so
+      // this is never LOWER than the true price paid by a guess.
+      const overhead = ((f.feeLamports ?? 0) + (f.rentLamports ?? 0)) / LAMPORTS;
+      const paid = Math.max(0, -sol);
+      b.entrySpentSol += paid - overhead > 0 ? paid - overhead : paid;
       b.tokensBought += Math.max(0, tokens);
       b.lifetimeSpentSol += Math.max(0, -sol);
       b.lifetimeTokensBought += Math.max(0, tokens);
@@ -537,6 +592,7 @@ export function basisByMint(
         });
         running.set(f.mint, 0);
         b.spentSol = 0;
+        b.entrySpentSol = 0;
         b.receivedSol = 0;
         b.tokensBought = 0;
         b.tokensSold = 0;

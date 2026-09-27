@@ -1,4 +1,5 @@
-import type { KryptoSession } from '@shared/kryptoMode';
+import type { KryptoGoal, KryptoLimits, KryptoSession } from '@shared/kryptoMode';
+import type { TraderFit, TraderLimits, TraderOptions, TraderRow } from '@shared/kryptoTrader';
 import type { WalletWithdrawResult, AppSettings, BacktestTrade, EngineEvent, EngineSnapshot, ExecutionSnapshot, HistorySummary, IpcResult, LiveState, WalletHolding, WalletInfo, WalletSummary, WatchedWallet } from '@shared/types';
 import type {
   CandleInterval,
@@ -42,6 +43,7 @@ import type { SwapDraft, SwapQuote } from '@shared/swap';
 import type { BridgeDraft, BridgeQuote, InFlight } from '@shared/bridge';
 import type { ScoutChain, ScoutRow, ScoutScanHours, ScoutScanStatus, ScoutSort, ScoutWallet, ScoutWindow, WalletReadStatus } from '@shared/walletScout';
 import type { McpAccess, McpBudget, McpSettings } from '@shared/mcp';
+import type { ProfilesView } from '../electron/system/profiles';
 
 /** What the AI-connection panel reads in one call. */
 interface McpPanel {
@@ -81,6 +83,15 @@ declare global {
         popout: (panelId: string) => Promise<IpcResult<void>>;
         close: () => Promise<IpcResult<void>>;
         openToken: (mint: string, chain?: string) => Promise<IpcResult<void>>;
+      };
+      profiles: {
+        list: () => Promise<IpcResult<ProfilesView>>;
+        create: (name: string) => Promise<IpcResult<ProfilesView>>;
+        duplicate: (name: string, copyWallets: boolean) => Promise<IpcResult<ProfilesView>>;
+        rename: (id: string, name: string) => Promise<IpcResult<ProfilesView>>;
+        remove: (id: string) => Promise<IpcResult<ProfilesView>>;
+        open: (id: string) => Promise<IpcResult>;
+        shortcut: (id: string) => Promise<IpcResult>;
       };
       legal: {
         status: () => Promise<
@@ -518,6 +529,24 @@ declare global {
         sellAll: (id: string) => Promise<IpcResult<void>>;
         withdraw: (id: string) => Promise<IpcResult<void>>;
         remove: (id: string) => Promise<IpcResult<void>>;
+        setLimits: (id: string, patch: { limits?: Partial<KryptoLimits>; goal?: KryptoGoal; budgetSol?: number }) => Promise<IpcResult<void>>;
+      };
+      /** Krypto Trader. `open` always opens on paper; going live is `goLive`
+       *  (the page confirms). There is no goal and no target field. */
+      kryptoTrader: {
+        list: () => Promise<IpcResult<{ sessions: TraderRow[]; failure: string | null }>>;
+        /** The fit check, computed in main. Unknown = null, never 0. */
+        fit: (mint: string, opts: Partial<TraderOptions>) => Promise<IpcResult<TraderFit>>;
+        open: (options: Partial<TraderOptions>) => Promise<IpcResult<TraderRow>>;
+        pause: (id: string) => Promise<IpcResult<void>>;
+        resume: (id: string) => Promise<IpcResult<void>>;
+        goLive: (id: string) => Promise<IpcResult<void>>;
+        sellAll: (id: string) => Promise<IpcResult<void>>;
+        setEnvelope: (id: string, patch: Partial<Pick<TraderOptions, 'maxLossPct' | 'timeLimitH' | 'atExpiry' | 'reinvest' | 'thesis'>>) => Promise<IpcResult<void>>;
+        setLimits: (id: string, patch: Partial<TraderLimits>) => Promise<IpcResult<void>>;
+        remove: (id: string) => Promise<IpcResult<void>>;
+        reconcile: (id: string) => Promise<IpcResult<void>>;
+        adopt: (id: string) => Promise<IpcResult<void>>;
       };
       evm: {
         state: (chain: EvmChainKind) => Promise<IpcResult<EvmState>>;

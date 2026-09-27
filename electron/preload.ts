@@ -36,6 +36,17 @@ const api = {
       /** Open a coin in the MAIN window from a popped-out panel. */
       openToken: (mint: string, chain?: string) => ipcRenderer.invoke('panel:openToken', mint, chain),
     },
+  /** Profiles — isolated copies of the app (Settings → Profiles). Every call
+   *  names a profile by id; main never takes a path from here. */
+  profiles: {
+    list: () => ipcRenderer.invoke('profiles:list'),
+    create: (name: string) => ipcRenderer.invoke('profiles:create', name),
+    duplicate: (name: string, copyWallets: boolean) => ipcRenderer.invoke('profiles:duplicate', name, copyWallets),
+    rename: (id: string, name: string) => ipcRenderer.invoke('profiles:rename', id, name),
+    remove: (id: string) => ipcRenderer.invoke('profiles:remove', id),
+    open: (id: string) => ipcRenderer.invoke('profiles:open', id),
+    shortcut: (id: string) => ipcRenderer.invoke('profiles:shortcut', id),
+  },
   legal: {
     status: () => ipcRenderer.invoke('legal:status'),
     accept: () => ipcRenderer.invoke('legal:accept'),
@@ -354,6 +365,22 @@ const api = {
     sellAll: (id: string) => ipcRenderer.invoke('kryptoMode:sellAll', id),
     withdraw: (id: string) => ipcRenderer.invoke('kryptoMode:withdraw', id),
     remove: (id: string) => ipcRenderer.invoke('kryptoMode:remove', id),
+    setLimits: (id: string, patch: unknown) => ipcRenderer.invoke('kryptoMode:setLimits', id, patch),
+  },
+  /** Krypto Trader — one coin, one of your wallets, a preset or an AI. Paper first. */
+  kryptoTrader: {
+    list: () => ipcRenderer.invoke('kryptoTrader:list'),
+    fit: (mint: string, opts: unknown) => ipcRenderer.invoke('kryptoTrader:fit', mint, opts),
+    open: (raw: unknown) => ipcRenderer.invoke('kryptoTrader:open', raw),
+    pause: (id: string) => ipcRenderer.invoke('kryptoTrader:pause', id),
+    resume: (id: string) => ipcRenderer.invoke('kryptoTrader:resume', id),
+    goLive: (id: string) => ipcRenderer.invoke('kryptoTrader:goLive', id),
+    sellAll: (id: string) => ipcRenderer.invoke('kryptoTrader:sellAll', id),
+    setEnvelope: (id: string, patch: unknown) => ipcRenderer.invoke('kryptoTrader:setEnvelope', id, patch),
+    setLimits: (id: string, patch: unknown) => ipcRenderer.invoke('kryptoTrader:setLimits', id, patch),
+    remove: (id: string) => ipcRenderer.invoke('kryptoTrader:remove', id),
+    reconcile: (id: string) => ipcRenderer.invoke('kryptoTrader:reconcile', id),
+    adopt: (id: string) => ipcRenderer.invoke('kryptoTrader:adopt', id),
   },
 
   evm: {

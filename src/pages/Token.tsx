@@ -70,7 +70,7 @@ const HELD_OVER_NOTE_MS = 45_000;
  *  a minute is far inside what SOL moves in a session. */
 const SOL_RATE_POLL_MS = 60_000;
 
-export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }) {
+export function TokenPage({ mint, onBack, onOpenTrader }: { mint: string; onBack: () => void; onOpenTrader?: (mint: string) => void }) {
   const term = useTerminal();
   const toast = useToast();
 
@@ -737,6 +737,17 @@ export function TokenPage({ mint, onBack }: { mint: string; onBack: () => void }
                 Solscan
                 <ExternalLink className="h-3 w-3" />
               </button>
+              {/* Krypto Trader (2026-09-25): opens its form with this coin
+                  filled in. Nothing starts until Start (paper) there. */}
+              {onOpenTrader && (
+                <button
+                  onClick={() => onOpenTrader(mint)}
+                  title="Trade this coin from one of your wallets with a preset or an AI — paper first"
+                  className="flex items-center gap-1 text-body text-krypt-muted hover:text-krypt-purple transition"
+                >
+                  Open in Krypto Trader
+                </button>
+              )}
               {/* The token's own links — X, website, Telegram — and its
                   launchpad page, up here where a trader looks first
                   (2026-09-20). Each opens the system browser; the Links

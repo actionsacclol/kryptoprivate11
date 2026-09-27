@@ -26,7 +26,12 @@ import {
   paperSellProceeds,
   parseKryptoIntent,
   strategyIntent,
+  DEFAULT_KRYPTO_LIMITS,
+  KRYPTO_MAX_BUDGET_SOL,
+  KRYPTO_MIN_BUDGET_SOL,
+  kryptoLimitsOf,
   type KryptoDriver,
+  type KryptoGoal,
   type KryptoIntent,
   type KryptoOptions,
   type KryptoSession,
@@ -54,8 +59,9 @@ export interface KryptoHost {
   priceSol(mint: string): Promise<number | null>;
   /** Public market facts for the AI driver. */
   market(mint: string): { symbol: string; ageSec: number | null; marketCapUsd: number | null; holders: number | null; change5mPct: number | null };
-  /** Why a live trade cannot run now (not armed, breaker…), or null. */
-  liveBlocked(): string | null;
+  /** Why a live trade cannot run now, or null. A 'sell' meets only "not
+   *  armed / switched off" — breakers block buys, never sells (K1). */
+  liveBlocked(side?: 'buy' | 'sell'): string | null;
   buy(walletId: string, mint: string, sol: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }>;
   sell(walletId: string, mint: string, pct: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }>;
   /** The bot wallet's SOL (lamports) and token balance (UI units); null = unread. */
@@ -63,7 +69,7 @@ export interface KryptoHost {
   fund(fromWalletId: string, toAddress: string, lamports: number): Promise<{ ok: boolean; message: string }>;
   collect(walletId: string, toWalletId: string): Promise<{ ok: boolean; message: string }>;
   /** Ask the user's AI key. Null when no key is set. */
-  ask(facts: string): Promise<{ ok: boolean; message: string; text?: string } | null>;
+  ask(facts: string, goal: KryptoGoal): Promise<{ ok: boolean; message: string; text?: string } | null>;
   /** Keep live ticks flowing for this mint. */
   watch(mint: string): void;
   emit(sessions: KryptoSession[]): void;
@@ -76,8 +82,6 @@ const MAX_SESSIONS = 50;
 /** SOL left in the bot wallet on top of the budget, for fees and rent. */
 export const FEE_HEADROOM_LAMPORTS = 15_000_000;
 const TICK_MS = 5_000;
-const AI_EVERY_MS = 60_000;
-const AI_PER_HOUR = 30;
 const SYNC_EVERY_MS = 30_000;
 
 let host: KryptoHost | null = null;
@@ -90,8 +94,21 @@ const busy = new Set<string>();
 
 // ─── persistence ───────────────────────────────────────────────────────────
 
+let loadedDir: string | null = null;
+
 export function init(userDataDir: string, h: KryptoHost): void {
   host = h;
+  load(userDataDir, (line) => h.log('warn', line));
+}
+
+/**
+ * Read the file. electron/main.ts calls this BEFORE its startup dialog so
+ * `failure()` is listed there (K3) — `init`, which needs the engine's host,
+ * runs later from registerIpc and does not read a loaded file twice.
+ */
+export function load(userDataDir: string, warn: (line: string) => void = () => {}): void {
+  if (userDataDir && loadedDir === userDataDir) return;
+  loadedDir = userDataDir;
   filePath = userDataDir ? path.join(userDataDir, FILE) : '';
   loadFailure = null;
   sessions = [];
@@ -103,7 +120,7 @@ export function init(userDataDir: string, h: KryptoHost): void {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
       loadFailure = `${filePath} could not be read (${(e as Error).message})`;
-      h.log('warn', `krypto mode: ${loadFailure} — sessions are read-only this run`);
+      warn(`krypto mode: ${loadFailure} — sessions are read-only this run`);
     }
     return;
   }
@@ -113,7 +130,7 @@ export function init(userDataDir: string, h: KryptoHost): void {
     declared = raw.declared && typeof raw.declared === 'object' ? raw.declared : {};
   } catch (e) {
     loadFailure = `${filePath} is corrupt (${(e as Error).message})`;
-    h.log('warn', `krypto mode: ${loadFailure} — sessions are read-only this run`);
+    warn(`krypto mode: ${loadFailure} — sessions are read-only this run`);
     sessions = [];
     declared = {};
   }
@@ -150,6 +167,12 @@ export function declare(metadataUri: string, walletId: string, address: string):
   const keys = Object.keys(declared).sort((a, b) => declared[a]!.at - declared[b]!.at);
   while (keys.length > 20) delete declared[keys.shift()!];
   save();
+}
+
+/** Every wallet a Krypto Mode upload ever declared — Krypto Trader refuses
+ *  them (M9: a bot on your own coin must be declared). */
+export function declaredWallets(): string[] {
+  return [...new Set(Object.values(declared).map((d) => d.walletId))];
 }
 
 export function declaredFor(metadataUri: string): KryptoDeclared | null {
@@ -190,6 +213,8 @@ export async function start(p: {
     launchWalletId: p.launchWalletId,
     metadataUri: p.metadataUri,
     driver: p.options.driver,
+    goal: p.options.goal,
+    limits: kryptoLimitsOf(p.options.limits),
     strategy: p.options.strategy,
     budgetSol: p.options.budgetSol,
     mode: 'paper',
@@ -238,6 +263,28 @@ export function setStatus(id: string, status: KryptoStatus): { ok: boolean; mess
   s.note = null;
   changed();
   return { ok: true, message: `${s.symbol}: ${status}.` };
+}
+
+/**
+ * The creator changes a running bot's pacing, goal or budget. Their call —
+ * 0 turns a pacing limit off. The budget can grow on paper freely; on live the
+ * wallet only holds what was funded, so a bigger budget there takes effect as
+ * far as the wallet's SOL reaches.
+ */
+export function setLimits(id: string, patch: { limits?: unknown; goal?: unknown; budgetSol?: unknown }): { ok: boolean; message: string } {
+  const s = find(id);
+  if (!s) return { ok: false, message: 'No such session.' };
+  if (patch.limits !== undefined) s.limits = kryptoLimitsOf({ ...(s.limits ?? DEFAULT_KRYPTO_LIMITS), ...(patch.limits as object) });
+  if (patch.goal === 'position' || patch.goal === 'support') s.goal = patch.goal;
+  if (patch.budgetSol !== undefined) {
+    const b = Number(patch.budgetSol);
+    if (!Number.isFinite(b) || b < KRYPTO_MIN_BUDGET_SOL || b > KRYPTO_MAX_BUDGET_SOL) {
+      return { ok: false, message: `The budget must be between ${KRYPTO_MIN_BUDGET_SOL} and ${KRYPTO_MAX_BUDGET_SOL} SOL.` };
+    }
+    s.budgetSol = b;
+  }
+  changed();
+  return { ok: true, message: `${s.symbol}: settings saved.` };
 }
 
 /** Paper → live: fund the budget from the launch wallet and start a fresh book. */
@@ -364,10 +411,11 @@ async function step(s: KryptoSession): Promise<void> {
     intent = strategyIntent(s.strategy, viewOf(s, now));
   } else if (s.driver === 'ai') {
     s.aiCalls = s.aiCalls.filter((t) => now - t < 3_600_000);
-    if ((s.lastAiAt === null || now - s.lastAiAt >= AI_EVERY_MS) && s.aiCalls.length < AI_PER_HOUR && px) {
+    const every = (s.limits ?? DEFAULT_KRYPTO_LIMITS).aiEverySec * 1000;
+    if ((s.lastAiAt === null || now - s.lastAiAt >= every) && px) {
       s.lastAiAt = now;
       s.aiCalls.push(now);
-      const r = await h.ask(kryptoFacts(viewOf(s, now), h.market(s.mint)));
+      const r = await h.ask(kryptoFacts(viewOf(s, now), h.market(s.mint)), s.goal ?? 'position');
       if (!r) s.note = 'No AI key is set (Settings → AI), so the bot holds.';
       else if (!r.ok || !r.text) s.note = `AI: ${r.message}`;
       else {
@@ -404,7 +452,7 @@ async function execute(s: KryptoSession, raw: KryptoIntent, by: KryptoDriver, fo
   const view = viewOf(s, now);
   let intent = raw;
   if (!force) {
-    const c = checkKryptoIntent(raw, view);
+    const c = checkKryptoIntent(raw, view, s.limits ?? DEFAULT_KRYPTO_LIMITS);
     if (!c.ok) {
       s.note = `${raw.action} refused: ${c.reason}`;
       return { ok: false, message: s.note };
@@ -450,7 +498,7 @@ async function execute(s: KryptoSession, raw: KryptoIntent, by: KryptoDriver, fo
     trade.ok = true;
     trade.message = 'paper fill';
   } else {
-    const blocked = h.liveBlocked();
+    const blocked = h.liveBlocked(intent.action);
     if (blocked && !force) {
       s.note = `live trade waiting: ${blocked}`;
       return { ok: false, message: s.note };
@@ -555,6 +603,7 @@ export async function tradeFromMcp(
 export function _reset(): void {
   stopLoop();
   host = null;
+  loadedDir = null;
   sessions = [];
   declared = {};
   loadFailure = null;

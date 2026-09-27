@@ -75,7 +75,9 @@ export const WORKSPACES: WorkspaceSpec[] = [
     // page a newcomer should land on; Copy Trading beside it has every
     // control on the same configs.
     // AI connection (MCP) moved here from Settings on 2026-09-23.
-    routes: ['copysimple', 'wallets', 'scripts', 'autocallout', 'pumpaccounts', 'mcp', 'farming'],
+    // Krypto Trader (2026-09-25) sits beside Scripts: both trade on rules you
+    // set, under a budget, paper first.
+    routes: ['copysimple', 'wallets', 'trader', 'scripts', 'autocallout', 'pumpaccounts', 'mcp', 'farming'],
     icon: 'automation',
     ready: true,
   },
@@ -169,7 +171,7 @@ export const WORKSPACES: WorkspaceSpec[] = [
     id: 'system',
     title: 'Settings & Legal',
     blurb: 'Preferences, providers, keys, and the documents you accepted.',
-    routes: ['settings', 'about', 'legal'],
+    routes: ['settings', 'profiles', 'about', 'legal'],
     icon: 'settings',
     ready: true,
   },

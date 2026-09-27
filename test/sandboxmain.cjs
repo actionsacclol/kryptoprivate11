@@ -136,7 +136,11 @@ app.whenReady().then(async () => {
   // before killing it, and a wedged one answers by never answering — so the
   // kill lands one probe timeout later than it used to. That second is the
   // price of not crashing well-behaved scripts.
-  await new Promise((r) => setTimeout(r, 6_000));
+  // 11 s since 2026-09-26: the probe now allows PROBE_SILENT_SLICES on-time
+  // silent slices (3 × 2 s) before declaring a renderer wedged, so a main
+  // process busy for a second no longer kills a healthy script. The kill
+  // lands at ~3 s deadline + ~6 s of silence.
+  await new Promise((r) => setTimeout(r, 11_000));
   out('after forge — gone:', JSON.stringify(gone), 'isRunning:', sb.isRunning('four'));
   const forgeKilled = !!gone && gone.id === 'four' && !sb.isRunning('four');
 

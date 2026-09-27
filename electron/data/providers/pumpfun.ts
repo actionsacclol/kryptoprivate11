@@ -250,7 +250,70 @@ export function migrated(limit = 40): Promise<PumpCoin[]> {
   return coins({ sort: 'last_trade_timestamp', limit, complete: true, key: `pf:mig:${limit}`, ttlMs: 6_000 });
 }
 
-/** One coin by mint — the bonding-curve half of the token page. */
+// ── One coin by mint ──────────────────────────────────────────────────
+//
+// pump MOVED this read on 2026-09-26 (~07:47Z): `GET /coins/{mint}` answers
+// 404 "Cannot GET" for every mint, while the list route `/coins?…` is
+// unchanged. pump's own web app now reads `/coins-v3/{mint}`; `/coins-v2/{mint}`
+// also answers. All three serve the SAME record shape (checked field by field
+// against a `/coins?` list row the same day).
+//
+// The two new routes say "no such coin" differently, and that difference is
+// what lets a gone ROUTE be told apart from an unknown COIN:
+//   /coins-v3/{mint}  unknown coin → 200 `null`. So a 404 here means the route.
+//   /coins-v2/{mint}  unknown coin → 404 "Coin not found". A 404 is an answer.
+//   /coins/{mint}     the old route, kept last in case pump restores it.
+// A route is only skipped for good when its 404 cannot mean "unknown coin" —
+// otherwise every unlisted mint would walk the app off a working route.
+
+interface CoinRoute {
+  path: (mint: string) => string;
+  /** True when this route answers an UNKNOWN coin with 404, so a 404 from it
+   *  is a verdict about the coin rather than evidence the route is gone. */
+  unknownIs404: boolean;
+}
+
+export const COIN_ROUTES: readonly CoinRoute[] = [
+  { path: (m) => `/coins-v3/${encodeURIComponent(m)}?includeLiveStreamInfo=false`, unknownIs404: false },
+  { path: (m) => `/coins-v2/${encodeURIComponent(m)}`, unknownIs404: true },
+  { path: (m) => `/coins/${encodeURIComponent(m)}`, unknownIs404: true },
+];
+
+/** Index of the first route not yet proven gone. Moves forward only. */
+let coinRouteAt = 0;
+
+/** For tests: which route the next read starts from. */
+export function coinRouteIndex(): number {
+  return coinRouteAt;
+}
+/** For tests only. */
+export function resetCoinRoute(): void {
+  coinRouteAt = 0;
+}
+
+/**
+ * One coin, trying the routes in order. The result of the route that
+ * ANSWERED — a record, an unknown coin (`coin: null, error: null`), or the
+ * failure of the last route tried. Never a made-up record.
+ */
+async function readCoin(mint: string, opts: { priority?: boolean } = {}): Promise<{ coin: PumpCoin | null; error: string | null }> {
+  let last: { coin: PumpCoin | null; error: string | null } = { coin: null, error: 'pump.fun: no coin route answered' };
+  for (let i = coinRouteAt; i < COIN_ROUTES.length; i++) {
+    const route = COIN_ROUTES[i];
+    const r = await getJson<PumpCoin | null>('pumpfun', route.path(mint), { priority: opts.priority });
+    if (r.ok) {
+      const c = r.data;
+      return c && typeof c.mint === 'string' ? { coin: c, error: null } : { coin: null, error: null };
+    }
+    last = { coin: null, error: `pump.fun ${r.status ?? 'network'}: ${r.message}` };
+    if (r.status !== 404) return last; // a 429 / 5xx / timeout says nothing about the route
+    if (route.unknownIs404) return { coin: null, error: null }; // "no such coin" is an answer
+    // A 404 from a route that answers unknown coins with 200: the route is gone.
+    if (coinRouteAt === i) coinRouteAt = i + 1;
+  }
+  return last;
+}
+
 /** `coin()` for the trade path: no memo (one call per trade), and the HTTP
  *  failure is returned instead of swallowed. pump.fun's frontend API sits
  *  behind Cloudflare and blocks many VPN / datacenter exits with 403 — a user
@@ -259,18 +322,12 @@ export async function coinOrError(
   mint: string,
   opts: { priority?: boolean } = {},
 ): Promise<{ coin: PumpCoin | null; error: string | null }> {
-  const r = await getJson<PumpCoin>('pumpfun', `/coins/${encodeURIComponent(mint)}`, { priority: opts.priority });
-  if (!r.ok) return { coin: null, error: `pump.fun ${r.status ?? 'network'}: ${r.message}` };
-  if (!r.data || typeof r.data.mint !== 'string') return { coin: null, error: null };
-  return { coin: r.data, error: null };
+  return readCoin(mint, opts);
 }
 
+/** One coin by mint — the bonding-curve half of the token page. */
 export async function coin(mint: string): Promise<PumpCoin | null> {
-  return memo<PumpCoin>(`pf:coin:${mint}`, 6_000, async () => {
-    const r = await getJson<PumpCoin>('pumpfun', `/coins/${encodeURIComponent(mint)}`);
-    if (!r.ok || !r.data || typeof r.data.mint !== 'string') return null;
-    return r.data;
-  });
+  return memo<PumpCoin>(`pf:coin:${mint}`, 6_000, async () => (await readCoin(mint)).coin);
 }
 
 /**

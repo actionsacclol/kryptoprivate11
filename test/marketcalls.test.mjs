@@ -203,9 +203,12 @@ function install() {
         bump('pump:list');
         return json(Array.from({ length: 40 }, (_, i) => pumpCoin(churnBase + i)));
       }
-      if (p.startsWith('/coins/')) {
+      // pump moved the single-coin read to /coins-v3/{mint} on 2026-09-26;
+      // the provider falls back to /coins-v2 and the old /coins/{mint}.
+      const coinPrefix = ['/coins-v3/', '/coins-v2/', '/coins/'].find((x) => p.startsWith(x));
+      if (coinPrefix) {
         bump('pump:coin');
-        const mint = decodeURIComponent(p.slice('/coins/'.length));
+        const mint = decodeURIComponent(p.slice(coinPrefix.length));
         return json({ ...pumpCoin(mintIndex.get(mint) ?? 0), mint, ...(coinExtra.get(mint) ?? {}) });
       }
       bump('pump:other');

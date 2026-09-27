@@ -116,6 +116,89 @@ export const READY_TIMEOUT_MS = 8_000;
  *  a healthy script for that is worse than waiting. A renderer that stops
  *  answering is killed at the first check, whatever the clock says. */
 export const READY_MAX_MS = 30_000;
+
+// ── Is the sandbox renderer wedged, or just slow to answer? ────────────────
+//
+// Until 2026-09-26 the probe was ONE `executeJavaScript('0')` with a 1 s
+// timeout, and a miss killed the script ("interval handler ran past 5 s —
+// killed"). But the answer travels renderer → MAIN → our timer, so a main
+// process busy for a second (a big feed parse, a GC, a burst of decodes)
+// looked exactly like a wedged script, and the script lost its memory for
+// our lateness. Now: several slices, a fresh ask in each, any answer wins,
+// and a slice whose own timer fired late is MAIN's stall — it is not counted
+// against the script. A truly wedged renderer still never answers, so it is
+// still killed, a few seconds later than before.
+
+/** One probe slice. */
+export const PROBE_SLICE_MS = 2_000;
+/** On-time silent slices before the renderer is declared wedged. */
+export const PROBE_SILENT_SLICES = 3;
+/** A slice timer that fires this late means main was stalled, not the page. */
+export const PROBE_LATE_MS = 400;
+/** Hard cap on slices, however late main keeps being. */
+export const PROBE_MAX_SLICES = 10;
+
+export interface ProbeDeps {
+  /** Ask the renderer anything; resolves when it answers. Rejects if the
+   *  frame is gone. */
+  ask: () => Promise<unknown>;
+  /** True once the renderer is destroyed. */
+  gone: () => boolean;
+  now?: () => number;
+  sliceMs?: number;
+  silentSlices?: number;
+  lateMs?: number;
+  maxSlices?: number;
+}
+
+/** True if the renderer answers within the tolerance above, false if it is
+ *  gone or stays silent for `silentSlices` on-time slices. */
+export function probeResponsive(d: ProbeDeps): Promise<boolean> {
+  const now = d.now ?? Date.now;
+  const slice = d.sliceMs ?? PROBE_SLICE_MS;
+  const silentMax = d.silentSlices ?? PROBE_SILENT_SLICES;
+  const lateMs = d.lateMs ?? PROBE_LATE_MS;
+  const maxSlices = d.maxSlices ?? PROBE_MAX_SLICES;
+  if (d.gone()) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let silent = 0;
+    let slices = 0;
+    const done = (v: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(v);
+    };
+    const ask = (): void => {
+      try {
+        // Every earlier ask stays live: whichever answers first wins.
+        d.ask().then(
+          () => done(true),
+          () => done(false),
+        );
+      } catch {
+        done(false);
+      }
+    };
+    const arm = (): void => {
+      const due = now() + slice;
+      timer = setTimeout(() => {
+        if (settled) return;
+        slices += 1;
+        if (d.gone()) return done(false);
+        if (now() - due < lateMs) silent += 1; // on time: the page had its chance
+        if (silent >= silentMax || slices >= maxSlices) return done(false);
+        ask();
+        arm();
+      }, slice);
+    };
+    ask();
+    arm();
+  });
+}
+
 /** Longest line a script may log; the rest is cut. */
 export const MAX_LOG_LINE = 400;
 /** `bot.every` floor, seconds. */

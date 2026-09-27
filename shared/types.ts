@@ -961,6 +961,8 @@ export type EngineEvent =
   | { kind: 'toast'; level: 'info' | 'success' | 'warn' | 'error'; message: string }
   /** $Krypto Mode sessions changed (electron/engine/kryptoMode.ts). */
   | { kind: 'krypto'; sessions: KryptoSession[] }
+  /** Krypto Trader sessions changed (electron/engine/kryptoTrader.ts). */
+  | { kind: 'kryptoTrader'; sessions: import('./kryptoTrader').TraderRow[] }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; line: string; at: number }
   /** Advanced-order list changed (created, triggered, filled, cancelled). */
   | { kind: 'orders'; snapshot: import('./orders').OrdersSnapshot }

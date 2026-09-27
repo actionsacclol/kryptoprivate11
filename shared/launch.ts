@@ -189,13 +189,12 @@ export interface LaunchDraft {
    *  recipient. Off unless asked for. */
   mayhem: boolean;
   /**
-   * Solana: redirect the creator fee to traders, PERMANENTLY.
-   *
-   * Off by default and it stays off unless the user turns it on. 44 % of pump
-   * launches use it, which is why the modal successful launch pays its creator
-   * nothing — the choice is irreversible and belongs to the person making it.
+   * Solana: pump HOLDER REWARDS — the creator fee is paid out to the coin's
+   * holders (pro rata, to wallets holding at least ~$20) instead of the
+   * creator, PERMANENTLY. Replaced cashback coins on 2026-09-12. Off unless
+   * the user turns it on; the choice is irreversible and theirs.
    */
-  cashback: boolean;
+  holderRewards: boolean;
   /** Robinhood: creator fee in basis points, 0–MAX_CREATOR_TAX_BPS. */
   creatorTaxBps: number;
   /**
@@ -218,10 +217,18 @@ export function emptyDraft(chain: LaunchChain): LaunchDraft {
     website: '',
     devBuy: MIN_DEV_BUY[chain],
     mayhem: false,
-    cashback: false,
+    holderRewards: false,
     creatorTaxBps: 100,
     // Inlined rather than imported: kryptoMode.ts imports this file.
-    krypto: { enabled: false, driver: 'strategy', strategy: 'ladder', budgetSol: 0.1, live: false },
+    krypto: {
+      enabled: false,
+      driver: 'strategy',
+      strategy: 'ladder',
+      goal: 'position',
+      budgetSol: 0.1,
+      live: false,
+      limits: { minGapSec: 15, noRebuySec: 60, maxTradesPerHour: 20, aiEverySec: 60 },
+    },
   };
 }
 

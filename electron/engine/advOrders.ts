@@ -58,6 +58,8 @@ import * as recorder from './recorder';
 import { mentionsRateLimit } from '@shared/rpcErrors';
 
 const FILE = 'adv-orders.json';
+/** The note on an order that was mid-execution when the app stopped. */
+const INTERRUPTED_NOTE = 'The app closed while this order was executing. Check your wallet before resuming.';
 const MAX_ORDERS = 200;
 
 let orders: AdvOrder[] = [];
@@ -142,7 +144,7 @@ export function init(userDataDir: string): void {
         o.state === 'armed'
           ? 'Paused when the app restarted — review and resume.'
           : o.state === 'triggered'
-            ? 'The app closed while this order was executing. Check your wallet before resuming.'
+            ? INTERRUPTED_NOTE
             : o.note,
     }));
   } catch (err) {
@@ -309,6 +311,15 @@ export function clearCompleted(): number {
   return before - orders.length;
 }
 
+/**
+ * A paused order that was EXECUTING when the app stopped: its transaction may
+ * have landed. Nothing may re-arm or re-place it without a human checking the
+ * wallet — scripts read this through bot.orders() as `interrupted`.
+ */
+export function wasInterrupted(o: Pick<AdvOrder, 'state' | 'note'>): boolean {
+  return o.state === 'paused' && (o.note ?? '').startsWith(INTERRUPTED_NOTE.slice(0, 45));
+}
+
 /** Re-arm everything that came back paused after a restart. */
 export function resumePaused(): { ok: boolean; message: string; resumed: number } {
   const paused = orders.filter((o) => o.state === 'paused');
@@ -319,7 +330,7 @@ export function resumePaused(): { ok: boolean; message: string; resumed: number 
     // A `triggered` order that got paused was mid-flight when the app died.
     // Resuming it would re-send a transaction that may already have landed,
     // so those are NOT re-armed — they need a human to check the wallet.
-    if (o.note?.startsWith('The app closed while this order was executing')) {
+    if (wasInterrupted(o)) {
       needsCheck += 1;
       continue;
     }

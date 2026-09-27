@@ -74,6 +74,26 @@ const CHANNELS = {
   'kryptoMode:sellAll': ['id'],
   'kryptoMode:withdraw': ['id'],
   'kryptoMode:remove': ['id'],
+  'kryptoMode:setLimits': ['id', 'patch'],
+  'kryptoTrader:fit': ['mint', 'opts'],
+  'kryptoTrader:open': ['raw'],
+  'kryptoTrader:pause': ['id'],
+  'kryptoTrader:resume': ['id'],
+  'kryptoTrader:goLive': ['id'],
+  'kryptoTrader:sellAll': ['id'],
+  'kryptoTrader:setEnvelope': ['id', 'patch'],
+  'kryptoTrader:setLimits': ['id', 'patch'],
+  'kryptoTrader:remove': ['id'],
+  'kryptoTrader:reconcile': ['id'],
+  'kryptoTrader:adopt': ['id'],
+  // Profiles (2026-09-26). Ids only, never paths.
+  'profiles:list': [],
+  'profiles:create': ['name'],
+  'profiles:duplicate': ['name', 'copyWallets'],
+  'profiles:rename': ['id', 'name'],
+  'profiles:remove': ['id'],
+  'profiles:open': ['id'],
+  'profiles:shortcut': ['id'],
 };
 
 for (const [channel, expected] of Object.entries(CHANNELS)) {
@@ -219,6 +239,26 @@ for (const [channel, expected] of Object.entries(CHANNELS)) {
   const unhandled = invoked.filter((c) => !handledSet.has(c));
   assert.deepEqual(unhandled, [], `preload invokes ${unhandled.join(', ')} but main never handles it`);
   ok(`every handled channel is reachable from preload and every invoked one is handled (${handled.length} channels, ${UNCALLED.length} known dead)`);
+}
+
+// T29 (Krypto Trader): every TraderOptions field survives IPC. The open
+// handler hands the raw object to the module, whose traderOptionsOf rebuilds
+// it field by field — so that function must read r.<field> for every field
+// of the type, and nothing else may build the options.
+{
+  const src = fs.readFileSync(new URL('../shared/kryptoTrader.ts', import.meta.url), 'utf8');
+  const at = src.indexOf('export interface TraderOptions {');
+  const fields = [...src.slice(at, src.indexOf('\n}', at)).matchAll(/^\s{2}(\w+)\??:/gm)].map((m) => m[1]);
+  assert.ok(fields.length >= 14, `found the TraderOptions fields (${fields.length})`);
+  const fn = src.slice(src.indexOf('export function traderOptionsOf('), src.indexOf('export function traderOptionProblems('));
+  for (const f of fields) assert.ok(fn.includes(`r.${f}`), `traderOptionsOf reads r.${f} — a field it drops is one the user silently loses`);
+  const start = ipc.indexOf("ipcMain.handle('kryptoTrader:open'");
+  const body = ipc.slice(start, ipc.indexOf("ipcMain.handle('kryptoTrader:pause'"));
+  assert.ok(body.includes('kryptoTrader.open(raw)'), 'the open handler passes the raw payload to the module');
+  const eng = fs.readFileSync(new URL('../electron/engine/kryptoTrader.ts', import.meta.url), 'utf8');
+  const open = eng.slice(eng.indexOf('export async function open('), eng.indexOf('// ─── controls'));
+  assert.ok(open.includes('traderOptionsOf(raw)'), 'and open() builds the options from traderOptionsOf alone');
+  ok(`kryptoTrader:open keeps every TraderOptions field (${fields.length}) — T29`);
 }
 
 console.log(`\nipccontract: ${passed}/${passed} passed`);

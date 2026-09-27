@@ -157,7 +157,7 @@ export function status(): BotStatus[] {
     paired: !!s?.[kind].ownerId,
     tokenPresent: !!s?.[kind].token.trim(),
     pairingActive: !!pairings[kind],
-    lastError: kind === 'discord' ? discord.lastFailure() : null,
+    lastError: kind === 'discord' ? discord.lastFailure() : telegram.lastFailure(),
   }));
 }
 

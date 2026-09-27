@@ -44,7 +44,7 @@ const timer = setTimeout(() => {
   console.error('sandbox live test: timed out');
   child.kill();
   process.exit(1);
-}, 60_000);
+}, 120_000);
 child.on('exit', (code) => {
   clearTimeout(timer);
   const pass = code === 0 && /SANDBOX LIVE: PASS/.test(stdout);

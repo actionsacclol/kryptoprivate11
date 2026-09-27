@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import {
   calloutChain,
   calloutsFor,
+  coinCallsLabel,
   newestFirst,
   parseCoinCallouts,
   parseHomeFeed,
@@ -175,6 +176,27 @@ const rows = parseHomeFeed(feed);
   const forMint = calloutsFor(rows, mint.toUpperCase());
   assert.ok(forMint.length >= 1, 'a mint lookup is case-insensitive');
   ok('newest-first sorting is a copy, and a per-mint lookup ignores case');
+}
+
+{
+  // The feed's `position.totalCallouts` is the COIN's call count, not the
+  // caller's: measured 2026-09-26, feed rows said 87 / 9 / 11 / 47 where each
+  // caller's own /users/{address}/callout-stats said 477 / 1405 / 1776 / 2693
+  // all-time. Labelling it as the caller's count was the bug.
+  const sol = rows.find((r) => r.rawChain === 'solana');
+  assert.equal(sol.coinCallouts, feed.coins[0].position.totalCallouts, 'the count is carried — as the coin’s');
+  for (const r of rows) assert.equal(r.caller.totalCallouts, null, 'and never as the caller’s');
+  const top = parseCoinCallouts({ callouts: [{ calloutId: 'x', createdAt: 1789707057360 }] }, 'M', 'solana');
+  assert.equal(top[0].coinCallouts, null, 'a route that does not carry it says nothing');
+  const noCount = parseHomeFeed({ coins: [{ ...feed.coins[0], position: { ...feed.coins[0].position, totalCallouts: 'many' } }] });
+  assert.equal(noCount[0].coinCallouts, null, 'a non-number is unknown, not 0');
+
+  assert.equal(coinCallsLabel([sol]), sol.coinCallouts > 1 ? `1 of ${sol.coinCallouts} calls` : '1 call');
+  assert.equal(coinCallsLabel([{ ...sol, coinCallouts: 87 }]), '1 of 87 calls', 'one feed row of 87 says so');
+  assert.equal(coinCallsLabel([{ ...sol, coinCallouts: null }]), '1 call', 'unknown count adds nothing');
+  assert.equal(coinCallsLabel([{ ...sol, coinCallouts: null }, { ...sol, id: 'y', coinCallouts: null }]), '2 calls');
+  assert.equal(coinCallsLabel([{ ...sol, coinCallouts: 1 }]), '1 call', 'a count that is not larger is not repeated');
+  ok('position.totalCallouts is the coin’s count (coinCallouts), never the caller’s');
 }
 
 console.log(`\ncallouts: ${passed}/${passed} passed`);

@@ -191,4 +191,32 @@ const ok = (label) => {
   ok('the feature ships off and read-only, the connect string is loopback with a bearer token, and the agent is told what paper means');
 }
 
-console.log(`\nmcp: ${passed}/5 passed`);
+// ── Krypto Trader: read two, act one, create none (2026-09-25) ───────────
+{
+  const byName = Object.fromEntries(MCP_TOOLS.map((t) => [t.name, t]));
+  assert.equal(byName.get_trader_sessions?.tier, 'read');
+  assert.equal(byName.get_trader_session?.tier, 'read');
+  assert.deepEqual(byName.get_trader_session.inputSchema.required, ['session_id']);
+  assert.match(byName.get_trader_session.description, /untrusted/, 'it warns that token text is creator-written');
+  const act = byName.trader_act;
+  assert.equal(act?.tier, 'trade');
+  assert.deepEqual(Object.keys(act.inputSchema.properties).sort(), ['action', 'expected_seq', 'percent', 'reason', 'session_id', 'sol']);
+  assert.deepEqual(act.inputSchema.properties.action.enum, ['hold', 'buy', 'sell']);
+  assert.ok(act.inputSchema.required.includes('expected_seq'), 'a decision always names the seq it was made on');
+  assert.match(act.description, /never to make volume or move price/);
+  // No tool creates, funds, starts, resumes or configures a session: the only
+  // session tools are the two reads, trader_act and Krypto Mode's pair.
+  const sessionTools = MCP_TOOLS.filter((t) => /trader|session|krypto/.test(t.name)).map((t) => t.name).sort();
+  assert.deepEqual(sessionTools, ['get_krypto_sessions', 'get_trader_session', 'get_trader_sessions', 'krypto_mode_trade', 'trader_act']);
+  for (const t of MCP_TOOLS) {
+    assert.ok(!/create|start|fund|resume|configure|open_session|go_live|set_limits|set_envelope/.test(t.name), `${t.name} does not create, fund, start, resume or configure anything`);
+  }
+  for (const k of ['budget', 'budgetSol', 'mint', 'wallet', 'walletId', 'driver', 'limits', 'live', 'mode', 'preset', 'goal']) {
+    assert.ok(!(k in act.inputSchema.properties), `trader_act cannot set ${k}`);
+  }
+  assert.equal(toolAllowed('trader_act', 'read').ok, false, 'a read-only connection cannot act');
+  assert.equal(toolAllowed('get_trader_session', 'read').ok, true);
+  ok('Krypto Trader: two read tools and trader_act (intent + expected_seq); no tool creates, funds, starts, resumes or configures a session');
+}
+
+console.log(`\nmcp: ${passed}/6 passed`);

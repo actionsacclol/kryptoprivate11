@@ -96,6 +96,13 @@ export function CalloutRow({ c, onOpen }: { c: Callout; onOpen?: (mint: string, 
           {c.caller.name ?? (c.caller.wallet ? shortAddr(c.caller.wallet, 4) : 'unknown caller')}
         </span>
         {c.caller.totalCallouts !== null && <span>· {c.caller.totalCallouts} calls</span>}
+        {/* The COIN's call count (pump's feed files it under the caller's
+            position, but it is the same on every caller's row for a coin). */}
+        {c.coinCallouts !== null && (
+          <span>
+            · coin called {c.coinCallouts}×
+          </span>
+        )}
         <Skin c={c} />
         {/* Called at what size. This is the number that says whether a 3x was
             3x of something real or 3x of four thousand dollars. */}

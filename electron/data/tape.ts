@@ -97,6 +97,15 @@ export function lastPriceSol(mint: string): number | null {
   return Number.isFinite(p) && p > 0 ? p : null;
 }
 
+/** The last traded price AND when it arrived — a bot must know how old a
+ *  price is before it stops out or buys on it (Krypto Trader). */
+export function lastTick(mint: string): { priceSol: number; at: number } | null {
+  const ticks = entries.get(mint)?.ticks;
+  if (!ticks || ticks.length === 0) return null;
+  const t = ticks[ticks.length - 1];
+  return Number.isFinite(t.priceSol) && t.priceSol > 0 ? { priceSol: t.priceSol, at: t.at } : null;
+}
+
 export function record(mint: string, tick: Tick): void {
   const e = entries.get(mint);
   if (!e) return;

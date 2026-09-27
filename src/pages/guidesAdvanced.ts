@@ -1008,8 +1008,8 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
         heading: 'Access levels',
         lines: [
           'Off: the server answers 503 whatever token is sent.',
-          'Read only: the 13 read tools. Trade tools are neither listed nor answered.',
-          'Paper trading: adds the 4 trade tools. Fills are simulated into the paper book, nothing is bought, and no fee is paid.',
+          'Read only: the 16 read tools. Trade tools are neither listed nor answered.',
+          'Paper trading: adds the 6 trade tools. Fills are simulated into the paper book, nothing is bought, and no fee is paid. A paper connection cannot act for a live Krypto Mode or Krypto Trader session.',
           'Live trading: real funds, within the limits.',
           'The level is re-read on every request, so a change takes effect on the next call. It is checked before arguments, so a read-only client learns nothing about trade-tool fields.',
           'The access level and token cannot be changed by a settings change, only from this page.',
@@ -1028,8 +1028,10 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       {
         heading: 'Tools',
         lines: [
-          'Read: get_wallet, get_positions, get_token, find_tokens, get_wallet_scores, get_wallet_record, get_copy_configs, get_orders, get_trade_history, get_chart, get_token_links, get_runner_alerts, get_callouts.',
-          'Trade: buy_token (mint, amount, chain), sell_token (mint, percent 1–100, chain), place_order (stop_loss, take_profit, trailing_stop, limit_buy, limit_sell; limit orders do not accept a percent trigger), cancel_orders.',
+          'Read: get_wallet, get_positions, get_token, find_tokens, get_wallet_scores, get_wallet_record, get_copy_configs, get_orders, get_trade_history, get_chart, get_token_links, get_runner_alerts, get_callouts, get_krypto_sessions, get_trader_sessions, get_trader_session (session_id).',
+          'Trade: buy_token (mint, amount, chain), sell_token (mint, percent 1–100, chain), place_order (stop_loss, take_profit, trailing_stop, limit_buy, limit_sell; limit orders do not accept a percent trigger), krypto_mode_trade, trader_act, cancel_orders.',
+          'trader_act (session_id, action hold/buy/sell, sol or percent of the session’s bag, reason, expected_seq) acts only for a Krypto Trader session you set to MCP while it runs. It is checked in order: the connection may trade; the session is MCP-driven and running; a live session needs a live connection; expected_seq matches (stale data is refused); the connection’s limits; then the session’s own limits. A hold uses no trade slot.',
+          'No tool creates, funds, starts, resumes or changes a Krypto Trader session. buy_token and place_order are refused on a coin a live session trades from that wallet.',
           'Most tools accept chain = solana, robinhood or bnb. place_order, cancel_orders, get_chart, get_token_links and get_callouts are Solana only and refuse a chain argument.',
           'Answers carry their caveats: null means unknown, the Copy score ranks least bad, and trade history is read from the chain with fees included.',
         ],

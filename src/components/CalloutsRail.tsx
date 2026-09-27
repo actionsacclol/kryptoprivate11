@@ -17,7 +17,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Megaphone, RefreshCw, X } from 'lucide-react';
 import type { ChainKind } from '@shared/evm';
-import { newestFirst, type Callout } from '@shared/callouts';
+import { coinCallsLabel, newestFirst, type Callout } from '@shared/callouts';
 import { refreshCallouts, useCallouts, useCoinCallouts } from '../state/callouts';
 import { CalloutRow } from './CalloutRow';
 import { cls, fmtAgo } from '../utils/format';
@@ -175,7 +175,10 @@ export function CalloutsRail({
               {openMint && coin.answered && coin.rows.length > 0 && (
                 <section className="mb-2 space-y-1.5">
                   <div className="px-0.5 font-display text-nano uppercase tracking-label text-krypt-muted">
-                    This coin · {coin.rows.length} call{coin.rows.length === 1 ? '' : 's'}
+                    {/* Since pump dropped its per-coin route (2026-09-26) these
+                        rows come from the feed, which shows ONE call per coin;
+                        its own count says how many there really are. */}
+                    This coin · {coinCallsLabel(coin.rows)}
                   </div>
                   {coin.rows.map((c) => (
                     <CalloutRow key={`coin-${c.id}`} c={c} onOpen={onOpenToken} />

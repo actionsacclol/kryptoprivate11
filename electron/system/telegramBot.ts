@@ -41,6 +41,21 @@ let host: TelegramHost | null = null;
 let running = false;
 let offset = 0;
 let consecutiveErrors = 0;
+/** Shown in the settings panel. Set on a 409; cleared by the next good poll. */
+let lastError: string | null = null;
+
+/**
+ * What a 409 means, in words (2026-09-26). Telegram lets exactly one poller
+ * hold a bot token; with profiles, the likeliest second one is ANOTHER Krypto
+ * Bot profile given the same token. Only one of them receives messages, so
+ * the user has to be told which fix applies rather than see a silent bot.
+ */
+export const CONFLICT_MESSAGE =
+  'Telegram says another program is already reading this bot (409). If another Krypto Bot profile or install uses the same bot token, only one of them can receive messages — give each profile its own bot from @BotFather.';
+
+export function lastFailure(): string | null {
+  return lastError;
+}
 
 export function attach(h: TelegramHost): void {
   host = h;
@@ -120,11 +135,16 @@ async function poll(): Promise<void> {
             /* no body — the exponential wait applies */
           }
         }
+        if (res.status === 409) {
+          if (lastError !== CONFLICT_MESSAGE) host?.log('error', `Telegram bot: ${CONFLICT_MESSAGE}`);
+          lastError = CONFLICT_MESSAGE;
+        }
         await backoff(res.status === 409 ? 'another client is polling this bot' : `HTTP ${res.status}`, retryAfterMs);
         continue;
       }
       const body = (await res.json()) as { ok?: boolean; result?: TgUpdate[] };
       consecutiveErrors = 0;
+      lastError = null;
       for (const u of body?.result ?? []) {
         if (typeof u.update_id === 'number') offset = Math.max(offset, u.update_id + 1);
         const m = u.message;

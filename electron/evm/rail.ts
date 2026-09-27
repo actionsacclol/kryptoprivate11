@@ -489,6 +489,40 @@ export function fillTokens(chain: EvmChainKind, hash: string, timeoutMs = 30_000
 }
 
 /**
+ * A transaction's settled ledger row — tokens AND native moved, from its
+ * receipt (Krypto Trader books its own fills from this, 2026-09-25). Waits
+ * like `fillTokens`; null when the hash never settles here. The row may be
+ * 'unreconciled' (its deltas could not be read): the caller decides.
+ */
+export function settledFill(chain: EvmChainKind, hash: string, timeoutMs = 30_000): Promise<EvmFill | null> {
+  const want = hash.toLowerCase();
+  const find = (): EvmFill | undefined => ledger.all().find((f) => f.chain === chain && f.hash.toLowerCase() === want);
+  const known = find();
+  if (known && known.state !== 'pending') return Promise.resolve(known);
+  const wait = known ? timeoutMs : 5_000;
+  return new Promise((resolve) => {
+    let off: (() => void) | null = null;
+    let done = false;
+    const finish = (v: EvmFill | null): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      off?.();
+      resolve(v);
+    };
+    const timer = setTimeout(() => {
+      const f = find();
+      finish(f && f.state !== 'pending' ? f : null);
+    }, wait);
+    off = ledger.onSettled((f) => {
+      if (f.chain === chain && f.hash.toLowerCase() === want) finish(f);
+    });
+    const again = find();
+    if (again && again.state !== 'pending') finish(again);
+  });
+}
+
+/**
  * The ledger's record of a BUY of `token` around `atMs`, in base units — how
  * a copy row opened before quantities were tracked recovers its own size.
  *

@@ -316,7 +316,7 @@ const GOOD = { acceptedAt: 1_790_000_000_000, version: MULTI_WALLET_CONSENT_VERS
   // And a script's named-wallet buy is still its own budget's business.
   const autos = src('../electron/engine/automation.ts');
   const wt = autos.slice(autos.indexOf('async function walletTrade('), autos.indexOf('async function handleCall('));
-  assert.match(wt, /buyGate\(s, rt, mint, amount, label\)/, 'the script budget gates it');
+  assert.match(wt, /buyGate\(s, rt, mint, amount, label, \{ address \}\)/, 'the script budget gates it (and the Krypto Trader claim on the named wallet)');
   assert.match(wt, /rateLimited\(/, 'so does its action rate');
   assert.match(wt, /s\.mode === 'paper'/, 'and paper spends nothing');
   assert.match(wt, /rt\.buysToday \+= 1/, 'a named-wallet buy counts as one of its buys');

@@ -12,7 +12,7 @@
 
 import { BrowserWindow, ipcMain, session, type WebContents } from 'electron';
 import path from 'node:path';
-import { parseFromSandbox, sandboxPageHtml, ALIVE_TIMEOUT_MS, EVENT_HARD_MS, EVENT_TIMEOUT_MS, READY_MAX_MS, READY_TIMEOUT_MS, type MainToSandbox, type SandboxToMain } from '@shared/scriptProtocol';
+import { parseFromSandbox, probeResponsive, sandboxPageHtml, ALIVE_TIMEOUT_MS, EVENT_HARD_MS, EVENT_TIMEOUT_MS, READY_MAX_MS, READY_TIMEOUT_MS, type MainToSandbox, type SandboxToMain } from '@shared/scriptProtocol';
 
 const CHANNEL = 'script-sandbox';
 const PARTITION = 'script-sandbox';
@@ -369,27 +369,15 @@ export async function start(scriptId: string, code: string, info?: { chain?: str
 }
 
 /** True if the RENDERER itself answers. A wedged one never does; a page
- *  merely waiting on main does. Same probe the event watchdog uses. */
+ *  merely waiting on main does. Same probe the event watchdog uses.
+ *
+ *  Tolerant since 2026-09-26 (see probeResponsive in shared/scriptProtocol):
+ *  it was one ask with a 1 s timeout, so a main process that was itself busy
+ *  for a second killed healthy scripts ("handler ran past 5 s — killed"). */
 async function probeAlive(contents: WebContents): Promise<boolean> {
-  if (contents.isDestroyed()) return false;
-  return await new Promise<boolean>((resolve) => {
-    let settled = false;
-    const done = (v: boolean): void => {
-      if (settled) return;
-      settled = true;
-      resolve(v);
-    };
-    const timer = setTimeout(() => done(false), 1_000);
-    contents
-      .executeJavaScript('0')
-      .then(() => {
-        clearTimeout(timer);
-        done(true);
-      })
-      .catch(() => {
-        clearTimeout(timer);
-        done(false);
-      });
+  return probeResponsive({
+    ask: () => contents.executeJavaScript('0'),
+    gone: () => contents.isDestroyed(),
   });
 }
 
@@ -467,7 +455,9 @@ export function dispatch(scriptId: string, name: string, payload: unknown): Prom
         return;
       }
       box.inflight.delete(id);
-      const secs = Math.round(waited / 1000);
+      // Measured at the kill, not before the probe: the probe itself can
+      // take several seconds, and "ran past 3 s" for a 9 s kill misleads.
+      const secs = Math.round((Date.now() - startedAt) / 1000);
       settle({ ok: false, error: `handler for "${name}" ran past ${secs} s — killed` });
       kill(
         box,

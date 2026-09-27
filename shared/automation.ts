@@ -624,7 +624,11 @@ export interface RuleSet {
 
 export const MAX_CONDITIONS = 20;
 export const MAX_ACTIONS = 8;
-export const MAX_CODE_BYTES = 64 * 1024;
+// There is no script size cap (removed 2026-09-26, user's call). It was 64 KB,
+// then 256 KB; it only ever protected the live update, which carried every
+// script's full code on every log line. Live updates now leave code out
+// (`codeOmitted`, mergeSnapshot), and the code reaches the sandbox as a
+// message, not a URL, so nothing downstream needs a bound.
 export const MAX_SCRIPTS = 20;
 export const MAX_STATE_BYTES = 16 * 1024;
 
@@ -1330,12 +1334,6 @@ export function validateScript(
   if (s.mode !== 'paper' && s.mode !== 'live') return { ok: false, message: 'Mode must be paper or live' };
   const b = validateBudget(s.budget);
   if (!b.ok) return b;
-  // Outside the branch on purpose: a RULES script carries a `code` field too,
-  // and the whole file is re-serialised on every save, so an unbounded body
-  // there is the same cost whether or not anything ever runs it.
-  if (typeof s.code === 'string' && new TextEncoder().encode(s.code).length > MAX_CODE_BYTES) {
-    return { ok: false, message: `Script is over ${MAX_CODE_BYTES / 1024} KB` };
-  }
   if (s.kind === 'code') {
     if (typeof s.code !== 'string' || !s.code.trim()) return { ok: false, message: 'The script is empty' };
   } else {
@@ -1471,6 +1469,12 @@ export interface ScriptStats {
 
 export interface ScriptSnapshot {
   scripts: UserScript[];
+  /**
+   * Live-update snapshots leave every script's `code` empty (it can be a
+   * quarter of a megabyte, per script, per log line). The window keeps the
+   * code it already has — see mergeSnapshot. Absent on a full read.
+   */
+  codeOmitted?: boolean;
   stats: Record<string, ScriptStats>;
   logs: Record<string, ScriptLogLine[]>;
   /**
@@ -1525,7 +1529,7 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'buy', signature: 'await bot.buy(mint, sol, address?)', returns: '{ok, message}', notes: 'Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over THIS SCRIPT’S budget — max per trade, buys per day, open positions, actions per minute — or while live is blocked (not armed, execution off, a breaker). The app’s manual per-trade cap does NOT apply: a script’s own budget is the authority on its size. Pass another of your own wallet ADDRESSES (see bot.wallets) to buy with that wallet instead — refused until you accept “Trading from your other wallets” on the Scripts page. The app does not space these out or cap how many of your wallets touch a coin: the script does what it is written to, inside its own budget. Solana only, and paper spends nothing.', action: true },
   { method: 'sell', signature: 'await bot.sell(mint, pct, address?)', returns: '{ok, message}', notes: 'pct 1–100 of what is held in the script’s mode. Refused when nothing is held. Pass another of your own wallet ADDRESSES to sell from that one instead — only a mint this script opened, and only on Solana.', action: true },
   { method: 'sellAll', signature: 'await bot.sellAll()', returns: '{ok, message, sold: number}', notes: 'Sell 100 % of every position this script holds.', action: true },
-  { method: 'order', signature: "await bot.order({ mint, kind, triggerBasis, triggerValue, amount })", returns: '{ok, message}', notes: "kind: stop_loss | take_profit | trailing_stop | limit_buy | limit_sell | sell_on_dev_sell | sell_on_migration | buy_on_migration. triggerBasis: 'pct' (from the price now) | 'mcap_usd' | 'price_sol'. amount: SOL for buys, % for sells. Placed as a real advanced order (paused if the app cannot execute right now).", action: true },
+  { method: 'order', signature: "await bot.order({ mint, kind, triggerBasis, triggerValue, amount })", returns: '{ok, message}', notes: "kind: stop_loss | take_profit | trailing_stop | limit_buy | limit_sell | sell_on_dev_sell | sell_on_migration | buy_on_migration. triggerBasis: 'pct' (from the price now) | 'mcap_usd' | 'price_sol'. amount: SOL for buys, % for sells. Placed as a real advanced order. 'pct' is measured from your position's fill price (fees and the token-account deposit excluded), or from the price now when nothing is held. An app restart brings every armed order back PAUSED and never resumes it by itself: the script gets an 'order' event with orderState 'paused' for its coins, and must cancelOrders + order again to re-arm.", action: true },
   { method: 'cancelOrders', signature: 'await bot.cancelOrders(mint)', returns: '{ok, message, cancelled: number}', notes: 'Cancel every open order on the token.', action: true },
   { method: 'clearCompletedOrders', signature: 'await bot.clearCompletedOrders()', returns: '{ok, message, cleared: number}', notes: 'Prune every FINISHED order (filled, cancelled, expired, failed) from the Orders list. Finished orders otherwise pile up against the 200-order cap and eventually get new orders (your take-profit rungs) refused, so a long-running script that places orders should call this each loop. Housekeeping — costs no action, touches no open order. Solana only.', action: false },
   { method: 'templates', signature: 'await bot.templates()', returns: 'Array<{id, name}>', notes: 'Saved order templates.', action: false },
@@ -1557,7 +1561,7 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'creator', signature: 'await bot.creator(mint)', returns: 'Creator | null', notes: 'The creator wallet’s launch record from pump.fun (a round trip; costs an action): {address, launches, graduated, graduationRate, medianAthUsd, bestAthUsd, firstLaunchAt, lastLaunchAt, truncated}. Null when the creator is unknown or the source did not answer. Solana only.', action: false },
   { method: 'analyze', signature: 'await bot.analyze(mint)', returns: 'Analysis', notes: 'The AI second opinion from the token page: {score, verdict, summary, bullish, bearish, provider, model, at}. It spends YOUR key (Settings → AI) on every uncached call, so it is capped at 20 per hour per script and cached 10 minutes per token, and it counts as an action. Only public on-chain facts about the token are sent — never a wallet or a key. Rejects with the reason when AI is off or capped. Solana only.', action: true },
   { method: 'positions', signature: 'await bot.positions()', returns: 'Position[]', notes: 'Every position THIS SCRIPT opened, in its mode, as the same facts object plus held=true, pnlPct, pnlSol, holdMinutes, drawdownFromPeakPct, costSol. Bags the user opened by hand are not listed and cannot be sold.', action: false },
-  { method: 'orders', signature: 'await bot.orders(mint?)', returns: 'Order[]', notes: '{id, mint, symbol, kind, state, triggerBasis, triggerValue, amount}. All orders, or the token’s.', action: false },
+  { method: 'orders', signature: 'await bot.orders(mint?)', returns: 'Order[]', notes: '{id, mint, symbol, kind, state, triggerBasis, triggerValue, amount, interrupted}. All orders, or the token’s. interrupted = paused because the app stopped while it was executing (its trade may have landed): never re-place one without checking the wallet.', action: false },
   { method: 'runners', signature: 'await bot.runners()', returns: 'Token[]', notes: 'Launches the scanner currently flags as runners.', action: false },
   { method: 'leaders', signature: 'await bot.leaders()', returns: 'Array<{wallet, label, enabled, mode}>', notes: 'Wallets followed on the Copy Trading page.', action: false },
   { method: 'wallet', signature: 'await bot.wallet()', returns: '{sol: number | null, address: string | null}', notes: "This script's chain's trading wallet — `sol` is that chain's own coin. Null when unknown.", action: false },
@@ -1592,7 +1596,7 @@ export const SCRIPT_EVENTS_DOC: EventSpec[] = [
   { event: 'position', payload: 'Token + position fields (held=true)', when: 'every ~5 s for each position the script holds, and on every fill' },
   { event: 'tick', payload: 'Token + position fields; priceSol is the tick', when: 'the price moved on a token the script holds, watched or subscribed to; at most once a second per token' },
   { event: 'leaderTrade', payload: 'Token + leaderWallet, leaderLabel, leaderSide, leaderSol, leaderSoldPct', when: 'a wallet followed on Copy Trading bought or sold' },
-  { event: 'order', payload: 'Token + orderKind, orderState, orderAmount', when: 'one of your advanced orders triggered, filled, failed, expired or was cancelled' },
+  { event: 'order', payload: 'Token + orderKind, orderState, orderAmount', when: 'one of your advanced orders triggered, filled, failed, expired, was cancelled or was paused — including, when the script starts, each order on a coin it holds that came back paused from a restart' },
   { event: 'alert', payload: 'Token + alertKind, alertThreshold', when: 'one of your alerts fired' },
   { event: 'fill', payload: '{mint, side, ok}', when: 'one of this script’s own trades landed or failed' },
   { event: 'schedule', payload: '{at: "HH:MM"}', when: 'the time set with bot.at' },
@@ -1801,4 +1805,24 @@ ${examples}
 
 The user will describe what they want below. Write it.
 `;
+}
+
+/**
+ * Fold a live-update snapshot (code left out) into the one on screen.
+ *
+ * Each script keeps the code the window already holds; a script the window
+ * has never seen, or one saved since (a different updatedAt), marks the result
+ * `stale` so the caller re-reads the full list. It errs toward KEEPING code:
+ * a blank editor that someone then saves would wipe a script.
+ */
+export function mergeSnapshot(prev: ScriptSnapshot | null, next: ScriptSnapshot): { snap: ScriptSnapshot; stale: boolean } {
+  if (!next.codeOmitted) return { snap: next, stale: false };
+  let stale = false;
+  const had = new Map((prev?.scripts ?? []).map((s) => [s.id, s]));
+  const scripts = next.scripts.map((s) => {
+    const old = had.get(s.id);
+    if (!old || old.updatedAt !== s.updatedAt) stale = true;
+    return { ...s, code: old?.code ?? '' };
+  });
+  return { snap: { ...next, scripts, codeOmitted: stale }, stale };
 }

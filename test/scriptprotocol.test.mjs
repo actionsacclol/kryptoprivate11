@@ -5,7 +5,7 @@
 // have, or pass an unbounded payload.
 
 import assert from 'node:assert';
-import { parseFromSandbox, sandboxPageHtml, SCRIPT_METHODS, EVENT_TIMEOUT_MS, MIN_INTERVAL_S } from './.scriptprotocol.mjs';
+import { parseFromSandbox, probeResponsive, sandboxPageHtml, SCRIPT_METHODS, EVENT_TIMEOUT_MS, MIN_INTERVAL_S, PROBE_SILENT_SLICES, PROBE_SLICE_MS } from './.scriptprotocol.mjs';
 
 let passed = 0;
 const cases = [];
@@ -92,5 +92,37 @@ for (const c of cases) {
   const page = sandboxPageHtml();
   for (const f of ['stat:', 'stats:', 'clearStats:', 'error:']) assert.ok(page.includes(`    ${f}`), `bot.${f.slice(0, -1)} exists in the harness`);
   console.log('ok  bot.stat messages are checked, cut and capped');
+}
+{
+  // probeResponsive — "interval handler ran past 5 s — killed" (2026-09-26).
+  // The old probe was ONE ask with a 1 s timeout; a main process busy for a
+  // second killed a healthy script. Now: several slices, a fresh ask each,
+  // any answer wins, and a slice whose timer fired late (main's stall) is not
+  // counted against the script. Small slices here; the logic is the same.
+  const fast = { sliceMs: 30, silentSlices: 3, lateMs: 20, maxSlices: 10 };
+  const never = () => new Promise(() => {});
+  assert.equal(await probeResponsive({ ...fast, ask: () => Promise.resolve(0), gone: () => false }), true, 'an answer is alive');
+  assert.equal(await probeResponsive({ ...fast, ask: () => Promise.resolve(0), gone: () => true }), false, 'a destroyed renderer is not');
+  assert.equal(await probeResponsive({ ...fast, ask: () => Promise.reject(new Error('gone')), gone: () => false }), false, 'a rejected ask means the frame is gone');
+  let asks = 0;
+  const t0 = Date.now();
+  assert.equal(await probeResponsive({ ...fast, ask: () => { asks += 1; return never(); }, gone: () => false }), false, 'a wedged renderer is still caught');
+  assert.equal(asks, 3, 'after exactly silentSlices on-time silent slices (one ask per slice)');
+  assert.ok(Date.now() - t0 >= 80, 'and not before they have passed');
+  asks = 0;
+  assert.equal(await probeResponsive({ ...fast, ask: () => (++asks >= 3 ? Promise.resolve(0) : never()), gone: () => false }), true, 'a slow answer inside the tolerance is alive — the one-shot probe killed this');
+  // Main stalled: every slice fires late. None of them counts, so a page that
+  // answers on the 6th ask (past silentSlices) is still alive…
+  let skew = 0;
+  const lateNow = () => Date.now() + (skew += 25);
+  asks = 0;
+  assert.equal(await probeResponsive({ ...fast, now: lateNow, ask: () => (++asks >= 6 ? Promise.resolve(0) : never()), gone: () => false }), true, 'main’s lateness is not the script’s');
+  // …and a wedged page under a stalled main is still killed at maxSlices.
+  asks = 0;
+  assert.equal(await probeResponsive({ ...fast, now: lateNow, ask: () => { asks += 1; return never(); }, gone: () => false }), false, 'the cap still bites');
+  assert.equal(asks, fast.maxSlices, 'at maxSlices');
+  assert.ok(PROBE_SILENT_SLICES * PROBE_SLICE_MS >= 5_000, 'the real tolerance is seconds, not the old 1 s');
+  assert.ok(PROBE_SILENT_SLICES * PROBE_SLICE_MS + EVENT_TIMEOUT_MS < 30_000, 'and a wedged handler is still killed well inside EVENT_HARD_MS');
+  console.log('ok  probeResponsive tolerates slow answers and main-process stalls, still kills a wedged renderer');
 }
 console.log(`scriptprotocol: ${passed}/${cases.length} passed`);

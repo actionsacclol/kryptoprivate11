@@ -73,4 +73,30 @@ const at = (marker, after = 0) => {
   ok('API, variables, AI prompt and examples live under Reference');
 }
 
+{
+  // 2026-09-26: "after starting a script I have to widen the window to see
+  // Settings and Stop". A bare `1fr` track has an auto (min-content) floor,
+  // and a running script's log lines (SCORE json, mints, URLs) only had
+  // `break-words`, which does not lower min-content. So the editor column
+  // grew past the window and the header card's controls went off-screen.
+  const listView = at("{view === 'scripts' && (");
+  const editor = at('{/* Editor */}', listView);
+  const grid = src.slice(listView, at('<ChainTabs', listView));
+  assert.ok(/lg:grid-cols-\[300px_minmax\(0,1fr\)\]/.test(grid), 'the editor track is minmax(0,1fr), never a bare 1fr');
+  assert.ok(!/grid-cols-\[300px_1fr\]/.test(src), 'no bare 1fr track left');
+  assert.ok(/^\s*<div className="space-y-4 min-w-0">/m.test(src.slice(editor, editor + 200)), 'the editor column is min-w-0');
+  const log = src.slice(at('function ScriptLog('));
+  assert.ok(/<span className="min-w-0 flex-1 whitespace-pre-wrap \[overflow-wrap:anywhere\]">\{l\.line\}<\/span>/.test(log), 'a log line wraps anywhere inside its own row');
+  assert.ok(/overflow-x-hidden/.test(log.slice(0, 1500)), 'the log box never scrolls sideways');
+  const stats = src.slice(at('{currentStats && ('), at('{currentStats && (') + 300);
+  assert.ok(/\[overflow-wrap:anywhere\]/.test(stats), 'the header card stats line (last error) wraps');
+  // The controls sit in the header card's wrapping row, not in the log.
+  const header = src.slice(at('<Card className="space-y-2 border-krypt-purple/25">'), at('<Field label="Kind">'));
+  assert.ok(/<div className="flex flex-wrap items-center gap-3">/.test(header) && /checked=\{current\.enabled\}/.test(header) && /Settings\n/.test(header), 'Settings and the arm switch are in the wrapping header row');
+  assert.ok(!/grid-cols-\[auto_auto_auto\]/.test(src), 'the Kind/Chain/Mode row wraps rather than setting a min width');
+  const common = fs.readFileSync(new URL('../src/components/common.tsx', import.meta.url), 'utf8');
+  assert.ok(/text-krypt-muted\/80 mt-1 \[overflow-wrap:anywhere\]">\{description\}/.test(common), 'a Section description (the log’s last error) wraps');
+  ok('long log lines and errors wrap; the editor never widens the page past its controls');
+}
+
 console.log(`\nscriptspage: ${passed}/${passed} passed`);

@@ -1,0 +1,35 @@
+{
+  "source": "mainnet tx 4rkXc1YMsorVzWrkTkP5jwhnoKh2DSm7JkGM5vnqrpS1JTdZf5B4GoukQfdDXEfQFGZfGD6LNmKWNErYZamtGM5F, a successful create_v2 with is_holder_reward = true, captured 2026-09-25",
+  "signature": "4rkXc1YMsorVzWrkTkP5jwhnoKh2DSm7JkGM5vnqrpS1JTdZf5B4GoukQfdDXEfQFGZfGD6LNmKWNErYZamtGM5F",
+  "mint": "BztXYBPDH3fB1wHcuGfWvHDgJ71DVMa8B1k2qpQgta6n",
+  "creator": "Aqje5DsN4u2PHmQxGF9PKfpsDGwQRCBhWeLKHCFhSMXk",
+  "args": {
+    "name": "catwifcap",
+    "symbol": "cap",
+    "uri": "https://metadata.j7tracker.io/metadata/a0ca48fa52d24b0e.json",
+    "creator": "Aqje5DsN4u2PHmQxGF9PKfpsDGwQRCBhWeLKHCFhSMXk",
+    "mayhem": false,
+    "cashback": false,
+    "creatorFeeBps": 0,
+    "holderReward": true
+  },
+  "data": "d6904cec5f8b31b409000000636174776966636170030000006361703c00000068747470733a2f2f6d657461646174612e6a37747261636b65722e696f2f6d657461646174612f613063613438666135326432346230652e6a736f6e923546011734488cf2fff5a726ba2f5d7d2b947ac427dfacbe026e31e74addaf0000000000000000000001",
+  "accounts": [
+    "BztXYBPDH3fB1wHcuGfWvHDgJ71DVMa8B1k2qpQgta6n",
+    "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",
+    "7ja4z9bbsj8hgwsmzBTH3vWiEtSYtbbkRBaLpszifntQ",
+    "4Fo9Diqoz4aVBidN8Vx1XtRDXLPLAbWNiiRhr7km5QAE",
+    "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf",
+    "Aqje5DsN4u2PHmQxGF9PKfpsDGwQRCBhWeLKHCFhSMXk",
+    "11111111111111111111111111111111",
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    "MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e",
+    "13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ",
+    "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s",
+    "CpRxHHLTkZP6N6AX7p5auVV91nstQ8LCCE9mjSZC31Cx",
+    "4eTr1w9vmgWvvDAz7rhq15YwC2qdYKLmX463rMCRJor8",
+    "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+  ]
+}

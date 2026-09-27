@@ -49,6 +49,11 @@ export function onSettled(fn: (fill: EvmFill) => void): () => void {
   return () => listeners.delete(fn);
 }
 
+/** The note on a fill whose receipt says reverted — the one EVM proof that
+ *  a transaction did not land (Krypto Trader reads it; every other
+ *  unreconciled row is unprovable, not failed). */
+export const REVERTED_NOTE = 'transaction reverted';
+
 function settled(fill: EvmFill): void {
   for (const fn of listeners) {
     try {
@@ -237,7 +242,7 @@ export async function reconcile(fill: EvmFill): Promise<void> {
       const gasWei = receipt.gasUsed * receipt.effectiveGasPrice;
       if (receipt.status !== 'success') {
         fill.state = 'unreconciled';
-        fill.note = 'transaction reverted';
+        fill.note = REVERTED_NOTE;
         fill.gasWei = gasWei.toString();
         persist();
         settled(fill);

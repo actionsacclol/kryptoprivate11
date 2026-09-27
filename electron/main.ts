@@ -32,10 +32,13 @@ import * as bridgeStore from './engine/bridgeStore';
 import * as alertStore from './engine/alerts';
 import * as copyTrade from './engine/copyTrade';
 import * as automation from './engine/automation';
+import * as kryptoMode from './engine/kryptoMode';
+import * as kryptoTrader from './engine/kryptoTrader';
 import * as programWatch from './engine/programWatch';
 import { registerImageProtocol, registerImageScheme, setEnabled as setImagesEnabled } from './data/images';
 import { installNetAgent } from './system/netAgent';
 import { pickUserDataDir, LEGACY_PROFILE_NAMES } from './system/profileContinuity';
+import * as profiles from './system/profiles';
 
 // ──────────────────────────────────────────────────────────────────────
 // Crash guard — installed before anything else can throw
@@ -67,6 +70,25 @@ const profilePick = pickUserDataDir({
 });
 if (profilePick.redirectedFrom) app.setPath('userData', profilePick.dir);
 
+// ──────────────────────────────────────────────────────────────────────
+// Profiles (2026-09-26) — isolated copies of the app, one folder each
+// ──────────────────────────────────────────────────────────────────────
+// `--profile=<id>` picks a folder under "<appData>/Krypto Bot Profiles".
+// Whatever the lines above settled on is the Default profile, used exactly as
+// before when no profile is named. Decided HERE, before anything reads
+// userData — and before requestSingleInstanceLock, which Electron keys on the
+// userData folder, so the lock becomes per profile by itself. The flag names
+// an id from the registry, never a path (see shared/profiles.ts). A profile
+// that cannot be opened is REFUSED with a message rather than falling back to
+// Default: a clone's shortcut must never open the real wallet by surprise.
+const profileSel = profiles.selectAtStartup({
+  appData: app.getPath('appData'),
+  defaultUserData: app.getPath('userData'),
+  argv: process.argv,
+  env: process.env,
+});
+if (profileSel.ok && profileSel.id !== null) app.setPath('userData', profileSel.dir);
+
 const CRASH_DIR = path.join(app.getPath('userData'), 'crashes');
 const LOGS_DIR = path.join(app.getPath('userData'), 'logs');
 
@@ -77,6 +99,9 @@ logger.attachFileSink(
 );
 if (profilePick.redirectedFrom) {
   logger.info(`profile: using legacy folder ${profilePick.dir} (new-name folder ${profilePick.redirectedFrom} has no wallet)`);
+}
+if (profileSel.ok && profileSel.id !== null) {
+  logger.info(`profile: "${profiles.currentProfile().name}" (${profileSel.id}) — ${profileSel.dir}`);
 }
 
 crashGuard.install({
@@ -136,10 +161,25 @@ process.env.VITE_PUBLIC = app.isPackaged
 // handler so the renderer's CSP can stay closed to remote image hosts.
 registerImageScheme();
 
-const gotLock = app.requestSingleInstanceLock();
+// PER PROFILE: Electron keys this lock on the userData folder set above, so a
+// second launch of the same profile lands in 'second-instance' below (and its
+// window comes to the front), while a different profile gets its own lock and
+// runs beside this one. Nothing may call setPath('userData') after this line.
+if (!profileSel.ok) {
+  logger.error(`profile: refused — ${profileSel.message}`);
+  try {
+    dialog.showErrorBox('Krypto Bot could not open that profile', profileSel.message);
+  } catch {
+    /* the log has it */
+  }
+}
+const gotLock = profileSel.ok && app.requestSingleInstanceLock();
 if (!gotLock) {
-  app.quit();
+  if (profileSel.ok) app.quit();
+  else app.exit(1);
 } else {
+  profiles.markRunning();
+  app.on('will-quit', () => profiles.clearRunning());
   app.on('second-instance', () => {
     showMainWindow();
 
@@ -325,7 +365,8 @@ function showMainWindow(): BrowserWindow {
     minWidth: 1040,
     minHeight: 680,
     backgroundColor: '#0A0A0F',
-    title: 'Krypto Bot',
+    // Names the profile, so two instances side by side are never confused.
+    title: profiles.title(),
     autoHideMenuBar: true,
     // `resources/` is packed INSIDE app.asar (package.json `files`), so the
     // path is the same relative one in both modes: dist-electron/../resources.
@@ -388,6 +429,13 @@ function showMainWindow(): BrowserWindow {
     if (img.isEmpty()) logger.warn(`mainWindow: window icon did not decode (${iconPath})`);
     else win.setIcon(img);
   }
+
+  // The page's <title> would otherwise replace the profile name the moment
+  // index.html loads.
+  win.on('page-title-updated', (e) => {
+    e.preventDefault();
+    win.setTitle(profiles.title());
+  });
 
   win.once('ready-to-show', reveal);
   win.webContents.once('did-finish-load', reveal);
@@ -565,7 +613,7 @@ function openPanelWindow(panelId: string): { ok: boolean; message: string } {
     frame: false,
     resizable: true,
     backgroundColor: '#0E0D15',
-    title: 'Krypto Bot',
+    title: profiles.title(),
     autoHideMenuBar: true,
     skipTaskbar: false,
     webPreferences: {
@@ -614,6 +662,10 @@ function openPanelWindow(panelId: string): { ok: boolean; message: string } {
   } else {
     win.loadFile(path.join(process.env.DIST!, 'index.html'), { hash }).catch((err) => logger.error(`panel loadFile failed: ${err}`));
   }
+  win.on('page-title-updated', (e) => {
+    e.preventDefault();
+    win.setTitle(profiles.title());
+  });
   win.once('ready-to-show', () => {
     if (!win.isDestroyed()) win.show();
   });
@@ -688,6 +740,11 @@ async function bootstrap(): Promise<void> {
   // User scripts and rules. Live ones come back disabled; paper ones
   // resume once the engine exists (startEnabled, below registerIpc).
   automation.init(app.getPath('userData'));
+  // The two bot-session stores are read here, before the dialog below, so an
+  // unreadable one is listed with the rest. Their hosts attach later, in
+  // registerIpc, without reading the file again.
+  kryptoMode.load(app.getPath('userData'), (line) => logger.warn(line));
+  kryptoTrader.load(app.getPath('userData'), (line) => logger.warn(line));
 
   // If a saved file exists but cannot be read, the app runs WITHOUT
   // overwriting it. Say so plainly and immediately: silently showing "no
@@ -713,6 +770,10 @@ async function bootstrap(): Promise<void> {
       { what: 'copy trading', why: copyTrade.failure() },
       { what: 'scripts and rules', why: automation.failure() },
       { what: 'advanced orders', why: advOrders.failure() },
+      // Bot sessions: a live one holds real tokens only its record can tell
+      // apart from the user's own.
+      { what: 'Krypto Mode sessions', why: kryptoMode.failure() },
+      { what: 'Krypto Trader sessions', why: kryptoTrader.failure() },
       // The highest-stakes one on this list: it records transfers that have
       // left a wallet and not arrived anywhere yet. Silence here would read as
       // "nothing in flight" to a user whose money is genuinely in transit.

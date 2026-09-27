@@ -263,6 +263,27 @@ test('a blocked live copy is skipped with the reason, and does not buy', async (
   assert.match(copy.snapshot().recent[0].reason, /not armed/);
 });
 
+// Krypto Trader stage 3 (critic #6): a live session's (wallet, coin) pair is
+// its own; a live copy into it is skipped with the session named.
+test('a live Krypto Trader claim on the coin skips the copy, naming the session', async () => {
+  const h = setup();
+  const asked = [];
+  copy.setTraderClaimCheck((ref, mint) => {
+    asked.push(ref);
+    return mint === MINT ? 'a live Krypto Trader session (KT, kt_abc) trades this coin from wallet Wa11et…' : null;
+  });
+  try {
+    save({ mode: 'live', sizing: 'fixed', sizeValue: 0.05, maxTradeSol: 0.1 });
+    copy.onWalletTrade(trade({ sol: 5 }));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(h.calls.buys.length, 0, 'no buy');
+    assert.match(copy.snapshot().recent[0].reason, /Krypto Trader session \(KT, kt_abc\)/);
+    assert.deepEqual(asked[0], { walletId: null }, 'a config with no wallet of its own is checked against the active one');
+  } finally {
+    copy.setTraderClaimCheck(null);
+  }
+});
+
 test('a failed live buy is recorded, not silently dropped', async () => {
   const h = setup({ buyResult: { ok: false, message: 'relayer rejected' } });
   save({ mode: 'live' });

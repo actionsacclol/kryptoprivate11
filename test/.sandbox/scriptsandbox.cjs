@@ -44,12 +44,16 @@ var import_electron = require("electron");
 var import_node_path = __toESM(require("node:path"));
 
 // shared/scriptProtocol.ts
+var MAX_STAT_KEYS = 24;
+var MAX_STAT_NAME = 32;
+var MAX_STAT_TEXT = 80;
 var SCRIPT_METHODS = [
   "buy",
   "sell",
   "sellAll",
   "order",
   "cancelOrders",
+  "clearCompletedOrders",
   "templates",
   "applyTemplate",
   "alert",
@@ -58,6 +62,16 @@ var SCRIPT_METHODS = [
   "subscribe",
   "unsubscribe",
   "notify",
+  "callout",
+  "pumpAccounts",
+  "wallets",
+  "calloutReply",
+  "discord",
+  "discordEdit",
+  "follow",
+  "unfollow",
+  "like",
+  "unlike",
   "price",
   "token",
   "market",
@@ -81,6 +95,54 @@ var EVENT_HARD_MS = 3e4;
 var ALIVE_TIMEOUT_MS = 4e3;
 var READY_TIMEOUT_MS = 8e3;
 var READY_MAX_MS = 3e4;
+var PROBE_SLICE_MS = 2e3;
+var PROBE_SILENT_SLICES = 3;
+var PROBE_LATE_MS = 400;
+var PROBE_MAX_SLICES = 10;
+function probeResponsive(d) {
+  const now = d.now ?? Date.now;
+  const slice = d.sliceMs ?? PROBE_SLICE_MS;
+  const silentMax = d.silentSlices ?? PROBE_SILENT_SLICES;
+  const lateMs = d.lateMs ?? PROBE_LATE_MS;
+  const maxSlices = d.maxSlices ?? PROBE_MAX_SLICES;
+  if (d.gone()) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let silent = 0;
+    let slices = 0;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(v);
+    };
+    const ask = () => {
+      try {
+        d.ask().then(
+          () => done(true),
+          () => done(false)
+        );
+      } catch {
+        done(false);
+      }
+    };
+    const arm = () => {
+      const due = now() + slice;
+      timer = setTimeout(() => {
+        if (settled) return;
+        slices += 1;
+        if (d.gone()) return done(false);
+        if (now() - due < lateMs) silent += 1;
+        if (silent >= silentMax || slices >= maxSlices) return done(false);
+        ask();
+        arm();
+      }, slice);
+    };
+    ask();
+    arm();
+  });
+}
 var MAX_LOG_LINE = 400;
 var MAX_ARGS = 8;
 var MAX_ARG_BYTES = 32 * 1024;
@@ -111,6 +173,25 @@ function parseFromSandbox(raw) {
       const level = m.level === "warn" || m.level === "error" ? m.level : "info";
       if (typeof m.line !== "string") return null;
       return { t: "log", level, line: m.line.slice(0, MAX_LOG_LINE) };
+    }
+    case "stats": {
+      const src = m.values;
+      if (typeof src !== "object" || src === null || Array.isArray(src)) return null;
+      const values = {};
+      let n = 0;
+      for (const [k, v] of Object.entries(src)) {
+        if (n >= MAX_STAT_KEYS) break;
+        const name = k.trim().slice(0, MAX_STAT_NAME);
+        if (!name) continue;
+        if (typeof v === "number") {
+          if (!Number.isFinite(v)) continue;
+          values[name] = v;
+        } else if (typeof v === "string") values[name] = v.slice(0, MAX_STAT_TEXT);
+        else if (typeof v === "boolean" || v === null) values[name] = v;
+        else continue;
+        n++;
+      }
+      return { t: "stats", values, clear: m.clear === true ? true : void 0 };
     }
     case "error":
       if (typeof m.line !== "string") return null;
@@ -147,6 +228,10 @@ function sandboxPageHtml() {
   // differently on paper is not a rehearsal of the live one.
   let chain = 'solana';
   let nativeSymbol = 'SOL';
+  // Answers to whatever the script declared in its @inputs block. Static per
+  // run, like the chain: they ride along with the code so reading one costs
+  // no round trip, and a script cannot change what it was given.
+  let input = {};
 
   const send = (m) => { try { bridge.send(m); } catch (_) {} };
   const str = (v) => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch (_) { return String(v); } };
@@ -175,11 +260,18 @@ function sandboxPageHtml() {
       atHandlers.get(hhmm).push(fn);
       return call('at', [hhmm]);
     },
-    buy: (mint, sol) => call('buy', [mint, sol]),
-    sell: (mint, pct) => call('sell', [mint, pct]),
+    /**
+     * Buy with this chain's trading wallet, or with another of your own \u2014
+     * pass its ADDRESS as the third argument (see bot.wallets).
+     */
+    buy: (mint, sol, wallet) => call('buy', wallet === undefined ? [mint, sol] : [mint, sol, str(wallet)]),
+    sell: (mint, pct, wallet) => call('sell', wallet === undefined ? [mint, pct] : [mint, pct, str(wallet)]),
+    /** Your own wallets: [{address, label, active}]. No keys, ever. */
+    wallets: () => call('wallets', []),
     sellAll: () => call('sellAll', []),
     order: (req) => call('order', [req]),
     cancelOrders: (mint) => call('cancelOrders', [mint]),
+    clearCompletedOrders: () => call('clearCompletedOrders', []),
     templates: () => call('templates', []),
     applyTemplate: (mint, templateId) => call('applyTemplate', [mint, templateId]),
     alert: (req) => call('alert', [req]),
@@ -188,11 +280,66 @@ function sandboxPageHtml() {
     subscribe: (mint) => call('subscribe', [mint]),
     unsubscribe: (mint) => call('unsubscribe', [mint]),
     notify: (message) => call('notify', [str(message)]),
+    /**
+     * Post a pump.fun callout. Solana only.
+     *
+     * The third argument is the ADDRESS of one of your own accounts (see
+     * bot.pumpAccounts); left out, the active trading wallet posts. A script
+     * can only ever name an account this app holds a session for \u2014 there is
+     * nothing to say here that would post as somebody else.
+     */
+    callout: (mint, text, wallet) => call('callout', [mint, text === undefined ? '' : str(text), wallet === undefined ? '' : str(wallet)]),
+    /** Your signed-in pump.fun accounts: [{address, username, active}]. */
+    pumpAccounts: () => call('pumpAccounts', []),
+    /**
+     * Reply to a callout this account already made on a coin. Solana only.
+     *
+     * A callout is one per coin per account, so this is how one is followed
+     * up as the coin moves. Same third argument as callout.
+     */
+    calloutReply: (mint, text, wallet) => call('calloutReply', [mint, str(text ?? ''), wallet === undefined ? '' : str(wallet)]),
+    /**
+     * Post an embed to Discord. The first argument is the NAME of one of this
+     * script's own "webhook" settings (see @inputs), never a URL \u2014 the app
+     * looks the URL up, so a post only goes where you pasted one.
+     * embed: {title, description, url, color, fields:[{name, value, inline}], thumbnail, footer}.
+     */
+    discord: (field, embed) => call('discord', [str(field ?? ''), embed ?? {}]),
+    /**
+     * Replace the embed on a message bot.discord posted \u2014 pass the messageId
+     * it returned. For showing how a call ended on the call itself. Edit
+     * only: there is deliberately no delete.
+     */
+    discordEdit: (field, messageId, embed) => call('discordEdit', [str(field ?? ''), str(messageId ?? ''), embed ?? {}]),
+    /**
+     * Follow / unfollow a pump.fun user (a wallet address, a pump user id or a
+     * pump.fun/profile link) as one of your accounts. Solana only. Same third
+     * argument as callout: left out, the trading wallet's account acts.
+     */
+    follow: (user, wallet) => call('follow', [str(user ?? ''), wallet === undefined ? '' : str(wallet)]),
+    unfollow: (user, wallet) => call('unfollow', [str(user ?? ''), wallet === undefined ? '' : str(wallet)]),
+    /** Like / unlike a callout by its id, as one of your accounts. */
+    like: (calloutId, wallet) => call('like', [str(calloutId ?? ''), wallet === undefined ? '' : str(wallet)]),
+    unlike: (calloutId, wallet) => call('unlike', [str(calloutId ?? ''), wallet === undefined ? '' : str(wallet)]),
     log: (...parts) => send({ t: 'log', level: 'info', line: parts.map(str).join(' ') }),
     warn: (...parts) => send({ t: 'log', level: 'warn', line: parts.map(str).join(' ') }),
+    error: (...parts) => send({ t: 'log', level: 'error', line: parts.map(str).join(' ') }),
+    /**
+     * Show a number (or short text) on this script's widget, live \u2014 e.g.
+     * bot.stat('Callouts', 12). Same name again replaces it. Nothing waits on
+     * it and it costs no action. bot.stats({...}) sets several at once;
+     * bot.clearStats() empties the widget. null shows as unknown.
+     */
+    stat: (name, value) => send({ t: 'stats', values: { [str(name)]: value === undefined ? null : value } }),
+    stats: (obj) => send({ t: 'stats', values: obj && typeof obj === 'object' ? obj : {} }),
+    clearStats: () => send({ t: 'stats', values: {}, clear: true }),
     price: (mint) => call('price', [mint]),
     token: (mint) => call('token', [mint]),
     market: (mint) => call('market', [mint]),
+    links: (mint) => call('links', [mint]),
+    security: (mint) => call('security', [mint]),
+    creator: (mint) => call('creator', [mint]),
+    analyze: (mint) => call('analyze', [mint]),
     positions: () => call('positions', []),
     orders: (mint) => call('orders', mint === undefined ? [] : [mint]),
     runners: () => call('runners', []),
@@ -206,6 +353,14 @@ function sandboxPageHtml() {
     get chain() { return chain; },
     /** The coin every amount in this script is denominated in: SOL, ETH or BNB. */
     get nativeSymbol() { return nativeSymbol; },
+    /**
+     * The settings this script asked for, as the form answered them.
+     *
+     * Empty when the script declares no @inputs block. Every value is already
+     * in its declared shape, so a range is always two numbers low-to-high and
+     * a lines field is always an array of non-empty strings.
+     */
+    get input() { return input; },
   });
 
   const safeConsole = Object.freeze({
@@ -222,6 +377,7 @@ function sandboxPageHtml() {
       scriptId = m.scriptId;
       if (typeof m.chain === 'string' && m.chain) chain = m.chain;
       if (typeof m.nativeSymbol === 'string' && m.nativeSymbol) nativeSymbol = m.nativeSymbol;
+      if (m.inputs && typeof m.inputs === 'object') input = Object.freeze(m.inputs);
       try {
         // AsyncFunction, not Function: the guide (and the generated AI
         // prompt) promise top-level \`await\`, and a plain Function body
@@ -437,7 +593,7 @@ async function start(scriptId, code, info) {
     host?.log("error", `script ${scriptId}: ${why}`);
     return { ok: false, message: why, retryable: true };
   }
-  post(box, { t: "init", scriptId, code, chain: info?.chain, nativeSymbol: info?.nativeSymbol });
+  post(box, { t: "init", scriptId, code, chain: info?.chain, nativeSymbol: info?.nativeSymbol, inputs: info?.inputs });
   const startedAt = Date.now();
   let ready = null;
   for (; ; ) {
@@ -472,22 +628,9 @@ async function start(scriptId, code, info) {
   return { ok: true, message: "running" };
 }
 async function probeAlive(contents) {
-  if (contents.isDestroyed()) return false;
-  return await new Promise((resolve) => {
-    let settled = false;
-    const done = (v) => {
-      if (settled) return;
-      settled = true;
-      resolve(v);
-    };
-    const timer = setTimeout(() => done(false), 1e3);
-    contents.executeJavaScript("0").then(() => {
-      clearTimeout(timer);
-      done(true);
-    }).catch(() => {
-      clearTimeout(timer);
-      done(false);
-    });
+  return probeResponsive({
+    ask: () => contents.executeJavaScript("0"),
+    gone: () => contents.isDestroyed()
   });
 }
 function dispatch(scriptId, name, payload) {
@@ -524,7 +667,7 @@ function dispatch(scriptId, name, payload) {
         return;
       }
       box.inflight.delete(id);
-      const secs = Math.round(waited / 1e3);
+      const secs = Math.round((Date.now() - startedAt) / 1e3);
       settle({ ok: false, error: `handler for "${name}" ran past ${secs} s \u2014 killed` });
       kill(
         box,

@@ -298,6 +298,31 @@ ok('an unwritable log directory is not fatal', () => {
   __resetSinkForTest();
 });
 
+// 2026-09-26: app.log went silent at 02:16 while the app ran on for hours.
+// A flush timer that fired while a slow append was still in flight kept its
+// dead handle in `timer`, and schedule() never armed another one.
+{
+  const dir = path.join(tmp, "logs-slow");
+  __resetSinkForTest();
+  logger.attachFileSink(dir, "boot");
+  const realAppend = fs.promises.appendFile;
+  fs.promises.appendFile = (...a) => new Promise((r) => setTimeout(r, 400)).then(() => realAppend(...a));
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  logger.info("line-a"); // flush timer at ~250 ms, slow write lands at ~650 ms
+  await wait(300);
+  logger.info("line-b"); // its timer fires at ~550 ms, while line-a is still writing
+  await wait(500);
+  fs.promises.appendFile = realAppend;
+  logger.info("line-c");
+  await wait(1200);
+  const body = fs.readFileSync(path.join(dir, "app.log"), "utf8");
+  ok("a flush timer firing during a slow write does not stop the file sink", () => {
+    for (const l of ["line-a", "line-b", "line-c"]) assert.ok(body.includes(l), `${l} missing:
+${body}`);
+  });
+  __resetSinkForTest();
+}
+
 __resetForTest(null);
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`crashguard: ${passed}/${passed} tests passed`);

@@ -93,11 +93,20 @@ export interface CreateV2Args {
    */
   mayhem: boolean;
   /**
-   * Cashback: the creator's whole fee is redirected to traders, permanently.
-   * `null` leaves it unset. Measured 2026-09-09: 44% of new pump launches use
-   * it, and it is why the modal successful launch pays its creator nothing.
+   * Cashback: the creator's whole fee to traders. pump stopped allowing NEW
+   * cashback coins on 2026-09-12 (replaced by holder rewards), so the
+   * launcher always sends false; the field stays because the IDL has it.
    */
   cashback: boolean | null;
+  /**
+   * Holder rewards (pump, 2026-09-12): the creator fee goes to holders of the
+   * coin instead of the creator, permanently. `null` = the older 10-byte form
+   * that omits the field (still accepted; it is what the 09-10 fixture is);
+   * a boolean = the current 11-byte form every new pump create sends.
+   */
+  holderReward?: boolean | null;
+  /** `creator_fee_bps`, an OptionU64. 0 on every observed launch (default fee). */
+  creatorFeeBps?: number;
 }
 
 const borshString = (s: string): Buffer => {
@@ -118,18 +127,16 @@ const borshString = (s: string): Buffer => {
 const optionBool = (v: boolean | null): Buffer => Buffer.from([v ? 1 : 0]);
 
 /**
- * Eight zero bytes every real create carries and the IDL does not describe.
- *
- * Measured on three launches 2026-09-10: the on-chain instruction data is
- * exactly eight bytes longer than the published argument list accounts for,
- * and those bytes are zero every time. The on-chain IDL is evidently a little
- * behind the deployed program.
- *
- * We send what everyone else sends. It is written down here rather than
- * silently appended so that the day it stops being zero, this comment is where
- * someone looks — and the fixture test fails first.
+ * `creator_fee_bps` — the eight bytes that were "undocumented" on 09-10. The
+ * published IDL (pump-public-docs, read 2026-09-25) names them: an OptionU64,
+ * which like OptionBool is a bare struct, so 8 bytes little-endian, no tag.
+ * 0 on every observed launch (pump's default fee).
  */
-const UNDOCUMENTED_TAIL = Buffer.alloc(8);
+const u64le = (n: number): Buffer => {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64LE(BigInt(Math.max(0, Math.round(n))));
+  return b;
+};
 
 /** create_v2's argument buffer, Borsh, in IDL order. */
 export function createV2Data(args: CreateV2Args): Buffer {
@@ -141,7 +148,9 @@ export function createV2Data(args: CreateV2Args): Buffer {
     args.creator.toBuffer(),
     Buffer.from([args.mayhem ? 1 : 0]),
     optionBool(args.cashback),
-    UNDOCUMENTED_TAIL,
+    u64le(args.creatorFeeBps ?? 0),
+    // is_holder_reward — only in the current form (see CreateV2Args).
+    ...(args.holderReward === null || args.holderReward === undefined ? [] : [optionBool(args.holderReward)]),
   ]);
 }
 

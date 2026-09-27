@@ -39,6 +39,7 @@ import {
   aiPromptPack,
   defaultScript,
   describeRules,
+  mergeSnapshot,
   fieldGuideText,
   validateScript,
   type RuleAction,
@@ -134,7 +135,14 @@ export function ScriptsPage() {
   useEffect(() => {
     void load();
     const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'automation') setSnap(ev.snapshot);
+      if (ev.kind === 'automation') {
+        // Live updates carry no code; keep what is on screen (mergeSnapshot).
+        setSnap((prev) => {
+          const m = mergeSnapshot(prev, ev.snapshot);
+          if (m.stale) queueMicrotask(() => void window.krypt.automation.list().then((r) => r.ok && r.data && setSnap(r.data)));
+          return m.snap;
+        });
+      }
     });
     return off;
   }, [load]);
@@ -409,11 +417,17 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
       )}
 
       {view === 'scripts' && (
-        <div className="grid lg:grid-cols-[300px_1fr] gap-4 items-start">
+        /* minmax(0,1fr) + min-w-0, never a bare 1fr: a 1fr track is
+           minmax(auto,1fr), so its floor is the editor's LONGEST UNBROKEN
+           string. A running script's log (SCORE json, mint addresses, URLs)
+           or a long last-error then widened the column past the window and
+           pushed the header card's Settings / arm switch / Save off-screen
+           behind a horizontal scroll (user report, 2026-09-26). */
+        <div className="grid lg:grid-cols-[300px_minmax(0,1fr)] gap-4 items-start">
           {/* The list: one tab per chain. A script can only see and spend the
               money of the chain it is on, so the chain is picked BEFORE the
               script exists rather than found later inside its editor. */}
-          <div className="space-y-3">
+          <div className="space-y-3 min-w-0">
             <ChainTabs value={tab} onChange={setTab} counts={chainCounts} />
             {/* A live script on this chain that the chain cannot execute. The
                 page used to show only Solana's reason, so an unarmed EVM rail
@@ -485,7 +499,7 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
           </div>
 
           {/* Editor */}
-          <div className="space-y-4">
+          <div className="space-y-4 min-w-0">
             {!draft ? (
               <Card className="text-xs text-krypt-muted">
                 Pick a script on the left, or{' '}
@@ -563,7 +577,7 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                     )}
                   </div>
                   {currentStats && (
-                    <div className="text-label font-mono text-krypt-muted/70">
+                    <div className="text-label font-mono text-krypt-muted/70 [overflow-wrap:anywhere]">
                       last run {fmtAgo(currentStats.lastRunAt)} · today {currentStats.buysToday} buys, {currentStats.sellsToday} sells,{' '}
                       {currentStats.realizedSolToday >= 0 ? '+' : ''}
                       {currentStats.realizedSolToday.toFixed(4)} {nativeSymbolOf(scriptChain(draft))} realised · {currentStats.openCount} open
@@ -585,14 +599,14 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                   {inputs.error && (
                     <p className="flex items-start gap-1.5 text-label text-rose-300">
                       <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                      <span>This script's settings could not be read, so it has none: {inputs.error}</span>
+                      <span className="min-w-0 [overflow-wrap:anywhere]">This script's settings could not be read, so it has none: {inputs.error}</span>
                     </p>
                   )}
                   {dirty && <p className="text-label text-amber-200/90">Unsaved changes. Arming waits for a save; saving a live script restarts it with the new settings.</p>}
                 </Card>
 
                 <Card className="space-y-3">
-                  <div className="grid grid-cols-[auto_auto_auto] gap-3 items-end">
+                  <div className="flex flex-wrap gap-3 items-end">
                     <Field label="Kind">
                       <div className="flex rounded-md border border-white/10 overflow-hidden">
                         {(['rules', 'code'] as const).map((k) => (
@@ -1247,7 +1261,11 @@ function ScriptLog({ lines, stats, coin }: { lines: ScriptLogLine[]; stats?: Scr
       title="Log"
       description={stats ? `Last run ${fmtAgo(stats.lastRunAt)} · today ${stats.buysToday} buys, ${stats.sellsToday} sells, ${stats.realizedSolToday >= 0 ? '+' : ''}${stats.realizedSolToday.toFixed(4)} ${coin} realised · ${stats.openCount} open · fired on ${stats.firedMints} tokens${stats.lastError ? ` · last error${stats.lastErrorAt ? ` ${fmtAgo(stats.lastErrorAt)} ago` : ''}: ${stats.lastError}` : ''}` : ''}
     >
-      <Card padded={false} className="max-h-[320px] overflow-auto">
+      {/* A line WRAPS inside the log, never widens it: `break-words` alone
+          does not lower a line's min-content, so one SCORE json row or URL
+          set the width of the whole page (2026-09-26). `anywhere` does, and
+          min-w-0 lets the flex child shrink to it. */}
+      <Card padded={false} className="max-h-[320px] overflow-y-auto overflow-x-hidden">
         {lines.length === 0 ? (
           <div className="p-4 text-xs text-krypt-muted">Nothing yet.</div>
         ) : (
@@ -1255,7 +1273,7 @@ function ScriptLog({ lines, stats, coin }: { lines: ScriptLogLine[]; stats?: Scr
             {[...lines].reverse().map((l, i) => (
               <div key={i} className={cls('px-4 py-1 border-b border-white/5 flex gap-3', l.level === 'error' ? 'text-rose-300' : l.level === 'warn' ? 'text-amber-300' : 'text-white/80')}>
                 <span className="text-krypt-muted/60 flex-shrink-0">{new Date(l.at).toLocaleTimeString()}</span>
-                <span className="whitespace-pre-wrap break-words">{l.line}</span>
+                <span className="min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{l.line}</span>
               </div>
             ))}
           </div>

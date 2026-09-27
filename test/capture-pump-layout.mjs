@@ -66,7 +66,7 @@ for (const s of sigs) {
   await sleep(150);
   let tx;
   try {
-    tx = await rpc('getTransaction', [s.signature, { encoding: 'json', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
+    tx = await rpc('getTransaction', [s.signature, { encoding: 'json', maxSupportedTransactionVersion: 1, commitment: 'confirmed' }]);
   } catch (e) {
     console.error('skip', s.signature.slice(0, 12), e.message);
     continue;

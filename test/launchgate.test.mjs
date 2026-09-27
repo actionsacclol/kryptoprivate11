@@ -127,7 +127,7 @@ const good = (chain = 'solana', over = {}) => ({
 }
 
 {
-  assert.equal(emptyDraft('solana').cashback, false, 'cashback is OFF unless asked for');
+  assert.equal(emptyDraft('solana').holderRewards, false, 'holder rewards are OFF unless asked for');
   assert.equal(emptyDraft('solana').mayhem, false, 'and so is mayhem');
   // Cashback gives the creator's entire fee away, permanently. 44 % of pump
   // launches use it, which is exactly why it must never be the default here.

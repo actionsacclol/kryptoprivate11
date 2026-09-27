@@ -6,7 +6,8 @@
 //
 //   GET /home-feed          the global feed — every live callout, all chains,
 //                           each with the CALLER'S OWN POSITION in the coin.
-//   GET /callout/top/{mint} the calls on one coin.
+//   GET /callout/top/{mint} the calls on one coin. GONE since 2026-09-26
+//                           (404 "Cannot GET"); see calloutsForMint.
 //
 // What is NOT available keyless, checked 2026-09-18 so nobody spends an
 // afternoon rediscovering it: `/callout/leaderboard`, `/callout/leaderboard-
@@ -20,7 +21,7 @@
 // chronological; `newestFirst` is applied by the caller that wants time order.
 
 import { getJson, memo } from '../http';
-import { parseCoinCallouts, parseHomeFeed, type Callout } from '@shared/callouts';
+import { calloutsFor, parseCoinCallouts, parseHomeFeed, type Callout } from '@shared/callouts';
 import type { ChainKind } from '@shared/evm';
 
 /**
@@ -74,16 +75,57 @@ export async function calloutFeed(): Promise<Callout[] | null> {
   });
 }
 
-/** The callouts on one coin. Null = the call failed; [] = none. */
+/**
+ * `/callout/top/{mint}` went away on 2026-09-26 (~07:47Z): 404 "Cannot GET"
+ * for every coin, called or not, while pump's route table still lists it and
+ * no keyless replacement exists (`/following-feed/by-mint/{mint}` is 401;
+ * `/callout/user/{user}/mint/{mint}` needs the caller first). A 404 therefore
+ * retires the route for this long before it is asked again — rather than one
+ * wasted request per opened coin, each counting toward the host's failure
+ * streak that parks Discover's lists too.
+ */
+const COIN_ROUTE_RETRY_MS = 30 * 60_000;
+let coinRouteGoneUntil = 0;
+
+/** For tests only. */
+export function resetCoinRouteForTests(): void {
+  coinRouteGoneUntil = 0;
+}
+
+/**
+ * The callouts on one coin. Null = could not be answered; [] = pump answered
+ * and there are none.
+ *
+ * While the per-coin route is gone, the coin's rows in the global feed are
+ * the fallback — they are real calls on this coin, but the feed carries at
+ * most the ONE call pump is surfacing, so the fallback never answers `[]`:
+ * a coin missing from the feed has not been shown to have no calls. Each
+ * feed row carries `coinCallouts`, the coin's own count, so the panel can
+ * say "1 of 87" instead of implying one call is all there is.
+ */
 export async function calloutsForMint(mint: string, chain: ChainKind): Promise<Callout[] | null> {
   const key = `callouts:mint:${chain}:${mint}`;
   return memo<Callout[]>(key, COIN_TTL_MS, async () => {
-    const r = await getJson<unknown>('pumpfun', `/callout/top/${encodeURIComponent(mint)}`, { lane: 'callout' });
-    if (!r.ok || r.data === undefined) {
-      lastError = r.message || null;
+    if (Date.now() >= coinRouteGoneUntil) {
+      const r = await getJson<unknown>('pumpfun', `/callout/top/${encodeURIComponent(mint)}`, { lane: 'callout' });
+      if (r.ok && r.data !== undefined) {
+        lastError = null;
+        return parseCoinCallouts(r.data, mint, chain);
+      }
+      if (r.status !== 404) {
+        lastError = r.message || null;
+        return null;
+      }
+      coinRouteGoneUntil = Date.now() + COIN_ROUTE_RETRY_MS;
+    }
+    const feed = await calloutFeed();
+    if (!feed) return null; // lastError already says why
+    const rows = calloutsFor(feed, mint);
+    if (rows.length === 0) {
+      lastError = 'pump.fun no longer serves a coin’s callouts, and this coin is not in its current feed';
       return null;
     }
     lastError = null;
-    return parseCoinCallouts(r.data, mint, chain);
+    return rows;
   });
 }

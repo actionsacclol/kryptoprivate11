@@ -51,7 +51,7 @@ export function Section({
                 <div className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" aria-hidden="true" />
               </div>
             )}
-            {description && <p className="text-xs text-krypt-muted/80 mt-1">{description}</p>}
+            {description && <p className="text-xs text-krypt-muted/80 mt-1 [overflow-wrap:anywhere]">{description}</p>}
           </div>
           {actions && <div className="flex items-center gap-2 flex-shrink-0">{actions}</div>}
         </div>

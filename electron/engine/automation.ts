@@ -79,6 +79,9 @@ import { TRIGGER_BASES } from '@shared/orders';
 import type { NewOrderRequest, OrderKind, TriggerBasis } from '@shared/orders';
 import type { AlertKind, NewAlertRequest } from '@shared/alerts';
 import * as recorder from './recorder';
+import { traderClaimFor } from './traderClaims';
+// Re-exported for the test bundle, which has its own copy of the module.
+export { setTraderClaimCheck } from './traderClaims';
 
 const FILE = 'automation.json';
 const LOG_CAP = 200;
@@ -99,6 +102,9 @@ export interface OrderView {
   triggerBasis: string;
   triggerValue: number | null;
   amount: number;
+  /** Paused because the app stopped while it was EXECUTING — its trade may
+   *  have landed. Never re-place one without checking the wallet. */
+  interrupted?: boolean;
 }
 
 export interface LeaderView {
@@ -157,6 +163,10 @@ export interface AutomationHost {
   analyze(mint: string, chain?: ChainKind): Promise<AiAnalysis>;
   /** Open positions in a mode. */
   positions(mode: ScriptMode, chain?: ChainKind): Promise<ScriptPosition[]>;
+  /** All-in SOL the chain says these buy signatures spent (fees and rent
+   *  included, the same measure as a live position's `costSol`), or null
+   *  when any of them is not reconciled yet. */
+  spentSolFor?(signatures: string[]): number | null;
   /**
    * The mints the active wallet (or the paper book) holds, or NULL when the
    * read failed. `positions` answers a failed read with an empty list, which
@@ -250,6 +260,29 @@ interface OpenedEntry {
   costSol: number;
   at: number;
   wallet?: string;
+  /**
+   * Signatures of this script's buys of the mint, so its share of the bag can
+   * be priced from the CHAIN like the wallet's (see `sellOne`). `sigless`
+   * is set once any buy — a limit/migration order's fill, a buy that returned
+   * no signature — joined the entry without one: the signatures then no
+   * longer cover everything the script paid, and the requested SOL is used.
+   */
+  sigs?: string[];
+  sigless?: boolean;
+}
+
+/** Keep the signature list bounded; past this the entry counts as sigless. */
+const MAX_OPENED_SIGS = 20;
+
+/** Add one buy to an opened entry, keeping the signature bookkeeping honest. */
+function openedWithBuy(prev: OpenedEntry | undefined, sol: number, at: number, signature: string | null | undefined, wallet?: string): OpenedEntry {
+  const sigs = [...(prev?.sigs ?? [])];
+  let sigless = prev ? prev.sigless === true || !prev.sigs?.length : false;
+  if (signature && sigs.length < MAX_OPENED_SIGS) sigs.push(signature);
+  else sigless = true;
+  const e: OpenedEntry = { costSol: (prev?.costSol ?? 0) + sol, at, sigs, sigless };
+  if (wallet) e.wallet = wallet;
+  return e;
 }
 
 interface Runtime {
@@ -717,7 +750,7 @@ function statsFor(s: UserScript): ScriptStats {
   };
 }
 
-export function snapshot(): ScriptSnapshot {
+export function snapshot(withCode = true): ScriptSnapshot {
   const stats: Record<string, ScriptStats> = {};
   const logs: Record<string, ScriptLogLine[]> = {};
   const metrics: NonNullable<ScriptSnapshot['metrics']> = {};
@@ -728,7 +761,10 @@ export function snapshot(): ScriptSnapshot {
     metrics[s.id] = [...rt.metrics].map(([name, m]) => ({ name, value: m.value, at: m.at }));
   }
   return {
-    scripts: all(),
+    // Live updates go out on every script log line; the code is left out of
+    // them (it is only needed to edit, and a full read carries it).
+    scripts: withCode ? all() : all().map((s) => ({ ...s, code: '' })),
+    ...(withCode ? {} : { codeOmitted: true }),
     stats,
     logs,
     metrics,
@@ -832,7 +868,7 @@ function refuse(s: UserScript, why: string): ActResult {
 }
 
 /** The budget gate every BUY-like action passes: caps, live gates, size. */
-async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, what: string): Promise<ActResult | null> {
+async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, what: string, wallet: { address?: string | null } = {}): Promise<ActResult | null> {
   const h = host as AutomationHost;
   if (!Number.isFinite(sol) || sol <= 0) return refuse(s, `buy ${what}: amount must be a positive number of SOL`);
   if (sol > s.budget.maxSolPerTrade) return refuse(s, `buy ${what}: ${sol} SOL is over the script's max per trade (${s.budget.maxSolPerTrade})`);
@@ -849,6 +885,18 @@ async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, wh
     // being off.
     const blocked = h.liveBlockedReason(scriptChain(s)) ?? h.buyBlockedReason(scriptChain(s));
     if (blocked) return refuse(s, `buy ${what}: not executed — ${blocked}`);
+    // A live Krypto Trader session holds this coin in this wallet (the active
+    // one unless a wallet was named): a script buying into it would mix its
+    // bag with the session's, and the session would pause on the fill.
+    // Orders are refused in engine.createOrder, which every order path uses.
+    // On BNB / Robinhood the pair is (chain, the chain's signer, coin) — a
+    // claim there is not a claim on Solana, and the reverse (stage 4).
+    const chain = scriptChain(s);
+    const claim =
+      chain === 'solana'
+        ? traderClaimFor(wallet.address ? { address: wallet.address } : { walletId: null }, mint)
+        : traderClaimFor({ walletId: null, address: wallet.address ?? null, chain }, mint);
+    if (claim) return refuse(s, `buy ${what}: not executed — ${claim}`);
     // The app's MANUAL per-trade cap deliberately does NOT apply (2026-09-22).
     // `maxSolPerTrade` above is this script's own, set on the same screen as
     // its code, and it is the authority on its size. Two caps for one decision
@@ -947,8 +995,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       const r = await h.buy(mint, sol, s.mode, scriptChain(s), s.budget.maxSolPerTrade);
       if (r.ok || r.pending) {
         rt.buysToday += 1;
-        const prev = rt.opened.get(mint);
-        rt.opened.set(mint, { costSol: (prev?.costSol ?? 0) + sol, at: now });
+        rt.opened.set(mint, openedWithBuy(rt.opened.get(mint), sol, now, r.signature));
         h.subscribeTicks(mint);
         slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}buy ${what} ${sol} SOL: ${r.message}${r.pending ? ' (pending)' : ''}`);
         recorder.record('script_buy', { scriptId: s.id, name: s.name, mode: s.mode, mint, sol, ok: r.ok, signature: r.signature ?? null });
@@ -1004,7 +1051,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       const r = await h.placeOrder({ mint, symbol: ctx?.symbol ?? '', kind, triggerBasis: basis, triggerValue, amount: Number(amount) });
       if (r.ok && isBuy) {
         rt.buysToday += 1;
-        rt.opened.set(mint, { costSol: (rt.opened.get(mint)?.costSol ?? 0) + Number(amount), at: now });
+        rt.opened.set(mint, openedWithBuy(rt.opened.get(mint), Number(amount), now, null));
       }
       // "armed" / "NOT armed" up front: "take profit +100% sell 50% on X" read as a
       // sale that happened (09-24) when it was only the order being placed.
@@ -1096,7 +1143,20 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   // copyTrade.ts `walletPctFor` already uses, and the reason `opened` carries
   // costSol at all. `Math.max(1, …)` because a share that rounds to zero must
   // still be able to exit; this only ever shrinks the sell, never grows it.
-  const ourCost = rt.opened.get(mint)?.costSol ?? 0;
+  //
+  // Both sides of the ratio must be the same kind of number. The wallet's
+  // cost is the ledger's ALL-IN spend (priority fee, tip, token-account rent
+  // included); the script's used to be the SOL it asked to spend. On a 0.016
+  // SOL buy that is ~0.0027 SOL apart, so every "sell 100%" of a bag only the
+  // script ever bought sold 92–99% and left dust that later cost more to sell
+  // than it was worth (09-25: FOMOFY 96%, Gavel 92%, LIABCAT 94%…). So price
+  // the script's own buys from the chain too, when every one of them is known.
+  const entry = rt.opened.get(mint);
+  let ourCost = entry?.costSol ?? 0;
+  if (entry?.sigs?.length && !entry.sigless && h.spentSolFor) {
+    const chainCost = h.spentSolFor(entry.sigs);
+    if (chainCost !== null && Number.isFinite(chainCost) && chainCost > 0) ourCost = chainCost;
+  }
   let pctOfWallet = pct;
   // An UNKNOWN wallet basis means the script cannot work out its own share, so
   // it sells the percentage it asked for rather than guessing a ratio — the
@@ -1307,7 +1367,41 @@ async function startCodeInner(s: UserScript): Promise<void> {
   rt.startFails = 0;
   rt.running = true;
   slog(s, 'info', 'sandbox running');
+  announcePausedOrders(s, rt);
   changed();
+}
+
+/**
+ * Tell a freshly started script about orders on ITS coins that came back
+ * `paused` from a restart.
+ *
+ * Restart → paused is deliberate (advOrders §3: never resume a live order
+ * silently) and stays so — nothing here resumes anything. But the script
+ * placed those stops and rungs, remembers them as placed, and was never told:
+ * the `orders` diff treats the first sighting of an order as a baseline, so a
+ * restored-paused order produced no event at all. The script went on
+ * believing its stop and take-profits were armed while nothing could fire
+ * (WAIFU/PGPU, 09-25 10:36). Now it gets the same `order` event with
+ * orderState 'paused' that a wallet-switch pause already sends, and the log
+ * says so; re-placing (cancel + order) is the script's own decision.
+ */
+function announcePausedOrders(s: UserScript, rt: Runtime): void {
+  const h = host;
+  if (!h || s.kind !== 'code' || scriptChain(s) !== 'solana' || s.mode !== 'live') return;
+  const paused = h.orders().filter((o) => o.state === 'paused' && rt.opened.has(o.mint));
+  if (!paused.length) return;
+  const mints = new Set(paused.map((o) => o.mint));
+  slog(
+    s,
+    'warn',
+    `${paused.length} order(s) on ${mints.size} coin(s) this script holds came back PAUSED after the restart — they will not fire until resumed or re-placed (sent to the script as 'order' events, state 'paused')`,
+  );
+  for (const o of paused) {
+    void ctxFor(s, o.mint).then((c) => {
+      if (!c.symbol && o.symbol) c.symbol = o.symbol;
+      enqueue(s, 'order', withOrder(c, { kind: o.kind, state: o.state, amount: o.amount }));
+    });
+  }
 }
 
 async function stopCode(s: UserScript, reason: string): Promise<void> {
@@ -1503,7 +1597,7 @@ async function walletTrade(
   if (rateLimited(s, rt, Date.now())) return refuse(s, `${side} ${label}: over ${s.budget.maxActionsPerMinute} actions in a minute`);
 
   if (side === 'buy') {
-    const gate = await buyGate(s, rt, mint, amount, label);
+    const gate = await buyGate(s, rt, mint, amount, label, { address });
     if (gate) return gate;
     if (s.mode === 'paper') {
       slog(s, 'info', `PAPER buy ${amount} SOL of ${label} as ${who}… — nothing spent`);
@@ -1628,8 +1722,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           // reserve it now, or the budget counts it only once it fires.
           if (r.ok && kind === 'buy_on_migration') {
           rt.buysToday += 1;
-          const prev = rt.opened.get(orderMint);
-          rt.opened.set(orderMint, { costSol: (prev?.costSol ?? 0) + amount, at: Date.now() });
+          rt.opened.set(orderMint, openedWithBuy(rt.opened.get(orderMint), amount, Date.now(), null));
           persist();
           }
           slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'armed' : 'NOT armed'} order ${kind} on ${ctx.symbol || orderMint.slice(0, 8)}: ${r.message}`);
@@ -2313,6 +2406,21 @@ export function resetScript(id: string): { ok: boolean; message: string } {
         ? `"${s.name}" reset — its stats, saved state, log and paper positions are cleared.`
         : `"${s.name}" reset — its stats, saved state and log are cleared. Open live positions and today’s budget (${rt.buysToday} buys, ${rt.realizedToday.toFixed(4)} realised) are kept.`,
   };
+}
+
+/**
+ * Scripts holding an opened position in `mint`: the script's name and the
+ * wallet it bought with (null = the active wallet). Krypto Trader refuses a
+ * (wallet, mint) pair a script already trades — a script "sell all" would
+ * otherwise sell the session's tokens.
+ */
+export function openedOn(mint: string): { script: string; wallet: string | null }[] {
+  const out: { script: string; wallet: string | null }[] = [];
+  for (const s of scripts) {
+    const e = runtimes.get(s.id)?.opened.get(mint);
+    if (e) out.push({ script: s.name, wallet: e.wallet ?? null });
+  }
+  return out;
 }
 
 export function _runtimeOf(id: string): { opened: string[]; firedMints: string[]; realizedToday: number; buysToday: number; kv: Record<string, unknown>; subscribed: string[]; atTimers: string[] } | null {

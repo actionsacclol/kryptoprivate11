@@ -29,7 +29,18 @@ export interface Caller {
   xUsername: string | null;
   verified: boolean;
   avatarUrl: string | null;
-  /** How many calls they have made, ever. */
+  /**
+   * How many calls THIS CALLER has made, ever — from a source that is about
+   * the caller. Null on every row this module parses today.
+   *
+   * It used to be filled from the feed's `position.totalCallouts`, which is
+   * NOT the caller's count: measured 2026-09-26 on four feed rows, it read
+   * 87 / 9 / 11 / 47 where each caller's own `/users/{address}/callout-stats`
+   * said 477 / 1405 / 1776 / 2693 all-time — and it is the same number for
+   * every caller on one coin. It is the COIN's call count; see
+   * `Callout.coinCallouts`. The caller's real count is one call away
+   * (callerStats in electron/system/pumpProfile.ts) and is not fetched per row.
+   */
   totalCallouts: number | null;
   /** Tokens still held of the coin they called. 0 is a KNOWN zero here — it
    *  means they hold none, not that we failed to read it. */
@@ -87,6 +98,13 @@ export interface Callout {
   views: number | null;
   /** Follow-up posts the caller added to their own call. */
   updates: number | null;
+  /**
+   * How many callouts this COIN has on pump — the feed's
+   * `position.totalCallouts`, which is per coin, not per caller (same value
+   * on every caller's row for a coin; see `Caller.totalCallouts`). Null when
+   * the route does not carry it.
+   */
+  coinCallouts: number | null;
   caller: Caller;
 }
 
@@ -179,12 +197,14 @@ type FeedCoin = Record<string, unknown>;
 
 function parseCaller(p: Record<string, unknown>): Caller {
   return {
+    // NOT `p.totalCallouts`: on the feed that is the coin's count
+    // (Callout.coinCallouts). Nothing in `position` counts the caller's calls.
     name: str(p.userName, 60),
     wallet: str(p.walletAddress, 64),
     xUsername: str(p.xUsername, 60),
     verified: p.isVerified === true,
     avatarUrl: str(p.profileImage, 300),
-    totalCallouts: num(p.totalCallouts),
+    totalCallouts: null,
     holds: num(p.amountHeld),
     positionUsd: num(p.valueUsd),
     costUsd: num(p.costBasisUsd),
@@ -237,6 +257,7 @@ export function parseHomeFeed(raw: unknown): Callout[] {
       replies: num(callout.replyCount),
       views: num(callout.viewCount),
       updates: num(callout.updateCount),
+      coinCallouts: position ? num(position.totalCallouts) : null,
       caller: position ? parseCaller(position) : parseCaller({}),
     });
   }
@@ -244,7 +265,9 @@ export function parseHomeFeed(raw: unknown): Callout[] {
 }
 
 /**
- * `GET /callout/top/{mint}` → that coin's callouts.
+ * `GET /callout/top/{mint}` → that coin's callouts. (That route answers 404
+ * "Cannot GET" since 2026-09-26; kept for if pump restores it — the provider
+ * falls back to the feed's rows, see electron/data/providers/pumpCallouts.ts.)
  *
  * A different shape from the feed: `{ callouts: [...] }`, flat, and with the
  * caller's wallet in `userId` rather than `walletAddress`. It carries no
@@ -284,6 +307,7 @@ export function parseCoinCallouts(raw: unknown, mint: string, chain: ChainKind):
       replies: num(c.replyCount),
       views: num(c.viewCount),
       updates: num(c.updateCount),
+      coinCallouts: null,
       caller: {
         name: str(c.username, 60),
         // On this route the wallet is `userId`; `user_uuid` is the account id.
@@ -309,6 +333,19 @@ export function parseCoinCallouts(raw: unknown, mint: string, chain: ChainKind):
  *  time order and is not a ranking this app has any way to check. */
 export function newestFirst(rows: Callout[]): Callout[] {
   return [...rows].sort((a, b) => b.at - a.at);
+}
+
+/**
+ * "3 calls", or "1 of 87 calls" when pump's own count for the coin says the
+ * rows in hand are not all of them (the feed shows one call per coin). The
+ * larger known count wins; an unknown count adds nothing.
+ */
+export function coinCallsLabel(rows: Callout[]): string {
+  const shown = rows.length;
+  let total: number | null = null;
+  for (const r of rows) if (r.coinCallouts !== null && (total === null || r.coinCallouts > total)) total = r.coinCallouts;
+  if (total !== null && total > shown) return `${shown} of ${total} calls`;
+  return `${shown} call${shown === 1 ? '' : 's'}`;
 }
 
 /** Feed rows for one mint, newest first. */

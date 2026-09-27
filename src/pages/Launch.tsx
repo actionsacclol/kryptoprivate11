@@ -33,7 +33,7 @@ import {
 } from '@shared/launch';
 import { useAppState } from '../state/AppStateProvider';
 import { LaunchStats } from '../components/terminal/LaunchStats';
-import { KryptoSessions } from '../components/terminal/KryptoSessions';
+import { KryptoLimitsFields, KryptoSessions } from '../components/terminal/KryptoSessions';
 import {
   KRYPTO_DISCLOSURE_MAX,
   KRYPTO_DRIVERS,
@@ -687,7 +687,7 @@ export function Launch() {
           <div className="mt-3 space-y-2">
             {([
               ['mayhem', 'Mayhem mode', 'Trades against inflated virtual reserves, with the fee going to a reserved recipient.'],
-              ['cashback', 'Cashback', 'Your entire creator fee is redirected to traders, permanently. This cannot be undone, and it is why the typical successful launch pays its creator nothing.'],
+              ['holderRewards', 'Holder rewards', 'Your creator fee is paid out to the coin’s holders (wallets holding about $20 or more) instead of to you, permanently. pump replaced Cashback with this on 2026-09-12. This cannot be undone, and it is why the typical successful launch pays its creator nothing.'],
             ] as const).map(([key, label, why]) => (
               <button
                 key={key}
@@ -762,6 +762,14 @@ export function Launch() {
                       className={cls(inputCls, 'font-mono')}
                     />
                   </Field>
+                  <Field label="Pacing (yours to set, 0 turns a limit off)">
+                    <KryptoLimitsFields
+                      limits={draft.krypto.limits}
+                      goal={draft.krypto.goal}
+                      driver={draft.krypto.driver}
+                      onChange={(p) => setKrypto(p)}
+                    />
+                  </Field>
                   <div className="grid grid-cols-2 gap-1.5">
                     {([
                       [false, 'Start on paper', 'Simulated at the live price. Go live from the Krypto Mode tab when you are happy.'],
@@ -783,9 +791,8 @@ export function Launch() {
                       {kryptoDisclosure(kryptoAddress && draft.metadataUri ? kryptoAddress : '<the bot wallet — made when you pin>')}
                     </div>
                     <div className="mt-1.5">
-                      Every trade goes through the normal trade path: 0.5% fee, your live limits and breakers. The bot never trades
-                      faster than every 15 seconds, never buys back within a minute of a sell, and stops at 20 trades an hour, so it
-                      manages a position rather than making volume.
+                      Every trade goes through the normal trade path: 0.5% fee, your live limits and breakers. It never spends past
+                      the budget; the pacing above is yours, and every setting can be changed on the Krypto Mode tab while it runs.
                     </div>
                   </div>
                 </div>

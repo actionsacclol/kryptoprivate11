@@ -37,7 +37,7 @@ import type { NotifyTarget } from '@shared/types';
 import type { ChainKind } from '@shared/evm';
 import { PositionManager, type TokenMarket } from './positions';
 import { noteActiveMint, parseCurve } from './txBuilder';
-import { getTokenBalanceForMint, getTokenBalanceRawForMint, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from '../chain/rpcClient';
+import { getTokenBalanceForMint, getTokenBalanceRawForMint, getSignaturesForAddress, getTransaction, resolveAccountKeys, getAccountInfo, getMultipleAccountInfo, getSignatureStatuses, getBalance, getTokenAccountsByOwner, getTokenSupply, setRpcFallback, isEndpointRejected } from '../chain/rpcClient';
 import { solToLamports } from './curve';
 import * as wallet from '../system/wallet';
 import * as programWatch from './programWatch';
@@ -91,12 +91,15 @@ import * as priorityFeed from './priorityFeed';
 import * as portfolio from './portfolio';
 import { buildShadowPlan } from './sender';
 import { shouldRetrySell, shouldRetryPreBroadcast, escalatedSellSlippagePct, nextConsecutiveLosses, liveBreakerReason } from '@shared/liveBreakers';
+import { pctForClaim } from '@shared/botStrategy';
+import * as pumpChain from '../data/pumpChain';
 import { LEAN_EXIT_LAMPORTS, planBuySize, planExitBudget } from '@shared/exitBudget';
 import { describeTemplate, ordersForTemplate } from '@shared/orderTemplates';
 import { isPctKind } from '@shared/orders';
 import * as templateStore from '../system/templateStore';
 import type { DisarmReason, ExecutionSnapshot, LiveState, ShadowSendPlan } from '@shared/types';
 import { DEFAULT_BLOCK_FEED_WSS_URL, LIVE_EXECUTION_AVAILABLE } from '@shared/types';
+import { traderClaimFor } from './traderClaims';
 
 /**
  * A live trade result plus the size the engine actually SENT.
@@ -1045,7 +1048,33 @@ export class SniperEngine {
         }
         if (!creator) return null;
         const h = await launchIntel.creatorHistory(creator).catch(() => null);
-        if (!h) return null;
+        if (!h) {
+          // pump.fun's creator list is the only full record, and pump parks
+          // this IP for minutes at a time (09-27: 25 of 37 classic flags came
+          // back "creator unknown" while frontend-api-v3 sat on strike 9).
+          // Jupiter's audit block counts the same creator's mints
+          // cross-launchpad (a floor, and it includes this mint, exactly like
+          // pump's list), so a script still gets a launch count. Anything
+          // Jupiter does not carry stays null, never 0.
+          const s = market.summaryIfCached(mint) ?? (await market.summary(mint).catch(() => null));
+          const n = s?.audit.devMints;
+          if (typeof n !== 'number' || !Number.isFinite(n) || n < 1) return null;
+          const g = s?.audit.devMigrations;
+          // Both counts or nothing: `graduated` is a number in the script API,
+          // and a graduation count Jupiter did not give is not zero.
+          if (typeof g !== 'number' || !Number.isFinite(g) || g < 0) return null;
+          return {
+            address: creator,
+            launches: n,
+            graduated: g,
+            graduationRate: Math.round((g / n) * 1000) / 10,
+            medianAthUsd: null,
+            bestAthUsd: null,
+            firstLaunchAt: null,
+            lastLaunchAt: null,
+            truncated: false,
+          };
+        }
         return {
           address: h.address,
           launches: h.launches,
@@ -1072,6 +1101,13 @@ export class SniperEngine {
         return r.analysis;
       },
       positions: (mode, chain) => this.scriptPositions(mode, chain),
+      spentSolFor: (signatures) => {
+        const d = ledger.cashDeltaFor(signatures);
+        // Unknown is not zero: one unreconciled buy and the script's share
+        // cannot be priced from the chain at all.
+        if (d.unknown > 0 || !(d.solLamports < 0)) return null;
+        return -d.solLamports / 1e9;
+      },
       heldMints: (mode, chain) => this.scriptHeldMints(mode, chain),
       wallet: (chain) => {
         // `walletSol` on an EVM script is that chain's own coin and that
@@ -1088,7 +1124,7 @@ export class SniperEngine {
         advOrders
           .all()
           .filter((o) => !mint || o.mint === mint)
-          .map((o) => ({ id: o.id, mint: o.mint, symbol: o.symbol, kind: o.kind, state: o.state, triggerBasis: o.triggerBasis, triggerValue: o.triggerValue, amount: o.amount })),
+          .map((o) => ({ id: o.id, mint: o.mint, symbol: o.symbol, kind: o.kind, state: o.state, triggerBasis: o.triggerBasis, triggerValue: o.triggerValue, amount: o.amount, interrupted: advOrders.wasInterrupted(o) })),
       placeOrder: (req) => this.createOrder({ ...req, symbol: req.symbol || this.tokens.get(req.mint)?.row.symbol || market.summaryIfCached(req.mint)?.symbol || '' }),
       cancelOrders: (mint) => {
         let cancelled = 0;
@@ -1192,7 +1228,7 @@ export class SniperEngine {
         })),
       log: (level, line) => this.log(level, line),
       toast: (level, message) => this.emit({ kind: 'toast', level, message }),
-      changed: () => this.emit({ kind: 'automation', snapshot: automation.snapshot() }),
+      changed: () => this.emit({ kind: 'automation', snapshot: automation.snapshot(false) }),
       sandbox: {
         start: scriptSandbox.start,
         dispatch: scriptSandbox.dispatch,
@@ -2566,6 +2602,8 @@ export class SniperEngine {
     const why = multiWalletProblem(1, s.multiWallet);
     if (why) return { ok: false, message: why };
     if (side === 'buy') {
+      const claim = traderClaimFor({ walletId: mine.id }, mint);
+      if (claim) return { ok: false, message: `Buy not sent — ${claim}` };
       const r = await this.labBuy(mine.id, mint, amount, ownCapSol);
       return { ok: r.ok, message: r.message };
     }
@@ -2956,7 +2994,10 @@ export class SniperEngine {
     return res;
   }
 
-  /** Fire a real 100% sell when a live position exits. */
+  /** Fire a real 100% sell when a live position exits. NOT blocked by a
+   *  Krypto Trader claim on the coin: it is an exit, and an exit is never
+   *  blocked. If it sells a session's bag, the session pauses on the fill
+   *  (kryptoTrader.onLedgerFill; see electron/engine/traderClaims.ts). */
   private autoLiveSell(mint: string, symbol: string, reason: string): void {
     if (!this.liveMints.has(mint)) return;
     this.liveMints.delete(mint);
@@ -3707,12 +3748,18 @@ export class SniperEngine {
   /**
    * The average price this wallet actually entered `mint` at, SOL per token,
    * or null when it holds none / the fills cannot be priced yet.
+   *
+   * A PRICE, so the network fee and the token-account rent deposit are left
+   * out (`entrySpentSol`); the all-in `spentSol` is a cost for PnL. Anchoring
+   * on the all-in figure put a "+100%" rung at ~2.4x the fill and a "−40%"
+   * stop at −29% on a 0.016 SOL buy (2026-09-26).
    */
   private positionEntryPriceSol(mint: string): number | null {
     const b = this.basisFor(mint);
     if (!b || !(b.spentSol > 0) || !(b.tokensBought > 0)) return null;
     if (!(b.tokensBought - b.tokensSold > 0)) return null;
-    const avg = b.spentSol / b.tokensBought;
+    const paid = b.entrySpentSol > 0 ? b.entrySpentSol : b.spentSol;
+    const avg = paid / b.tokensBought;
     return Number.isFinite(avg) && avg > 0 ? avg : null;
   }
 
@@ -3918,6 +3965,15 @@ export class SniperEngine {
    * one this picks is on the confirmation, the list and the chart label.
    */
   async createOrder(req: import('@shared/orders').NewOrderRequest): Promise<{ ok: boolean; message: string }> {
+    // An order sells (or buys into) the ACTIVE wallet's balance when it
+    // fires. While a live Krypto Trader session holds this coin in the active
+    // wallet, arming one would let it sell the session's bag (critic #6) — so
+    // it is refused here, the one door every order path uses: the Orders
+    // panel, templates (applyTemplate reports each refusal), scripts and MCP
+    // place_order. Already-armed orders still fire: an exit is never blocked,
+    // and the session pauses on the fill (electron/engine/traderClaims.ts).
+    const claim = traderClaimFor({ walletId: null }, req.mint);
+    if (claim) return { ok: false, message: `Order not armed — ${claim}` };
     // Only the percentage kinds are measured from an anchor; a limit order's
     // trigger is absolute and "entry" would be a meaningless thing to stamp.
     if (isPctKind(req.kind)) {
@@ -4359,7 +4415,9 @@ export class SniperEngine {
 
   /** Sell 100% of every token the wallet actually holds (except wSOL).
    *  Chained behind in-flight live trades, so it liquidates only what
-   *  remains after per-position sells complete. */
+   *  remains after per-position sells complete. The panic exit: never held
+   *  back by a Krypto Trader claim — a session whose bag it sells pauses on
+   *  the fill (kryptoTrader.onLedgerFill; electron/engine/traderClaims.ts). */
   sellAllHeld(reason: string): { ok: boolean; message: string } {
     const s = this.getSettings();
     if (this.paperMode()) {
@@ -4659,7 +4717,7 @@ export class SniperEngine {
     /** The caller's own per-trade cap when it has one — a script's budget.
      *  Replaces the manual cap for that caller, exactly as in `testTrade`. */
     capSol?: number,
-  ): Promise<{ ok: boolean; message: string; signature: string | null; costSol: number | null; stage?: string | null }> {
+  ): Promise<{ ok: boolean; message: string; signature: string | null; costSol: number | null; stage?: string | null; sentSol?: number | null }> {
     const s = this.getSettings();
     if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'live execution is not armed', signature: null, costSol: null, stage: 'validate' };
     // No click behind this buy, so the real-money breakers and the per-trade
@@ -4712,34 +4770,239 @@ export class SniperEngine {
       signature: res.signature ?? null,
       costSol: res.simulatedLossSol ?? null,
       stage: res.stage ?? null,
+      // What actually went out after the per-trade cap. A caller that
+      // reserved budget for `wantSol` gives the difference back (Krypto
+      // Trader, critic #17) — the clip above only logs.
+      sentSol: sol,
     };
   }
 
-  // ── $Krypto Mode (electron/engine/kryptoMode.ts) ─────────────────
+  // ── Bot sessions: $Krypto Mode + Krypto Trader ───────────────────
   //
-  // A launched coin's declared bot trades through the Wallet Lab path: signed
-  // by the bot's own wallet, the full pipeline (fee, breakers, per-trade cap),
-  // recorded in the ledger under that wallet. No shortcut of its own.
+  // A launched coin's declared bot (kryptoMode.ts) and a Krypto Trader
+  // session (kryptoTrader.ts) trade through the Wallet Lab path: signed by
+  // the session's own wallet, the full pipeline (fee, breakers, per-trade
+  // cap), recorded in the ledger under that wallet. No shortcut of their own.
+  // The per-trade cap (`maxLiveSol`) applies to every one of these trades —
+  // no caller passes `capSol` to widen it (Trader design D5).
 
-  kryptoBuy(walletId: string, mint: string, sol: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }> {
+  botBuy(walletId: string, mint: string, sol: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null; sentSol?: number | null }> {
     return this.labBuy(walletId, mint, sol);
   }
 
-  kryptoSell(walletId: string, mint: string, pct: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }> {
+  /** A percentage-of-balance sell. Krypto Mode's bot wallet holds only the
+   *  bot's tokens, so a percentage of it IS a percentage of the bag. A
+   *  Krypto Trader session trades from a wallet that may hold the user's
+   *  own tokens too, so it uses `botSellClaim` instead. */
+  botSell(walletId: string, mint: string, pct: number): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null }> {
     return this.labSell(walletId, mint, pct);
   }
 
+  /**
+   * Sell AT MOST `claimRaw` base units from a wallet that may hold tokens
+   * that are not the caller's (Krypto Trader, critic #2).
+   *
+   * The sell rail is percentage-of-balance all the way down, and the local
+   * builder sizes partials since 09-07 — so exact base units are not safely
+   * available (a numeric amount goes to the relayer, wrong on mayhem and
+   * cashback coins; critic #3). The percentage comes from `pctForClaim`,
+   * which ROUNDS DOWN (pctForTokens above rounds UP — right for copy
+   * trading, wrong here), sends 100 only when the claim is at least the whole
+   * balance, and returns null — NO SELL, never a fallback to a requested
+   * percentage — when the balance is unreadable or the claim is under the
+   * builder's 0.01 % floor.
+   *
+   * Exactly-once note (critic #4): `labSell` goes through `sellWithRetry`,
+   * which can broadcast a 100 % sell a second time after broadcast. The
+   * caller's in-flight record covers THIS call, not those attempts; it is
+   * safe because 100 % is only sent when every token in the wallet is the
+   * caller's, and the second send sells what remains.
+   */
+  async botSellClaim(
+    walletId: string,
+    mint: string,
+    claimRaw: string,
+  ): Promise<{ ok: boolean; message: string; signature: string | null; stage?: string | null; walletPct: number | null; balanceRaw: string | null }> {
+    const s = this.getSettings();
+    if (!this.armed || !s.execution.liveEnabled) return { ok: false, message: 'live execution is not armed', signature: null, stage: 'validate', walletPct: null, balanceRaw: null };
+    const bal = await this.tokenBalanceRaw(walletId, mint);
+    const claim = /^\d+$/.test(claimRaw) ? BigInt(claimRaw) : 0n;
+    const pct = pctForClaim(claim, bal === null ? null : BigInt(bal));
+    if (pct === null) {
+      return {
+        ok: false,
+        message:
+          bal === null
+            ? 'the wallet’s balance of this coin could not be read — not selling'
+            : claim <= 0n
+              ? 'nothing to sell'
+              : 'the session holds under 0.01% of the wallet’s balance of this coin — the sell rail cannot size that without selling your tokens',
+        signature: null,
+        stage: 'validate',
+        walletPct: null,
+        balanceRaw: bal,
+      };
+    }
+    const r = await this.labSell(walletId, mint, pct);
+    return { ...r, walletPct: pct, balanceRaw: bal };
+  }
+
+  /** In-flight balance reads, shared: callers asking for the same wallet+mint
+   *  at once make ONE RPC call (Trader critic #18). Not cached beyond the
+   *  call — a percentage sized against a stale, smaller balance oversells. */
+  private balanceReads = new Map<string, Promise<string | null>>();
+
+  /** A wallet's balance of a coin in base units; null = unread. */
+  tokenBalanceRaw(walletId: string, mint: string): Promise<string | null> {
+    const owner = wallet.publicKeyOf(walletId);
+    if (!owner) return Promise.resolve(null);
+    const key = `${owner}|${mint}`;
+    const inflight = this.balanceReads.get(key);
+    if (inflight) return inflight;
+    const s = this.getSettings();
+    const p = getTokenBalanceRawForMint(s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner, mint)
+      .then((r) => (r.ok && r.data ? r.data.raw.toString() : null))
+      .catch(() => null)
+      .finally(() => this.balanceReads.delete(key));
+    this.balanceReads.set(key, p);
+    return p;
+  }
+
+  /** A signature's confirmed fill from the ledger: base units moved and the
+   *  wallet's lamport delta. Waits for reconciliation (≤ 30 s); null when it
+   *  does not settle — never a guess. */
+  async botFill(signature: string): Promise<{ tokensRaw: string; decimals: number | null; solLamports: number; feeLamports: number | null } | null> {
+    const t = await this.awaitFillTokens(signature);
+    if (!t) return null;
+    const f = ledger.all().find((x) => x.signature === signature);
+    if (!f || f.solDeltaLamports === null) return null;
+    return { tokensRaw: t.raw, decimals: t.decimals, solLamports: f.solDeltaLamports, feeLamports: f.feeLamports };
+  }
+
+  /**
+   * The in-flight trade of `mint` by this wallet since `sinceMs`, read from
+   * the chain — the reconcile for a trade in flight at a crash, whose
+   * signature was never recorded (Trader critic #8). Every signature back to
+   * `sinceMs` is listed (paged with `before`), then the transactions are
+   * read NEAREST `match.near` first, and the first on `match.side` that moves
+   * this coin is it — never one of `match.skip`, never simply the newest
+   * (which may be the user's own trade after the restart). null = every
+   * transaction since was read and none matched; undefined = the chain could
+   * not be read, or there were more than can be checked: "not found yet",
+   * never "did not land" (review #8).
+   */
+  async botFindTrade(
+    walletId: string,
+    mint: string,
+    sinceMs: number,
+    match: { side: 'buy' | 'sell'; near: number; skip: string[] },
+  ): Promise<{ signature: string; side: 'buy' | 'sell'; tokensRaw: string; solLamports: number; decimals: number | null } | null | undefined> {
+    const owner = wallet.publicKeyOf(walletId);
+    if (!owner) return undefined;
+    const url = this.getSettings().rpc.httpUrl;
+    const PAGE = 100;
+    const MAX_PAGES = 10;
+    const MAX_READS = 40;
+    type Sig = { signature: string; err: unknown; blockTime?: number | null };
+    const listed: Sig[] = [];
+    let before: string | undefined;
+    let complete = false;
+    for (let page = 0; page < MAX_PAGES && !complete; page++) {
+      const r = await getSignaturesForAddress(url, owner, PAGE, before).catch(() => null);
+      if (!r || !r.ok || !r.data) return undefined;
+      for (const x of r.data) {
+        if (x.blockTime !== null && x.blockTime !== undefined && x.blockTime * 1000 < sinceMs) {
+          complete = true;
+          break;
+        }
+        listed.push(x);
+      }
+      if (r.data.length < PAGE) complete = true;
+      before = r.data[r.data.length - 1]?.signature;
+      if (!before) complete = true;
+    }
+    if (!complete) return undefined; // more history since then than one reconcile reads
+    const skip = new Set(match.skip);
+    const dist = (x: Sig): number => (x.blockTime === null || x.blockTime === undefined ? Number.MAX_SAFE_INTEGER : Math.abs(x.blockTime * 1000 - match.near));
+    const cands = listed.filter((x) => !x.err && !skip.has(x.signature)).sort((a, b) => dist(a) - dist(b));
+    for (const x of cands.slice(0, MAX_READS)) {
+      const r = await getTransaction(url, x.signature).catch(() => null);
+      if (!r || !r.ok || !r.data) return undefined;
+      const tx = r.data;
+      if (!tx.meta || tx.meta.err) continue;
+      const meta = tx.meta;
+      const idx = resolveAccountKeys(tx).indexOf(owner);
+      const sum = (rows: typeof meta.preTokenBalances): bigint => {
+        let n = 0n;
+        for (const e of rows ?? []) {
+          if (e.mint !== mint || (e.owner && e.owner !== owner)) continue;
+          try {
+            n += BigInt(e.uiTokenAmount.amount);
+          } catch {
+            /* unparseable — skip */
+          }
+        }
+        return n;
+      };
+      const d = sum(meta.postTokenBalances) - sum(meta.preTokenBalances);
+      if (d === 0n || idx < 0 || !meta.preBalances || !meta.postBalances) continue;
+      const side = d > 0n ? 'buy' : 'sell';
+      if (side !== match.side) continue;
+      const decimals = [...(meta.postTokenBalances ?? []), ...(meta.preTokenBalances ?? [])].find((e) => e.mint === mint)?.uiTokenAmount.decimals ?? null;
+      return { signature: x.signature, side, tokensRaw: (d < 0n ? -d : d).toString(), solLamports: (meta.postBalances[idx] ?? 0) - (meta.preBalances[idx] ?? 0), decimals };
+    }
+    return cands.length > MAX_READS ? undefined : null;
+  }
+
   /** Price for a bot decision: the free local reads, then one market read. */
-  async kryptoPrice(mint: string): Promise<number | null> {
+  async botPrice(mint: string): Promise<number | null> {
     return this.cheapPriceSol(mint) ?? (await this.paperFillPrice(mint));
   }
 
-  /** Why a Krypto Mode live trade cannot run right now, or null. */
-  kryptoLiveBlocked(): string | null {
+  /**
+   * The freshest price the engine knows for a mint AND when it was seen
+   * (Trader critic #5): `cheapPriceSol` has no timestamp, and on a quiet
+   * coin it can be hours old. A bot must never stop out or buy on that.
+   * Candidates: the pump chain read's cache, the last-known map, the tape's
+   * last tick. Null when none has a time.
+   */
+  priceSolWithAge(mint: string): { priceSol: number; at: number } | null {
+    const out: { priceSol: number; at: number }[] = [];
+    const c = pumpChain.readIfCached(mint);
+    if (c && c.priceSol !== null && c.priceSol > 0) out.push({ priceSol: c.priceSol, at: c.readAt });
+    const kp = this.lastKnownPriceSol.get(mint);
+    const ka = this.lastKnownPriceAt.get(mint);
+    if (kp !== undefined && ka !== undefined && kp > 0) out.push({ priceSol: kp, at: ka });
+    const tk = tape.lastTick(mint);
+    if (tk) out.push(tk);
+    out.sort((a, b) => b.at - a.at);
+    return out[0] ?? null;
+  }
+
+  /**
+   * Why a bot's live trade cannot run right now, or null. TWO gates (Trader
+   * K1, and Krypto Mode since 09-25): a BUY meets the real-money breakers; a
+   * SELL meets only "switched off / not armed" — a breaker that traps
+   * someone in a position is worse than the loss it guards against
+   * (order-safety rule 5).
+   */
+  botLiveBlocked(side: 'buy' | 'sell' = 'buy'): string | null {
     const s = this.getSettings();
     if (!s.execution.liveEnabled) return 'live execution is switched off';
     if (!this.armed) return 'the engine is not armed';
-    return this.liveBreakerReason();
+    return side === 'buy' ? this.liveBreakerReason() : null;
+  }
+
+  /** The per-trade cap every bot trade meets (D5). */
+  maxLiveSol(): number | null {
+    const v = this.getSettings().execution.maxLiveSol;
+    return typeof v === 'number' && v > 0 ? v : null;
+  }
+
+  /** Whether the engine holds an auto position on this mint. Those sell
+   *  '100%' of the ACTIVE wallet (Trader claims, critic #6). */
+  holdsLiveMint(mint: string): boolean {
+    return this.liveMints.has(mint) || this.stuckMints.has(mint);
   }
 
   /** A sell (default the whole bag) signed by a SPECIFIC wallet. */
@@ -6355,10 +6618,20 @@ export class SniperEngine {
     if (chain && chain !== 'solana') {
       if (mode === 'paper') return this.evmPaperBuy(chain, mint, sol);
       if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
+      // A live Krypto Trader session on this chain holding the coin in the
+      // chain's signer (scripts' and MCP buy_token's door, stage 4).
+      const evmClaim = traderClaimFor({ walletId: null, chain }, mint);
+      if (evmClaim) return { ok: false, message: `Buy not sent — ${evmClaim}` };
       return this.evmCopy.buy(chain, mint, sol);
     }
     // Paper = the same simulation a paper buy by hand runs, booked into the
-    // paper book from the simulated fill. Live = the real thing.
+    // paper book from the simulated fill. Live = the real thing — unless a
+    // live Krypto Trader session holds this coin in the active wallet: this
+    // is the scripts' and MCP buy_token's door, never a manual button's.
+    if (mode === 'live') {
+      const claim = traderClaimFor({ walletId: null }, mint);
+      if (claim) return { ok: false, message: `Buy not sent — ${claim}` };
+    }
     const r = await this.testTrade(mint, sol, mode === 'paper', { ownCapSol });
     return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
   }
