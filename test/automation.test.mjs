@@ -563,19 +563,266 @@ test('enabling a code script starts its sandbox; launch chatter reaches it at mo
   assert.equal(h.calls.dispatched[1].payload.score, 82, 'the script sees the same facts a rule does');
 });
 
-test('five errors in a row disable a code script; a sandbox that dies is restarted while enabled', async () => {
-  const h = setup({ dispatchResult: { ok: false, error: 'TypeError: x is not a function' } });
+test('five errors in a row PAUSE a code script, it restarts by itself, and the fourth pause in 24 h turns it off', async () => {
+  // Scripts run for days; the errors that trip the wall are mostly a parked
+  // provider or a network hour, which clear. Off-until-noticed was the old
+  // answer (2026-09-27). Never silent: log, toast and a desktop notification.
+  auto._setRecoveryBackoff([60]);
+  try {
+    const h = setup({ dispatchResult: { ok: false, error: 'TypeError: x is not a function' } });
+    const c = saved(codeScript({ mode: 'live' }));
+    auto.setEnabled(c.id, true);
+    await tick();
+    auto.onSandboxMessage(c.id, { t: 'ready' });
+    const burst = async (k) => {
+      for (let i = 0; i < 5; i++) {
+        auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: `Mint${k}${i}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` }) });
+        await tick(20);
+      }
+    };
+    for (let pause = 1; pause <= 3; pause++) {
+      const startedBefore = h.calls.started.length;
+      await burst(pause);
+      const st = auto.snapshot().stats[c.id];
+      assert.equal(auto.all()[0].enabled, true, `pause ${pause}: still armed, not disabled`);
+      assert.equal(typeof st.pausedUntil, 'number', `pause ${pause}: paused`);
+      assert.equal(st.running, false, 'nothing runs while paused');
+      assert.match(st.lastError, /^paused until .* 5 errors in a row .*TypeError/);
+      assert.ok(h.calls.notifies.some((n) => /restarts at .*\(LIVE\)/.test(n)), 'a desktop notification says when, and that it is live');
+      assert.ok(h.calls.toasts.some((t) => /paused until/.test(t.message)));
+      // Nothing is dispatched while paused.
+      const sent = h.calls.dispatched.length;
+      auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: 'MintPausedxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' }) });
+      await tick(20);
+      assert.equal(h.calls.dispatched.length, sent, 'a paused script hears nothing');
+      await tick(90);
+      assert.equal(h.calls.started.length, startedBefore + 1, `pause ${pause}: restarted by itself`);
+      assert.equal(auto.snapshot().stats[c.id].pausedUntil, null);
+      assert.equal(auto.snapshot().stats[c.id].errorsInARow, 0, 'the streak starts over');
+      assert.ok(auto.snapshot().logs[c.id].some((l) => /restarting after its pause — LIVE/.test(l.line)));
+    }
+    await burst(4);
+    assert.equal(auto.all()[0].enabled, false, 'the fourth trip in a day turns it off');
+    assert.match(auto.snapshot().logs[c.id].at(-1).line, /DISABLED — .*stays off/);
+    const startedAtOff = h.calls.started.length;
+    await tick(90);
+    assert.equal(h.calls.started.length, startedAtOff, 'and it does not come back');
+
+    // Turning it off during a pause cancels the restart.
+    const h3 = setup({ dispatchResult: { ok: false, error: 'boom' } });
+    const c3 = saved(codeScript());
+    auto.setEnabled(c3.id, true);
+    await tick();
+    for (let i = 0; i < 5; i++) {
+      auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: `MintOff${i}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` }) });
+      await tick(20);
+    }
+    assert.equal(typeof auto.snapshot().stats[c3.id].pausedUntil, 'number');
+    auto.setEnabled(c3.id, false);
+    await tick(90);
+    assert.equal(h3.calls.started.length, 1, 'off means off');
+
+    // A crash loop pauses too, rather than restarting forever or dying for good.
+    const h4 = setup();
+    const c4 = saved(codeScript());
+    auto.setEnabled(c4.id, true);
+    await tick();
+    for (let i = 0; i < 6; i++) {
+      auto.onSandboxGone(c4.id, 'renderer crashed');
+      await tick();
+    }
+    const st4 = auto.snapshot().stats[c4.id];
+    assert.equal(auto.all()[0].enabled, true);
+    assert.match(st4.lastError ?? '', /paused until .*(restarted \d+ times in a minute|errors in a row)/);
+    const n4 = h4.calls.started.length;
+    await tick(90);
+    assert.equal(h4.calls.started.length, n4 + 1, 'back after the pause');
+  } finally {
+    auto._setRecoveryBackoff(null);
+  }
+});
+
+test('wantsTicks: an armed script following a coin (subscribed or opened) wants its ticks; a disarmed one does not', async () => {
+  const h = setup();
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  await tick();
+  assert.equal(auto.wantsTicks(MINT), false);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'subscribe', args: [MINT] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'buy', args: [MINT2, 0.01] });
+  await tick(30);
+  assert.equal(auto.wantsTicks(MINT), true, 'subscribed');
+  assert.equal(auto.wantsTicks(MINT2), true, 'opened');
+  assert.equal(auto.wantsTicks(MINT3), false);
+  assert.equal(h.calls.buys.length, 1);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'unsubscribe', args: [MINT] });
+  await tick();
+  assert.equal(auto.wantsTicks(MINT), false, 'unsubscribed');
+  auto.setEnabled(c.id, false);
+  assert.equal(auto.wantsTicks(MINT2), false, 'a disarmed script follows nothing');
+});
+
+test('a script’s own state is saved within seconds and coalesced; a buy is saved at once and carries it', async () => {
+  // Every save rewrites the whole file, every script's source included. The
+  // soak measured ~17 writes a minute from one script's setStates (2026-09-27).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'krypt-soft-'));
+  const h = setup();
+  auto.init(dir);
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  await tick(400);
+  const real = fs.writeFileSync;
+  let writes = 0;
+  fs.writeFileSync = function (f, ...rest) {
+    if (String(f).endsWith('automation.json.tmp')) writes += 1;
+    return real.call(this, f, ...rest);
+  };
+  try {
+    for (let i = 0; i < 5; i++) {
+      auto.onSandboxMessage(c.id, { t: 'call', id: 10 + i, method: 'setState', args: [{ n: i }] });
+      await tick(20);
+    }
+    await tick(400);
+    assert.equal(writes, 0, 'five setStates, no write yet');
+    auto.onSandboxMessage(c.id, { t: 'call', id: 20, method: 'buy', args: [MINT, 0.01] });
+    await tick(450);
+    assert.equal(writes, 1, 'the buy is written within 300 ms');
+    const saved1 = JSON.parse(fs.readFileSync(path.join(dir, 'automation.json'), 'utf8'));
+    assert.deepEqual(saved1.runtime[c.id].kv, { n: 4 }, 'and carries the state set before it');
+    assert.ok(saved1.runtime[c.id].opened[MINT], 'and the position');
+    auto.onSandboxMessage(c.id, { t: 'call', id: 21, method: 'setState', args: [{ n: 9 }] });
+    await tick(3_300);
+    assert.equal(writes, 2, 'a lone setState is written within 3 s');
+    assert.equal(h.calls.buys.length, 1);
+  } finally {
+    fs.writeFileSync = real;
+    await auto.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bot.positions REJECTS when the wallet read failed — unknown is not empty', async () => {
+  // The host answers a failed holdings read with []; a script that believed
+  // it decided every bag was "no longer held" and cancelled its own stops
+  // (2026-09-27, found reviewing scorenow for multi-day runs).
+  const h = setup();
+  let readOk = true;
+  h.heldMints = async (mode) => (readOk ? new Set(h.book[mode].map((p) => p.mint)) : null);
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.01] });
+  await tick(30);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'positions', args: [] });
+  await tick(30);
+  const r2 = h.calls.replies.find((r) => r.cid === 2);
+  assert.equal(r2.ok, true);
+  assert.deepEqual(r2.value.map((x) => x.mint), [MINT]);
+  readOk = false;
+  h.book.paper = []; // what a failed read looks like to positions()
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'positions', args: [] });
+  await tick(30);
+  const r3 = h.calls.replies.find((r) => r.cid === 3);
+  assert.equal(r3.ok, false, 'a failed read is refused, not answered with []');
+  assert.match(r3.error, /could not be read .* unknown, not empty/);
+});
+
+test('a restarted script does not inherit the last run’s bot.every timer', async () => {
+  const h = setup();
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'every', args: [30] });
+  await tick();
+  assert.equal(auto._diag().scripts[c.id].intervalSec, 30);
+  auto.onSandboxGone(c.id, 'renderer crashed');
+  await tick();
+  assert.equal(h.calls.started.length, 2, 'restarted');
+  assert.equal(auto._diag().scripts[c.id].intervalSec, 0, 'the old timer is gone until the new run asks again');
+  auto.stopTimers();
+});
+
+test('a running script writes an hourly health line: events, drops, handler times, restarts, memory, state', async () => {
+  // Scripts run for days; app.log said nothing between a script's own lines,
+  // so a slow degradation could not be seen after the fact (2026-09-27).
+  auto._setHealthEvery(80);
+  try {
+    const h = setup();
+    const lines = [];
+    h.log = (level, line) => lines.push(line);
+    h.sandbox.memoryMB = () => 87;
+    const c = saved(codeScript({ name: 'healthy' }));
+    auto.setEnabled(c.id, true);
+    await tick();
+    auto.onSandboxMessage(c.id, { t: 'ready' });
+    auto.startTimers();
+    for (let i = 0; i < 3; i++) {
+      auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: `MintH${i}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` }) });
+      await tick(10);
+    }
+    auto.onSandboxGone(c.id, 'renderer crashed');
+    await tick(120);
+    const line = lines.find((l) => /script "healthy" health/.test(l));
+    assert.ok(line, 'a health line was written');
+    assert.match(line, /up \d+m · 3 events, 0 failed, 0 dropped \(queue full\) · handler p50 \d+ ms, p95 \d+ ms, max \d+ ms · 1 restart\(s\) · sandbox 87 MB · state 0\.0 KB/);
+  } finally {
+    auto.stopTimers();
+    auto._setHealthEvery(null);
+  }
+});
+
+test('a stalled positions read cannot pile up event contexts without bound', async () => {
+  // Each event's context awaits the positions read before it is queued; a read
+  // that hangs (RPC, a network hour) used to retain one per launch, update and
+  // tick until it returned (2026-09-27).
+  const h = setup();
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const realPositions = h.positions;
+  h.positions = async (mode) => {
+    await gate;
+    return realPositions(mode);
+  };
   const c = saved(codeScript());
   auto.setEnabled(c.id, true);
   await tick();
   auto.onSandboxMessage(c.id, { t: 'ready' });
-  for (let i = 0; i < 5; i++) {
-    auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: `Mint${i}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` }) });
-    await tick(20);
-  }
-  assert.equal(auto.all()[0].enabled, false, 'disabled after five');
-  assert.match(auto.snapshot().stats[c.id].lastError, /TypeError/);
+  for (let i = 0; i < 500; i++) auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: 'MintB' + String(i).padStart(4, 'x') + 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' }) });
+  await tick();
+  assert.equal(auto._diag().scripts[c.id].building, 200, 'at most 200 in flight');
+  auto.onEngineEvent({ kind: 'runner', runner: { mint: MINT, name: 'n', symbol: 'R', creator: 'c', flaggedAt: Date.now(), windowS: 60, bucket: 'top5_10', observedPct: 10, basePct: 2, n: 10, line: '', mult3Line: null, priceSol: 1e-8, curvePct: 5, uniqueBuyers: 9, netInflowSol: 1, tradesSeen: 9 } });
+  await tick();
+  assert.equal(auto._diag().scripts[c.id].building, 201, 'a runner flag is never dropped for it');
+  release();
+  await tick(60);
+  assert.equal(auto._diag().scripts[c.id].building, 0, 'all settle once the read returns');
+  assert.ok(h.calls.dispatched.some((d) => d.name === 'runner'), 'and the flag is delivered');
 
+  // A read that NEVER settles must not hold the ceiling shut for good: the
+  // soak's did, and launch/tick events stopped for the life of the app.
+  auto._setBuildTimeout(40);
+  try {
+    let hang = true;
+    h.positions = async (mode) => {
+      if (hang) await new Promise(() => undefined);
+      return realPositions(mode);
+    };
+    for (let i = 0; i < 300; i++) auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: 'MintN' + String(i).padStart(4, 'x') + 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' }) });
+    await tick();
+    assert.equal(auto._diag().scripts[c.id].building, 200);
+    await tick(120);
+    assert.equal(auto._diag().scripts[c.id].building, 0, 'given up, not held forever');
+    hang = false;
+    const before = h.calls.dispatched.length;
+    auto.onEngineEvent({ kind: 'launch', launch: launchRow({ mint: 'MintAfterxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' }) });
+    await tick(40);
+    assert.equal(h.calls.dispatched.length, before + 1, 'and launches flow again');
+  } finally {
+    auto._setBuildTimeout(null);
+  }
+});
+
+test('a sandbox that dies is restarted while enabled', async () => {
   const h2 = setup();
   const c2 = saved(codeScript());
   auto.setEnabled(c2.id, true);
@@ -789,6 +1036,44 @@ test('a daily schedule fires its rule with only the global facts; a code script 
   await tick();
   assert.ok(h.calls.dispatched.some((d) => d.name === 'schedule' && d.payload.at === '09:30'));
   auto.stopTimers();
+});
+
+test('daily times follow the wall clock: never early, on time fires, a time slept through is skipped and said', async () => {
+  // One timer for up to 24 h ran on the process clock, which does not follow
+  // the wall across a laptop sleep, a clock correction or a DST change
+  // (2026-09-27). Now the wall clock is checked in short steps.
+  assert.equal(auto.scheduleStep(1_000, 999), 'wait');
+  assert.equal(auto.scheduleStep(1_000, 1_000), 'fire');
+  assert.equal(auto.scheduleStep(1_000, 1_000 + auto.AT_LATE_MS), 'fire', 'a check that woke a little late still fires');
+  assert.equal(auto.scheduleStep(1_000, 1_001 + auto.AT_LATE_MS), 'missed', 'asleep through it: skipped, not fired hours late');
+  const realNow = Date.now;
+  auto._setAtStep(15);
+  try {
+    const h = setup();
+    const c = saved(codeScript({ name: 'sleepy' }));
+    auto.setEnabled(c.id, true);
+    await tick();
+    auto.onSandboxMessage(c.id, { t: 'ready' });
+    let fake = new Date(2026, 8, 27, 9, 29, 30).getTime();
+    Date.now = () => fake;
+    auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'at', args: ['09:30'] });
+    const fired = () => h.calls.dispatched.filter((d) => d.name === 'schedule').length;
+    await tick(60);
+    assert.equal(fired(), 0, 'not before 09:30');
+    fake += 60_000; // 09:30:30
+    await tick(60);
+    assert.equal(fired(), 1, 'fires at 09:30 by the wall clock');
+    // Asleep through the NEXT day's 09:30, woken at 11:00.
+    fake = new Date(2026, 8, 28, 11, 0, 0).getTime();
+    await tick(60);
+    assert.equal(fired(), 1, 'not fired an hour and a half late');
+    assert.ok(auto.snapshot().logs[c.id].some((l) => /daily 09:30 missed/.test(l.line)), 'and it says so');
+    assert.deepEqual(auto._runtimeOf(c.id).atTimers, ['09:30'], 're-armed for the day after');
+  } finally {
+    Date.now = realNow;
+    auto._setAtStep(null);
+    auto.stopTimers();
+  }
 });
 
 test('advanced orders: a PAPER script notes them; a LIVE script places them, and a limit buy counts as a buy', async () => {
@@ -1836,6 +2121,60 @@ test('bot.creator falls back to Jupiter audit counts when pump is silent', () =>
   assert.ok(body.includes('audit.devMints'), 'then Jupiter mints');
   assert.ok(body.includes('audit.devMigrations'), 'and graduations');
   assert.ok(body.includes("if (typeof g !== 'number' || !Number.isFinite(g) || g < 0) return null;"), 'no graduation count = no record, never a made-up 0');
+});
+
+// 2026-09-27: a script ships with the app (bundled/scripts/*.js).
+test('a shipped script is installed once, off and in paper; updates only while unedited; a deleted one stays deleted', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'krypt-bundled-'));
+  auto._reset();
+  auto.init(dir);
+  auto.attach(makeHost());
+  const v1 = { key: 'krypto-script', name: 'Krypto Script', code: "bot.log('v1');" };
+  auto.seedBundled([v1]);
+  let s = auto.all().find((x) => x.bundled?.key === 'krypto-script');
+  assert.ok(s, 'installed');
+  assert.equal(s.enabled, false, 'off');
+  assert.equal(s.mode, 'paper', 'paper');
+  auto.seedBundled([v1]);
+  assert.equal(auto.all().filter((x) => x.bundled?.key === 'krypto-script').length, 1, 'never twice');
+  // A new app version, the user has not edited it: the code follows.
+  auto.seedBundled([{ ...v1, code: "bot.log('v2');" }]);
+  s = auto.all().find((x) => x.bundled?.key === 'krypto-script');
+  assert.equal(s.code, "bot.log('v2');", 'unedited copy updates');
+  // The window can never mint or strip the mark.
+  const other = saved(codeScript({ name: 'mine' }));
+  auto.upsert({ ...auto.all().find((x) => x.id === other.id), bundled: { key: 'krypto-script', sha: 'x' } });
+  assert.equal(auto.all().find((x) => x.id === other.id).bundled, undefined, 'a user script cannot claim to be shipped');
+  // The user edits it: updates stop, reset brings the shipped code back.
+  auto.upsert({ ...s, code: "bot.log('mine');" });
+  s = auto.all().find((x) => x.bundled?.key === 'krypto-script');
+  assert.equal(s.bundled.edited, true, 'marked edited');
+  auto.seedBundled([{ ...v1, code: "bot.log('v3');" }]);
+  assert.equal(auto.all().find((x) => x.id === s.id).code, "bot.log('mine');", 'an edited copy is left alone');
+  assert.equal(auto.resetBundled(s.id).ok, true);
+  assert.equal(auto.all().find((x) => x.id === s.id).code, "bot.log('v3');", 'reset brings the shipped code');
+  assert.equal(auto.resetBundled(other.id).ok, false, 'reset refuses a user script');
+  // Deleted stays deleted, across a restart.
+  auto.remove(s.id);
+  await auto.shutdown();
+  auto._reset();
+  auto.init(dir);
+  auto.seedBundled([v1]);
+  assert.equal(auto.all().filter((x) => x.bundled?.key === 'krypto-script').length, 0, 'a deleted shipped script does not come back');
+  // Invalid shipped code is never installed.
+  auto.seedBundled([{ key: 'broken', name: 'Broken', code: '' }]);
+  assert.equal(auto.all().some((x) => x.bundled?.key === 'broken'), false, 'invalid code is refused');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('the shipped script file itself passes the app’s own validation', () => {
+  const code = fs.readFileSync(new URL('../bundled/scripts/krypto-script.js', import.meta.url), 'utf8');
+  const v = validateScript({ ...defaultScript('code'), name: 'Krypto Script', code });
+  assert.equal(v.ok, true, v.message);
+  const src = fs.readFileSync(new URL('../electron/engine/bundledScripts.ts', import.meta.url), 'utf8');
+  assert.ok(src.includes("bundled/scripts/krypto-script.js?raw"), 'built into the app from that file');
+  const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  assert.ok(main.includes('automation.seedBundled(BUNDLED_SCRIPTS)'), 'seeded at startup');
 });
 
 await run();

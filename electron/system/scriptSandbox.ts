@@ -10,7 +10,7 @@
 // The window is tied to a script id at creation. A message is attributed
 // by the webContents it came from, never by anything the message says.
 
-import { BrowserWindow, ipcMain, session, type WebContents } from 'electron';
+import { app, BrowserWindow, ipcMain, session, type WebContents } from 'electron';
 import path from 'node:path';
 import { parseFromSandbox, probeResponsive, sandboxPageHtml, ALIVE_TIMEOUT_MS, EVENT_HARD_MS, EVENT_TIMEOUT_MS, READY_MAX_MS, READY_TIMEOUT_MS, type MainToSandbox, type SandboxToMain } from '@shared/scriptProtocol';
 
@@ -82,9 +82,19 @@ interface Bucket {
   reported: boolean;
 }
 
+/**
+ * Two buckets per sandbox (2026-09-27). One shared bucket let a burst of log
+ * lines (a pass writing its SCORE rows) starve the script's own CALLS, and a
+ * starved call was never answered — see the refusal in `install`. Logs,
+ * stats and errors ("chatter") now spend their own budget; calls spend
+ * theirs. Each is the same size as the old single wall, so neither kind can
+ * cost main more than it could before.
+ */
+type BucketKind = 'chatter' | 'calls';
 const boxes = new Map<string, Box>();
 const byContents = new Map<number, string>();
-const buckets = new Map<number, Bucket>();
+const buckets = new Map<string, Bucket>();
+const bucketKey = (contentsId: number, kind: BucketKind): string => `${contentsId}:${kind}`;
 let host: SandboxHost | null = null;
 let installed = false;
 let generation = 0;
@@ -96,6 +106,11 @@ let generation = 0;
 let preloadPath: string | null = null;
 export function _setPreloadPath(p: string | null): void {
   preloadPath = p;
+}
+/** Test seam: the next start's page load fails as if Chromium refused it. */
+let failNextLoad = false;
+export function _failNextLoad(): void {
+  failNextLoad = true;
 }
 
 /** Once, before any sandbox: lock the partition down and route its messages. */
@@ -130,7 +145,18 @@ export function install(h: SandboxHost): void {
     // failure to start. Everything else — log, call, error, and anything
     // malformed — is bucketed, so a flood costs main a lookup and no more.
     const kind = typeof raw === 'object' && raw !== null ? (raw as { t?: unknown }).t : undefined;
-    if (kind !== 'ready' && kind !== 'done' && !allow(box)) return;
+    if (kind !== 'ready' && kind !== 'done' && !allow(box, kind === 'call' ? 'calls' : 'chatter')) {
+      // A dropped CALL must still be answered. Its promise in the page is
+      // what the handler awaits: left unanswered it hung the handler to the
+      // 30 s hard kill and the script lost its memory for OUR wall (09-26
+      // 22:15: a pass that priced ~120 coins at once, killed at 31 s). A
+      // refusal costs one post and the script sees an ordinary rejection.
+      const id = kind === 'call' ? (raw as { id?: unknown }).id : undefined;
+      if (typeof id === 'number' && Number.isInteger(id) && id >= 0 && id < 2 ** 31) {
+        post(box, { t: 'reply', id, ok: false, error: `dropped: over ${MSG_PER_SEC} calls a second from this script — slow down (price in batches)` });
+      }
+      return;
+    }
     const msg = parseFromSandbox(raw);
     if (!msg) {
       host?.log('warn', `script ${scriptId}: dropped a malformed sandbox message`);
@@ -157,12 +183,13 @@ export function install(h: SandboxHost): void {
 }
 
 /** Token bucket per sandbox. False ⇒ drop this message. */
-function allow(box: Box): boolean {
+function allow(box: Box, kind: BucketKind): boolean {
   const now = Date.now();
-  let b = buckets.get(box.contentsId);
+  const key = bucketKey(box.contentsId, kind);
+  let b = buckets.get(key);
   if (!b) {
     b = { tokens: MSG_BURST, last: now, dropped: 0, reported: false };
-    buckets.set(box.contentsId, b);
+    buckets.set(key, b);
   }
   b.tokens = Math.min(MSG_BURST, b.tokens + ((now - b.last) / 1000) * MSG_PER_SEC);
   b.last = now;
@@ -179,10 +206,14 @@ function allow(box: Box): boolean {
   b.dropped += 1;
   if (!b.reported) {
     b.reported = true;
-    host?.log('warn', `script ${box.scriptId}: over ${MSG_PER_SEC} sandbox messages a second — dropping the excess`);
+    const what = kind === 'calls' ? 'calls' : 'log/stat messages';
+    host?.log('warn', `script ${box.scriptId}: over ${MSG_PER_SEC} sandbox ${what} a second — dropping the excess`);
     host?.onMessage(box.scriptId, {
       t: 'error',
-      line: `flooded the sandbox channel (over ${MSG_PER_SEC} messages a second) — messages are being dropped`,
+      line:
+        kind === 'calls'
+          ? `flooded the sandbox channel (over ${MSG_PER_SEC} calls a second) — the excess calls are refused ("dropped: …"); make fewer at once`
+          : `flooded the sandbox channel (over ${MSG_PER_SEC} log/stat messages a second) — the excess lines are dropped`,
     });
   }
   return false;
@@ -201,6 +232,20 @@ export interface StartResult {
   ok: boolean;
   message: string;
   retryable?: boolean;
+}
+
+/** The script's renderer working set in MB, or null (not running, or the
+ *  process metrics do not list it). For the hourly health line. */
+export function memoryMB(scriptId: string): number | null {
+  const b = boxes.get(scriptId);
+  if (!b || b.contents.isDestroyed()) return null;
+  try {
+    const pid = b.contents.getOSProcessId();
+    const kb = app.getAppMetrics().find((m) => m.pid === pid)?.memory?.workingSetSize;
+    return typeof kb === 'number' && Number.isFinite(kb) ? Math.round(kb / 1024) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Start (or restart) the sandbox for a script and load its code. */
@@ -226,7 +271,7 @@ export async function start(scriptId: string, code: string, info?: { chain?: str
       },
     });
   } catch (err) {
-    return { ok: false, message: `sandbox window: ${(err as Error).message}` };
+    return { ok: false, message: `sandbox window: ${(err as Error).message}`, retryable: true };
   }
   const contents = win.webContents;
   const box: Box = {
@@ -285,11 +330,20 @@ export async function start(scriptId: string, code: string, info?: { chain?: str
   // start may already own the id, and stopping "the script" would kill the
   // healthy newer sandbox while this stale start reports the failure.
   const superseded = (): boolean => boxes.get(scriptId) !== box;
+  // Our own constant page failing to load is never the script's fault, so it
+  // is RETRYABLE (2026-09-27). A soak crashed a sandbox renderer 36 minutes
+  // into a heavy run and the immediate restart's load came back ERR_FAILED
+  // (-2); reported as a plain failure, that DISABLED the script for good. A
+  // retry two seconds later is what it needed.
   try {
+    if (failNextLoad) {
+      failNextLoad = false;
+      throw new Error('ERR_FAILED (-2) (test)');
+    }
     await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(sandboxPageHtml())}`);
   } catch (err) {
     teardown(box);
-    return { ok: false, message: `sandbox load: ${(err as Error).message}` };
+    return { ok: false, message: `sandbox load: ${(err as Error).message}`, retryable: true };
   }
   if (superseded()) {
     teardown(box);
@@ -297,7 +351,7 @@ export async function start(scriptId: string, code: string, info?: { chain?: str
   }
   if (contents.isDestroyed()) {
     teardown(box);
-    return { ok: false, message: 'sandbox closed while loading' };
+    return { ok: false, message: 'sandbox closed while loading', retryable: true };
   }
   // Phase 1: is the bridge there at all? `alive` is the harness's first
   // statement, so this covers process start and nothing else. Missing it
@@ -533,7 +587,8 @@ export async function stopAll(): Promise<void> {
 function teardown(box: Box): void {
   if (boxes.get(box.scriptId) === box) boxes.delete(box.scriptId);
   byContents.delete(box.contentsId);
-  buckets.delete(box.contentsId);
+  buckets.delete(bucketKey(box.contentsId, 'chatter'));
+  buckets.delete(bucketKey(box.contentsId, 'calls'));
   for (const [, p] of box.inflight) {
     clearTimeout(p.timer);
     p.settle({ ok: false, error: 'sandbox stopped' });

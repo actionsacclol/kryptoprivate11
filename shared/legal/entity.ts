@@ -88,10 +88,14 @@ export const LIABILITY_CAP_USD = 100;
 // pump then publishes under the account (callouts, profile, follows, likes).
 // Same version, before release: every pump account is referred by Krypt's
 // pump.fun account (terms › Fees, the summary's fee point, privacy).
-export const TERMS_VERSION = '2026-09-22.1';
+// 2026-09-27.1: Fees (§8) now says a swap between two tokens is a trade,
+// billed on its SOL value, and taken in the token you receive when neither
+// side has a SOL price. Same rate; a new way of charging it, so everyone is
+// asked once.
+export const TERMS_VERSION = '2026-09-27.1';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '22 September 2026';
+export const TERMS_EFFECTIVE_DATE = '27 September 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

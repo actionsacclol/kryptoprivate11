@@ -242,3 +242,203 @@ console.log(`feeflow: ${passed}/${passed} tests passed`);
   assert.match(swap, /fit\.dropped\.length/, 'and one lost to the size limit');
   console.log('ok  a refused referrer is reported, and the swap path has the rent guard too');
 }
+
+// ── fee audit 2026-09-26 ────────────────────────────────────────────────
+//
+// 1. Every Solana SELL funnel hands the signer an estimate. Only a relayer-
+//    built sell reads it, but without it that sell went out UNBILLED — and
+//    the autonomous exit (autoLiveSell) and the per-wallet exit (labSell:
+//    copy configs on their own wallet, script named-wallet sells, Krypto
+//    Mode, Krypto Trader, Wallet Lab) passed none.
+// 2. A sell billed on a price the proceeds did not reach can fail AT our fee
+//    transfer. That exit is re-sent without the fee — never blocked by it —
+//    and ONLY when the failing instruction is a fee transfer.
+{
+  const fs = await import('node:fs');
+  const { revertedAtFee } = await import('./.fees.mjs');
+  assert.equal(revertedAtFee('{"InstructionError":[4,{"Custom":1}]}', [4, 5]), true, 'the treasury transfer failed');
+  assert.equal(revertedAtFee('{"InstructionError":[5,{"Custom":1}]}', [4, 5]), true, 'the referrer transfer failed');
+  assert.equal(revertedAtFee('{"InstructionError":[2,{"Custom":6004}]}', [4, 5]), false, 'a slippage revert in the swap keeps its fee');
+  assert.equal(revertedAtFee('{"InstructionError":[4,{"Custom":1}]}', []), false, 'no fee attached, nothing to strip');
+  assert.equal(revertedAtFee('"InsufficientFundsForFee"', [4]), false, 'a transaction-level error is not a fee revert');
+  assert.equal(revertedAtFee(undefined, [4]), false, 'an unreadable error is not a fee revert');
+  console.log('ok  revertedAtFee names a fee-transfer revert and nothing else');
+
+  const eng = fs.readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const body = (name) => {
+    const i = eng.indexOf(`  private ${name}(`) >= 0 ? eng.indexOf(`  private ${name}(`) : eng.indexOf(`  private async ${name}(`);
+    assert.ok(i > 0, `${name} exists`);
+    return eng.slice(i, eng.indexOf('\n  }\n', i));
+  };
+  assert.match(body('autoLiveSell'), /estProceedsLamports: this\.estSellProceedsLamports\(mint, 100\)\.catch/, 'the autonomous exit passes an estimate');
+  assert.match(body('labSell'), /estProceedsLamports: this\.estSellProceedsLamports\(mint, share, owner\)\.catch/, 'the per-wallet exit passes one, for THAT wallet');
+  assert.match(body('estSellProceedsLamports'), /const owner = ownerOverride \?\? wallet\.publicKey\(\)/, 'the estimate reads the named wallet when one is given');
+  // Every executeTrade sell in the engine goes through sellWithRetry, and every
+  // sellWithRetry call site carries an estimate.
+  const sells = eng.split('this.sellWithRetry({').slice(1).map((s) => s.slice(0, s.indexOf('});')));
+  assert.ok(sells.length >= 4, 'the sell funnels are all found');
+  for (const s of sells) assert.match(s, /estProceedsLamports:/, 'a sell funnel without an estimate bills nothing on the relayer route');
+  console.log(`ok  all ${sells.length} Solana sell funnels hand the signer a proceeds estimate`);
+
+  const src = fs.readFileSync(new URL('../electron/engine/liveSigner.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(src, /feeReverted: p\.action === 'sell' && revertedAtFee\(raw, feeIxIndexes\)/, 'only a SELL is flagged');
+  assert.match(src, /if \(!res\.ok && res\.feeReverted && p\.action === 'sell'\) \{[\s\S]*?runPipeline\([^)]*lastValidBlockHeight, true\)/, 'and it is re-run once without the fee');
+  assert.match(src, /const billFee = !\(skipFee && p\.action === 'sell'\)/, 'a buy can never be sent fee-free through that door');
+  console.log('ok  a sell that would revert at the fee transfer goes out without it; buys never do');
+}
+
+// ── every swap is billed (2026-09-26) ──────────────────────────────────
+//
+// The Swap card used to charge nothing on a token-to-token pair it could not
+// price in SOL. Now: the input priced in SOL, else the OUTPUT priced in SOL,
+// else the fee is taken in the output token itself, inside the same
+// transaction — a classic-Token TransferChecked from our own account into the
+// treasury's (and referrer's) EXISTING token account, which the signer permits
+// through its own named, capped allowance and nothing wider.
+{
+  const fs = await import('node:fs');
+  const { splitTokenFee, FEE_BPS } = await import('./.fees.mjs');
+  const { injectTokenTransfersFit, compileKeepingTransfersStatic } = await import('./.broadcast.mjs');
+  const { AddressLookupTableAccount } = await import('@solana/web3.js');
+
+  // The arithmetic: same rate, same referrer share, in base units, as bigint.
+  let s = splitTokenFee(1_000_000n, true);
+  assert.deepEqual([s.totalRaw, s.treasuryRaw, s.referrerRaw], [5_000n, 4_000n, 1_000n], '0.5 %, 20 % of it to the referrer');
+  s = splitTokenFee(1_000_000n, false, 25);
+  assert.deepEqual([s.totalRaw, s.treasuryRaw, s.referrerRaw], [2_500n, 2_500n, 0n], 'a $KRYPTO holder pays half');
+  s = splitTokenFee(1_000_000n, false, 500);
+  assert.equal(s.totalRaw, 5_000n, 'a rate above FEE_BPS is clamped to it, never charged');
+  assert.equal(splitTokenFee(199n, true).totalRaw, 0n, 'a fee that rounds to zero is zero');
+  assert.equal(splitTokenFee(0n, true).totalRaw, 0n);
+  assert.equal(splitTokenFee(-5n, true).totalRaw, 0n);
+  const big = 2n ** 60n;
+  assert.equal(splitTokenFee(big, false).totalRaw, (big * BigInt(FEE_BPS)) / 10_000n, 'u64 amounts past 2^53 are exact');
+  console.log('ok  splitTokenFee: the token-unit split matches the SOL split');
+
+  const TOKEN = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+  const ATA_PROG = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+  const ata = (owner, mint) =>
+    PublicKey.findProgramAddressSync([new PublicKey(owner).toBuffer(), TOKEN.toBuffer(), new PublicKey(mint).toBuffer()], ATA_PROG)[0].toBase58();
+  const IN_MINT = Keypair.generate().publicKey.toBase58();
+  const OUT_MINT = Keypair.generate().publicKey.toBase58();
+  const JUP = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
+  const tAta = ata(TREASURY, OUT_MINT);
+  const rAta = ata(REFERRER, OUT_MINT);
+  const src = ata(OWNER, OUT_MINT);
+  /** A stand-in for a Jupiter token-to-token route. */
+  const routeTx = () =>
+    new VersionedTransaction(
+      new TransactionMessage({
+        payerKey: me.publicKey,
+        recentBlockhash: BLOCKHASH,
+        instructions: [
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 }),
+          new TransactionInstruction({
+            programId: JUP,
+            keys: [
+              { pubkey: me.publicKey, isSigner: true, isWritable: true },
+              { pubkey: new PublicKey(ata(OWNER, IN_MINT)), isSigner: false, isWritable: true },
+              { pubkey: new PublicKey(src), isSigner: false, isWritable: true },
+            ],
+            data: Buffer.from([9, 9]),
+          }),
+        ],
+      }).compileToV0Message(),
+    ).serialize();
+  const plan = (treasuryRaw, referrerRaw, over = {}) => [
+    { source: src, mint: OUT_MINT, decimals: 6, dest: tAta, amountRaw: treasuryRaw, priority: 0, ...over },
+    ...(referrerRaw > 0n ? [{ source: src, mint: OUT_MINT, decimals: 6, dest: rAta, amountRaw: referrerRaw, priority: 1 }] : []),
+  ];
+  const SWAP = (allow) => ({
+    intent: 'trade',
+    trade: { side: 'sell', mint: IN_MINT },
+    maxTransferLamports: 10_000_000,
+    tokenFeeAllowance: allow,
+  });
+  const allowFor = (t, r) => ({
+    mint: OUT_MINT,
+    recipients: [{ account: tAta, maxRaw: String(t) }, ...(r > 0n ? [{ account: rAta, maxRaw: String(r) }] : [])],
+  });
+
+  const fit = await injectTokenTransfersFit(routeTx(), OWNER, plan(4_000n, 1_000n), 'http://unused');
+  assert.ok(fit && fit.kept.length === 2 && fit.dropped.length === 0, 'both token fee transfers attach');
+  const decoded = VersionedTransaction.deserialize(fit.tx);
+  const n = decoded.message.compiledInstructions.length;
+  assert.equal(n, 4, 'appended after the route, so they are the LAST instructions (what revertedAtFee is told)');
+  const last = decoded.message.compiledInstructions[n - 1];
+  assert.equal(decoded.message.staticAccountKeys[last.programIdIndex].toBase58(), TOKEN.toBase58());
+  assert.equal(last.data[0], 12, 'a TransferChecked');
+  assert.equal(Buffer.from(last.data).readBigUInt64LE(1), 1_000n, 'carrying exactly the split');
+  let r = check(fit.tx, OWNER, HOME, SWAP(allowFor(4_000n, 1_000n)));
+  assert.equal(r.ok, true, r.message);
+  console.log('ok  an output-token fee is injected and the signer accepts exactly it');
+
+  r = check(fit.tx, OWNER, HOME, SWAP(allowFor(3_999n, 1_000n)));
+  assert.equal(r.ok, false, 'one base unit over the ceiling is refused');
+  assert.match(r.message, /over the 3999 allowed/);
+  r = check(fit.tx, OWNER, HOME, SWAP(undefined));
+  assert.equal(r.ok, false, 'no allowance: the ordinary token rule refuses moving the OUTPUT token out');
+  const evil = ata(Keypair.generate().publicKey.toBase58(), OUT_MINT);
+  const redirected = await injectTokenTransfersFit(routeTx(), OWNER, plan(4_000n, 0n, { dest: evil }), 'http://unused');
+  r = check(redirected.tx, OWNER, HOME, SWAP(allowFor(4_000n, 0n)));
+  assert.equal(r.ok, false, 'a token fee redirected to a stranger is refused');
+  const otherMint = Keypair.generate().publicKey.toBase58();
+  const wrongMint = await injectTokenTransfersFit(
+    routeTx(),
+    OWNER,
+    plan(4_000n, 0n, { mint: otherMint, source: ata(OWNER, otherMint) }),
+    'http://unused',
+  );
+  r = check(wrongMint.tx, OWNER, HOME, SWAP(allowFor(4_000n, 0n)));
+  assert.equal(r.ok, false, 'a different token out of a different account is not the fee');
+  r = check(fit.tx, OWNER, HOME, { ...SWAP(allowFor(4_000n, 1_000n)), intent: 'sweep' });
+  assert.equal(r.ok, false, 'the allowance means nothing outside a trade');
+  console.log('ok  a tampered, redirected, other-mint or out-of-trade token fee is REFUSED');
+
+  // A route's own lookup table often holds the output mint and our token
+  // account for it; the signer names every account of the fee transfer, so
+  // the compile must keep them static even then.
+  const table = new AddressLookupTableAccount({
+    key: Keypair.generate().publicKey,
+    state: {
+      deactivationSlot: (1n << 64n) - 1n,
+      lastExtendedSlot: 0,
+      lastExtendedSlotStartIndex: 0,
+      addresses: [new PublicKey(OUT_MINT), new PublicKey(src), new PublicKey(tAta)],
+    },
+  });
+  const msg = TransactionMessage.decompile(VersionedTransaction.deserialize(fit.tx).message);
+  const loose = msg.compileToV0Message([table]);
+  assert.ok(
+    !loose.staticAccountKeys.some((k) => k.toBase58() === OUT_MINT),
+    'without the guard the table would hide the mint (so this test can fail)',
+  );
+  const compiled = compileKeepingTransfersStatic(msg, [], [table], new Set([OUT_MINT, src, tAta]));
+  const staticKeys = new Set(compiled.staticAccountKeys.map((k) => k.toBase58()));
+  assert.ok([OUT_MINT, src, tAta].every((k) => staticKeys.has(k)), 'every token-fee account stays static despite the table');
+  console.log('ok  token-fee accounts are kept out of lookup tables');
+
+  // The Swap card's wiring, pinned at the source.
+  const swap = fs.readFileSync(new URL('../electron/engine/swap.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(swap, /quoteSellLamports\(inputMint, inRaw, \{ priority: true \}\)/, 'the input is priced in SOL first');
+  assert.match(swap, /quoteSellLamports\(outputMint, outRaw, \{ priority: true \}\)/, 'then the OUTPUT');
+  assert.match(swap, /return \{ kind: 'token', basisRaw: outRaw \}/, 'and with no SOL price at all, the fee is taken in the output token');
+  assert.match(swap, /if \(info\.data\.owner !== TOKEN_PROGRAM\) return \{ plan: null/, 'classic Token only (a Token-2022 hook could revert the swap)');
+  assert.match(swap, /if \(!treasuryOk\) return \{ plan: null/, "never creates the treasury's account at the user's expense");
+  assert.match(swap, /const received = outAfter - outBefore\.raw \+ tokenFeeRaw;/, 'the receipt check adds the token fee back');
+  assert.match(
+    swap,
+    /prepared\.feeReverted && draft\.inputMint !== WSOL_MINT\) \{[\s\S]*?prepared = await prepare\(false\)/,
+    'a swap failing AT the fee is re-run fee-free, never a SOL-spending one',
+  );
+  assert.match(swap, /revertedAtFee\(raw, feeIxIndexes\)/, 'and only when the failing instruction is a fee transfer');
+  assert.match(swap, /requireFeeTransfer:\s*draft\.inputMint === WSOL_MINT && treasuryKept/, 'a SOL-spending swap is a buy and keeps the fee interlock');
+  assert.match(swap, /treasuryIntegrity\(\)\.treasury/, 'the treasury comes from the integrity layer');
+  assert.match(swap, /holderFeeBps\(FEE_BPS, holderRateApplies\(kryptoUsableTokens\(\)\)\)/, 'the $KRYPTO rate applies to the token fee too');
+  // USDC callout rewards -> SOL ride the Swap card's execute, so they pay the
+  // same fee on their SOL leg — no second path to forget.
+  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const rewards = ipc.slice(ipc.indexOf("ipcMain.handle('calloutRewards:swapUsdc'"), ipc.indexOf("ipcMain.handle('calloutRewards:withdrawUsdc'"));
+  assert.match(rewards, /swap\.execute\(\s*\{ chain: 'solana', inputMint: USDC_MINT, outputMint: WSOL_MINT/, 'USDC -> SOL goes through the billed swap path');
+  console.log('ok  the Swap card bills every pair; USDC rewards -> SOL ride the same fee point');
+}

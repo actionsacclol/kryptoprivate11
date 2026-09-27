@@ -27,6 +27,7 @@ import {
   AddressLookupTableAccount,
   PublicKey,
   SystemProgram,
+  TransactionInstruction,
   TransactionMessage,
   MessageV0,
   VersionedTransaction,
@@ -274,6 +275,9 @@ export function compileKeepingTransfersStatic(
   msg: TransactionMessage,
   own: AddressLookupTableAccount[],
   extra: AddressLookupTableAccount[],
+  /** More keys that must stay static — every account of an injected token
+   *  fee transfer, which the signer reads by name (see injectTokenTransfersFit). */
+  alsoStatic?: ReadonlySet<string>,
 ): MessageV0 {
   // Every SOL transfer destination in the message must stay a static key —
   // whichever table it appears in. PumpPortal's table (the relayer's OWN
@@ -283,14 +287,22 @@ export function compileKeepingTransfersStatic(
   // tables (same positions, so every other index still resolves) makes the
   // compiler leave them static.
   const keep = transferDestinations(msg);
+  for (const k of alsoStatic ?? []) keep.add(k);
+  const fine = (m: MessageV0): boolean => {
+    if (!transferDestinationsStatic(m)) return false;
+    if (!alsoStatic || alsoStatic.size === 0) return true;
+    const s = new Set(m.staticAccountKeys.map((k) => k.toBase58()));
+    for (const k of alsoStatic) if (!s.has(k)) return false;
+    return true;
+  };
   const ownMasked = own.map((a) => maskAlt(a, keep));
   const extraMasked = extra.map((a) => maskAlt(a, keep));
   if (extraMasked.length > 0) {
     const compressed = msg.compileToV0Message([...ownMasked, ...extraMasked]);
-    if (transferDestinationsStatic(compressed)) return compressed;
+    if (fine(compressed)) return compressed;
   }
   const plain = msg.compileToV0Message(ownMasked);
-  if (transferDestinationsStatic(plain)) return plain;
+  if (fine(plain)) return plain;
   // Cannot happen after masking; if it ever does, prefer a message the signer
   // will read over one it will refuse.
   return msg.compileToV0Message([]);
@@ -348,6 +360,75 @@ export async function injectTransfersFit(
   httpUrl: string,
   allowDrop = true,
 ): Promise<{ tx: Uint8Array; kept: PlannedTransfer[]; dropped: PlannedTransfer[] } | null> {
+  return appendFit(txBytes, owner, transfers, httpUrl, allowDrop, (t, from) =>
+    SystemProgram.transfer({ fromPubkey: from, toPubkey: new PublicKey(t.to), lamports: t.lamports }),
+  );
+}
+
+/** A token transfer we append: the platform fee taken in a token. */
+export interface PlannedTokenTransfer {
+  /** Our own (classic-Token) associated account of `mint`. */
+  source: string;
+  mint: string;
+  decimals: number;
+  /** The recipient's existing token account for `mint`. */
+  dest: string;
+  amountRaw: bigint;
+  /** Higher = dropped first when the transaction would not fit. */
+  priority: number;
+}
+
+const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+
+/** A classic-Token TransferChecked: [12, amount u64 LE, decimals u8];
+ *  accounts source (w), mint, destination (w), authority (signer). */
+export function tokenTransferCheckedIx(t: PlannedTokenTransfer, owner: PublicKey): TransactionInstruction {
+  const data = Buffer.alloc(10);
+  data[0] = 12;
+  data.writeBigUInt64LE(t.amountRaw, 1);
+  data[9] = t.decimals;
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: new PublicKey(t.source), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(t.mint), isSigner: false, isWritable: false },
+      { pubkey: new PublicKey(t.dest), isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+}
+
+/**
+ * Append token TRANSFERS (the platform fee taken in a token), with the same
+ * contract as injectTransfersFit: compressed with lookup tables, the least
+ * important dropped until it fits, null when the message cannot be rebuilt.
+ *
+ * Every account of an injected transfer is kept STATIC — the signer names
+ * source, mint, destination and authority before it will sign a token fee,
+ * and a Jupiter route's own lookup table often holds the output mint and our
+ * own token account for it.
+ */
+export async function injectTokenTransfersFit(
+  txBytes: Uint8Array,
+  owner: string,
+  transfers: PlannedTokenTransfer[],
+  httpUrl: string,
+): Promise<{ tx: Uint8Array; kept: PlannedTokenTransfer[]; dropped: PlannedTokenTransfer[] } | null> {
+  const keep = new Set<string>();
+  for (const t of transfers) for (const k of [t.source, t.mint, t.dest]) keep.add(k);
+  return appendFit(txBytes, owner, transfers, httpUrl, true, (t, from) => tokenTransferCheckedIx(t, from), keep);
+}
+
+async function appendFit<T extends { priority: number }>(
+  txBytes: Uint8Array,
+  owner: string,
+  transfers: T[],
+  httpUrl: string,
+  allowDrop: boolean,
+  toIx: (t: T, from: PublicKey) => TransactionInstruction,
+  alsoStatic?: ReadonlySet<string>,
+): Promise<{ tx: Uint8Array; kept: T[]; dropped: T[] } | null> {
   if (transfers.length === 0) return { tx: txBytes, kept: [], dropped: [] };
   try {
     const tx = VersionedTransaction.deserialize(txBytes);
@@ -358,24 +439,21 @@ export async function injectTransfersFit(
       own.push(alt);
     }
     const extra = await publicAlts(httpUrl);
+    // Inside the try: a bad owner is "cannot rebuild" (null), never a throw.
     const from = new PublicKey(owner);
-    const attempt = (set: PlannedTransfer[]): Uint8Array | null => {
+    const attempt = (set: T[]): Uint8Array | null => {
       const msg = TransactionMessage.decompile(tx.message, { addressLookupTableAccounts: own });
-      for (const t of set) {
-        msg.instructions.push(
-          SystemProgram.transfer({ fromPubkey: from, toPubkey: new PublicKey(t.to), lamports: t.lamports }),
-        );
-      }
+      for (const t of set) msg.instructions.push(toIx(t, from));
       let bytes: Uint8Array;
       try {
-        bytes = new VersionedTransaction(compileKeepingTransfersStatic(msg, own, extra)).serialize();
+        bytes = new VersionedTransaction(compileKeepingTransfersStatic(msg, own, extra, alsoStatic)).serialize();
       } catch {
         return null; // web3.js throws "encoding overruns" past the packet limit
       }
       return bytes.length <= MAX_TX_BYTES ? bytes : null;
     };
     let kept = [...transfers];
-    const dropped: PlannedTransfer[] = [];
+    const dropped: T[] = [];
     for (;;) {
       const bytes = attempt(kept);
       if (bytes) return { tx: bytes, kept, dropped };

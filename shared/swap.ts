@@ -262,9 +262,12 @@ export interface SwapQuote {
    *
    * `basis` says where the number came from rather than leaving the user to
    * assume: 'sol-leg' when SOL is one side of the swap, 'quoted' when neither
-   * side is SOL and the input had to be priced in SOL separately, and
-   * 'unpriced' when it could not be priced at all — in which case the fee is
-   * zero, because a fee this app cannot justify is one it does not charge.
+   * side is SOL and one side (the input, else the output) was priced in SOL
+   * separately, 'output-token' when neither side could be priced in SOL and
+   * the fee is taken from the OUTPUT token instead (`feeTokenRaw`, same
+   * transaction — 2026-09-26), and 'unpriced' when not even that is possible
+   * (a Token-2022 output, or no fee account exists for the output token) —
+   * the only case in which a swap is charged nothing.
    */
   feeLamports: number;
   /**
@@ -272,7 +275,10 @@ export interface SwapQuote {
    * the native leg, so there is no separate number to show — but "none"
    * would be a lie, and that is what the card said until 2026-09-11.
    */
-  feeBasis: 'sol-leg' | 'quoted' | 'unpriced' | 'inside' | 'on-top' | 'follows';
+  feeBasis: 'sol-leg' | 'quoted' | 'output-token' | 'unpriced' | 'inside' | 'on-top' | 'follows';
+  /** 'output-token' only: the fee in base units of the OUTPUT token, taken
+   *  from what the swap delivers. Null on every other basis. */
+  feeTokenRaw?: string | null;
   /** The fee in the chain's own coin, when the rail priced it (EVM). */
   feeNative: number | null;
   /**

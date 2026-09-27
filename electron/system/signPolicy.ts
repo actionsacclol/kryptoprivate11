@@ -427,6 +427,22 @@ export interface SignPolicy {
    */
   feeAllowance?: Array<{ address: string; maxLamports: number }>;
   /**
+   * Intent 'trade' ONLY (2026-09-26): the platform fee taken in a TOKEN rather
+   * than in SOL — the Swap card's fallback when a token-to-token swap cannot be
+   * priced in SOL. It permits exactly this and nothing wider:
+   *
+   *  · a classic-Token `TransferChecked` of `mint` (the swap's OUTPUT),
+   *  · FROM this wallet's own associated account for that mint, authorised by
+   *    this wallet,
+   *  · INTO one of the named `recipients` accounts (the treasury's and the
+   *    referrer's token accounts), summed per account against its own ceiling.
+   *
+   * Everything else the token rule refuses stays refused; a transfer of any
+   * other mint, from any other account, or to any other account falls through
+   * to the ordinary rule. Absent means no token fee may appear at all.
+   */
+  tokenFeeAllowance?: { mint: string; recipients: Array<{ account: string; maxRaw: string }> };
+  /**
    * Intent 'bridge' ONLY: the address lookup tables the transaction
    * references, RESOLVED by the caller from the chain, in the order the
    * message lists them, each with that table's full address list.
@@ -689,6 +705,8 @@ export function checkOutflow(
    *  cannot each slip under the ceiling individually. */
   const feeOut = new Map<string, bigint>();
   let relayerOut = 0n;
+  /** Token-fee base units per recipient account (see tokenFeeAllowance). */
+  const tokenFeeOut = new Map<string, bigint>();
 
   // Token accounts of OURS this trade may legitimately touch: the traded mint's
   // ATA under both token programs, and the WSOL ATA (AMM quote side).
@@ -736,6 +754,9 @@ export function checkOutflow(
     }
 
     if (program === TOKEN_PROGRAM || program === TOKEN_2022_PROGRAM) {
+      const fee = checkTokenFee(ix, staticKeys, walletPublicKey, policy, program, tokenFeeOut);
+      if (fee === 'fee') continue;
+      if (fee !== null) return { ok: false, message: fee };
       const bad = checkTokenInstruction(ix, staticKeys, walletPublicKey, policy, ownAtas, ownWsolAta, tradeProgramAccounts);
       if (bad) return { ok: false, message: bad };
       continue;
@@ -881,6 +902,52 @@ export function checkOutflow(
     };
   }
   return { ok: true, message: 'ok' };
+}
+
+/**
+ * The token-fee exception (SignPolicy.tokenFeeAllowance), in one place.
+ *
+ * Returns 'fee' when the instruction IS an allowed fee transfer (the caller
+ * skips the ordinary token rule for it), a refusal string when it is a fee
+ * transfer over its ceiling, and null for anything else — which then meets
+ * the ordinary rule exactly as before. Every clause must hold for 'fee':
+ * trade intent, classic Token program, TransferChecked with exactly four
+ * static accounts, source = OUR associated account of the fee mint, the mint
+ * slot = the fee mint, authority = us, destination = a named recipient.
+ */
+function checkTokenFee(
+  ix: MessageCompiledInstruction,
+  staticKeys: string[],
+  wallet: string,
+  policy: SignPolicy,
+  program: string,
+  tokenFeeOut: Map<string, bigint>,
+): 'fee' | string | null {
+  const allow = policy.tokenFeeAllowance;
+  if (!allow || policy.intent !== 'trade' || program !== TOKEN_PROGRAM) return null;
+  const data = ix.data;
+  if (data.length !== 10 || data[0] !== TOK_TRANSFER_CHECKED || ix.accountKeyIndexes.length !== 4) return null;
+  const at = (i: number): string | undefined => {
+    const k = ix.accountKeyIndexes[i];
+    return k !== undefined && k < staticKeys.length ? staticKeys[k] : undefined;
+  };
+  const dest = at(2);
+  const slot = allow.recipients.find((r) => r.account === dest);
+  if (!slot) return null;
+  if (at(0) !== ataFor(wallet, allow.mint, TOKEN_PROGRAM) || at(1) !== allow.mint || at(3) !== wallet) return null;
+  const amount = new DataView(data.buffer, data.byteOffset, data.byteLength).getBigUint64(1, true);
+  let max: bigint;
+  try {
+    max = BigInt(slot.maxRaw);
+  } catch {
+    return 'Token fee allowance is not a number — refusing to sign';
+  }
+  const soFar = (tokenFeeOut.get(slot.account) ?? 0n) + amount;
+  if (soFar > max) {
+    return `Transaction sends ${soFar} base units to fee account ${short(slot.account)}, over the ${max} allowed for this trade — refusing to sign`;
+  }
+  tokenFeeOut.set(slot.account, soFar);
+  return 'fee';
 }
 
 /** Our ATAs for the traded mint (both token programs) plus WSOL. */

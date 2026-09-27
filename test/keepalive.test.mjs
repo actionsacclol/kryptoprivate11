@@ -26,8 +26,8 @@ const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
   const start = src.indexOf('  private onTrade(ev: PumpTradeEvent, n: LogNotification): void {');
   assert.ok(start > 0, 'onTrade is where it was');
   const body = src.slice(start, start + 16_000);
-  const gate = body.indexOf('const kept = held || this.runnerFlagged(ev.mint, n.receivedAt) || tape.isSubscribed(ev.mint);');
-  assert.ok(gate > 0, 'a decided launch is kept alive by a position, a runner flag or a tape subscription');
+  const gate = body.indexOf('const kept = held || this.runnerFlagged(ev.mint, n.receivedAt) || this.ticksWanted(ev.mint);');
+  assert.ok(gate > 0, 'a decided launch is kept alive by a position, a runner flag, a tape subscription or a script following it');
   assert.ok(body.indexOf('if (t.decided && !kept) {') > gate, 'and the fast-path return tests that, not the position alone');
   assert.ok(!/if \(t\.decided && !held\) \{/.test(body), 'the old position-only gate is gone');
   const refresh = body.indexOf('this.pushLaunchThrottled(t, true);');
@@ -36,6 +36,22 @@ const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
   assert.ok(/private runnerFlagged\(mint: string, now: number\): boolean \{[\s\S]{0,200}RUNNER_TTL_MS/.test(src), 'a runner flag keeps a launch alive for its TTL, not forever');
   assert.ok(/this\.positions\.hasOpenFor\(mint\) \|\| this\.runnerFlagged\(mint, Date\.now\(\)\)/.test(src), 'eviction past the launch cap spares a flagged runner like a held position');
   ok('a flagged, held or subscribed launch keeps its flow and launch updates after the decision');
+}
+
+{
+  // Scripts follow coins WITHOUT taking the terminal's tape slots (2026-09-27).
+  // The tape keeps eight, least-recently-touched evicted; a script watching
+  // forty runners evicted the chart the user had open and got ticks for at
+  // most eight of its own coins.
+  const src = read('../electron/engine/engine.ts');
+  const has = (text, s) => text.includes(s);
+  assert.ok(has(src, 'private ticksWanted(mint: string): boolean {\n    return tape.isSubscribed(mint) || automation.wantsTicks(mint);'), 'ticks are wanted by a tape subscription OR a script');
+  assert.ok(has(src, 'isOpen: (mint) => this.ticksWanted(mint)'), 'the chart-tick throttle lets script-followed mints through');
+  assert.equal(src.split('if (this.ticksWanted(ev.mint)) this.recordTapeTrade(ev, n);').length - 1, 2, 'both curve-trade paths tick for a script-followed mint');
+  assert.ok(!has(src, 'subscribeTicks: (mint) => tape.subscribe(mint)'), 'a script never takes a tape slot');
+  const ipc = read('../electron/ipc.ts');
+  assert.ok(has(ipc, "if (ev.kind !== 'tick' || tape.isSubscribed(ev.mint)) broadcast(ev);"), 'and a script-only tick is not sent to the window');
+  ok('scripts follow coins through their own interest set, not the terminal tape');
 }
 
 {

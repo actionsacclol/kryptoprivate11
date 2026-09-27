@@ -356,7 +356,9 @@ export function SwapCard() {
           <div>
             {/* Where the fee's basis came from is stated rather than implied —
                 a token-to-token swap has no SOL leg to charge on, so it says
-                so, and an unpriceable one is charged nothing at all. */}
+                so; one with no SOL price at all pays in the output token
+                (2026-09-26), and only when even that is impossible is it
+                charged nothing. */}
             Platform fee:{' '}
             <span className="text-white/70">
               {/* The quote is priced main-side and already has the holder
@@ -367,16 +369,23 @@ export function SwapCard() {
                 ? quote.feeNative !== null
                   ? `${quote.feeNative.toFixed(6)} ${nativeSymbol(draft.chain)}`
                   : `${(holderFeeBps(FEE_BPS, waiver.halved) / 100).toFixed(2).replace(/\.?0+$/, '')}%`
-                : feeSol === null || feeSol === 0
-                  ? 'none'
-                  : `${feeSol.toFixed(6)} SOL`}
+                : quote.feeBasis === 'output-token'
+                  ? quote.outDecimals !== null && quote.feeTokenRaw
+                    ? `${fromRaw(quote.feeTokenRaw, quote.outDecimals).toLocaleString(undefined, { maximumFractionDigits: 6 })} of the output token`
+                    : '—'
+                  : feeSol === null || feeSol === 0
+                    ? 'none'
+                    : `${feeSol.toFixed(6)} SOL`}
             </span>
             {waiver.halved ? <span className="text-emerald-300/80"> — halved (${KRYPTO_TOKEN.symbol} holder)</span> : null}
             {quote.feeBasis === 'on-top' ? ` — added on top of the ${nativeSymbol(draft.chain)} you send` : ''}
             {quote.feeBasis === 'follows' ? ' — sent as a second transaction right after the buy lands' : ''}
             {quote.feeBasis === 'inside' ? ' — taken out of the proceeds; the amount above is what you get' : ''}
-            {quote.feeBasis === 'quoted' && feeSol ? ` (${(holderFeeBps(FEE_BPS, waiver.halved) / 100).toFixed(2).replace(/\.?0+$/, '')}% of the input priced in SOL)` : ''}
-            {quote.feeBasis === 'unpriced' ? ' — this pair could not be priced in SOL, so nothing is charged' : ''}
+            {quote.feeBasis === 'quoted' && feeSol ? ` (${(holderFeeBps(FEE_BPS, waiver.halved) / 100).toFixed(2).replace(/\.?0+$/, '')}% of the swap priced in SOL)` : ''}
+            {quote.feeBasis === 'output-token'
+              ? ` (${(holderFeeBps(FEE_BPS, waiver.halved) / 100).toFixed(2).replace(/\.?0+$/, '')}% — this pair has no SOL price, so the fee is taken from what the swap delivers, in the same transaction; the amount above is before it)`
+              : ''}
+            {quote.feeBasis === 'unpriced' ? ' — this pair could not be priced in SOL and the fee cannot be taken in the output token, so nothing is charged' : ''}
             {/* Not offered on a pair that is charged nothing anyway — there
                 would be no fee for the holding to remove. */}
             {quote.feeBasis !== 'unpriced' && (

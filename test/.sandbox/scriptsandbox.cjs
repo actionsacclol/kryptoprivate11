@@ -30,10 +30,12 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // electron/system/scriptSandbox.ts
 var scriptSandbox_exports = {};
 __export(scriptSandbox_exports, {
+  _failNextLoad: () => _failNextLoad,
   _setPreloadPath: () => _setPreloadPath,
   dispatch: () => dispatch,
   install: () => install,
   isRunning: () => isRunning,
+  memoryMB: () => memoryMB,
   reply: () => reply,
   start: () => start,
   stop: () => stop,
@@ -422,12 +424,17 @@ var MSG_PER_SEC = 60;
 var boxes = /* @__PURE__ */ new Map();
 var byContents = /* @__PURE__ */ new Map();
 var buckets = /* @__PURE__ */ new Map();
+var bucketKey = (contentsId, kind) => `${contentsId}:${kind}`;
 var host = null;
 var installed = false;
 var generation = 0;
 var preloadPath = null;
 function _setPreloadPath(p) {
   preloadPath = p;
+}
+var failNextLoad = false;
+function _failNextLoad() {
+  failNextLoad = true;
 }
 function install(h) {
   host = h;
@@ -447,7 +454,13 @@ function install(h) {
     const box = boxes.get(scriptId);
     if (!box) return;
     const kind = typeof raw === "object" && raw !== null ? raw.t : void 0;
-    if (kind !== "ready" && kind !== "done" && !allow(box)) return;
+    if (kind !== "ready" && kind !== "done" && !allow(box, kind === "call" ? "calls" : "chatter")) {
+      const id = kind === "call" ? raw.id : void 0;
+      if (typeof id === "number" && Number.isInteger(id) && id >= 0 && id < 2 ** 31) {
+        post(box, { t: "reply", id, ok: false, error: `dropped: over ${MSG_PER_SEC} calls a second from this script \u2014 slow down (price in batches)` });
+      }
+      return;
+    }
     const msg = parseFromSandbox(raw);
     if (!msg) {
       host?.log("warn", `script ${scriptId}: dropped a malformed sandbox message`);
@@ -467,12 +480,13 @@ function install(h) {
     host?.onMessage(scriptId, msg);
   });
 }
-function allow(box) {
+function allow(box, kind) {
   const now = Date.now();
-  let b = buckets.get(box.contentsId);
+  const key = bucketKey(box.contentsId, kind);
+  let b = buckets.get(key);
   if (!b) {
     b = { tokens: MSG_BURST, last: now, dropped: 0, reported: false };
-    buckets.set(box.contentsId, b);
+    buckets.set(key, b);
   }
   b.tokens = Math.min(MSG_BURST, b.tokens + (now - b.last) / 1e3 * MSG_PER_SEC);
   b.last = now;
@@ -488,10 +502,11 @@ function allow(box) {
   b.dropped += 1;
   if (!b.reported) {
     b.reported = true;
-    host?.log("warn", `script ${box.scriptId}: over ${MSG_PER_SEC} sandbox messages a second \u2014 dropping the excess`);
+    const what = kind === "calls" ? "calls" : "log/stat messages";
+    host?.log("warn", `script ${box.scriptId}: over ${MSG_PER_SEC} sandbox ${what} a second \u2014 dropping the excess`);
     host?.onMessage(box.scriptId, {
       t: "error",
-      line: `flooded the sandbox channel (over ${MSG_PER_SEC} messages a second) \u2014 messages are being dropped`
+      line: kind === "calls" ? `flooded the sandbox channel (over ${MSG_PER_SEC} calls a second) \u2014 the excess calls are refused ("dropped: \u2026"); make fewer at once` : `flooded the sandbox channel (over ${MSG_PER_SEC} log/stat messages a second) \u2014 the excess lines are dropped`
     });
   }
   return false;
@@ -499,6 +514,17 @@ function allow(box) {
 function isRunning(scriptId) {
   const b = boxes.get(scriptId);
   return !!b && b.ready && !b.contents.isDestroyed();
+}
+function memoryMB(scriptId) {
+  const b = boxes.get(scriptId);
+  if (!b || b.contents.isDestroyed()) return null;
+  try {
+    const pid = b.contents.getOSProcessId();
+    const kb = import_electron.app.getAppMetrics().find((m) => m.pid === pid)?.memory?.workingSetSize;
+    return typeof kb === "number" && Number.isFinite(kb) ? Math.round(kb / 1024) : null;
+  } catch {
+    return null;
+  }
 }
 async function start(scriptId, code, info) {
   await stop(scriptId, "restart");
@@ -522,7 +548,7 @@ async function start(scriptId, code, info) {
       }
     });
   } catch (err) {
-    return { ok: false, message: `sandbox window: ${err.message}` };
+    return { ok: false, message: `sandbox window: ${err.message}`, retryable: true };
   }
   const contents = win.webContents;
   const box = {
@@ -561,10 +587,14 @@ async function start(scriptId, code, info) {
   win.on("closed", () => gone("closed"));
   const superseded = () => boxes.get(scriptId) !== box;
   try {
+    if (failNextLoad) {
+      failNextLoad = false;
+      throw new Error("ERR_FAILED (-2) (test)");
+    }
     await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(sandboxPageHtml())}`);
   } catch (err) {
     teardown(box);
-    return { ok: false, message: `sandbox load: ${err.message}` };
+    return { ok: false, message: `sandbox load: ${err.message}`, retryable: true };
   }
   if (superseded()) {
     teardown(box);
@@ -572,7 +602,7 @@ async function start(scriptId, code, info) {
   }
   if (contents.isDestroyed()) {
     teardown(box);
-    return { ok: false, message: "sandbox closed while loading" };
+    return { ok: false, message: "sandbox closed while loading", retryable: true };
   }
   if (!box.alive) {
     await new Promise((resolve) => {
@@ -723,7 +753,8 @@ async function stopAll() {
 function teardown(box) {
   if (boxes.get(box.scriptId) === box) boxes.delete(box.scriptId);
   byContents.delete(box.contentsId);
-  buckets.delete(box.contentsId);
+  buckets.delete(bucketKey(box.contentsId, "chatter"));
+  buckets.delete(bucketKey(box.contentsId, "calls"));
   for (const [, p] of box.inflight) {
     clearTimeout(p.timer);
     p.settle({ ok: false, error: "sandbox stopped" });
@@ -744,10 +775,12 @@ function post(box, msg) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  _failNextLoad,
   _setPreloadPath,
   dispatch,
   install,
   isRunning,
+  memoryMB,
   reply,
   start,
   stop,

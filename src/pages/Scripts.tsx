@@ -294,6 +294,23 @@ export function ScriptsPage() {
   // script's totals are usually its OWN saved state (bot.setState), so this
   // clears that, not just the widget. Live scripts keep their open positions
   // and today's budget — see automation.resetScript.
+  // A script that ships with the app: back to the code this version ships.
+  const resetShipped = async (s: UserScript): Promise<void> => {
+    const okGo = await modal.confirm({
+      title: `Reset "${s.name}" to the shipped version`,
+      message: 'Replace this script’s code with the version that ships with Krypto Bot? Your edits to the code are lost; its settings, stats and saved state are kept. From then on it updates with the app again.',
+      confirmLabel: 'Reset code',
+      destructive: true,
+    });
+    if (!okGo) return;
+    const r = await window.krypt.automation.resetBundled(s.id);
+    if (!r.ok) toast.error(r.message);
+    else {
+      toast.success(r.message);
+      if (r.data) setSnap(r.data);
+    }
+  };
+
   const resetScripts = async (s: UserScript | null): Promise<void> => {
     const kept = 'Live scripts keep the positions they still hold (so they can still sell them) and today’s buys and loss, which their daily limits count.';
     const okGo = await modal.confirm({
@@ -472,7 +489,12 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                         <span className="text-sm font-semibold text-white truncate">{s.name}</span>
                         <span className="flex items-center gap-1.5 flex-shrink-0">
                           <Badge tone={s.mode === 'live' ? 'danger' : 'neutral'}>{s.mode}</Badge>
-                          <Badge tone={s.enabled ? 'success' : 'neutral'}>{s.enabled ? (s.kind === 'code' && st && !st.running ? 'starting' : 'on') : 'off'}</Badge>
+                          {s.enabled && st?.pausedUntil ? (
+                            // Paused after its own errors; it restarts by itself (automation.ts pauseForErrors).
+                            <Badge tone="warn">paused</Badge>
+                          ) : (
+                            <Badge tone={s.enabled ? 'success' : 'neutral'}>{s.enabled ? (s.kind === 'code' && st && !st.running ? 'starting' : 'on') : 'off'}</Badge>
+                          )}
                         </span>
                       </div>
                       <div className="mt-1 text-body text-krypt-muted truncate">{s.kind === 'rules' ? describeRules(s.rules, scriptChain(s)) : `script · ${s.code.split('\n').length} lines`}</div>
@@ -569,6 +591,13 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                       <GhostButton onClick={() => void resetScripts(current)} className="!py-2 text-xs">
                         <RotateCcw className="h-3.5 w-3.5" /> Reset stats
                       </GhostButton>
+                    )}
+                    {current?.bundled && (
+                      <span title={current.bundled.edited ? 'You edited this script, so app updates no longer replace it' : 'Updates with the app while you have not edited it'}>
+                        <GhostButton onClick={() => void resetShipped(current)} className="!py-2 text-xs">
+                          <RotateCcw className="h-3.5 w-3.5" /> {current.bundled.edited ? 'Reset to shipped version' : 'Ships with Krypto Bot'}
+                        </GhostButton>
+                      </span>
                     )}
                     {current && (
                       <GhostButton destructive onClick={() => void removeScript(current)} className="!py-2 text-xs">

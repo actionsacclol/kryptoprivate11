@@ -39,13 +39,23 @@ import {
   type SwapSpeed,
 } from '@shared/swap';
 import * as feeEstimator from './feeEstimator';
-import { FEE_BPS, activeTreasury, feesEnabled, looksLikeSolAddress, splitFee, treasuryIntegrity } from '@shared/fees';
+import {
+  FEE_BPS,
+  activeTreasury,
+  feesEnabled,
+  looksLikeSolAddress,
+  revertedAtFee,
+  splitFee,
+  splitTokenFee,
+  treasuryIntegrity,
+  type TokenFeeSplit,
+} from '@shared/fees';
 import { holderFeeBps, holderRateApplies } from '@shared/krypto';
 import { usableTokens as kryptoUsableTokens } from './kryptoHolding';
 import * as wallet from '../system/wallet';
 import { logger } from '../system/logger';
 import { buildPairSwap, quoteSellLamports } from './jupiterRoute';
-import { injectTransfersFit, broadcastAndConfirm, type PlannedTransfer } from './broadcast';
+import { injectTransfersFit, injectTokenTransfersFit, broadcastAndConfirm, type PlannedTransfer, type PlannedTokenTransfer } from './broadcast';
 import { getAccountInfo, getBalance, getTokenBalanceRawForMint, simulateTransaction } from '../chain/rpcClient';
 import { anchorReason, rentSafeTransfers, tokenAmount } from './liveSigner';
 import { ataFor, TOKEN_PROGRAM, TOKEN_2022_PROGRAM } from '../chain/addresses';
@@ -166,27 +176,143 @@ export async function balanceOf(deps: SwapDeps, mint: string, chain: SwapDraft['
 }
 
 /**
- * What the platform fee would be on this swap, and where the number came from.
+ * What the platform fee is charged on for this swap, and where that came from.
  *
- * The fee is 0.5 % of the SOL value, like everywhere else. When SOL is one
- * side of the swap that value is the quote's own SOL leg. When neither side
- * is SOL the input has to be priced in SOL separately — and when even that
- * fails the fee is ZERO, because a fee this app cannot justify on a number it
- * can show you is one it does not charge.
+ * Every swap is billed (2026-09-26 — until then an unpriceable pair paid
+ * nothing). In order:
+ *
+ *  1. the quote's own SOL leg, when SOL is one side;
+ *  2. the INPUT priced in SOL (a sell quote of it);
+ *  3. the OUTPUT priced in SOL — the quote's output amount, sold in a quote.
+ *     A token-to-token route exists, so usually at least one side has a SOL
+ *     route even when the other does not;
+ *  4. neither: the fee is taken in the OUTPUT token itself, out of what the
+ *     swap delivers, in the same transaction (see tokenFeePlan) — never
+ *     skipped just because there is no SOL price.
+ *
+ * The same rate everywhere (FEE_BPS, halved for a $KRYPTO holder).
  */
+type SwapFee =
+  | { kind: 'sol'; lamports: number; basis: 'sol-leg' | 'quoted' }
+  | { kind: 'token'; basisRaw: bigint }
+  | { kind: 'none' };
+
 async function feeFor(
   inputMint: string,
   outputMint: string,
   inRaw: bigint,
   solLegLamports: number | undefined,
-): Promise<{ lamports: number; basis: SwapQuote['feeBasis'] }> {
-  if (!feesEnabled()) return { lamports: 0, basis: 'unpriced' };
+  outRaw: bigint,
+): Promise<SwapFee> {
+  if (!feesEnabled()) return { kind: 'none' };
   if (typeof solLegLamports === 'number' && Number.isFinite(solLegLamports) && solLegLamports > 0) {
-    return { lamports: solLegLamports, basis: inputMint === WSOL_MINT || outputMint === WSOL_MINT ? 'sol-leg' : 'quoted' };
+    return { kind: 'sol', lamports: solLegLamports, basis: inputMint === WSOL_MINT || outputMint === WSOL_MINT ? 'sol-leg' : 'quoted' };
   }
-  const priced = await quoteSellLamports(inputMint, inRaw);
-  if (priced && priced.lamports > 0) return { lamports: priced.lamports, basis: 'quoted' };
-  return { lamports: 0, basis: 'unpriced' };
+  // Priority lane: a user is waiting on this, and a timed-out price used to
+  // mean a free swap.
+  const priced = await quoteSellLamports(inputMint, inRaw, { priority: true });
+  if (priced && priced.lamports > 0) return { kind: 'sol', lamports: priced.lamports, basis: 'quoted' };
+  if (outRaw > 0n) {
+    const out = await quoteSellLamports(outputMint, outRaw, { priority: true });
+    if (out && out.lamports > 0) return { kind: 'sol', lamports: out.lamports, basis: 'quoted' };
+    return { kind: 'token', basisRaw: outRaw };
+  }
+  return { kind: 'none' };
+}
+
+/** Parsed output-side quote amount; 0 when absent or unreadable. */
+function rawOf(s: string | undefined): bigint {
+  try {
+    return s ? BigInt(s) : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+/** Token accounts known to exist, initialised and unfrozen — a fee recipient's
+ *  account only ever gets MORE tokens, so a positive read is cached. */
+const tokenAccountReadyAt = new Map<string, number>();
+const TOKEN_ACCOUNT_READY_TTL_MS = 10 * 60_000;
+
+/**
+ * Can `account` (a classic-Token account of `mint`) receive a transfer right
+ * now? It must exist, belong to the Token program, hold `mint`, and be
+ * Initialized (state byte 1) — a missing or FROZEN recipient would revert
+ * the whole swap, which a fee must never do.
+ */
+async function tokenAccountReady(httpUrl: string, account: string, mint: string): Promise<boolean> {
+  const seen = tokenAccountReadyAt.get(account);
+  if (seen !== undefined && Date.now() - seen < TOKEN_ACCOUNT_READY_TTL_MS) return true;
+  const info = await getAccountInfo(httpUrl, account);
+  if (!info.ok || !info.data) return false;
+  const raw = info.data.data;
+  if (info.data.owner !== TOKEN_PROGRAM || raw.length < 165) return false;
+  if (new PublicKey(raw.subarray(0, 32)).toBase58() !== mint) return false;
+  if (raw[108] !== 1) return false;
+  tokenAccountReadyAt.set(account, Date.now());
+  return true;
+}
+
+interface TokenFeePlan {
+  mint: string;
+  decimals: number;
+  split: TokenFeeSplit;
+  transfers: PlannedTokenTransfer[];
+}
+
+/**
+ * The fee in the OUTPUT token, for a swap nobody can price in SOL.
+ *
+ * Who pays rent: nobody. A token transfer needs the recipient's token account
+ * to exist already, and creating the treasury's (or a referrer's) account on
+ * the user's dime would cost ~0.002 SOL — more than the disclosed fee on most
+ * swaps. So a recipient whose account for this mint does not exist is skipped
+ * this time, exactly as rentSafeTransfers skips a SOL recipient below rent:
+ * forgoing a fee beats charging an undisclosed one or reverting the swap.
+ * The treasury's account is required for any token fee at all; when only the
+ * referrer's is missing the fee is split without them (logged), so the user
+ * pays the same either way.
+ *
+ * Classic Token only: a Token-2022 mint may carry a transfer hook (extra
+ * accounts a plain transfer does not pass — the swap would revert) or a
+ * transfer fee, so those stay unbilled rather than risk the swap.
+ *
+ * Null = no token fee is possible; `why` says so for the log and the card.
+ */
+async function tokenFeePlan(
+  httpUrl: string,
+  owner: string,
+  mint: string,
+  basisRaw: bigint,
+  treasury: string,
+  referrer: string | null,
+): Promise<{ plan: TokenFeePlan | null; why: string }> {
+  const info = await getAccountInfo(httpUrl, mint);
+  if (!info.ok || !info.data) return { plan: null, why: 'the output mint could not be read' };
+  if (info.data.owner !== TOKEN_PROGRAM) return { plan: null, why: 'the output token is not a classic SPL token' };
+  const decimals = info.data.data.length >= 82 ? info.data.data[44]! : null;
+  if (decimals === null) return { plan: null, why: 'the output mint could not be read' };
+  const treasuryAta = ataFor(treasury, mint, TOKEN_PROGRAM);
+  const referrerAta = referrer ? ataFor(referrer, mint, TOKEN_PROGRAM) : null;
+  const [treasuryOk, referrerOk] = await Promise.all([
+    tokenAccountReady(httpUrl, treasuryAta, mint),
+    referrerAta ? tokenAccountReady(httpUrl, referrerAta, mint) : Promise.resolve(false),
+  ]);
+  if (!treasuryOk) return { plan: null, why: 'the fee address has no account for the output token' };
+  // A referrer with no account for this token cannot be paid in it; the split
+  // is then made WITHOUT them, so the whole fee goes to the treasury (the
+  // Terms, §8: a skipped referral share never changes what the user pays).
+  const payReferrer = !!referrerAta && referrerOk;
+  if (referrerAta && !referrerOk) logger.warn('swap: referrer not paid — they have no account for the output token, and creating one would cost you rent');
+  const split = splitTokenFee(basisRaw, payReferrer, holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens())));
+  if (split.totalRaw <= 0n) return { plan: null, why: 'the fee rounds to zero in the output token' };
+  const source = ataFor(owner, mint, TOKEN_PROGRAM);
+  const transfers: PlannedTokenTransfer[] = [];
+  if (split.treasuryRaw > 0n) transfers.push({ source, mint, decimals, dest: treasuryAta, amountRaw: split.treasuryRaw, priority: 0 });
+  if (payReferrer && referrerAta && split.referrerRaw > 0n) {
+    transfers.push({ source, mint, decimals, dest: referrerAta, amountRaw: split.referrerRaw, priority: 1 });
+  }
+  return { plan: { mint, decimals, split, transfers }, why: 'ok' };
 }
 
 export interface SwapQuoteResult {
@@ -383,11 +509,23 @@ export async function quote(draft: SwapDraft, deps: SwapDeps): Promise<SwapQuote
   });
   if (!built.ok || !built.outAmount) return { ok: false, message: built.message };
 
-  const fee = await feeFor(draft.inputMint, draft.outputMint, inRaw, built.solValueLamports);
+  const fee = await feeFor(draft.inputMint, draft.outputMint, inRaw, built.solValueLamports, rawOf(built.outAmount));
   // The same rate the execution below charges: a $KRYPTO holder pays half
   // (shared/krypto.ts). Found 2026-09-20: this path had never asked about the
   // holding, so the card said "waived" over a quote that was priced in full.
-  const split = splitFee(fee.lamports, false, holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens())));
+  const split = splitFee(fee.kind === 'sol' ? fee.lamports : 0, false, holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens())));
+  // The output-token fallback, asked the same question the execution asks,
+  // so the card never promises a fee the swap will not take (or the reverse).
+  let feeBasis: SwapQuote['feeBasis'] = fee.kind === 'sol' ? fee.basis : 'unpriced';
+  let feeTokenRaw: string | null = null;
+  const treasury = treasuryIntegrity().treasury;
+  if (fee.kind === 'token' && treasury) {
+    const t = await tokenFeePlan(deps.httpUrl, owner, draft.outputMint, fee.basisRaw, treasury, null);
+    if (t.plan) {
+      feeBasis = 'output-token';
+      feeTokenRaw = t.plan.split.totalRaw.toString();
+    }
+  }
   return {
     ok: true,
     message: built.message,
@@ -401,7 +539,8 @@ export async function quote(draft: SwapDraft, deps: SwapDeps): Promise<SwapQuote
       route: built.route ?? [],
       priceImpactPct: null,
       feeLamports: split.totalLamports,
-      feeBasis: fee.basis,
+      feeBasis,
+      feeTokenRaw,
       feeNative: null,
       // What the Jupiter quote carries: whole basis points, at least one.
       appliedSlippagePct: Math.max(1, Math.min(5_000, Math.round(draft.slippagePct * 100))) / 100,
@@ -475,11 +614,12 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
   if (!built.ok || !built.tx) return { ok: false, message: built.message };
 
   // ── the platform fee ────────────────────────────────────────────────
-  const fee = await feeFor(draft.inputMint, draft.outputMint, inRaw, built.solValueLamports);
+  const fee = await feeFor(draft.inputMint, draft.outputMint, inRaw, built.solValueLamports, rawOf(built.outAmount));
   const treasury = treasuryIntegrity().treasury;
   const referrer = deps.referrer.trim();
   const hasReferrer = looksLikeSolAddress(referrer) && referrer !== treasury && referrer !== owner && !!treasury;
-  const split = treasury && fee.lamports > 0 ? splitFee(fee.lamports, hasReferrer, holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens()))) : { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
+  const bps = holderFeeBps(FEE_BPS, holderRateApplies(kryptoUsableTokens()));
+  const split = treasury && fee.kind === 'sol' ? splitFee(fee.lamports, hasReferrer, bps) : { totalLamports: 0, treasuryLamports: 0, referrerLamports: 0 };
 
   // A referrer was named and refused (not an address, the treasury, or this
   // very wallet). The whole fee goes to the treasury, which is correct, but
@@ -490,7 +630,6 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
     );
   }
 
-  let tx = built.tx;
   const planned: PlannedTransfer[] = [];
   if (split.totalLamports > 0 && treasury) {
     // Rent FIRST, size second. A sub-rent transfer to an empty wallet reverts
@@ -507,97 +646,161 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
     }
     for (const t of safe) planned.push({ ...t, priority: t.to === treasury ? 0 : 1 });
   }
-  if (planned.length > 0) {
-    const fit = await injectTransfersFit(tx, owner, planned, deps.httpUrl);
-    // A fee that will not fit is dropped, never allowed to fail the swap.
-    if (fit) {
-      tx = fit.tx;
-      if (fit.dropped.length) {
-        logger.warn(`swap: ${fit.dropped.length} fee transfer(s) dropped to fit the transaction — that share is not paid`);
-      }
-    } else logger.warn('swap: platform fee could not be attached — swapping without it');
+
+  // Neither side has a SOL price: the fee comes out of the OUTPUT token, in
+  // this same transaction, instead of not at all (2026-09-26).
+  let tokenPlan: TokenFeePlan | null = null;
+  if (fee.kind === 'token' && treasury) {
+    const t = await tokenFeePlan(deps.httpUrl, owner, draft.outputMint, fee.basisRaw, treasury, hasReferrer ? referrer : null);
+    tokenPlan = t.plan;
+    if (!t.plan) logger.warn(`swap: no SOL price for this pair and no fee in the output token (${t.why}) — swapping without a fee`);
+  } else if (fee.kind === 'none' && feesEnabled()) {
+    logger.warn('swap: no SOL price and no output amount to take a fee from — swapping without a fee');
   }
 
-  const policy = {
-    intent: 'trade' as const,
-    // A swap is a SELL of the input mint. See the header: this is what makes
-    // the existing token rules cover it exactly, with nothing widened.
-    trade: { side: 'sell' as const, mint: draft.inputMint },
-    // No tips, so the only bare SOL leaving is the fee plus whatever rent the
-    // route pays to open an output token account.
-    maxTransferLamports: MAX_RENT_ALLOWANCE_LAMPORTS,
-    feeAllowance:
-      split.totalLamports > 0 && treasury
-        ? [
-            { address: activeTreasury(), maxLamports: split.treasuryLamports },
-            ...(split.referrerLamports > 0 ? [{ address: referrer, maxLamports: split.referrerLamports }] : []),
-          ]
-        : undefined,
-  };
-
-  // ── The program gate ────────────────────────────────────────────────
-  //
-  // Added 2026-09-11 after the bridge swarm found this missing here. The
-  // signing policy inspects top-level instructions and guards our TOKEN
-  // accounts, but it does not stop an unrecognised program that has been
-  // handed the wallet's own system account — writable, and a signer — from
-  // moving SOL by CPI, because a CPI is not a top-level instruction. The loss
-  // bound below measures magnitude and is blind to destination: a route that
-  // sends exactly the amount being swapped, to somebody else, passes it.
-  //
-  // This sees TOP-LEVEL programs only. The venue itself runs as a CPI under
-  // Jupiter's program and is invisible here; what restricts the venue is
-  // the `dexes` list sent with the quote, and buildRoute refuses to quote
-  // without it. The two together are the gate; neither alone is.
-  const unknown = unknownTopLevelPrograms(VersionedTransaction.deserialize(tx), KNOWN_TRADE_PROGRAMS);
-  if (unknown.length > 0) {
-    // An ERROR, not a warning: the route came back running something this app
-    // does not recognise, which is either a venue we should add deliberately
-    // or a response that should not be trusted. Either way somebody needs to
-    // look at it, so it goes on the live log and not just into a toast.
-    logger.error(`swap refused: route runs unknown program(s) ${unknown.join(', ')}`);
-    return {
-      ok: false,
-      message: `Refusing: this route runs ${unknown.length > 1 ? 'programs' : 'a program'} this app does not know (${unknown.map((p) => p.slice(0, 12)).join(', ')}). Nothing was sent.`,
-    };
-  }
-
-  const signed = walletId ? wallet.signVersionedTransactionForWallet(walletId, tx, policy) : wallet.signVersionedTransaction(tx, policy);
-  if (!signed.ok || !signed.signed) return { ok: false, message: signed.message };
-  const base64 = Buffer.from(signed.signed).toString('base64');
-
-  // Simulate the SIGNED bytes, and bound the loss: a swap must never cost
-  // more SOL than its fee, its rent and the network's own charge.
-  //
-  // The output side is watched too — the token account(s) the swap should
-  // fill, under either token program — so a route that spends the input and
-  // delivers to somebody else is caught. The SOL guard alone is blind to
-  // that: it bounds what leaves, not where the proceeds go. Found by audit
-  // 2026-09-11 (the trade path had this check; the swap did not).
   const outIsSol = draft.outputMint === WSOL_MINT;
   const outAtas = outIsSol ? [] : [ataFor(owner, draft.outputMint, TOKEN_PROGRAM), ataFor(owner, draft.outputMint, TOKEN_2022_PROGRAM)];
-  // Read at the commitment the simulation runs at, so a transaction landing
-  // between the two reads does not skew the guard.
-  const before = await getBalance(deps.httpUrl, owner, 'processed');
-  const outBefore = outIsSol ? { ok: true as const, raw: 0n } : await outputHeld(deps.httpUrl, owner, draft.outputMint);
-  const sim = await simulateTransaction(deps.httpUrl, base64, [owner, ...outAtas]);
-  if (!sim.ok || !sim.data) return { ok: false, message: `Could not simulate the swap: ${sim.message}` };
-  if (sim.data.err) {
-    const why = anchorReason(sim.data.logs) ?? JSON.stringify(sim.data.err);
-    logger.warn(`swap refused by the chain: ${why}`);
-    return { ok: false, message: `The chain refused this swap: ${why}. Nothing was sent.` };
-  }
-  const post = sim.data.postLamports[0];
-  // A guard that cannot read its numbers refuses. Until 2026-09-11 a failed
-  // balance read (a 429, an RPC that omitted the account) skipped the whole
-  // check and the swap went on to broadcast — the trade path refused in the
-  // same case; this one did not. Found by audit.
-  if (!before.ok || before.data === undefined || typeof post !== 'number') {
-    const why = !before.ok ? ` (${before.message})` : '';
-    return { ok: false, message: `Could not read the balance for the loss guard${why} — nothing was sent.` };
-  }
-  if (!outBefore.ok) return { ok: false, message: `Could not read what you hold of the output token before the swap — nothing was sent.` };
-  {
+
+  /**
+   * Fee, program gate, sign, simulate and every guard — once with the fee,
+   * and at most once more WITHOUT it.
+   *
+   * The second pass exists for the same reason liveSigner's does: a fee is
+   * billed before the swap runs, on a quote, and a swap whose proceeds or
+   * wallet cannot cover it would fail AT our transfer. A swap is a sell of
+   * its input to the signer, and a fee never blocks an exit — so that one
+   * case (and only that case: revertedAtFee names the failing instruction)
+   * is re-run fee-free. A swap that SPENDS SOL (input = SOL) is a buy and is
+   * never re-sent without its fee.
+   */
+  const prepare = async (
+    withFee: boolean,
+  ): Promise<{ ok: true; signed: Uint8Array; base64: string } | { ok: false; result: SwapResult; feeReverted: boolean }> => {
+    const refuse = (message: string, feeReverted = false) => ({ ok: false as const, result: { ok: false, message }, feeReverted });
+    let tx = built.tx!;
+    let solKept: PlannedTransfer[] = [];
+    let tokenKept: PlannedTokenTransfer[] = [];
+    if (withFee && planned.length > 0) {
+      const fit = await injectTransfersFit(tx, owner, planned, deps.httpUrl);
+      // A fee that will not fit is dropped, never allowed to fail the swap.
+      if (fit) {
+        tx = fit.tx;
+        solKept = fit.kept;
+        if (fit.dropped.length) {
+          logger.warn(`swap: ${fit.dropped.length} fee transfer(s) dropped to fit the transaction — that share is not paid`);
+        }
+      } else logger.warn('swap: platform fee could not be attached — swapping without it');
+    }
+    if (withFee && tokenPlan && tokenPlan.transfers.length > 0) {
+      const fit = await injectTokenTransfersFit(tx, owner, tokenPlan.transfers, deps.httpUrl);
+      if (fit) {
+        tx = fit.tx;
+        tokenKept = fit.kept;
+        if (fit.dropped.length) {
+          logger.warn(`swap: ${fit.dropped.length} token fee transfer(s) dropped to fit the transaction — that share is not paid`);
+        }
+      } else logger.warn('swap: output-token fee could not be attached — swapping without it');
+    }
+    const solFeeLamports = solKept.reduce((s, t) => s + t.lamports, 0);
+    const tokenFeeRaw = tokenKept.reduce((s, t) => s + t.amountRaw, 0n);
+    const treasuryKept = solKept.find((t) => t.to === treasury);
+
+    // The fee instructions are appended LAST, in order, so they are the final
+    // ones in the message — which is what revertedAtFee is told to look for.
+    const finalTx = VersionedTransaction.deserialize(tx);
+    const nIx = finalTx.message.compiledInstructions.length;
+    const feeCount = solKept.length + tokenKept.length;
+    const feeIxIndexes = Array.from({ length: feeCount }, (_, i) => nIx - feeCount + i);
+
+    const policy = {
+      intent: 'trade' as const,
+      // A swap is a SELL of the input mint. See the header: this is what makes
+      // the existing token rules cover it exactly, with nothing widened.
+      trade: { side: 'sell' as const, mint: draft.inputMint },
+      // No tips, so the only bare SOL leaving is the fee plus whatever rent the
+      // route pays to open an output token account.
+      maxTransferLamports: MAX_RENT_ALLOWANCE_LAMPORTS,
+      feeAllowance:
+        solKept.length > 0
+          ? [
+              { address: activeTreasury(), maxLamports: split.treasuryLamports },
+              ...(split.referrerLamports > 0 ? [{ address: referrer, maxLamports: split.referrerLamports }] : []),
+            ]
+          : undefined,
+      // The output-token fee: exactly the transfers just appended, each
+      // account named and capped. See SignPolicy.tokenFeeAllowance.
+      tokenFeeAllowance:
+        tokenPlan && tokenKept.length > 0
+          ? { mint: tokenPlan.mint, recipients: tokenKept.map((t) => ({ account: t.dest, maxRaw: t.amountRaw.toString() })) }
+          : undefined,
+      // The buy-side interlock (see SignPolicy.requireFeeTransfer): a swap that
+      // SPENDS SOL is a buy, so a build with its fee stripped cannot sign it.
+      // Only when our treasury transfer actually survived the rent and size
+      // guards — a fee legitimately skipped must not refuse the swap.
+      requireFeeTransfer:
+        draft.inputMint === WSOL_MINT && treasuryKept ? { address: activeTreasury(), minLamports: treasuryKept.lamports } : undefined,
+    };
+
+    // ── The program gate ────────────────────────────────────────────────
+    //
+    // Added 2026-09-11 after the bridge swarm found this missing here. The
+    // signing policy inspects top-level instructions and guards our TOKEN
+    // accounts, but it does not stop an unrecognised program that has been
+    // handed the wallet's own system account — writable, and a signer — from
+    // moving SOL by CPI, because a CPI is not a top-level instruction. The loss
+    // bound below measures magnitude and is blind to destination: a route that
+    // sends exactly the amount being swapped, to somebody else, passes it.
+    //
+    // This sees TOP-LEVEL programs only. The venue itself runs as a CPI under
+    // Jupiter's program and is invisible here; what restricts the venue is
+    // the `dexes` list sent with the quote, and buildRoute refuses to quote
+    // without it. The two together are the gate; neither alone is.
+    const unknown = unknownTopLevelPrograms(finalTx, KNOWN_TRADE_PROGRAMS);
+    if (unknown.length > 0) {
+      // An ERROR, not a warning: the route came back running something this app
+      // does not recognise, which is either a venue we should add deliberately
+      // or a response that should not be trusted. Either way somebody needs to
+      // look at it, so it goes on the live log and not just into a toast.
+      logger.error(`swap refused: route runs unknown program(s) ${unknown.join(', ')}`);
+      return refuse(
+        `Refusing: this route runs ${unknown.length > 1 ? 'programs' : 'a program'} this app does not know (${unknown.map((p) => p.slice(0, 12)).join(', ')}). Nothing was sent.`,
+      );
+    }
+
+    const signed = walletId ? wallet.signVersionedTransactionForWallet(walletId, tx, policy) : wallet.signVersionedTransaction(tx, policy);
+    if (!signed.ok || !signed.signed) return refuse(signed.message);
+    const base64 = Buffer.from(signed.signed).toString('base64');
+
+    // Simulate the SIGNED bytes, and bound the loss: a swap must never cost
+    // more SOL than its fee, its rent and the network's own charge.
+    //
+    // The output side is watched too — the token account(s) the swap should
+    // fill, under either token program — so a route that spends the input and
+    // delivers to somebody else is caught. The SOL guard alone is blind to
+    // that: it bounds what leaves, not where the proceeds go. Found by audit
+    // 2026-09-11 (the trade path had this check; the swap did not).
+    // Read at the commitment the simulation runs at, so a transaction landing
+    // between the two reads does not skew the guard.
+    const before = await getBalance(deps.httpUrl, owner, 'processed');
+    const outBefore = outIsSol ? { ok: true as const, raw: 0n } : await outputHeld(deps.httpUrl, owner, draft.outputMint);
+    const sim = await simulateTransaction(deps.httpUrl, base64, [owner, ...outAtas]);
+    if (!sim.ok || !sim.data) return refuse(`Could not simulate the swap: ${sim.message}`);
+    if (sim.data.err) {
+      const raw = JSON.stringify(sim.data.err);
+      const why = anchorReason(sim.data.logs) ?? raw;
+      logger.warn(`swap refused by the chain: ${why}`);
+      return refuse(`The chain refused this swap: ${why}. Nothing was sent.`, revertedAtFee(raw, feeIxIndexes));
+    }
+    const post = sim.data.postLamports[0];
+    // A guard that cannot read its numbers refuses. Until 2026-09-11 a failed
+    // balance read (a 429, an RPC that omitted the account) skipped the whole
+    // check and the swap went on to broadcast — the trade path refused in the
+    // same case; this one did not. Found by audit.
+    if (!before.ok || before.data === undefined || typeof post !== 'number') {
+      const why = !before.ok ? ` (${before.message})` : '';
+      return refuse(`Could not read the balance for the loss guard${why} — nothing was sent.`);
+    }
+    if (!outBefore.ok) return refuse(`Could not read what you hold of the output token before the swap — nothing was sent.`);
     const spentLamports = before.data - post;
     // Selling INTO SOL raises the balance, which is fine; the bound only
     // catches SOL going the wrong way by more than this swap can justify.
@@ -605,21 +808,15 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
     // legitimately cost, so the bound has to include it — otherwise Fast
     // would refuse itself on a congested chain.
     const allowed =
-      split.totalLamports +
-      MAX_RENT_ALLOWANCE_LAMPORTS +
-      priority.bySpeed[draft.speed] +
-      (draft.inputMint === WSOL_MINT ? Number(inRaw) : 0);
+      solFeeLamports + MAX_RENT_ALLOWANCE_LAMPORTS + priority.bySpeed[draft.speed] + (draft.inputMint === WSOL_MINT ? Number(inRaw) : 0);
     if (spentLamports > allowed) {
       // The loss guard firing is the single most important line this module
       // can produce: the simulation said this swap would spend more than it
       // should. Never let that be invisible.
-      logger.error(
-        `swap refused by the loss guard: simulation spends ${spentLamports} lamports, allowed ${allowed} — nothing was sent`,
+      logger.error(`swap refused by the loss guard: simulation spends ${spentLamports} lamports, allowed ${allowed} — nothing was sent`);
+      return refuse(
+        `Refusing: the simulation spends ${(spentLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL, more than this swap should cost. Nothing was sent.`,
       );
-      return {
-        ok: false,
-        message: `Refusing: the simulation spends ${(spentLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL, more than this swap should cost. Nothing was sent.`,
-      };
     }
     // ── The receipt: what the quote promised at minimum must ARRIVE ──
     const threshold = BigInt(built.otherAmountThreshold || '0');
@@ -631,24 +828,35 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
       const RECEIPT_FLOOR = 20_000_000n;
       if (threshold >= RECEIPT_FLOOR) {
         const gain = BigInt(post - before.data);
-        const costs = BigInt(split.totalLamports + MAX_RENT_ALLOWANCE_LAMPORTS + priority.bySpeed[draft.speed]);
+        const costs = BigInt(solFeeLamports + MAX_RENT_ALLOWANCE_LAMPORTS + priority.bySpeed[draft.speed]);
         if (gain + costs < threshold) {
           logger.error(`swap refused by the receipt check: expected at least ${threshold} lamports to arrive, balance moves ${gain}`);
-          return { ok: false, message: 'Refusing: the simulation does not deliver the SOL this swap should pay out — the proceeds are not arriving in this wallet. Nothing was sent.' };
+          return refuse('Refusing: the simulation does not deliver the SOL this swap should pay out — the proceeds are not arriving in this wallet. Nothing was sent.');
         }
       }
     } else {
+      // An output-token fee leaves the same account the proceeds land in, so
+      // it is added back: the route must still deliver the quote's floor.
       const outAfter = tokenAmount(sim.data.postData[1] ?? null) + tokenAmount(sim.data.postData[2] ?? null);
-      const received = outAfter - outBefore.raw;
+      const received = outAfter - outBefore.raw + tokenFeeRaw;
       if (received < threshold) {
         logger.error(`swap refused by the receipt check: expected at least ${threshold} base units to arrive, simulation delivers ${received}`);
-        return { ok: false, message: 'Refusing: the simulation delivers less of the output token than the quote\'s minimum — the proceeds are not arriving in this wallet. Nothing was sent.' };
+        return refuse("Refusing: the simulation delivers less of the output token than the quote's minimum — the proceeds are not arriving in this wallet. Nothing was sent.");
       }
     }
+    return { ok: true, signed: signed.signed, base64 };
+  };
+
+  let prepared = await prepare(true);
+  if (!prepared.ok && prepared.feeReverted && draft.inputMint !== WSOL_MINT) {
+    logger.warn('swap: the simulation failed AT the platform fee transfer — re-running once without the fee (a fee never blocks an exit)');
+    prepared = await prepare(false);
   }
+  if (!prepared.ok) return prepared.result;
+  const { signed, base64 } = prepared;
   if (simulateOnly) return { ok: true, message: 'The chain accepts this swap.', outAmountRaw: built.outAmount };
 
-  const sig = bs58Signature(signed.signed);
+  const sig = bs58Signature(signed);
   const sent = await broadcastAndConfirm({
     httpUrl: deps.httpUrl,
     base64,

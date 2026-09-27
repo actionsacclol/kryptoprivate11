@@ -263,12 +263,19 @@ async function buildRoute(req: RouteRequest): Promise<JupiterSwapResult> {
  * the cost back. Null when Jupiter has no route (then the caller falls back
  * to spot and says so).
  */
-export async function quoteSellLamports(mint: string, raw: bigint): Promise<{ lamports: number; route: string[] } | null> {
+export async function quoteSellLamports(
+  mint: string,
+  raw: bigint,
+  /** `priority`: the Swap card pricing its platform fee (2026-09-26) — one
+   *  call a user is waiting on, not a display poll, so it does not queue
+   *  behind Discover and lose the fee to a timeout. Display callers omit it. */
+  opts: { priority?: boolean } = {},
+): Promise<{ lamports: number; route: string[] } | null> {
   if (raw <= 0n) return null;
   // A DISPLAY value, so: not on the priority lane (six of these fired
   // together used to bypass Jupiter's park and re-park it while a real sell
   // waited), and memoised 20 s so the three portfolio pollers share one.
-  return memo(`jup:liq:${mint}:${raw.toString()}`, 20_000, async () => {
+  return memo(`jup:liq:${mint}:${raw.toString()}${opts.priority ? ':p' : ''}`, 20_000, async () => {
     const dexes = await allowedDexLabels();
     const q = new URLSearchParams({
       inputMint: mint,
@@ -278,7 +285,11 @@ export async function quoteSellLamports(mint: string, raw: bigint): Promise<{ la
       restrictIntermediateTokens: 'true',
     });
     if (dexes) q.set('dexes', dexes.join(','));
-    const quote = await getJson<QuoteResponse>('jupiter', `/swap/v1/quote?${q.toString()}`, { timeoutMs: 4_000 });
+    const quote = await getJson<QuoteResponse>(
+      'jupiter',
+      `/swap/v1/quote?${q.toString()}`,
+      opts.priority ? { priority: true, timeoutMs: 6_000 } : { timeoutMs: 4_000 },
+    );
     if (!quote.ok || !quote.data || quote.data.error || !quote.data.outAmount) return null;
     const lamports = Number(quote.data.outAmount);
     if (!Number.isFinite(lamports) || lamports < 0) return null;

@@ -32,6 +32,7 @@ import * as bridgeStore from './engine/bridgeStore';
 import * as alertStore from './engine/alerts';
 import * as copyTrade from './engine/copyTrade';
 import * as automation from './engine/automation';
+import { BUNDLED_SCRIPTS } from './engine/bundledScripts';
 import * as kryptoMode from './engine/kryptoMode';
 import * as kryptoTrader from './engine/kryptoTrader';
 import * as programWatch from './engine/programWatch';
@@ -740,6 +741,8 @@ async function bootstrap(): Promise<void> {
   // User scripts and rules. Live ones come back disabled; paper ones
   // resume once the engine exists (startEnabled, below registerIpc).
   automation.init(app.getPath('userData'));
+  // The scripts that ship with the app: installed once per user, off and in paper.
+  automation.seedBundled(BUNDLED_SCRIPTS);
   // The two bot-session stores are read here, before the dialog below, so an
   // unreadable one is listed with the rest. Their hosts attach later, in
   // registerIpc, without reading the file again.

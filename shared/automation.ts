@@ -654,6 +654,20 @@ export interface UserScript {
   budget: ScriptBudget;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Set on a script that ships with the app (bundled/scripts/*.js), never by
+   * the window. `sha` is the shipped code it was last given; `edited` goes
+   * true when the user saves different code, after which updates stop
+   * replacing it (Reset to shipped version brings it back).
+   */
+  bundled?: { key: string; sha: string; edited?: boolean };
+}
+
+/** A script the app ships to every user (see electron/engine/bundledScripts.ts). */
+export interface BundledScript {
+  key: string;
+  name: string;
+  code: string;
 }
 
 export function defaultRules(chain: ChainKind = 'solana'): RuleSet {
@@ -1465,6 +1479,9 @@ export interface ScriptStats {
   firedMints: number;
   /** Code scripts: the sandbox is up and listening. */
   running: boolean;
+  /** Paused after its own errors and restarting by itself at this time
+   *  (ms); null or absent when not paused (2026-09-27). */
+  pausedUntil?: number | null;
 }
 
 export interface ScriptSnapshot {
@@ -1617,7 +1634,8 @@ export const SCRIPT_API_DOC: string = [
   '// Not available: fetch, XMLHttpRequest, WebSocket, require, keys, files.',
   '// Unknown facts are null — never treat null as zero.',
   `// A handler is checked at ${EVENT_TIMEOUT_MS / 1000} s: one still awaiting bot calls gets more time, up to ${EVENT_HARD_MS / 1000} s;`,
-  '// a stuck one is killed and counts as an error. Five errors in a row disable the script.',
+  '// a stuck one is killed and counts as an error. Five errors in a row pause the script (it restarts by itself; the 4th pause in 24 h turns it off).',
+  '// Past 60 calls a second the excess calls REJECT with "dropped: ..." — price many coins in batches, not all at once.',
 ].join('\n');
 
 export const SCRIPT_EXAMPLES: Array<{ name: string; description: string; code: string }> = [
@@ -1745,7 +1763,7 @@ You are writing a JavaScript automation script for **Krypto Bot**, a memecoin tr
 - Plain JavaScript (ES2022). No imports, no \`require\`, no \`fetch\`, no \`WebSocket\`, no \`XMLHttpRequest\`, no DOM, no files, no timers other than \`bot.every\` / \`bot.at\`. Top-level \`await\` is allowed.
 - The script body runs once at load. Register handlers with \`bot.on(...)\`; everything happens in handlers.
 - Only \`bot\` and \`console\` (which logs to the script's own log) are available. \`Math\`, \`Date\`, \`JSON\`, \`Set\`, \`Map\` etc. are normal JavaScript.
-- Handlers run one at a time per script. A handler is checked at **${EVENT_TIMEOUT_MS / 1000} seconds**: one that is still awaiting \`bot\` calls is given more time, up to **${EVENT_HARD_MS / 1000} seconds**; one that is stuck, or past that, is killed and counted as an error. Five errors in a row turn the script off. Keep handlers short — do a few network calls (\`bot.market\`, \`bot.callout\`, a trade) per handler, not a loop of them; spread work across \`bot.every\` ticks with a queue in \`bot.setState\`. Never loop forever or busy-wait.
+- Handlers run one at a time per script. A handler is checked at **${EVENT_TIMEOUT_MS / 1000} seconds**: one that is still awaiting \`bot\` calls is given more time, up to **${EVENT_HARD_MS / 1000} seconds**; one that is stuck, or past that, is killed and counted as an error. Five errors in a row PAUSE the script: it restarts by itself after 5, then 15, then 60 minutes (you get a notification each time), and a fourth pause within 24 hours turns it off. Past 60 calls a second the excess calls reject with "dropped: …" — price many coins in batches of ~15, not a hundred at once. Keep handlers short — do a few network calls (\`bot.market\`, \`bot.callout\`, a trade) per handler, not a loop of them; spread work across \`bot.every\` ticks with a queue in \`bot.setState\`. Never loop forever or busy-wait.
 - The script's memory resets when it restarts. To remember across restarts use \`bot.getState()\` / \`bot.setState(obj)\` (16 KB of JSON).
 
 ## Money rules the app enforces (you cannot bypass them; design for them)

@@ -997,7 +997,8 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
     steps: [
       'Open Automation → AI connection and turn the switch on. It starts at Read only.',
       'Choose how far it reaches: Off, Read only, Paper trading or Live trading. Live asks you to confirm “Let an AI spend real funds?”.',
-      'Press Copy the connect command, which copies claude mcp add --transport http krypto-terminal http://127.0.0.1:8787/mcp --header "Authorization: Bearer <token>". Or use Copy it as JSON.',
+      'Under Connect a client, pick the AI app. Claude Code and Gemini CLI get a command (claude mcp add --transport http krypto-terminal http://127.0.0.1:8787/mcp --header "Authorization: Bearer <token>"); Codex (also the ChatGPT desktop app and GPT-6 Astra there) gets a config.toml table with http_headers; Cursor, VS Code, Windsurf, Cline, Zed and LM Studio get their own JSON shape with the Authorization header; Claude Desktop and other stdio-only apps get the mcp-remote bridge (npx, header passed through an AUTH_HEADER variable). The token is hidden on screen and included in the copy. On a second profile the server name gains the profile id.',
+      'Web, phone and cloud AIs (ChatGPT or claude.ai in a browser, Claude custom connectors, the Gemini app, cloud agents) cannot reach 127.0.0.1, and tunnels are not supported.',
       'Before going live, set Max per buy, Max in an hour and Trades a minute.',
       'Have the assistant call get_wallet first. It reports the connection mode, and the assistant should state that mode in every report.',
       'Run it on Paper trading, then compare get_trade_history with what you expected before moving to Live.',

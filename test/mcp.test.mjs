@@ -25,7 +25,12 @@ import {
   canSpend,
   canTrade,
   checkMcpTrade,
+  MCP_CANNOT_CONNECT,
+  MCP_REMOTE_PACKAGE,
+  MCP_TOKEN_MASK,
+  maskMcpToken,
   mcpAddCommand,
+  mcpClientConfigs,
   mcpJsonConfig,
   mcpUrl,
   toolAllowed,
@@ -219,4 +224,83 @@ const ok = (label) => {
   ok('Krypto Trader: two read tools and trader_act (intent + expected_seq); no tool creates, funds, starts, resumes or configures a session');
 }
 
-console.log(`\nmcp: ${passed}/6 passed`);
+// ── one connect snippet per client (2026-09-27, "Astra couldn't connect") ─
+{
+  const TOKEN = 'f00d'.repeat(16);
+  const NAME = 'krypto-terminal-paper2';
+  const PORT = 8799;
+  const URL_ = `http://127.0.0.1:${PORT}/mcp`;
+  for (const platform of ['win', 'mac', 'linux']) {
+    const list = mcpClientConfigs(PORT, TOKEN, NAME, platform);
+    const ids = list.map((c) => c.id);
+    assert.equal(new Set(ids).size, ids.length, 'ids are unique');
+    for (const want of ['claude-code', 'codex', 'claude-desktop', 'cursor', 'vscode', 'windsurf', 'gemini-cli', 'cline', 'zed', 'lm-studio', 'bridge', 'generic']) {
+      assert.ok(ids.includes(want), `${want} has an entry`);
+    }
+    assert.ok(list.some((c) => /Astra/.test(c.client)), 'the Astra route is named where people look');
+    for (const c of list) {
+      // The token is copied, never shown.
+      assert.ok(c.snippet.includes(TOKEN), `${c.id}: the copy carries the token`);
+      assert.ok(!c.shown.includes(TOKEN), `${c.id}: the screen never does`);
+      assert.ok(c.shown.includes(MCP_TOKEN_MASK), `${c.id}: the screen shows the mask where it was`);
+      assert.equal(c.shown, maskMcpToken(c.snippet, TOKEN));
+      for (const f of ['client', 'where', 'notes']) assert.ok(!c[f].includes(TOKEN), `${c.id}.${f} holds no token`);
+      // Per-profile name and port, and loopback only.
+      assert.ok(c.snippet.includes(NAME), `${c.id}: the per-profile server name`);
+      assert.ok(c.snippet.includes(URL_), `${c.id}: the loopback URL with this port`);
+      const hosts = [...c.snippet.matchAll(/https?:\/\/([^/:\s"]+)/g)].map((m) => m[1]);
+      assert.ok(hosts.length > 0 && hosts.every((h) => h === '127.0.0.1'), `${c.id}: no host but 127.0.0.1 (${hosts})`);
+      assert.ok(!/0\.0\.0\.0|localhost|ngrok|https:/.test(c.snippet), `${c.id}: no routable or tunnel address`);
+      if (c.lang === 'json') JSON.parse(c.snippet);
+    }
+    const by = Object.fromEntries(list.map((c) => [c.id, c]));
+    const j = (id) => JSON.parse(by[id].snippet);
+    const bearer = `Bearer ${TOKEN}`;
+    assert.equal(by['claude-code'].snippet, mcpAddCommand(PORT, TOKEN, NAME), 'Claude Code keeps the verified command');
+    assert.deepEqual(j('cursor').mcpServers[NAME], { url: URL_, headers: { Authorization: bearer } });
+    assert.deepEqual(j('vscode').servers[NAME], { type: 'http', url: URL_, headers: { Authorization: bearer } }, 'VS Code: "servers" + type http');
+    assert.deepEqual(j('windsurf').mcpServers[NAME], { serverUrl: URL_, headers: { Authorization: bearer } }, 'Windsurf: serverUrl');
+    assert.equal(j('cline').mcpServers[NAME].type, 'streamableHttp', 'Cline: without the type it falls back to SSE');
+    assert.deepEqual(j('zed').context_servers[NAME], { url: URL_, headers: { Authorization: bearer } });
+    assert.deepEqual(j('lm-studio').mcpServers[NAME], { url: URL_, headers: { Authorization: bearer } });
+    for (const id of ['claude-desktop', 'bridge']) {
+      const b = j(id).mcpServers[NAME];
+      assert.equal(b.command, 'npx');
+      assert.deepEqual(b.args, ['-y', MCP_REMOTE_PACKAGE, URL_, '--header', 'Authorization:${AUTH_HEADER}']);
+      assert.ok(b.args.every((a) => !/\s/.test(a)), `${id}: no space in any arg (Windows hosts split them)`);
+      assert.equal(b.env.AUTH_HEADER, bearer, `${id}: the header value travels in env`);
+    }
+    assert.match(MCP_REMOTE_PACKAGE, /^mcp-remote@\d+\.\d+\.\d+$/, 'the bridge is pinned');
+    assert.match(by['gemini-cli'].snippet, new RegExp(`^gemini mcp add --scope user --transport http --header "Authorization: ${bearer}" ${NAME} ${URL_.replace(/[.]/g, '\\.')}$`));
+    // Codex: a minimal TOML reading — one table, two keys, basic strings and an inline table.
+    const toml = by.codex.snippet.trim().split('\n');
+    assert.equal(toml[0], `[mcp_servers.${NAME}]`);
+    assert.equal(toml.length, 3);
+    const url = /^url = "(.*)"$/.exec(toml[1]);
+    assert.equal(url?.[1], URL_);
+    const hdr = /^http_headers = \{ Authorization = "(.*)" \}$/.exec(toml[2]);
+    assert.equal(hdr?.[1], bearer);
+    // Paths follow the platform.
+    if (platform === 'win') {
+      assert.equal(by['claude-desktop'].where, '%APPDATA%\\Claude\\claude_desktop_config.json');
+      assert.equal(by.codex.where, '%USERPROFILE%\\.codex\\config.toml');
+      assert.equal(by.cursor.where, '%USERPROFILE%\\.cursor\\mcp.json');
+    } else {
+      assert.equal(by.codex.where, '~/.codex/config.toml');
+      assert.ok(!list.some((c) => c.where.includes('%')), 'no Windows variables off Windows');
+    }
+  }
+  // A name that is not a bare TOML key is quoted rather than breaking the file.
+  assert.match(mcpClientConfigs(8787, TOKEN, 'odd name').find((c) => c.id === 'codex').snippet, /^\[mcp_servers\."odd name"\]/);
+  // Defaults: the Default profile's name, and no token means nothing to mask.
+  assert.ok(mcpClientConfigs(8787, TOKEN).every((c) => c.snippet.includes('krypto-terminal')));
+  assert.equal(maskMcpToken('abc', ''), 'abc');
+  // What cannot connect is said, with the reason and the Astra route.
+  assert.match(MCP_CANNOT_CONNECT, /127\.0\.0\.1/);
+  assert.match(MCP_CANNOT_CONNECT, /GPT-6 Astra/);
+  assert.match(MCP_CANNOT_CONNECT, /Project Astra/);
+  assert.match(MCP_CANNOT_CONNECT, /Codex/);
+  ok('every client gets its own verified shape: per-profile name and port, loopback only, token copied but never shown, and what cannot connect is named');
+}
+
+console.log(`\nmcp: ${passed}/7 passed`);

@@ -141,8 +141,10 @@ for (const [channel, expected] of Object.entries(CHANNELS)) {
       source: '../shared/automation.ts',
       type: 'UserScript',
       // Ids and timestamps are assigned by main, and arming a script is its
-      // own confirmed act (automation:setEnabled).
-      ownedByMain: ['createdAt', 'updatedAt', 'enabled'],
+      // own confirmed act (automation:setEnabled). `bundled` (a script that
+      // ships with the app) is set only by automation.seedBundled — the
+      // registry keeps it and never takes it from the window (2026-09-27).
+      ownedByMain: ['createdAt', 'updatedAt', 'enabled', 'bundled'],
     },
     {
       channel: 'copy:save',

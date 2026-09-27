@@ -24,7 +24,7 @@ order, and recorded on the script's log with its reason when refused.
 | A live buy is also capped by `execution.maxLiveSol` and blocked by the same reasons as an order | `act()` via `liveBlockedReason` / `buyBlockedReason` |
 | An unknown fact never satisfies a rule | `conditionHolds` |
 | A start that STALLS is retried 3 times with backoff, not disarmed; a script whose body throws is disarmed at once | `automation.ts` `startCode` |
-| Five errors in a row disable a code script; a handler is checked at 3 s and killed if stuck, 30 s hard ceiling (since 09-21) | `automation.ts` + `scriptSandbox.ts` watchdog — the deadline is cleared by the RENDERER answering a liveness probe, never by a `done` the page could forge |
+| Five errors in a row (or 6 restarts in a minute) PAUSE a code script — it restarts by itself after 5 / 15 / 60 min, with a toast + desktop notification each time, and the 4th pause in 24 h disables it (since 09-27; before, it was disabled at once); a handler is checked at 3 s and killed if stuck, 30 s hard ceiling (since 09-21) | `automation.ts` + `scriptSandbox.ts` watchdog — the deadline is cleared by the RENDERER answering a liveness probe, never by a `done` the page could forge |
 | Kill switch: everything off, nothing enables until lifted | `setKillSwitch`, re-read after every await and again before the buy |
 | A script may only sell what IT opened; `held` and `bot.positions()` mean this script's positions | `act()` sell / sell_all / order, `ctxFor`, `pollPositions` |
 | One action at a time per script, so N events in a tick cannot each read the same pre-buy counters | `act()` per-script chain |
@@ -154,6 +154,36 @@ A stalled start is retried three times (2 s, 5 s, 15 s) and the script stays
 armed while it retries. A script whose body throws is not retried: it would
 throw identically every time, so it disarms immediately with the error.
 Disarming, the kill switch, or a newer start all cancel a pending retry.
+
+## Running for days (2026-09-27)
+
+A multi-day review (real app.log of 09-24..27 + a soak harness, `npm run
+test:soak`) found and fixed:
+
+- **A log burst could hang a handler.** One message bucket (60/s, burst
+  120) covered logs AND calls, and a dropped `call` was never answered, so
+  the handler awaiting it ran to the 30 s hard kill and the script lost its
+  memory (seen 09-26 22:16 on scorenow). Now logs and calls have separate
+  buckets, and a dropped call is refused with `dropped: …`.
+  `floodNeverHangsAHandler` in `npm run test:sandbox`.
+- **Five errors in a row pause, not disable** (see the safety table).
+- **`bot.positions()` rejects when the wallet read failed** instead of
+  answering `[]` — a script that believed the empty list released every
+  bag as "no longer held" and cancelled its own stops during an RPC outage.
+- **Scripts no longer take the terminal's tape slots.** The tape keeps 8
+  (LRU); a script watching 40 runners evicted the user's open chart and got
+  ticks for at most 8 of its own. Script interest is now automation's own set
+  (`automation.wantsTicks`, engine `ticksWanted`); script-only ticks are not
+  sent to the window.
+- **`bot.at` follows the wall clock** (checked every minute), so a sleep, a
+  clock correction or DST no longer shifts it; a time slept through is
+  skipped and logged, never fired hours late.
+- Bounded: pending event contexts per script (200, chatter dropped past it),
+  a restarted run no longer inherits the old `bot.every` timer, a script's
+  `setState` is saved within 3 s (coalesced) instead of rewriting the whole
+  file on every call.
+- **Hourly health line** per running script in app.log: events, failed,
+  dropped, handler p50/p95/max, restarts, sandbox MB, state KB.
 
 ## Not done yet
 

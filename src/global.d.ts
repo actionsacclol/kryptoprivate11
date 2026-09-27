@@ -394,6 +394,7 @@ declare global {
         killSwitch: (on: boolean) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
         /** Reset one script's stats and saved state; no id = every script plus paper trades. */
         reset: (id?: string) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
+        resetBundled: (id: string) => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
         /** Pick a script file. Null data = cancelled. Nothing is saved. */
         openFile: () => Promise<IpcResult<{ name: string; code: string } | null>>;
       };

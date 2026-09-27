@@ -94,12 +94,12 @@ export const START_GUIDE: SectionGuide = {
  * except through a trade.
  */
 export const AI_CONNECTION_GUIDE: SectionGuide = {
-  what: 'You can let an AI assistant, like Claude, look at this app and — if you choose — trade through it. The way AI assistants plug into apps is called MCP. It can read your wallet, your positions, any coin, the charts, the scanner flags and the wallet records, on all three chains. It talks to this computer only. It starts off, and starts unable to trade.',
+  what: 'You can let an AI assistant, like Claude Code or Codex, look at this app and — if you choose — trade through it. The way AI assistants plug into apps is called MCP. It can read your wallet, your positions, any coin, the charts, the scanner flags and the wallet records, on all three chains. It talks to this computer only. It starts off, and starts unable to trade.',
   steps: [
     'Open Automation from the Hub. In the menu on the left, press AI connection. Turn the switch on.',
     'Pick how far it reaches. Read only means it can look and nothing else. Paper means it can also trade with fake money. Live means real money.',
-    'Press Copy the connect command. That puts one line on your clipboard.',
-    'Paste that line into a terminal and press enter. That is it — your AI can now see the app.',
+    'Under Connect a client, pick your AI app from the list and press Copy. The panel says where it goes.',
+    'For Claude Code or Gemini CLI, paste the line into a terminal and press enter. For the others (the ChatGPT desktop app’s Codex, Claude Desktop, Cursor, VS Code and more), add the copied text to the file the panel names, then restart that app.',
     'Ask it something, like what am I holding, or look up this coin, or what did the scanner flag today.',
     'If you chose Live, set the three limits underneath: the most it can spend on one buy, the most in an hour, and how many trades a minute.',
   ],
@@ -109,6 +109,7 @@ export const AI_CONNECTION_GUIDE: SectionGuide = {
     'It can never take your money out. There is no withdraw, no transfer and no send — the only thing it can do with your funds is trade them, and the coins land back in your own wallet.',
     'It also cannot change any setting, see your key, or hand the app something to sign. It asks; the app decides and builds the trade the same way the buttons do, with the same fee.',
     'It can drive a Krypto Trader session only if you picked MCP as that session’s driver, and only inside its budget and limits. It can never start, fund, resume or change a session, and a Paper connection cannot move a live one.',
+    'Only AI apps running on this computer can connect. ChatGPT or Claude in a web browser or on a phone, the Gemini app, and other cloud AIs cannot reach it — that is on purpose. To use GPT-6 Astra, use it in the ChatGPT desktop app’s Codex or the Codex CLI.',
     'Turning the switch off closes the door immediately, even in the middle of a conversation.',
   ],
 };

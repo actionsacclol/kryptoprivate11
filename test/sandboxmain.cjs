@@ -21,7 +21,9 @@
 //      disarmed — the ready budget belongs to the user's code;
 //   9. a preload that cannot load is named as a broken install, promptly,
 //      instead of surfacing as a bare eight-second timeout (the failure
-//      users actually hit).
+//      users actually hit);
+//  10. a log flood costs a script's calls nothing, and a call dropped by the
+//      rate wall is refused rather than left to hang its handler.
 const { app } = require('electron');
 const sb = require('./.sandbox/scriptsandbox.cjs');
 
@@ -225,6 +227,48 @@ app.whenReady().then(async () => {
   const slowHandlerSurvived =
     d11.ok && slowHandlerMs > 5_000 && elevenLines.includes('slow handler finished') && sb.isRunning('eleven') && !gone;
 
+  // 12: a flood must never HANG a handler (2026-09-27). One shared message
+  // bucket let a burst of log lines starve the script's calls, and a dropped
+  // call was never answered: its handler awaited it to the 30 s hard kill and
+  // the script lost its memory (seen 09-26 22:15 on a user's scorenow). Now
+  // logs and calls have separate budgets, and a dropped call is REFUSED.
+  // The verdict rides out in the handler's own `done` (a thrown error), which
+  // no bucket can drop.
+  gone = null;
+  const s12 = await sb.start(
+    'twelve',
+    `bot.on('launch', async () => {
+      const M = 'Mint111111111111111111111111111111111111111';
+      for (let i = 0; i < 400; i++) bot.log('row ' + i);
+      const a = await Promise.all(Array.from({ length: 10 }, () => bot.price(M).then(() => 'ok', (e) => 'no: ' + e.message)));
+      const b = await Promise.all(Array.from({ length: 300 }, () => bot.price(M).then(() => 'ok', (e) => e.message)));
+      throw new Error('RESULT a=' + a.filter((x) => x === 'ok').length + ' ok=' + b.filter((x) => x === 'ok').length + ' dropped=' + b.filter((x) => /^dropped/.test(x)).length);
+    });`,
+  );
+  const t12 = Date.now();
+  const d12 = await sb.dispatch('twelve', 'launch', {});
+  const floodMs = Date.now() - t12;
+  const m12 = /RESULT a=(\d+) ok=(\d+) dropped=(\d+)/.exec(d12.error ?? '');
+  out('flood does not hang:', JSON.stringify(d12), `${floodMs} ms`, 'isRunning:', sb.isRunning('twelve'));
+  const floodNoHang =
+    s12.ok &&
+    !!m12 &&
+    Number(m12[1]) === 10 && // a LOG flood costs the calls nothing
+    Number(m12[2]) + Number(m12[3]) === 300 && // every call answered, none hung
+    Number(m12[3]) > 0 && // the call wall still bites
+    floodMs < 5_000 &&
+    sb.isRunning('twelve') &&
+    !gone;
+
+  // 13: our own page failing to load is retryable, never the script's fault
+  // (a soak saw ERR_FAILED on the restart right after a renderer crash, and
+  // the script was disabled for good).
+  sb._failNextLoad();
+  const s13 = await sb.start('thirteen', `bot.on('launch', () => {});`);
+  const s13b = await sb.start('thirteen', `bot.on('launch', () => {});`);
+  out('page load failure:', JSON.stringify(s13), 'then:', JSON.stringify(s13b));
+  const loadFailRetryable = !s13.ok && s13.retryable === true && /^sandbox load:/.test(s13.message) && s13b.ok;
+
   await sb.stopAll();
   const checks = {
     loads: s1.ok && s2.ok,
@@ -253,6 +297,8 @@ app.whenReady().then(async () => {
     // Waiting is not wedging: a responsive handler past the deadline is given
     // more time, and its script keeps its memory.
     slowHandlerSurvives: s11.ok && slowHandlerSurvived,
+    floodNeverHangsAHandler: floodNoHang,
+    pageLoadFailureIsRetryable: loadFailRetryable,
     noUncaught: uncaught.length === 0,
   };
   for (const [k, v] of Object.entries(checks)) out(`${v ? 'ok  ' : 'FAIL'} ${k}`);

@@ -15,17 +15,18 @@ export function AiConnectionPage() {
   return (
     <Page
       title="AI connection"
-      subtitle="Let an AI assistant, like Claude, read this app — and trade through it only if you allow it."
+      subtitle="Let an AI assistant on this computer, like Claude Code, Codex or Cursor, read this app — and trade through it only if you allow it."
     >
       <Section title="What this is">
         <Card className="space-y-2">
           <p className="text-body leading-relaxed text-krypt-muted">
             <span className="text-white">MCP</span> (Model Context Protocol) is the standard way AI assistants plug into
-            other programs. Turn it on here and an assistant like Claude can ask this app questions:{' '}
+            other programs. Turn it on here and an assistant running on this computer can ask this app questions:{' '}
             <span className="text-white">what am I holding, look up this coin, what did the scanner flag today</span>.
           </p>
           <p className="text-body leading-relaxed text-krypt-muted">
-            It only talks to this computer. It starts <span className="text-white">off</span>, and when you turn it on it
+            It only talks to this computer, so AI apps on this computer can connect (Claude Code, Claude Desktop, the
+            ChatGPT desktop app’s Codex, Cursor, VS Code and more) but web and phone AIs cannot. It starts <span className="text-white">off</span>, and when you turn it on it
             starts <span className="text-white">read-only</span>. If you let it trade, it asks the app for a buy or a sell
             and the app builds it the same way as the buttons: same fees, same limits, same safety breakers, plus the
             spending limits you set below. It can never sign anything, move funds or change a setting.
@@ -38,7 +39,7 @@ export function AiConnectionPage() {
 
       <Section
         title="Connection"
-        description="Switch it on, choose how far it reaches, then copy the line that connects your assistant. The limits only matter once you choose Live."
+        description="Switch it on, choose how far it reaches, then pick your AI app and copy what connects it. The limits only matter once you choose Live."
       >
         <McpPanel />
       </Section>

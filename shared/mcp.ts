@@ -588,7 +588,7 @@ export const mcpUrl = (port: number): string => `http://127.0.0.1:${port}/mcp`;
  * token is the user's, so this string is a secret while it is on screen.
  */
 export function mcpAddCommand(port: number, token: string, name: string = MCP_SERVER_NAME): string {
-  return `claude mcp add --transport http ${name} ${mcpUrl(port)} --header "Authorization: Bearer ${token}"`;
+  return `claude mcp add --transport http --scope user ${name} ${mcpUrl(port)} --header "Authorization: Bearer ${token}"`;
 }
 
 /**
@@ -611,4 +611,208 @@ export function mcpJsonConfig(port: number, token: string, name: string = MCP_SE
     null,
     2,
   );
+}
+
+// ── Connecting other clients (2026-09-27) ─────────────────────────────
+//
+// A user's "Astra couldn't connect" report: the panel only showed Claude
+// Code's command, and nothing said which AI apps CAN reach a server on
+// 127.0.0.1 at all. "Astra" in September 2026 is almost certainly OpenAI's
+// GPT-6 Astra model (released 2026-09-03). It runs in ChatGPT on the web and
+// phone — which cannot reach this computer — and in Codex (the ChatGPT
+// desktop app, Codex CLI and the IDE extension), which reads
+// ~/.codex/config.toml and CAN. Each shape below was checked against the
+// client's own docs on 2026-09-27.
+//
+// Pure: the panel renders these and the test parses them. The snippet holds
+// the token, so it is a secret; `shown` is the same text with the token
+// masked, and only `snippet` ever reaches the clipboard.
+
+export type McpPlatform = 'win' | 'mac' | 'linux';
+
+export interface McpClientConfig {
+  id: string;
+  /** Who it is for, as the user would name it. */
+  client: string;
+  /** 'command': paste into a terminal. 'file': merge into a config file. 'fields': type into the app's own form. */
+  how: 'command' | 'file' | 'fields';
+  /** The config file, or where the command / fields go. */
+  where: string;
+  lang: 'shell' | 'json' | 'toml' | 'text';
+  /** The full text, token included — the only thing that is copied. */
+  snippet: string;
+  /** The same text with the token masked — the only thing that is shown. */
+  shown: string;
+  notes: string;
+}
+
+/** What stands in for the token on screen. */
+export const MCP_TOKEN_MASK = '••••••••';
+
+/**
+ * The stdio bridge for apps that only start local programs. Pinned to the
+ * version verified end to end against this server on 2026-09-27 (legacy
+ * handshake, tools/list, tools/call): an unpinned `npx` would run whatever is
+ * published next, inside a process that holds the wallet app's token.
+ */
+export const MCP_REMOTE_PACKAGE = 'mcp-remote@0.14.3';
+
+/**
+ * AI apps that cannot connect, and why — shown under the picker so nobody
+ * spends an evening on one. The server binds 127.0.0.1 on purpose: anything
+ * that runs in a company's cloud (a web page, a phone app, a cloud agent)
+ * cannot reach it, and making it reachable would put the wallet app on the
+ * internet.
+ */
+export const MCP_CANNOT_CONNECT =
+  'These cannot connect, by design: anything that runs in a company’s cloud rather than on this computer. That is ChatGPT on the web or phone (including GPT-6 Astra there), claude.ai on the web or phone and Claude’s “custom connectors”, the Gemini app and Google’s Project Astra, Perplexity, Grok, and cloud agents (Codex cloud tasks, Claude Code on the web, Devin, Manus). They reach servers on the internet, and this one only listens on 127.0.0.1 — your own computer. To use GPT-6 Astra, pick it inside the ChatGPT desktop app’s Codex, the Codex CLI or the Codex IDE extension and use the Codex entry. Tunnels (such as OpenAI’s Secure MCP Tunnel or ngrok) would put your wallet app on the internet and are not supported.';
+
+const tomlKey = (k: string): string => (/^[A-Za-z0-9_-]+$/.test(k) ? k : JSON.stringify(k));
+
+function homePath(platform: McpPlatform, rel: string): string {
+  return platform === 'win' ? `%USERPROFILE%\\${rel.replace(/\//g, '\\')}` : `~/${rel}`;
+}
+
+/** The text with every copy of the token masked. An empty token masks nothing. */
+export function maskMcpToken(text: string, token: string): string {
+  return token ? text.split(token).join(MCP_TOKEN_MASK) : text;
+}
+
+/**
+ * One entry per client. `name` is the per-profile server name
+ * (mcpServerNameFor), so two profiles never overwrite each other in a client.
+ */
+export function mcpClientConfigs(port: number, token: string, name: string = MCP_SERVER_NAME, platform: McpPlatform = 'win'): McpClientConfig[] {
+  const url = mcpUrl(port);
+  const bearer = `Bearer ${token}`;
+  const json = (o: unknown): string => JSON.stringify(o, null, 2);
+  const httpHeaders = { Authorization: bearer };
+  // The bridge's header goes through an env var: Claude Desktop (Windows),
+  // Cursor and Codex do not escape a space inside `args` when they start
+  // npx, so "Authorization: Bearer …" in args arrives in pieces. mcp-remote's
+  // README workaround is no space after the colon and the value in `env`.
+  const bridgeServer = {
+    command: 'npx',
+    args: ['-y', MCP_REMOTE_PACKAGE, url, '--header', 'Authorization:${AUTH_HEADER}'],
+    env: { AUTH_HEADER: bearer },
+  };
+  const claudeDesktopFile =
+    platform === 'win'
+      ? '%APPDATA%\\Claude\\claude_desktop_config.json'
+      : platform === 'mac'
+        ? '~/Library/Application Support/Claude/claude_desktop_config.json'
+        : '~/.config/Claude/claude_desktop_config.json';
+  const devinFile = platform === 'win' ? '%APPDATA%\\devin\\mcp_config.json' : '~/.config/devin/mcp_config.json';
+
+  const out: Omit<McpClientConfig, 'shown'>[] = [
+    {
+      id: 'claude-code',
+      client: 'Claude Code',
+      how: 'command',
+      where: 'A terminal (PowerShell, Command Prompt or any shell)',
+      lang: 'shell',
+      snippet: mcpAddCommand(port, token, name),
+      notes: 'Works from every folder (--scope user). Check with: claude mcp list.',
+    },
+    {
+      id: 'codex',
+      client: 'ChatGPT desktop / Codex (GPT-6 Astra)',
+      how: 'file',
+      where: homePath(platform, '.codex/config.toml'),
+      lang: 'toml',
+      snippet: `[mcp_servers.${tomlKey(name)}]\nurl = ${JSON.stringify(url)}\nhttp_headers = { Authorization = ${JSON.stringify(bearer)} }\n`,
+      notes: 'Add these lines to the file (create it if it is missing), then restart. The ChatGPT desktop app’s Codex, the Codex CLI and the Codex IDE extension all read this one file. This is how to use GPT-6 Astra with the app; ChatGPT on the web or phone cannot reach it.',
+    },
+    {
+      id: 'claude-desktop',
+      client: 'Claude Desktop',
+      how: 'file',
+      where: claudeDesktopFile,
+      lang: 'json',
+      snippet: json({ mcpServers: { [name]: bridgeServer } }),
+      notes: 'Claude Desktop starts local servers as programs, so this goes through the mcp-remote bridge and needs Node.js installed. Open the file from Settings → Developer → Edit Config, merge the entry into "mcpServers", then quit and reopen Claude. “Add custom connector” will not work: those connect from Anthropic’s cloud, which cannot reach this computer.',
+    },
+    {
+      id: 'cursor',
+      client: 'Cursor',
+      how: 'file',
+      where: homePath(platform, '.cursor/mcp.json'),
+      lang: 'json',
+      snippet: json({ mcpServers: { [name]: { url, headers: httpHeaders } } }),
+      notes: 'Merge the entry into "mcpServers" (or Settings → MCP → Add new global MCP server), then check it shows green in the MCP list.',
+    },
+    {
+      id: 'vscode',
+      client: 'VS Code (GitHub Copilot)',
+      how: 'file',
+      where: 'Command Palette → “MCP: Open User Configuration” (mcp.json)',
+      lang: 'json',
+      snippet: json({ servers: { [name]: { type: 'http', url, headers: httpHeaders } } }),
+      notes: 'VS Code uses "servers", not "mcpServers". Merge the entry, press Start above it, and use Copilot Chat in Agent mode.',
+    },
+    {
+      id: 'windsurf',
+      client: 'Windsurf / Devin Desktop',
+      how: 'file',
+      where: `${homePath(platform, '.codeium/windsurf/mcp_config.json')} (Devin Desktop: ${devinFile})`,
+      lang: 'json',
+      snippet: json({ mcpServers: { [name]: { serverUrl: url, headers: httpHeaders } } }),
+      notes: 'Merge the entry into "mcpServers" (Cascade → MCP servers → View raw config), then refresh the server list.',
+    },
+    {
+      id: 'gemini-cli',
+      client: 'Gemini CLI',
+      how: 'command',
+      where: 'A terminal',
+      lang: 'shell',
+      snippet: `gemini mcp add --scope user --transport http --header "Authorization: ${bearer}" ${name} ${url}`,
+      notes: `This writes it to ${homePath(platform, '.gemini/settings.json')}. Check with: gemini mcp list. The Gemini app on the web or phone cannot connect.`,
+    },
+    {
+      id: 'cline',
+      client: 'Cline',
+      how: 'file',
+      where: 'Cline → MCP Servers → Configure → cline_mcp_settings.json',
+      lang: 'json',
+      snippet: json({ mcpServers: { [name]: { type: 'streamableHttp', url, headers: httpHeaders, disabled: false } } }),
+      notes: 'Keep "type": "streamableHttp" — without it Cline falls back to the old SSE transport, which this server does not speak.',
+    },
+    {
+      id: 'zed',
+      client: 'Zed',
+      how: 'file',
+      where: 'Zed settings.json (Command Palette → “zed: open settings”)',
+      lang: 'json',
+      snippet: json({ context_servers: { [name]: { url, headers: httpHeaders } } }),
+      notes: 'Merge the entry into "context_servers", then check the Agent panel’s server list.',
+    },
+    {
+      id: 'lm-studio',
+      client: 'LM Studio',
+      how: 'file',
+      where: `Program tab → Install → Edit mcp.json (${homePath(platform, '.lmstudio/mcp.json')})`,
+      lang: 'json',
+      snippet: json({ mcpServers: { [name]: { url, headers: httpHeaders } } }),
+      notes: 'Merge the entry into "mcpServers". The model you load must support tool calling.',
+    },
+    {
+      id: 'bridge',
+      client: 'Apps that only run local programs (Goose, Continue, Msty, AnythingLLM, Jan…)',
+      how: 'file',
+      where: 'The app’s MCP or extensions settings — add a “command” (stdio) server',
+      lang: 'json',
+      snippet: json({ mcpServers: { [name]: bridgeServer } }),
+      notes: `Needs Node.js. If the app asks field by field: command npx; arguments -y ${MCP_REMOTE_PACKAGE} ${url} --header Authorization:\${AUTH_HEADER}; environment variable AUTH_HEADER set to "Bearer" and your token. Keep the header argument exactly as written, with no space after the colon.`,
+    },
+    {
+      id: 'generic',
+      client: 'Any other client with HTTP and custom headers',
+      how: 'fields',
+      where: 'The app’s “add MCP server” form',
+      lang: 'text',
+      snippet: `Name: ${name}\nTransport: Streamable HTTP\nURL: ${url}\nHeader name: Authorization\nHeader value: ${bearer}\n`,
+      notes: 'Pick Streamable HTTP (sometimes just “HTTP”), not SSE. If the app only offers an OAuth sign-in and no headers, use the bridge entry instead.',
+    },
+  ];
+  return out.map((c) => ({ ...c, shown: maskMcpToken(c.snippet, token) }));
 }

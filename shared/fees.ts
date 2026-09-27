@@ -104,6 +104,56 @@ export function splitFee(basisLamports: number, hasReferrer: boolean, bps: numbe
   return { totalLamports: total, treasuryLamports: total - referrer, referrerLamports: referrer };
 }
 
+export interface TokenFeeSplit {
+  /** Base units of the fee token leaving the wallet for us and the referrer. */
+  totalRaw: bigint;
+  treasuryRaw: bigint;
+  referrerRaw: bigint;
+}
+
+/**
+ * The same split as `splitFee`, in BASE UNITS of a token rather than lamports.
+ *
+ * Used only when a swap cannot be priced in SOL at all (2026-09-26): the fee
+ * is then taken from the OUTPUT token, in the same transaction, rather than
+ * skipped. Same rate, same clamp, same referrer share; bigint because a token
+ * amount is a u64 and routinely passes 2^53. There is no lamport floor here —
+ * a lamport floor means nothing in another token's units — only "rounds to
+ * zero pays nothing".
+ */
+export function splitTokenFee(basisRaw: bigint, hasReferrer: boolean, bps: number = FEE_BPS): TokenFeeSplit {
+  const zero = { totalRaw: 0n, treasuryRaw: 0n, referrerRaw: 0n };
+  if (typeof basisRaw !== 'bigint' || basisRaw <= 0n) return zero;
+  const rate = Number.isFinite(bps) && bps > 0 && bps <= FEE_BPS ? bps : FEE_BPS;
+  const total = (basisRaw * BigInt(Math.floor(rate))) / 10_000n;
+  if (total <= 0n) return zero;
+  if (!hasReferrer) return { totalRaw: total, treasuryRaw: total, referrerRaw: 0n };
+  const referrer = (total * BigInt(REFERRAL_SHARE_BPS)) / 10_000n;
+  return { totalRaw: total, treasuryRaw: total - referrer, referrerRaw: referrer };
+}
+
+/**
+ * Did a simulation fail AT one of our own fee transfers?
+ *
+ * `errJson` is the simulation's `err`, serialised — `{"InstructionError":[N,…]}`
+ * names the instruction that failed. `feeInstructionIndexes` are the positions
+ * of the fee transfers liveSigner appended. True only when the failing
+ * instruction IS a fee transfer, so a sell that reverts for any other reason
+ * (slippage, an empty bag) is never re-sent without its fee.
+ *
+ * Why it exists: a sell is billed BEFORE it runs, on a quote or — on the
+ * relayer route — on held × last price. A rug whose price has not caught up
+ * can bill a fee the proceeds do not cover, and the wallet's own SOL may not
+ * cover it either. Then the fee transfer is what reverts the exit, which is the
+ * one thing a fee must never do (see [[hardening]]: never block an exit).
+ */
+export function revertedAtFee(errJson: string, feeInstructionIndexes: readonly number[]): boolean {
+  if (!feeInstructionIndexes.length || typeof errJson !== 'string') return false;
+  const m = /"InstructionError"\s*:\s*\[\s*(\d+)/.exec(errJson);
+  if (!m) return false;
+  return feeInstructionIndexes.includes(Number(m[1]));
+}
+
 // ─── Address validation ───────────────────────────────────────────────
 
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]+$/;

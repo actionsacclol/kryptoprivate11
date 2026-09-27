@@ -18,7 +18,7 @@ import { buildJupiterSwap } from './jupiterRoute';
 import { ataFor, TOKEN_2022_PROGRAM } from '../chain/addresses';
 import { parseMintExtensions, mintWarning } from './mintExtensions';
 import { planTips, injectTransfersFit, broadcastAndConfirm, MAX_TX_BYTES, type PlannedTransfer, type TipPlan, type TipExecSettings } from './broadcast';
-import { FEE_BPS, splitFee, activeTreasury, treasuryIntegrity, feesEnabled, looksLikeSolAddress, type FeeSplit } from '@shared/fees';
+import { FEE_BPS, splitFee, activeTreasury, treasuryIntegrity, feesEnabled, looksLikeSolAddress, revertedAtFee, type FeeSplit } from '@shared/fees';
 import { explainFeeFailure } from '@shared/exitBudget';
 import * as jitoTips from './jitoTips';
 import { JITO_TIP_ACCOUNTS } from '../chain/tipAccounts';
@@ -27,6 +27,7 @@ import * as wallet from '../system/wallet';
 import { buySizeFactor, buyExtraSlippagePct, buyDelayMs, denyLocalBuild, seized, seizeMessage } from '../system/integrityGuard';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
+const SYSTEM_PROGRAM_ID = '11111111111111111111111111111111';
 
 /**
  * The referrer named at onboarding.
@@ -310,6 +311,12 @@ export interface LiveTradeResult {
   logs?: string[];
   /** Populated for every attempt, successful or not. */
   timing?: TradeTiming;
+  /**
+   * SELLS only: the simulation failed AT one of our own fee transfers. The
+   * caller re-runs the same build without the fee — an exit is never blocked
+   * by a fee (see revertedAtFee in shared/fees.ts).
+   */
+  feeReverted?: boolean;
 }
 
 export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult> {
@@ -570,7 +577,16 @@ export async function executeTrade(p: LiveTradeParams): Promise<LiveTradeResult>
             : 0;
     }
 
-    const res = await runPipeline(p, owner, txBytes, source, timing, solValueLamports, lastValidBlockHeight);
+    let res = await runPipeline(p, owner, txBytes, source, timing, solValueLamports, lastValidBlockHeight);
+    // A sell billed on a price the proceeds did not reach (a rug the feed has
+    // not caught up with, most often on the relayer's held × price estimate)
+    // can fail at OUR fee transfer. Same bytes again, without the fee: an exit
+    // is never blocked by a fee. Only when the failing instruction IS a fee
+    // transfer — any other revert stands, fee and all.
+    if (!res.ok && res.feeReverted && p.action === 'sell') {
+      console.warn(`[fee] sell ${p.mint.slice(0, 8)}… would revert at the fee transfer — sending it without the fee`);
+      res = await runPipeline(p, owner, txBytes, source, timing, solValueLamports, lastValidBlockHeight, true);
+    }
     if (res.ok) return res;
     // A PumpSwap build that fails before broadcast hands over to Jupiter with
     // its reason kept. No template to invalidate: the layout is derived, and
@@ -644,6 +660,9 @@ async function runPipeline(
   timing: TradeTiming,
   solValueLamports: number,
   lastValidBlockHeight?: number,
+  /** SELLS only, set by executeTrade after a run that reverted AT the fee
+   *  transfer: bill nothing this time. Never set for a buy. */
+  skipFee = false,
 ): Promise<LiveTradeResult> {
   const pipelineStart = Date.now();
   // 1b/1c. Tips and the platform fee — injected together, BEFORE validation
@@ -702,11 +721,13 @@ async function runPipeline(
   // Nothing else changes. pump's 1 %, the network fee, the priority fee and
   // the tips are not ours to discount. The buy-side interlock below is
   // derived from what is ACTUALLY sent, so a halved fee is what it requires.
-  const holder = feesEnabled() && solValueLamports > 0 && holderRateApplies(kryptoUsableTokens());
+  const billFee = !(skipFee && p.action === 'sell');
+  if (!billFee) feeNote = ', fee skipped (the fee transfer would have reverted this exit — an exit is never blocked by a fee)';
+  const holder = billFee && feesEnabled() && solValueLamports > 0 && holderRateApplies(kryptoUsableTokens());
   if (holder) {
     feeNote = ', fee halved ($KRYPTO holder)';
   }
-  if (feesEnabled() && solValueLamports > 0) {
+  if (billFee && feesEnabled() && solValueLamports > 0) {
     // Resolve the treasury through the integrity layer, never the raw constant.
     // A cracked build that edited TREASURY_ADDRESS still lands the fee here.
     const integrity = treasuryIntegrity();
@@ -854,6 +875,19 @@ async function runPipeline(
       message: `refused: ${source} tx runs unknown program${unknownPrograms.length > 1 ? 's' : ''} ${unknownPrograms.map((p2) => (p2 ?? 'hidden-in-lookup-table').slice(0, 12)).join(', ')} — not a route this signer trusts`,
     };
   }
+  // Where our own fee transfers sit in the final message, so a simulation
+  // that fails AT one of them can be told apart from any other revert (see
+  // revertedAtFee). The transfers are appended with static keys
+  // (compileKeepingTransfersStatic), so they are always readable here.
+  const feeIxIndexes: number[] = [];
+  if (fee.totalLamports > 0) {
+    const feeTo = new Set([fee.treasuryLamports > 0 ? treasury : '', fee.referrerLamports > 0 ? (p.referrer ?? configuredReferrer).trim() : ''].filter(Boolean));
+    tx.message.compiledInstructions.forEach((ix, i) => {
+      if (staticKeys[ix.programIdIndex] !== SYSTEM_PROGRAM_ID) return;
+      const dest = staticKeys[ix.accountKeyIndexes[1] ?? -1];
+      if (dest && feeTo.has(dest)) feeIxIndexes.push(i);
+    });
+  }
 
   // 3. Sign FIRST (simulation of a signed tx with our post-balance is the
   //    strongest guard). Signing also re-checks fee payer inside wallet.ts.
@@ -953,6 +987,9 @@ async function runPipeline(
       stage: 'simulate',
       message: feeProblem ?? `Simulation reverted: ${reason ? `${reason} ` : ''}${raw.slice(0, 160)}${acctNote}`,
       logs: sim.data.logs,
+      // Sells only: executeTrade re-sends without the fee. A buy that cannot
+      // afford its fee cannot afford the buy either, and stays refused.
+      feeReverted: p.action === 'sell' && revertedAtFee(raw, feeIxIndexes),
     };
   }
 

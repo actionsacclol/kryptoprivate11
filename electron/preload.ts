@@ -213,6 +213,8 @@ const api = {
     killSwitch: (on: boolean) => ipcRenderer.invoke('automation:killSwitch', on),
     /** Reset one script's stats and saved state; no id = every script plus paper trades. */
     reset: (id?: string) => ipcRenderer.invoke('automation:reset', id),
+    /** A script that ships with the app, back to its shipped code. */
+    resetBundled: (id: string) => ipcRenderer.invoke('automation:resetBundled', id),
     /** Pick a .js file; its text comes back as a draft, never a path. */
     openFile: () => ipcRenderer.invoke('automation:openFile'),
   },

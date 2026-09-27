@@ -31,6 +31,7 @@ import { walletVisibleOn, type EvmFill } from '@shared/evm';
 import { traderFit } from '@shared/botStrategy';
 import { curveRegime } from '@shared/odds';
 import * as pumpChain from './data/pumpChain';
+import * as tape from './data/tape';
 import * as advOrders from './engine/advOrders';
 import * as copyTrade from './engine/copyTrade';
 import * as ledger from './engine/ledger';
@@ -181,7 +182,11 @@ export function getEngine(): SniperEngine {
         return { ...s, rpc: resolveRpc(s.rpc) };
       },
       (ev) => {
-        broadcast(ev);
+        // A tick for a mint only a SCRIPT follows (engine ticksWanted) is the
+        // script's business: the window charts tape-subscribed mints only,
+        // and forty watched runners at up to 8 ticks a second each is IPC the
+        // renderer would route and throw away.
+        if (ev.kind !== 'tick' || tape.isSubscribed(ev.mint)) broadcast(ev);
         // A fill, real or paper, dates the kept portfolio build.
         if ((ev.kind === 'fill' && ev.state !== 'failed') || ev.kind === 'paper') engine?.markPortfolioDirty();
         // User scripts see the same events the UI does, after it.
@@ -4748,6 +4753,13 @@ export function registerIpc(): void {
     const paper = getEngine().resetPaperBook();
     const tail = paper.ok ? paper.message : `Paper trades were not reset: ${paper.message}`;
     return ok(`${list.length} script${list.length === 1 ? '' : 's'} reset (live scripts keep their open positions and today’s budget). ${tail}`, automation.snapshot());
+  });
+
+  // A shipped script back to the code this app version ships (bundledScripts.ts).
+  ipcMain.handle('automation:resetBundled', (_e, id: unknown) => {
+    if (typeof id !== 'string' || !id) return fail('Invalid id');
+    const r = automation.resetBundled(id);
+    return r.ok ? ok(r.message, automation.snapshot()) : fail(r.message);
   });
 
   ipcMain.handle('automation:setEnabled', (_e, id: unknown, enabled: unknown) => {

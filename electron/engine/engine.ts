@@ -424,7 +424,7 @@ export class SniperEngine {
   // this field is being initialised.
   private readonly chartTicks = createChartTicks({
     emit: (ev) => this.emit(ev),
-    isOpen: (mint) => tape.isSubscribed(mint),
+    isOpen: (mint) => this.ticksWanted(mint),
   });
 
   constructor(
@@ -1158,7 +1158,9 @@ export class SniperEngine {
         return { ok: placed > 0, message: `${describeTemplate(t)}: ${placed} order(s) armed${problems.length ? ` — ${problems.join('; ')}` : ''}` };
       },
       createAlert: (req) => this.createAlert(req),
-      subscribeTicks: (mint) => tape.subscribe(mint),
+      // Script interest is automation's own set (rt.subscribed / opened),
+      // read by ticksWanted — never a tape slot, which is the terminal's.
+      subscribeTicks: () => undefined,
       pin: (mint, on) => this.emit({ kind: 'pin', mint, on }),
       runners: () => this.runnersSnapshot(),
       leaders: () => copyTrade.all().map((c) => ({ wallet: c.wallet, label: c.label, enabled: c.enabled, mode: c.mode })),
@@ -1235,6 +1237,7 @@ export class SniperEngine {
         reply: scriptSandbox.reply,
         stop: scriptSandbox.stop,
         isRunning: scriptSandbox.isRunning,
+        memoryMB: scriptSandbox.memoryMB,
       },
     });
 
@@ -3013,6 +3016,9 @@ export class SniperEngine {
         httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
         simulateOnly: false,
         local: this.localBuildParams(mint),
+        // The same estimate manualSell hands over: a relayer-built exit is
+        // billed on it, and went unbilled without it (fee audit 2026-09-26).
+        estProceedsLamports: this.estSellProceedsLamports(mint, 100).catch(() => undefined),
         exec: s.execution,
         wssUrl: this.confirmWssUrl(),
       });
@@ -4180,10 +4186,14 @@ export class SniperEngine {
    *  FEE billing on relayer-built sells (no quote exists there). Held balance
    *  and price fetched in parallel with the other pre-sell lookups; null when
    *  either is unknown — the sell then goes unbilled rather than misbilled. */
-  private async estSellProceedsLamports(mint: string, pct: number): Promise<number | undefined> {
+  private async estSellProceedsLamports(mint: string, pct: number, ownerOverride?: string): Promise<number | undefined> {
     try {
       const s = this.getSettings();
-      const owner = wallet.publicKey();
+      // A lab / copy / bot sell signs as a SPECIFIC wallet, and "pct of the
+      // bag" means that wallet's bag — not the active one's (fee audit
+      // 2026-09-26: those sells passed no estimate at all, so a relayer-built
+      // one went out unbilled).
+      const owner = ownerOverride ?? wallet.publicKey();
       if (!owner) return undefined;
       // The engine already knows the price of any mint it has seen trade —
       // the feed row, the last-known map, or the tape. A provider summary
@@ -5031,6 +5041,10 @@ export class SniperEngine {
       httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
       simulateOnly: false,
       local: await this.localBuildParamsForSell(mint),
+      // Only a relayer-built sell reads this (every other route prices itself
+      // from its own quote); without it that sell went out unbilled. Not
+      // awaited — it resolves while the transaction is built.
+      estProceedsLamports: this.estSellProceedsLamports(mint, share, owner).catch(() => undefined),
       exec: exit.exec,
       walletId,
       wssUrl: this.confirmWssUrl(),
@@ -5255,6 +5269,22 @@ export class SniperEngine {
     this.emit({ kind: 'fill', mint, side, signature, state });
   }
 
+  /**
+   * Does anyone want this mint's live trades — the terminal (a tape
+   * subscription: a token page, a pinned chart) or a user script
+   * (bot.subscribe / bot.watch, or a position it opened)?
+   *
+   * Two separate sets since 2026-09-27. Scripts used to take TAPE slots, and
+   * the tape keeps eight (least recently touched evicted): a script watching
+   * forty runners evicted the chart the user had open, which then froze, and
+   * got ticks for at most eight of its own coins. Script interest now costs
+   * no tape slot and keeps no tick history; it only lets the throttled tick
+   * through (and keeps the launch tracked, see `kept` in onTrade).
+   */
+  private ticksWanted(mint: string): boolean {
+    return tape.isSubscribed(mint) || automation.wantsTicks(mint);
+  }
+
   /** Tape + chart tick for a trade on an OPEN mint (tape-subscribed). */
   private recordTapeTrade(ev: PumpTradeEvent, n: LogNotification): void {
     const priceSol = spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves);
@@ -5458,7 +5488,7 @@ export class SniperEngine {
       // onto PumpSwap via the pool map, which the token page seeds from the
       // pool DexScreener reports. Recorded FIRST, before the order
       // evaluation below, for the same reason as in onTrade (2026-09-20).
-      if (tape.isSubscribed(mint)) {
+      if (this.ticksWanted(mint)) {
         tape.record(mint, {
           at: n.receivedAt,
           wallet: event.user,
@@ -6010,7 +6040,7 @@ export class SniperEngine {
       // opened from Discover, or evicted past LAUNCH_LIST_CAP — still gets
       // its tape and chart ticks. Before this, only mints created during the
       // session ever ticked, i.e. most charts never moved.
-      if (tape.isSubscribed(ev.mint)) this.recordTapeTrade(ev, n);
+      if (this.ticksWanted(ev.mint)) this.recordTapeTrade(ev, n);
       return;
     }
     // Odds tape: the first ~130 s of every launch, bounded, regardless of
@@ -6061,7 +6091,7 @@ export class SniperEngine {
     // is usually open on a mint the strategy already passed on — that is the
     // whole point of a terminal. Gated on an explicit subscription (a Set
     // lookup) so the firehose costs nothing when nobody is looking.
-    if (tape.isSubscribed(ev.mint)) this.recordTapeTrade(ev, n);
+    if (this.ticksWanted(ev.mint)) this.recordTapeTrade(ev, n);
 
     // Advanced orders evaluate on EVERY trade of a mint we are tracking, at
     // full feed rate — ahead of the decided/unheld fast-path below, because
@@ -6191,7 +6221,7 @@ export class SniperEngine {
     // runner flag inside its 15 min, or a tape subscription — the terminal
     // chart or a script's bot.subscribe/bot.watch. Bounded by those three
     // sets, so the firehose still costs one price write for everything else.
-    const kept = held || this.runnerFlagged(ev.mint, n.receivedAt) || tape.isSubscribed(ev.mint);
+    const kept = held || this.runnerFlagged(ev.mint, n.receivedAt) || this.ticksWanted(ev.mint);
     if (t.decided && !kept) {
       t.row.priceSol = spotPriceSol(t.virtualSolReserves, t.virtualTokenReserves);
       return;

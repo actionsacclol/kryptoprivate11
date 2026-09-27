@@ -13,7 +13,9 @@ const ok = (label) => {
   passed += 1;
 };
 
-const src = fs.readFileSync(new URL('../src/pages/Scripts.tsx', import.meta.url), 'utf8');
+// CI checks the tree out with CRLF (Windows runner, autocrlf): normalise, or a
+// pin that names a line break passes here and fails there (5.2.0, 09-27).
+const src = fs.readFileSync(new URL('../src/pages/Scripts.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const at = (marker, after = 0) => {
   const i = src.indexOf(marker, after);
   assert.ok(i >= 0, `Scripts.tsx has ${marker.slice(0, 60)}`);
@@ -94,7 +96,7 @@ const at = (marker, after = 0) => {
   const header = src.slice(at('<Card className="space-y-2 border-krypt-purple/25">'), at('<Field label="Kind">'));
   assert.ok(/<div className="flex flex-wrap items-center gap-3">/.test(header) && /checked=\{current\.enabled\}/.test(header) && /Settings\n/.test(header), 'Settings and the arm switch are in the wrapping header row');
   assert.ok(!/grid-cols-\[auto_auto_auto\]/.test(src), 'the Kind/Chain/Mode row wraps rather than setting a min width');
-  const common = fs.readFileSync(new URL('../src/components/common.tsx', import.meta.url), 'utf8');
+  const common = fs.readFileSync(new URL('../src/components/common.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.ok(/text-krypt-muted\/80 mt-1 \[overflow-wrap:anywhere\]">\{description\}/.test(common), 'a Section description (the log’s last error) wraps');
   ok('long log lines and errors wrap; the editor never widens the page past its controls');
 }

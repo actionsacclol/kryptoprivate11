@@ -8,7 +8,23 @@ import { Card, Switch } from '../common';
 import { useToast } from '../../state/ToastProvider';
 import { useModal } from '../../state/ModalProvider';
 import { cls } from '../../utils/format';
-import { MCP_ACCESS_LEVELS, MCP_ACCESS_TEXT, type McpAccess } from '@shared/mcp';
+import { MCP_ACCESS_LEVELS, MCP_ACCESS_TEXT, MCP_CANNOT_CONNECT, MCP_SERVER_NAME, mcpClientConfigs, type McpAccess, type McpPlatform } from '@shared/mcp';
+
+/** The per-profile server name main used, read off its JSON entry. */
+function serverNameOf(json: string): string {
+  try {
+    const key = Object.keys((JSON.parse(json) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {})[0];
+    return key || MCP_SERVER_NAME;
+  } catch {
+    return MCP_SERVER_NAME;
+  }
+}
+
+/** Which config paths to show. */
+function platformOf(): McpPlatform {
+  const ua = typeof navigator === 'undefined' ? '' : navigator.userAgent;
+  return /Windows/i.test(ua) ? 'win' : /Mac OS X|Macintosh/i.test(ua) ? 'mac' : 'linux';
+}
 
 /**
  * The AI connection.
@@ -30,6 +46,7 @@ export function McpPanel() {
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [showToken, setShowToken] = useState(false);
+  const [clientId, setClientId] = useState('claude-code');
 
   const read = useCallback(async () => {
     const r = await window.krypt.mcp.status();
@@ -85,6 +102,12 @@ export function McpPanel() {
   if (!panel) return <Card className="text-note text-krypt-muted">Reading the connection…</Card>;
   const s = panel.settings;
   const live = s.access === 'live';
+  // The port and per-profile name exactly as main built them for the Claude
+  // Code line: the port actually bound while listening, and the server name
+  // read back off main's JSON entry rather than re-derived here.
+  const port = panel.server.running && panel.server.port ? panel.server.port : s.port;
+  const clients = s.token ? mcpClientConfigs(port, s.token, serverNameOf(panel.json), platformOf()) : [];
+  const picked = clients.find((c) => c.id === clientId) ?? clients[0];
 
   return (
     <Card className="space-y-4">
@@ -132,21 +155,40 @@ export function McpPanel() {
           <div>
             <div className="mb-1.5 text-micro uppercase tracking-label text-krypt-muted/60">Connect a client</div>
             <p className="mb-2 text-label leading-relaxed text-krypt-muted">
-              Paste this into a terminal to connect Claude Code. The token is a password for your wallet’s app — treat it like one, and never paste it into a
-              chat or a screenshot.
+              Pick your AI app and copy what it needs. The copied text contains a token, which is a password for your wallet’s app — treat it like one, and never
+              paste it into a chat or a screenshot. It is hidden below; Copy includes it.
             </p>
+            {clients.length > 0 && picked && (
+              <>
+                <select
+                  value={picked.id}
+                  onChange={(e) => setClientId(e.target.value)}
+                  aria-label="AI app"
+                  className="mb-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 text-note text-white outline-none focus:border-krypt-purple/50"
+                >
+                  {clients.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.client}
+                    </option>
+                  ))}
+                </select>
+                <div className="mb-1 text-label text-krypt-muted">
+                  {picked.how === 'command' ? 'Run in: ' : picked.how === 'fields' ? 'Type into: ' : 'Add to: '}
+                  <span className="break-all font-mono text-white/80">{picked.where}</span>
+                </div>
+                <pre className="mb-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-md border border-white/10 bg-black/40 px-3 py-2 font-mono text-label text-white/80">
+                  {picked.shown}
+                </pre>
+                <p className="mb-2 text-label leading-relaxed text-krypt-muted">{picked.notes}</p>
+              </>
+            )}
             <div className="flex flex-wrap gap-2">
               <button
-                onClick={() => void copy(panel.command, 'Command')}
-                className="rounded-lg border border-krypt-purple/50 bg-krypt-purple/15 px-4 py-2.5 text-note font-semibold text-white transition hover:bg-krypt-purple/25"
+                onClick={() => picked && void copy(picked.snippet, picked.how === 'command' ? 'Command' : 'Config')}
+                disabled={!picked}
+                className="rounded-lg border border-krypt-purple/50 bg-krypt-purple/15 px-4 py-2.5 text-note font-semibold text-white transition hover:bg-krypt-purple/25 disabled:opacity-50"
               >
-                Copy the connect command
-              </button>
-              <button
-                onClick={() => void copy(panel.json, 'Config')}
-                className="rounded-lg border border-white/15 bg-white/5 px-4 py-2.5 text-note font-medium text-white transition hover:bg-white/10"
-              >
-                Copy it as JSON
+                {picked?.how === 'command' ? 'Copy the command' : 'Copy the config'}
               </button>
               <button
                 onClick={() => setShowToken((v) => !v)}
@@ -171,6 +213,7 @@ export function McpPanel() {
               </button>
             </div>
             {showToken && <p className="mt-2 break-all rounded-md border border-white/10 bg-black/40 px-3 py-2 font-mono text-label text-white/80">{s.token}</p>}
+            <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">{MCP_CANNOT_CONNECT}</p>
           </div>
 
           {/* The limits only bind live spending, and the panel says so rather

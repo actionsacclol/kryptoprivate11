@@ -14,8 +14,10 @@
 //      open positions and actions per minute are capped; a day's realised
 //      loss past the cap DISABLES the script;
 //   4. an unknown fact never satisfies a rule;
-//   5. a script that errors five times in a row is disabled, and a handler
-//      that runs past the watchdog is killed and counted as an error;
+//   5. a script that errors five times in a row (or crash-loops) is PAUSED
+//      and restarts by itself, at most three times in 24 h, then disabled —
+//      loudly each time; a handler that runs past the watchdog is killed
+//      and counted as an error;
 //   6. every refusal is logged on the script with its reason.
 //
 // What a script can react to: launches and their updates, runner flags, its
@@ -26,11 +28,13 @@
 // create alerts, watch/unwatch, notify, log, and turn itself off.
 
 import type { AiAnalysis } from '@shared/ai';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../system/logger';
 import {
   contextFromEvmLaunch,
+  defaultScript,
   contextFromLaunch,
   contextFromRunner,
   describeAction,
@@ -66,6 +70,7 @@ import {
   type ScriptSnapshot,
   type ScriptStats,
   type UserScript,
+  type BundledScript,
 } from '@shared/automation';
 import { MAX_STAT_KEYS, MIN_INTERVAL_S, type SandboxToMain, type ScriptStatValue } from '@shared/scriptProtocol';
 import { REPLY_BUDGET, THESIS_BUDGET, calloutPageUrl } from '@shared/calloutAuto';
@@ -245,6 +250,9 @@ export interface AutomationHost {
     reply(scriptId: string, id: number, ok: boolean, value?: unknown, error?: string): void;
     stop(scriptId: string, reason?: string): Promise<void>;
     isRunning(scriptId: string): boolean;
+    /** The sandbox renderer's working set, MB, or null. For the hourly
+     *  health line only; optional so a test host can leave it out. */
+    memoryMB?(scriptId: string): number | null;
   };
 }
 
@@ -326,6 +334,15 @@ interface Runtime {
    *  made the user re-arm by hand for a stall that would have cleared. */
   startFails: number;
   startRetry: NodeJS.Timeout | null;
+  /** When a script paused for its own errors restarts (see pauseForErrors);
+   *  null when it is not paused. In memory: an app restart ends the pause. */
+  pausedUntil: number | null;
+  /** When this script was paused for errors, the last 24 h. */
+  recoveries: number[];
+  /** The hourly health line's counters (see logHealth). */
+  health: Health;
+  /** Event contexts being built right now (see BUILD_CAP). */
+  building: number;
   /** Daily schedules: "HH:MM" → timer to the next occurrence. */
   atTimers: Map<string, NodeJS.Timeout>;
   log: ScriptLogLine[];
@@ -354,6 +371,9 @@ let host: AutomationHost | null = null;
 let scripts: UserScript[] = [];
 const runtimes = new Map<string, Runtime>();
 let killSwitch = false;
+/** Keys of shipped scripts ever seeded here. A user who deletes one keeps it deleted. */
+let bundledSeen: string[] = [];
+let shipped: BundledScript[] = [];
 let filePath = '';
 let saveTimer: NodeJS.Timeout | null = null;
 let positionTimer: NodeJS.Timeout | null = null;
@@ -389,6 +409,7 @@ export function init(userDataDir: string): void {
     // Absent is a first run. Anything else is a file we must not overwrite.
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
       scripts = [];
+      bundledSeen = [];
       return;
     }
     loadFailure = `${filePath} could not be read (${(e as Error).message})`;
@@ -402,9 +423,12 @@ export function init(userDataDir: string): void {
       scripts: UserScript[];
       runtime: Record<string, PersistedRuntime>;
       killSwitch?: boolean;
+      bundledSeen?: unknown;
     };
     scripts = Array.isArray(raw?.scripts) ? raw.scripts : [];
     killSwitch = raw?.killSwitch === true;
+    const seen = (raw as { bundledSeen?: unknown }).bundledSeen;
+    bundledSeen = Array.isArray(seen) ? seen.filter((k): k is string => typeof k === 'string') : [];
     for (const s of scripts) {
       const rt = freshRuntime();
       const p = raw.runtime?.[s.id];
@@ -435,10 +459,30 @@ export function init(userDataDir: string): void {
   }
 }
 
-function persist(): void {
+/**
+ * Every save rewrites the WHOLE file — every script's source included, a
+ * quarter of a megabyte with two big scripts — and a script's own
+ * bot.setState can ask for one several times a pass. Money-path changes (a
+ * buy, a sell, the registry) are saved within 300 ms; a script's own state
+ * and its subscriptions within 3 s, so one pass's
+ * several setStates are one write (2026-09-27: the soak measured ~17 writes a
+ * minute, ~2 MB a minute, from one script). Either way a save already due
+ * sooner carries the change; shutdown writes at once.
+ */
+const HARD_SAVE_MS = 300;
+const SOFT_SAVE_MS = 3_000;
+let saveDue = 0;
+
+function persist(soft = false): void {
   if (!filePath || loadFailure) return;
+  const due = Date.now() + (soft ? SOFT_SAVE_MS : HARD_SAVE_MS);
+  if (saveTimer && saveDue <= due) return;
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(persistNow, 300);
+  saveDue = due;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    persistNow();
+  }, due - Date.now());
 }
 
 function persistNow(): void {
@@ -469,7 +513,7 @@ function persistNow(): void {
   }
   try {
     const tmp = `${filePath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, scripts, runtime, killSwitch }, null, 2), 'utf8');
+    fs.writeFileSync(tmp, JSON.stringify({ version: 1, scripts, runtime, killSwitch, bundledSeen }, null, 2), 'utf8');
     fs.renameSync(tmp, filePath);
   } catch {
     /* memory stays authoritative */
@@ -512,6 +556,71 @@ function changed(): void {
   if (typeof changedTimer.unref === 'function') changedTimer.unref();
 }
 
+/**
+ * What a script did since its last health line. A script is left running for
+ * days; until 2026-09-27 app.log said nothing about how it was doing between
+ * its own lines — no event count, no handler time, no memory — so a slow
+ * degradation could not be seen after the fact.
+ */
+interface Health {
+  since: number;
+  /** When the current sandbox came up (a restart resets it). */
+  upSince: number | null;
+  events: number;
+  /** Launch/tick chatter dropped because the queue was full. */
+  dropped: number;
+  failed: number;
+  /** Handler times, ms; bounded — a sample, not every one. */
+  lat: number[];
+  restarts: number;
+}
+const HEALTH_LAT_CAP = 4_000;
+let HEALTH_EVERY_MS = 3_600_000;
+let healthTimer: NodeJS.Timeout | null = null;
+function freshHealth(upSince: number | null = null): Health {
+  return { since: Date.now(), upSince, events: 0, dropped: 0, failed: 0, lat: [], restarts: 0 };
+}
+/** Test seam: a shorter health interval (restart the timers after). */
+export function _setHealthEvery(ms: number | null): void {
+  HEALTH_EVERY_MS = ms ?? 3_600_000;
+}
+
+function pctOf(sorted: number[], p: number): number | null {
+  if (!sorted.length) return null;
+  return sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
+}
+
+function span(ms: number): string {
+  const m = Math.round(ms / 60_000);
+  return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m` : `${m}m`;
+}
+
+/** One line per running code script: is it keeping up, and is it growing? */
+function logHealth(): void {
+  const h = host;
+  if (!h) return;
+  const now = Date.now();
+  for (const s of scripts) {
+    if (!s.enabled || s.kind !== 'code') continue;
+    const rt = rtFor(s);
+    const x = rt.health;
+    const lat = [...x.lat].sort((a, b) => a - b);
+    const mem = h.sandbox.memoryMB?.(s.id) ?? null;
+    let kv = 0;
+    try {
+      kv = JSON.stringify(rt.kv).length;
+    } catch {
+      kv = -1;
+    }
+    const state = rt.pausedUntil ? `PAUSED until ${clock(rt.pausedUntil)}` : rt.running ? `up ${x.upSince ? span(now - x.upSince) : '?'}` : 'NOT running';
+    h.log(
+      'info',
+      `script "${s.name}" health (${span(now - x.since)}): ${state} · ${x.events} events, ${x.failed} failed, ${x.dropped} dropped (queue full) · handler p50 ${pctOf(lat, 50) ?? '—'} ms, p95 ${pctOf(lat, 95) ?? '—'} ms, max ${lat.length ? lat[lat.length - 1] : '—'} ms · ${x.restarts} restart(s) · sandbox ${mem ?? '—'} MB · state ${(kv / 1024).toFixed(1)} KB · watching ${rt.subscribed.size}, holding ${rt.opened.size}`,
+    );
+    rt.health = freshHealth(x.upSince);
+  }
+}
+
 function freshRuntime(): Runtime {
   return {
     dayKey: dayKeyNow(),
@@ -536,6 +645,10 @@ function freshRuntime(): Runtime {
     intervalTimer: null,
     startFails: 0,
     startRetry: null,
+    pausedUntil: null,
+    recoveries: [],
+    health: freshHealth(),
+    building: 0,
     atTimers: new Map(),
     log: [],
     metrics: new Map(),
@@ -606,6 +719,73 @@ function slog(s: UserScript, level: ScriptLogLine['level'], line: string): void 
 
 // ── CRUD ──────────────────────────────────────────────────────────────
 
+// ── Scripts that ship with the app ─────────────────────────────────────
+//
+// 2026-09-27: one script ships to every user (bundled/scripts/*.js, read at
+// build time by bundledScripts.ts). Seeded ONCE per key — switched off, in
+// paper — so deleting it keeps it deleted. A new app version replaces the
+// code only while the user has not edited it; resetBundled brings it back.
+// Never on an unreadable file (nothing is written over a file we could not
+// read), never past MAX_SCRIPTS, never code that fails validateScript.
+
+const shaOf = (code: string): string => crypto.createHash('sha256').update(code, 'utf8').digest('hex').slice(0, 16);
+
+export function seedBundled(list: BundledScript[]): void {
+  shipped = list;
+  if (loadFailure || !filePath) return;
+  let touched = false;
+  for (const b of list) {
+    const draft = { ...defaultScript('code'), name: b.name.slice(0, 60) || 'Script', code: b.code };
+    const v = validateScript(draft);
+    if (!v.ok) {
+      logger.error(`automation: shipped script "${b.key}" is invalid (${v.message}) — not installed`);
+      continue;
+    }
+    const sha = shaOf(b.code);
+    const have = scripts.find((s) => s.bundled?.key === b.key);
+    if (have) {
+      if (have.bundled!.edited || have.bundled!.sha === sha) continue;
+      have.code = b.code;
+      have.bundled = { key: b.key, sha };
+      have.updatedAt = Date.now();
+      slog(have, 'info', 'updated to the version shipped with this app');
+      touched = true;
+      if (have.enabled && have.kind === 'code') void startCode(have);
+      continue;
+    }
+    if (bundledSeen.includes(b.key)) continue; // the user deleted it
+    if (scripts.length >= MAX_SCRIPTS) {
+      logger.warn(`automation: shipped script "${b.key}" not installed — ${MAX_SCRIPTS} scripts already`);
+      continue;
+    }
+    const now = Date.now();
+    const s: UserScript = { ...draft, id: nextId(), createdAt: now, updatedAt: now, enabled: false, mode: 'paper', bundled: { key: b.key, sha } };
+    scripts.push(s);
+    runtimes.set(s.id, freshRuntime());
+    bundledSeen.push(b.key);
+    touched = true;
+  }
+  if (touched) {
+    persist();
+    changed();
+  }
+}
+
+export function resetBundled(id: string): { ok: boolean; message: string } {
+  const s = scripts.find((x) => x.id === id);
+  if (!s?.bundled) return { ok: false, message: 'Not a script that ships with the app' };
+  const b = shipped.find((x) => x.key === s.bundled!.key);
+  if (!b) return { ok: false, message: 'This app version no longer ships that script' };
+  s.code = b.code;
+  s.bundled = { key: b.key, sha: shaOf(b.code) };
+  s.updatedAt = Date.now();
+  slog(s, 'info', 'reset to the version shipped with this app');
+  persist();
+  if (s.enabled && s.kind === 'code') void startCode(s);
+  changed();
+  return { ok: true, message: `"${s.name}" is back to the shipped version` };
+}
+
 export function all(): UserScript[] {
   return scripts.map((s) => ({ ...s, rules: { ...s.rules, conditions: [...s.rules.conditions], actions: [...s.rules.actions] }, budget: { ...s.budget } }));
 }
@@ -625,7 +805,13 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
     // mode: the mints in `opened` are addresses on the chain it LEFT, and a
     // sell routes to the chain it is on now.
     const chainChanged = scriptChain(existing) !== scriptChain(input);
+    const bundled = existing.bundled
+      ? { ...existing.bundled, edited: existing.bundled.edited === true || existing.code !== input.code }
+      : undefined;
     Object.assign(existing, input, { id: existing.id, createdAt: existing.createdAt, updatedAt: now });
+    // Only this module decides what is a shipped script.
+    if (bundled) existing.bundled = bundled;
+    else delete existing.bundled;
     // Switching to live disarms: arming live is a separate, confirmed act.
     if (toLive) existing.enabled = false;
     // `opened` is the script's authority to SELL — it is what separates its own
@@ -656,6 +842,7 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
   }
   if (scripts.length >= MAX_SCRIPTS) return { ok: false, message: `Limit of ${MAX_SCRIPTS} scripts reached` };
   const s: UserScript = { ...input, id: nextId(), createdAt: now, updatedAt: now, enabled: false };
+  delete s.bundled;
   scripts.unshift(s);
   runtimes.set(s.id, freshRuntime());
   persist();
@@ -726,6 +913,9 @@ function disable(s: UserScript, why: string): void {
   s.enabled = false;
   slog(s, 'error', `DISABLED — ${why}`);
   host?.toast('error', `Script "${s.name}" disabled: ${why}`);
+  // A desktop notification too: a script is left running for days, and a
+  // toast only reaches someone looking at the window (2026-09-27).
+  host?.notify(`Script stopped: ${s.name}`, why.slice(0, 200));
   void stopCode(s, why);
   clearSchedules(rtFor(s));
   persist();
@@ -747,6 +937,7 @@ function statsFor(s: UserScript): ScriptStats {
     openCount: rt.opened.size,
     firedMints: rt.firedMints.size,
     running: s.kind === 'code' ? rt.running && (host?.sandbox.isRunning(s.id) ?? false) : s.enabled,
+    pausedUntil: rt.pausedUntil,
   };
 }
 
@@ -1252,21 +1443,56 @@ function msUntil(hhmm: string, now = Date.now()): number | null {
   return t - now;
 }
 
+/**
+ * A daily time is checked against the WALL CLOCK in short steps rather than
+ * one timer for up to 24 h (2026-09-27). One long timer runs on the
+ * process's own clock, which does not follow the wall: a laptop that slept,
+ * a clock the OS corrected, a daylight-saving change — each left `bot.at`
+ * firing at the wrong local time, or hours late, with nothing said.
+ */
+let AT_STEP_MS = 60_000;
+/** Test seam: check schedules every `ms` instead of every minute. */
+export function _setAtStep(ms: number | null): void {
+  AT_STEP_MS = ms ?? 60_000;
+}
+/** Woken this long after the time (asleep through it): skip the day, say so. */
+export const AT_LATE_MS = 5 * 60_000;
+
+/** What a schedule check should do at `now` for a time due at `target`. */
+export function scheduleStep(target: number, now: number): 'wait' | 'fire' | 'missed' {
+  if (now < target) return 'wait';
+  return now - target <= AT_LATE_MS ? 'fire' : 'missed';
+}
+
 function armAt(s: UserScript, rt: Runtime, hhmm: string): boolean {
   const wait = msUntil(hhmm);
   if (wait === null) return false;
+  // Kept as a LOCAL date and time, turned into a timestamp at every check, so
+  // a daylight-saving change in between moves the moment with the clock.
+  const d = new Date(Date.now() + wait);
+  const due = (): number => new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), 0, 0).getTime();
   const prev = rt.atTimers.get(hhmm);
   if (prev) clearTimeout(prev);
-  rt.atTimers.set(
-    hhmm,
-    setTimeout(() => {
-      rt.atTimers.delete(hhmm);
-      if (!s.enabled) return;
-      void fireSchedule(s, hhmm).finally(() => {
-        if (s.enabled) armAt(s, rt, hhmm);
-      });
-    }, wait),
-  );
+  const check = (): void => {
+    rt.atTimers.delete(hhmm);
+    if (!s.enabled) return;
+    const now = Date.now();
+    const target = due();
+    const step = scheduleStep(target, now);
+    if (step === 'wait') {
+      rt.atTimers.set(hhmm, setTimeout(check, Math.min(AT_STEP_MS, Math.max(0, target - now))));
+      return;
+    }
+    if (step === 'missed') {
+      slog(s, 'warn', `daily ${hhmm} missed — the app was not running at that time (the computer slept, or the clock moved); next one tomorrow`);
+      armAt(s, rt, hhmm);
+      return;
+    }
+    void fireSchedule(s, hhmm).finally(() => {
+      if (s.enabled) armAt(s, rt, hhmm);
+    });
+  };
+  rt.atTimers.set(hhmm, setTimeout(check, Math.min(AT_STEP_MS, wait)));
   return true;
 }
 
@@ -1325,8 +1551,24 @@ async function startCodeInner(s: UserScript): Promise<void> {
     return;
   }
   const rt = rtFor(s);
+  // Any start supersedes a pending one — a pause's timed restart or a retry.
+  // Without this, arming a paused script by hand started it now AND again
+  // when the pause ran out, wiping the fresh run's memory.
+  if (rt.startRetry) {
+    clearTimeout(rt.startRetry);
+    rt.startRetry = null;
+  }
+  rt.pausedUntil = null;
   rt.running = false;
   clearSchedules(rt);
+  // The last run's bot.every too: a restart (watchdog, crash, an edit) goes
+  // through here without stopCode, and a new run that no longer calls
+  // bot.every kept receiving the old one's timer for the life of the app.
+  if (rt.intervalTimer) {
+    clearInterval(rt.intervalTimer);
+    rt.intervalTimer = null;
+  }
+  rt.intervalSec = null;
   const chain = scriptChain(s);
   // Coerced against the code being STARTED, so a script whose @inputs block
   // was edited without re-answering the form gets the declared shape rather
@@ -1361,11 +1603,20 @@ async function startCodeInner(s: UserScript): Promise<void> {
       changed();
       return;
     }
+    // Retries used up on a failure that was retryable (a stall, not a body
+    // that throws): pause and come back later rather than off for good.
+    if (r.retryable) {
+      rt.startFails = 0;
+      pauseForErrors(s, `could not start after ${START_RETRIES + 1} attempts: ${r.message}`);
+      return;
+    }
     disable(s, rt.startFails > 0 ? `could not start after ${rt.startFails + 1} attempts: ${r.message}` : `could not start: ${r.message}`);
     return;
   }
   rt.startFails = 0;
   rt.running = true;
+  if (rt.health.upSince !== null) rt.health.restarts += 1;
+  rt.health.upSince = Date.now();
   slog(s, 'info', 'sandbox running');
   announcePausedOrders(s, rt);
   changed();
@@ -1412,6 +1663,7 @@ async function stopCode(s: UserScript, reason: string): Promise<void> {
     clearTimeout(rt.startRetry);
     rt.startRetry = null;
   }
+  rt.pausedUntil = null;
   rt.startFails = 0;
   if (rt.intervalTimer) {
     clearInterval(rt.intervalTimer);
@@ -1440,6 +1692,73 @@ export async function startEnabled(): Promise<void> {
   }
 }
 
+/**
+ * A code script that stopped on its OWN errors — five in a row, or a crash
+ * loop — is paused and restarted by itself, a few times a day, before it is
+ * turned off for good (2026-09-27).
+ *
+ * Why not straight off, as before: scripts run for days, and the errors that
+ * trip these walls are mostly not the script's code. A provider parked for
+ * twenty minutes, an hour without network, a machine that slept — every
+ * handler fails for a while and then everything works again. Turning the
+ * script off for that left it off until someone noticed, often the next day.
+ *
+ * What stays a hard stop: the daily loss limit, the kill switch, a script
+ * turning itself off, a body that throws at load, validation — those are
+ * rules or broken code, and none of them goes through here. The pause is
+ * never silent: the log, a toast and a desktop notification say when it
+ * restarts, and again when it does; turning the script off cancels it. The
+ * script's budget, the live master switch and every breaker apply to the
+ * restarted run exactly as before — a restart is not a re-arm of anything
+ * the app itself has switched off. The pause is in memory only: a LIVE script
+ * still never survives an app restart armed.
+ */
+let RECOVER_BACKOFF_MS = [5 * 60_000, 15 * 60_000, 60 * 60_000];
+const RECOVERIES_PER_DAY = 3;
+const DAY_MS = 24 * 3_600_000;
+
+/** Test seam: shorter pauses. */
+export function _setRecoveryBackoff(ms: number[] | null): void {
+  RECOVER_BACKOFF_MS = ms && ms.length ? ms : [5 * 60_000, 15 * 60_000, 60 * 60_000];
+}
+
+function clock(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function pauseForErrors(s: UserScript, why: string): void {
+  if (!s.enabled) return;
+  const rt = rtFor(s);
+  const now = Date.now();
+  rt.recoveries = rt.recoveries.filter((t) => now - t < DAY_MS);
+  if (s.kind !== 'code' || rt.recoveries.length >= RECOVERIES_PER_DAY) {
+    disable(s, rt.recoveries.length >= RECOVERIES_PER_DAY ? `${why} — paused and restarted ${rt.recoveries.length} times in 24 h already, so it stays off` : why);
+    return;
+  }
+  rt.recoveries.push(now);
+  const n = rt.recoveries.length;
+  const wait = RECOVER_BACKOFF_MS[Math.min(n - 1, RECOVER_BACKOFF_MS.length - 1)];
+  void stopCode(s, `paused: ${why}`);
+  rt.pausedUntil = now + wait;
+  rt.lastError = `paused until ${clock(rt.pausedUntil)} — ${why}`;
+  rt.lastErrorAt = now;
+  const msg = `PAUSED — ${why}. It restarts by itself at ${clock(rt.pausedUntil)} (pause ${n} of ${RECOVERIES_PER_DAY} in 24 h; the next one after that turns it off). Turn it off to keep it off.`;
+  slog(s, 'error', msg);
+  host?.toast('warn', `Script "${s.name}" paused until ${clock(rt.pausedUntil)}: ${why}`);
+  host?.notify(`Script paused: ${s.name}`, `${why.slice(0, 160)} — restarts at ${clock(rt.pausedUntil)}${s.mode === 'live' ? ' (LIVE)' : ''}`);
+  rt.startRetry = setTimeout(() => {
+    rt.startRetry = null;
+    rt.pausedUntil = null;
+    if (!s.enabled || killSwitch) return;
+    rt.errorsInARow = 0;
+    slog(s, 'warn', `restarting after its pause${s.mode === 'live' ? ' — LIVE, on the same budget' : ''}`);
+    host?.toast(s.mode === 'live' ? 'warn' : 'info', `Script "${s.name}" restarted after its pause${s.mode === 'live' ? ' (LIVE)' : ''}`);
+    void startCode(s);
+  }, wait);
+  rt.startRetry.unref?.();
+  changed();
+}
+
 function noteError(s: UserScript, line: string): void {
   const rt = rtFor(s);
   rt.errorsInARow += 1;
@@ -1447,8 +1766,8 @@ function noteError(s: UserScript, line: string): void {
   rt.lastErrorAt = Date.now();
   slog(s, 'error', line);
   if (rt.errorsInARow >= ERRORS_TO_DISABLE) {
-    disable(s, `${ERRORS_TO_DISABLE} errors in a row (last: ${line.slice(0, 120)})`);
-    return; // disable() pushes its own snapshot
+    pauseForErrors(s, `${ERRORS_TO_DISABLE} errors in a row (last: ${line.slice(0, 120)})`);
+    return; // pause/disable push their own snapshot
   }
   // The Scripts page reads errorsInARow and lastError from pushed snapshots
   // only, so without this a script climbs 1→4 errors invisibly and then jumps
@@ -1464,6 +1783,7 @@ function enqueue(s: UserScript, name: string, payload: unknown): void {
     const i = rt.queue.findIndex((q) => q.name === 'launchUpdate' || q.name === 'launch' || q.name === 'tick');
     if (i >= 0) rt.queue.splice(i, 1);
     else rt.queue.shift();
+    rt.health.dropped += 1;
   }
   rt.queue.push({ name, payload });
   void pump(s, rt);
@@ -1475,8 +1795,14 @@ async function pump(s: UserScript, rt: Runtime): Promise<void> {
   try {
     while (rt.queue.length && rt.running && s.enabled) {
       const ev = rt.queue.shift() as { name: string; payload: unknown };
+      const t0 = Date.now();
       const r = await host?.sandbox.dispatch(s.id, ev.name, ev.payload);
       rt.lastRunAt = Date.now();
+      const hl = rt.health;
+      hl.events += 1;
+      if (r && !r.ok) hl.failed += 1;
+      if (hl.lat.length < HEALTH_LAT_CAP) hl.lat.push(rt.lastRunAt - t0);
+      else hl.lat[Math.floor(Math.random() * HEALTH_LAT_CAP)] = rt.lastRunAt - t0;
       if (!r) break;
       if (r.ok) rt.errorsInARow = 0;
       else if (!s.enabled || /sandbox stopped/.test(r.error ?? '')) break; // stopped on purpose mid-handler
@@ -1548,7 +1874,7 @@ export function onSandboxGone(scriptId: string, reason: string): void {
   rt.queue = [];
   if (!s.enabled) return;
   noteError(s, `sandbox gone (${reason})`);
-  if (!s.enabled) return; // noteError may have disabled it
+  if (!s.enabled || rt.pausedUntil) return; // noteError may have disabled or paused it
   // A handler that never returns is killed by the watchdog, comes back, and
   // runs again — so without a ceiling the five-error wall is never reached and
   // the loop is endless. Count restarts, not just errors.
@@ -1558,7 +1884,7 @@ export function onSandboxGone(scriptId: string, reason: string): void {
   restartWindow.set(scriptId, recent);
   if (recent.length > RESTARTS_PER_MIN) {
     restartWindow.delete(scriptId);
-    disable(s, `restarted ${recent.length} times in a minute (last: ${reason}) — stopping it`);
+    pauseForErrors(s, `restarted ${recent.length} times in a minute (last: ${reason})`);
     return;
   }
   // Killed by the watchdog or crashed: come back, unless the errors said stop.
@@ -1762,14 +2088,14 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (!isMint(mint)) return answer(false, undefined, 'subscribe: bad mint');
         h.subscribeTicks(mint);
         subscribe(rtFor(s), mint);
-        persist();
+        persist(true);
         return result({ ok: true, message: 'subscribed' });
       }
       case 'unsubscribe': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'unsubscribe: bad mint');
         rtFor(s).subscribed.delete(mint);
-        persist();
+        persist(true);
         return result({ ok: true, message: 'unsubscribed' });
       }
       case 'notify': {
@@ -2028,7 +2354,16 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         const now = Date.now();
         const out: RuleContext[] = [];
         const rtp = rtFor(s);
-        for (const p of (await h.positions(s.mode, scriptChain(s))).filter((x) => rtp.opened.has(x.mint))) {
+        // An unreadable wallet is not an empty one (2026-09-27). The host
+        // answers a failed holdings read with [], and a script that believed
+        // it — an RPC outage, an hour without network — decided every bag it
+        // held was "no longer held", cancelled its stops and take-profits and
+        // stopped managing real positions. heldMints says null on exactly
+        // that failure (same shared read, no extra request), so the script
+        // gets a rejection it can treat as "unknown, try again".
+        const [list, held] = await Promise.all([h.positions(s.mode, scriptChain(s)), h.heldMints ? h.heldMints(s.mode, scriptChain(s)) : Promise.resolve(undefined)]);
+        if (held === null) return answer(false, undefined, 'positions: the wallet could not be read just now — unknown, not empty; try again next pass');
+        for (const p of list.filter((x) => rtp.opened.has(x.mint))) {
           const row = h.launch(p.mint);
           let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
           c = withMarket(c, h.marketCached(p.mint, scriptChain(s)));
@@ -2064,7 +2399,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         }
         if (bytes > MAX_STATE_BYTES) return answer(false, undefined, `setState: over ${MAX_STATE_BYTES / 1024} KB`);
         rtFor(s).kv = JSON.parse(JSON.stringify(obj)) as Record<string, unknown>;
-        persist();
+        persist(true);
         return answer(true, true);
       }
       case 'disable': {
@@ -2113,8 +2448,8 @@ function fanOut(trigger: string, eventName: string, mint: string, chain: ChainKi
     if (!s.enabled) continue;
     if (scriptChain(s) !== chain) continue;
     if (s.kind === 'rules' && s.rules.trigger !== trigger) continue;
+    const rt = rtFor(s);
     if (s.kind === 'code') {
-      const rt = rtFor(s);
       if (!rt.running) continue;
       if (throttle && mint) {
         const m = throttle.map(rt);
@@ -2124,13 +2459,65 @@ function fanOut(trigger: string, eventName: string, mint: string, chain: ChainKi
         if (m.size > 2_000) m.delete(m.keys().next().value as string);
       }
     }
-    void build(s).then((ctx) => {
-      if (s.kind === 'rules') return runRules(s, ctx);
-      enqueue(s, eventName, ctx);
-      return undefined;
-    });
+    if (rt.building >= BUILD_CAP && CHATTER.has(eventName)) {
+      rt.health.dropped += 1;
+      continue;
+    }
+    rt.building += 1;
+    void bounded(build(s))
+      .then((ctx) => {
+        if (s.kind === 'rules') return runRules(s, ctx);
+        enqueue(s, eventName, ctx);
+        return undefined;
+      })
+      // A host read that throws must not become an unhandled rejection in
+      // main (the crash guard would shout "check your position" for a
+      // script's context build).
+      .catch(() => undefined)
+      .finally(() => {
+        rt.building -= 1;
+      });
   }
 }
+
+/**
+ * Contexts being built per script, and the ceiling on them (2026-09-27).
+ * Each build awaits the positions read before the event is even queued, so a
+ * stalled wallet read (an RPC that hangs, a network hour) left one pending
+ * build per launch, update and tick — hundreds a second, all retained until
+ * the read came back and then dumped into a queue that keeps fifty. Past the
+ * ceiling, launch and tick chatter is dropped before any work (and counted on
+ * the health line); runner flags, orders, positions and fills never are.
+ */
+const BUILD_CAP = 200;
+/**
+ * A build that has not settled by then is given up (the event is dropped).
+ * The soak's hung read never settled at all, and without this the 200 it
+ * left behind held the ceiling shut for good: launch and tick events for
+ * that script stopped for the life of the app (2026-09-27).
+ */
+let BUILD_TIMEOUT_MS = 15_000;
+/** Test seam. */
+export function _setBuildTimeout(ms: number | null): void {
+  BUILD_TIMEOUT_MS = ms ?? 15_000;
+}
+function bounded<T>(p: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('context build timed out')), BUILD_TIMEOUT_MS);
+    timer.unref?.();
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+const CHATTER = new Set(['launch', 'launchUpdate', 'tick']);
 
 /** The engine's events, as they happen. Cheap on the hot path: nothing is
  *  built for a script that is not listening. */
@@ -2164,12 +2551,22 @@ export function onEngineEvent(ev: EngineEvent): void {
         if (rt.lastTickAt.size > 2_000) rt.lastTickAt.delete(rt.lastTickAt.keys().next().value as string);
         if (s.kind === 'rules' && s.rules.trigger !== 'tick') continue;
         if (s.kind === 'code' && !rt.running) continue;
-        void ctxFor(s, mint).then((c) => {
-          if (price > 0) c.priceSol = price;
-          if (s.kind === 'rules') return runRules(s, c);
-          enqueue(s, 'tick', c);
-          return undefined;
-        });
+        if (rt.building >= BUILD_CAP) {
+          rt.health.dropped += 1;
+          continue;
+        }
+        rt.building += 1;
+        void bounded(ctxFor(s, mint))
+          .then((c) => {
+            if (price > 0) c.priceSol = price;
+            if (s.kind === 'rules') return runRules(s, c);
+            enqueue(s, 'tick', c);
+            return undefined;
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            rt.building -= 1;
+          });
       }
       return;
     }
@@ -2286,11 +2683,15 @@ export async function pollPositions(): Promise<void> {
 export function startTimers(): void {
   if (positionTimer) return;
   positionTimer = setInterval(() => void pollPositions(), POSITION_POLL_MS);
+  healthTimer = setInterval(logHealth, HEALTH_EVERY_MS);
+  healthTimer.unref?.();
 }
 
 export function stopTimers(): void {
   if (positionTimer) clearInterval(positionTimer);
   positionTimer = null;
+  if (healthTimer) clearInterval(healthTimer);
+  healthTimer = null;
   for (const rt of runtimes.values()) {
     if (rt.intervalTimer) clearInterval(rt.intervalTimer);
     rt.intervalTimer = null;
@@ -2312,6 +2713,8 @@ export async function shutdown(): Promise<void> {
 export function _reset(): void {
   stopTimers();
   scripts = [];
+  bundledSeen = [];
+  shipped = [];
   runtimes.clear();
   orderStates.clear();
   alertFires.clear();
@@ -2414,6 +2817,20 @@ export function resetScript(id: string): { ok: boolean; message: string } {
  * (wallet, mint) pair a script already trades — a script "sell all" would
  * otherwise sell the session's tokens.
  */
+/**
+ * Does any armed script want this mint's live ticks — subscribed to it, or
+ * holding a position it opened? Read on the trade hot path (engine
+ * ticksWanted), so a lookup per script and nothing else.
+ */
+export function wantsTicks(mint: string): boolean {
+  for (const s of scripts) {
+    if (!s.enabled) continue;
+    const rt = runtimes.get(s.id);
+    if (rt && (rt.subscribed.has(mint) || rt.opened.has(mint))) return true;
+  }
+  return false;
+}
+
 export function openedOn(mint: string): { script: string; wallet: string | null }[] {
   const out: { script: string; wallet: string | null }[] = [];
   for (const s of scripts) {
@@ -2427,6 +2844,56 @@ export function _runtimeOf(id: string): { opened: string[]; firedMints: string[]
   const rt = runtimes.get(id);
   if (!rt) return null;
   return { opened: [...rt.opened.keys()], firedMints: [...rt.firedMints], realizedToday: rt.realizedToday, buysToday: rt.buysToday, kv: rt.kv, subscribed: [...rt.subscribed], atTimers: [...rt.atTimers.keys()] };
+}
+
+/**
+ * Sizes of everything this module keeps in memory, per script and global —
+ * what a multi-day soak watches for growth (test/scriptsoak.live.mjs).
+ * Numbers only; nothing here names a mint or a secret.
+ */
+export function _diag(): { global: Record<string, number>; scripts: Record<string, Record<string, number>> } {
+  const per: Record<string, Record<string, number>> = {};
+  for (const [id, rt] of runtimes) {
+    let kvBytes = 0;
+    try {
+      kvBytes = JSON.stringify(rt.kv).length;
+    } catch {
+      kvBytes = -1;
+    }
+    per[id] = {
+      firedMints: rt.firedMints.size,
+      lastFireAt: rt.lastFireAt.size,
+      actions: rt.actions.length,
+      analyses: rt.analyses.length,
+      opened: rt.opened.size,
+      subscribed: rt.subscribed.size,
+      calledOut: rt.calledOut.size,
+      lastUpdateAt: rt.lastUpdateAt.size,
+      lastTickAt: rt.lastTickAt.size,
+      atTimers: rt.atTimers.size,
+      log: rt.log.length,
+      metrics: rt.metrics.size,
+      queue: rt.queue.length,
+      building: rt.building,
+      intervalSec: rt.intervalSec ?? 0,
+      errorsInARow: rt.errorsInARow,
+      kvBytes,
+    };
+  }
+  return {
+    global: {
+      scripts: scripts.length,
+      runtimes: runtimes.size,
+      orderStates: orderStates.size,
+      alertFires: alertFires.size,
+      peaks: peaks.size,
+      restartWindow: restartWindow.size,
+      fileLogBudget: fileLogBudget.size,
+      actChains: actChains.size,
+      startChains: startChains.size,
+    },
+    scripts: per,
+  };
 }
 
 /** Test seam: fire a schedule now. */

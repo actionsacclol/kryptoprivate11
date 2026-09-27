@@ -1,0 +1,5 @@
+# Check every text file out exactly as committed (no CRLF conversion).
+# The Windows CI runner defaults to core.autocrlf=true, which turned LF sources
+# into CRLF and broke source-pin tests that pass locally (5.2.0, 09-27:
+# scriptspage, kryptotrader). -text leaves bytes alone on every platform.
+* -text
