@@ -127,9 +127,10 @@ function makeHost(over = {}) {
       calls.orders.push({ id: 'o' + calls.orders.length, state: 'armed', symbol: '', ...req });
       return { ok: true, message: 'armed' };
     },
-    cancelOrders: (mint) => {
-      const n = calls.orders.filter((o) => o.mint === mint).length;
-      calls.orders = calls.orders.filter((o) => o.mint !== mint);
+    cancelOrders: (mint, kinds) => {
+      const hit = (o) => o.mint === mint && (!kinds || kinds.includes(o.kind));
+      const n = calls.orders.filter(hit).length;
+      calls.orders = calls.orders.filter((o) => !hit(o));
       return { ok: true, message: 'cancelled ' + n, cancelled: n };
     },
     templates: () => [{ id: 'tpl1', name: 'Default' }],
@@ -648,12 +649,14 @@ test('wantsTicks: an armed script following a coin (subscribed or opened) wants 
   auto.setEnabled(c.id, true);
   await tick();
   assert.equal(auto.wantsTicks(MINT), false);
+  assert.equal(auto.wantsAnyTicks(), false, 'nothing followed yet');
   auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'subscribe', args: [MINT] });
   auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'buy', args: [MINT2, 0.01] });
   await tick(30);
   assert.equal(auto.wantsTicks(MINT), true, 'subscribed');
   assert.equal(auto.wantsTicks(MINT2), true, 'opened');
   assert.equal(auto.wantsTicks(MINT3), false);
+  assert.equal(auto.wantsAnyTicks(), true, 'something followed: the amm feed decodes');
   assert.equal(h.calls.buys.length, 1);
   auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'unsubscribe', args: [MINT] });
   await tick();
@@ -1114,6 +1117,22 @@ test('advanced orders: a PAPER script notes them; a LIVE script places them, and
   assert.equal(h2.calls.replies.find((r) => r.cid === 4).value.ok, true);
   assert.equal(h2.calls.replies.find((r) => r.cid === 5).value.cancelled, 1);
   assert.equal(h2.calls.replies.find((r) => r.cid === 6).ok, false, 'an unknown order kind never reaches the host');
+  // 09-27 (REGULARS): a moonbag drops its stop and KEEPS its take-profit rungs.
+  // cancelOrders takes a list of kinds; anything that is not a list of kinds
+  // is refused — never read as "cancel everything".
+  auto.onSandboxMessage(live.id, { t: 'call', id: 7, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 40, amount: 100 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 8, method: 'order', args: [{ mint: MINT2, kind: 'take_profit', triggerBasis: 'pct', triggerValue: 300, amount: 50 }] });
+  await tick();
+  auto.onSandboxMessage(live.id, { t: 'call', id: 9, method: 'cancelOrders', args: [MINT2, ['stop_loss', 'trailing_stop']] });
+  await tick();
+  assert.equal(h2.calls.replies.find((r) => r.cid === 9).value.cancelled, 1, 'only the stop went');
+  assert.deepEqual(h2.calls.orders.filter((o) => o.mint === MINT2).map((o) => o.kind), ['take_profit'], 'the take-profit rung is still armed');
+  auto.onSandboxMessage(live.id, { t: 'call', id: 10, method: 'cancelOrders', args: [MINT2, ['bogus']] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 11, method: 'cancelOrders', args: [MINT2, []] });
+  await tick();
+  assert.equal(h2.calls.replies.find((r) => r.cid === 10).ok, false, 'an unknown kind is refused');
+  assert.equal(h2.calls.replies.find((r) => r.cid === 11).ok, false, 'an empty list is refused, never "all"');
+  assert.equal(h2.calls.orders.filter((o) => o.mint === MINT2).length, 1, 'nothing else was cancelled');
 });
 
 test('a limit order needs an absolute level: a percent basis is refused, not read as a market cap', async () => {
@@ -2124,7 +2143,7 @@ test('bot.creator falls back to Jupiter audit counts when pump is silent', () =>
 });
 
 // 2026-09-27: a script ships with the app (bundled/scripts/*.js).
-test('a shipped script is installed once, off and in paper; updates only while unedited; a deleted one stays deleted', async () => {
+test('a shipped script is installed once, off and in paper; updates replace edited copies too, keeping the edit as its own script; a deleted one stays deleted', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'krypt-bundled-'));
   auto._reset();
   auto.init(dir);
@@ -2145,12 +2164,23 @@ test('a shipped script is installed once, off and in paper; updates only while u
   const other = saved(codeScript({ name: 'mine' }));
   auto.upsert({ ...auto.all().find((x) => x.id === other.id), bundled: { key: 'krypto-script', sha: 'x' } });
   assert.equal(auto.all().find((x) => x.id === other.id).bundled, undefined, 'a user script cannot claim to be shipped');
-  // The user edits it: updates stop, reset brings the shipped code back.
+  // The user edits it: the shipped copy STILL follows the app (2026-09-28: a
+  // broken shipped script must be fixed for everyone), and the edit is kept
+  // as a script of its own — off, in paper, not marked shipped.
   auto.upsert({ ...s, code: "bot.log('mine');" });
   s = auto.all().find((x) => x.bundled?.key === 'krypto-script');
   assert.equal(s.bundled.edited, true, 'marked edited');
   auto.seedBundled([{ ...v1, code: "bot.log('v3');" }]);
-  assert.equal(auto.all().find((x) => x.id === s.id).code, "bot.log('mine');", 'an edited copy is left alone');
+  assert.equal(auto.all().find((x) => x.id === s.id).code, "bot.log('v3');", 'an edited copy is replaced too');
+  const kept = auto.all().find((x) => x.name === 'Krypto Script (your edit)');
+  assert.ok(kept, 'the edit is kept as its own script');
+  assert.equal(kept.code, "bot.log('mine');");
+  assert.equal(kept.enabled, false, 'off');
+  assert.equal(kept.mode, 'paper', 'paper');
+  assert.equal(kept.bundled, undefined, 'the kept copy is a user script');
+  assert.equal(auto.all().filter((x) => x.bundled?.key === 'krypto-script').length, 1, 'still one shipped copy');
+  auto.seedBundled([{ ...v1, code: "bot.log('v3');" }]);
+  assert.equal(auto.all().filter((x) => x.name === 'Krypto Script (your edit)').length, 1, 'the same version never keeps a second copy');
   assert.equal(auto.resetBundled(s.id).ok, true);
   assert.equal(auto.all().find((x) => x.id === s.id).code, "bot.log('v3');", 'reset brings the shipped code');
   assert.equal(auto.resetBundled(other.id).ok, false, 'reset refuses a user script');
@@ -2167,10 +2197,19 @@ test('a shipped script is installed once, off and in paper; updates only while u
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('the shipped script file itself passes the app’s own validation', () => {
+test('the shipped script file itself passes the app’s own validation', async () => {
   const code = fs.readFileSync(new URL('../bundled/scripts/krypto-script.js', import.meta.url), 'utf8');
   const v = validateScript({ ...defaultScript('code'), name: 'Krypto Script', code });
   assert.equal(v.ok, true, v.message);
+  // 2026-09-28: 5.3.0 shipped a script whose @inputs block the app refused
+  // (33 fields against a 32 cap), so it installed with NO settings — buySol
+  // undefined and all. The block must read, and every field must carry a
+  // default, or the script has nothing to run on.
+  const { parseInputs } = await import('./.scriptinputs.mjs');
+  const parsed = parseInputs(code);
+  assert.equal(parsed.error, null, `the shipped @inputs block reads: ${parsed.error}`);
+  assert.ok(Object.keys(parsed.specs).length >= 30, 'the settings are all there');
+  for (const [k, spec] of Object.entries(parsed.specs)) assert.ok('default' in spec, `${k} has a default`);
   const src = fs.readFileSync(new URL('../electron/engine/bundledScripts.ts', import.meta.url), 'utf8');
   assert.ok(src.includes("bundled/scripts/krypto-script.js?raw"), 'built into the app from that file');
   const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');

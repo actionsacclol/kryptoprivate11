@@ -357,7 +357,7 @@ export function sandboxPageHtml(): string {
     wallets: () => call('wallets', []),
     sellAll: () => call('sellAll', []),
     order: (req) => call('order', [req]),
-    cancelOrders: (mint) => call('cancelOrders', [mint]),
+    cancelOrders: (mint, kinds) => call('cancelOrders', kinds === undefined ? [mint] : [mint, kinds]),
     clearCompletedOrders: () => call('clearCompletedOrders', []),
     templates: () => call('templates', []),
     applyTemplate: (mint, templateId) => call('applyTemplate', [mint, templateId]),

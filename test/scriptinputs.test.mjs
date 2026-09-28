@@ -13,7 +13,6 @@
 import assert from 'node:assert';
 import fs from 'node:fs';
 import {
-  MAX_INPUTS,
   MAX_LINES,
   coerceInputs,
   defaultsFor,
@@ -104,18 +103,17 @@ bot.log(bot.input.mint);`;
 }
 
 {
-  const many = {};
-  for (let i = 0; i < 40; i += 1) many[`f${i}`] = { type: 'text', label: `F${i}` };
-  const over = parseInputs(`/* @inputs ${JSON.stringify(many)} */`);
-  assert.deepEqual(over.specs, {}, 'over the ceiling is refused whole, never trimmed');
-  assert.match(over.error, /declares 40 fields; a form holds at most/);
-  // Exactly at the ceiling is fine — and nothing past field 16 goes missing.
-  const full = {};
-  for (let i = 0; i < MAX_INPUTS; i += 1) full[`f${i}`] = { type: 'text', label: `F${i}` };
-  const atCap = parseInputs(`/* @inputs ${JSON.stringify(full)} */`);
-  assert.equal(atCap.error, null);
-  assert.equal(Object.keys(atCap.specs).length, MAX_INPUTS);
-  ok('a declaration over the ceiling is reported, not silently cut');
+  // 2026-09-28: no cap on the field count. Every cap (16, 24, 32) was
+  // outgrown by a real script and refused the whole block — the shipped
+  // script declared 33 and installed with no settings.
+  for (const n of [33, 40, 200]) {
+    const many = {};
+    for (let i = 0; i < n; i += 1) many[`f${i}`] = { type: 'text', label: `F${i}` };
+    const r = parseInputs(`/* @inputs ${JSON.stringify(many)} */`);
+    assert.equal(r.error, null, `${n} fields read`);
+    assert.equal(Object.keys(r.specs).length, n, `all ${n} kept, none cut`);
+  }
+  ok('a declaration is never refused or cut for its field count');
 }
 
 {

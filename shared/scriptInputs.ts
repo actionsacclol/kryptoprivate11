@@ -75,13 +75,14 @@ export interface ScriptInputSpec {
 export type ScriptInputSpecs = Record<string, ScriptInputSpec>;
 export type ScriptInputValues = Record<string, unknown>;
 
-/** More fields than this is a form nobody fills in. Was 16 until 09-22: a
- *  real script (scorenow) reached 18, and the fields past the cap were
- *  silently cut, so bot.input.likeChance read undefined and no like ever
- *  fired. Over the cap is now REPORTED, never trimmed. Was 24 until 09-24:
- *  scorenow reached 27, the whole block was refused, and the Settings button
- *  vanished with the error shown nowhere (the editor now shows it). */
-export const MAX_INPUTS = 32;
+// There is NO cap on how many fields a script may declare (2026-09-28). There
+// was one — 16, then 24, then 32 — and every time a real script grew past it
+// the whole block was refused and the script ran with no settings at all
+// (09-22: fields past the cap silently cut, no like ever fired; 09-24: the
+// Settings button vanished; 09-28: the SHIPPED script declared 33 and
+// installed with unreadable settings). A count protects nothing the
+// per-value limits below and the script's own budget do not already bound,
+// and the form scrolls. Same call as the script-size cap: gone.
 /** Longest a text answer may be. */
 export const MAX_TEXT = 500;
 /** Most entries a `lines` answer may carry. */
@@ -115,10 +116,6 @@ export function parseInputs(code: string): { specs: ScriptInputSpecs; error: str
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return { specs: {}, error: 'The @inputs block must be a JSON object of field name → settings.' };
-  }
-  const count = Object.keys(raw as Record<string, unknown>).length;
-  if (count > MAX_INPUTS) {
-    return { specs: {}, error: `The @inputs block declares ${count} fields; a form holds at most ${MAX_INPUTS}.` };
   }
   const specs: ScriptInputSpecs = {};
   for (const [key, v] of Object.entries(raw as Record<string, unknown>)) {

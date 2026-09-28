@@ -18,6 +18,7 @@
 // generated from the tables below, so they cannot drift from the code.
 
 import type { LaunchRow } from './types';
+import type { OrderKind } from './orders';
 import type { RunnerFlag } from './runners';
 import type { AlertKind } from './alerts';
 import { nativeSymbolOf, type ChainKind } from './evm';
@@ -567,7 +568,7 @@ export type RuleAction =
   | { type: 'trailing_stop'; pct: number }
   | { type: 'limit_buy'; basis: OrderBasis; value: number; sol: number }
   | { type: 'limit_sell'; basis: OrderBasis; value: number; pct: number }
-  | { type: 'cancel_orders' }
+  | { type: 'cancel_orders'; kinds?: OrderKind[] }
   | { type: 'apply_template'; templateId: string }
   | { type: 'alert'; kind: AlertKind; threshold: number }
   | { type: 'watch' }
@@ -1417,7 +1418,7 @@ function describeActionSol(a: RuleAction): string {
     case 'limit_sell':
       return `limit sell ${a.pct}% at ${a.basis === 'mcap_usd' ? `$${a.value} mcap` : `${a.value} SOL`}`;
     case 'cancel_orders':
-      return 'cancel orders';
+      return a.kinds?.length ? `cancel ${a.kinds.join(', ')} orders` : 'cancel orders';
     case 'apply_template':
       return 'apply template';
     case 'alert':
@@ -1547,7 +1548,7 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'sell', signature: 'await bot.sell(mint, pct, address?)', returns: '{ok, message}', notes: 'pct 1–100 of what is held in the script’s mode. Refused when nothing is held. Pass another of your own wallet ADDRESSES to sell from that one instead — only a mint this script opened, and only on Solana.', action: true },
   { method: 'sellAll', signature: 'await bot.sellAll()', returns: '{ok, message, sold: number}', notes: 'Sell 100 % of every position this script holds.', action: true },
   { method: 'order', signature: "await bot.order({ mint, kind, triggerBasis, triggerValue, amount })", returns: '{ok, message}', notes: "kind: stop_loss | take_profit | trailing_stop | limit_buy | limit_sell | sell_on_dev_sell | sell_on_migration | buy_on_migration. triggerBasis: 'pct' (from the price now) | 'mcap_usd' | 'price_sol'. amount: SOL for buys, % for sells. Placed as a real advanced order. 'pct' is measured from your position's fill price (fees and the token-account deposit excluded), or from the price now when nothing is held. An app restart brings every armed order back PAUSED and never resumes it by itself: the script gets an 'order' event with orderState 'paused' for its coins, and must cancelOrders + order again to re-arm.", action: true },
-  { method: 'cancelOrders', signature: 'await bot.cancelOrders(mint)', returns: '{ok, message, cancelled: number}', notes: 'Cancel every open order on the token.', action: true },
+  { method: 'cancelOrders', signature: 'await bot.cancelOrders(mint, kinds?)', returns: '{ok, message, cancelled: number}', notes: "Cancel every open order on the token — or, with kinds (e.g. ['stop_loss', 'trailing_stop']), only those kinds, leaving the rest armed: a moonbag can drop its stop and keep its take-profit rungs. An app build before 5.3.0 ignores the list and cancels every order.", action: true },
   { method: 'clearCompletedOrders', signature: 'await bot.clearCompletedOrders()', returns: '{ok, message, cleared: number}', notes: 'Prune every FINISHED order (filled, cancelled, expired, failed) from the Orders list. Finished orders otherwise pile up against the 200-order cap and eventually get new orders (your take-profit rungs) refused, so a long-running script that places orders should call this each loop. Housekeeping — costs no action, touches no open order. Solana only.', action: false },
   { method: 'templates', signature: 'await bot.templates()', returns: 'Array<{id, name}>', notes: 'Saved order templates.', action: false },
   { method: 'applyTemplate', signature: 'await bot.applyTemplate(mint, templateId)', returns: '{ok, message}', notes: 'Arm a template’s stops and take profits on a token.', action: true },

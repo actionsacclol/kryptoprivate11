@@ -20,6 +20,8 @@ import { EVM_CHAIN_META, nativeSymbolOf } from '@shared/evm';
 import type { EvmChainKind } from '@shared/evm';
 import { FeedManager, type LogNotification } from './feed';
 import { ReserveContinuity, curveFeedIsTicking } from './feedHealth';
+import { ammDecodeWanted, cheapPrice, type TimedPrice } from './priceSource';
+import { canonicalPoolFor } from './pumpSwapBuilder';
 import { DipShadow } from './dipShadow';
 import { StratLab } from './stratLab';
 import { MigShadow } from './migShadow';
@@ -967,7 +969,18 @@ export class SniperEngine {
           : this.getSettings().execution.maxLiveSol,
       priceSol: (mint, chain) =>
         chain && chain !== 'solana' ? (this.evmCopy?.price(chain, mint) ?? null) : this.cheapPriceSol(mint),
-      launch: (mint) => this.tokens.get(mint)?.row ?? null,
+      launch: (mint) => {
+        const t = this.tokens.get(mint);
+        if (!t) return null;
+        if (!t.curveComplete) return t.row;
+        // A migrated coin's row carries whatever the pool last printed on
+        // the amm feed — or the graduation price when nothing was heard.
+        // The script's bot.token must say the same price as its bot.price
+        // (2026-09-27), so the newest print the engine knows is laid over
+        // the row here; the row itself is left to the feed.
+        const px = this.cheapPriceSol(mint);
+        return px !== null && px !== t.row.priceSol ? { ...t.row, priceSol: px } : t.row;
+      },
       launchLinks: (mint) => {
         const t = this.tokens.get(mint);
         const so = t?.socials;
@@ -1126,14 +1139,18 @@ export class SniperEngine {
           .filter((o) => !mint || o.mint === mint)
           .map((o) => ({ id: o.id, mint: o.mint, symbol: o.symbol, kind: o.kind, state: o.state, triggerBasis: o.triggerBasis, triggerValue: o.triggerValue, amount: o.amount, interrupted: advOrders.wasInterrupted(o) })),
       placeOrder: (req) => this.createOrder({ ...req, symbol: req.symbol || this.tokens.get(req.mint)?.row.symbol || market.summaryIfCached(req.mint)?.symbol || '' }),
-      cancelOrders: (mint) => {
+      cancelOrders: (mint, kinds) => {
         let cancelled = 0;
         for (const o of advOrders.all()) {
           if (o.mint !== mint || !['armed', 'paused', 'triggered'].includes(o.state)) continue;
+          // Only the named kinds when a list is given (2026-09-27): a script
+          // releasing a moonbag drops the stop and keeps the take-profit rungs.
+          if (kinds && !kinds.includes(o.kind)) continue;
           if (advOrders.cancel(o.id).ok) cancelled += 1;
         }
         if (cancelled) this.emit({ kind: 'orders', snapshot: this.ordersSnapshot() });
-        return { ok: true, message: cancelled ? `cancelled ${cancelled} order(s)` : 'no open orders on this token', cancelled };
+        const what = kinds ? `${kinds.join('/')} order(s)` : 'order(s)';
+        return { ok: true, message: cancelled ? `cancelled ${cancelled} ${what}` : `no open ${what} on this token`, cancelled };
       },
       // Prune finished orders (filled/cancelled/expired/failed) so a long-lived
       // script does not accumulate terminal orders against MAX_ORDERS and
@@ -3170,10 +3187,22 @@ export class SniperEngine {
   // ── Copy trading (term.txt §11) ──────────────────────────────────
 
   /** The price the engine already knows for a mint, no lookups: the feed
-   *  row, the last-known map, or the tape. Null when nothing local knows. */
+   *  row, the last-known map, the tape, or the chain read's cache. Null when
+   *  nothing local knows. Once a curve is COMPLETE the row holds the
+   *  graduation price for good, so the newest timed print wins instead
+   *  (priceSource.ts — user report 2026-09-27: every migrated coin a script
+   *  priced read as its graduation price). */
   private cheapPriceSol(mint: string): number | null {
-    const p = this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? tape.lastPriceSol(mint) ?? null;
-    return typeof p === 'number' && p > 0 ? p : null;
+    const t = this.tokens.get(mint);
+    const timed: TimedPrice[] = [];
+    const kp = this.lastKnownPriceSol.get(mint);
+    const ka = this.lastKnownPriceAt.get(mint);
+    if (kp !== undefined && ka !== undefined) timed.push({ priceSol: kp, at: ka });
+    const tk = tape.lastTick(mint);
+    if (tk) timed.push(tk);
+    const c = pumpChain.readIfCached(mint);
+    if (c && c.priceSol !== null) timed.push({ priceSol: c.priceSol, at: c.readAt });
+    return cheapPrice({ rowPriceSol: t?.row.priceSol ?? null, curveComplete: t?.curveComplete === true, timed });
   }
 
   /**
@@ -5464,7 +5493,18 @@ export class SniperEngine {
     // ...and whether an armed order is waiting on a graduated token: those
     // evaluate below, and returning here would leave them to the 12 s poller
     // alone on a rail that moves in seconds.
-    if (!sAmm.shadowStratLab && !sAmm.shadowMigration && tape.subscriptions().length === 0 && !advOrders.hasArmed()) return;
+    // ...and whether a script follows a coin it holds or subscribed to
+    // (2026-09-27): its ticks and its price used to stop at the migration
+    // unless a chart happened to be open or an order armed.
+    if (
+      !ammDecodeWanted({
+        shadowStratLab: sAmm.shadowStratLab === true,
+        shadowMigration: sAmm.shadowMigration === true,
+        tapeSubscribed: tape.subscriptions().length,
+        ordersArmed: advOrders.hasArmed(),
+        scriptsWantTicks: automation.wantsAnyTicks(),
+      })
+    ) return;
     const decoded: AmmEvent[] = inner;
     if (inner.length === 0) {
       for (const payload of payloads) {
@@ -5484,6 +5524,22 @@ export class SniperEngine {
       if (sAmm.shadowMigration) this.emitMigEvents(this.mig.onAmmSwap(event, n.receivedAt));
       const mint = this.ammPoolToMint.get(event.pool);
       if (mint === undefined) continue;
+      // The launch row follows the coin onto its pool (2026-09-27). Its
+      // price used to stop at the last CURVE trade — the graduation price —
+      // so every cheap read of a migrated coin (a script's bot.price and
+      // bot.token, paper marks, the Runners page) sat there for as long as
+      // the row lived.
+      const tracked = this.tokens.get(mint);
+      if (tracked) {
+        const px = executedPriceSol(event);
+        if (Number.isFinite(px) && px > 0) {
+          if (!tracked.curveComplete) this.markCurveComplete(tracked);
+          tracked.row.priceSol = px;
+          tracked.row.priceHistory.push(px);
+          if (tracked.row.priceHistory.length > 90) tracked.row.priceHistory.splice(0, tracked.row.priceHistory.length - 90);
+          if (tracked.row.phase !== 'completed') this.updatePhase(tracked, 'completed');
+        }
+      }
       // A graduated token keeps charting: the terminal tape follows the mint
       // onto PumpSwap via the pool map, which the token page seeds from the
       // pool DexScreener reports. Recorded FIRST, before the order
@@ -6077,7 +6133,9 @@ export class SniperEngine {
     // judge must never flag a finished curve, so mark it here; the full
     // completion handler still runs when (if) the event arrives.
     if (!t.curveComplete && t.virtualTokenReserves <= CURVE_COMPLETE_VIRTUAL_TOKENS) {
-      t.curveComplete = true;
+      t.row.priceSol = spotPriceSol(t.virtualSolReserves, t.virtualTokenReserves);
+      this.markCurveComplete(t);
+      this.rememberAmmPool(canonicalPoolFor(ev.mint), ev.mint);
       this.log('info', `${t.row.symbol || t.row.mint.slice(0, 6)}: curve sold out (token floor reached before any complete event)`);
     }
     const held = this.positions.hasOpenFor(ev.mint);
@@ -6281,6 +6339,14 @@ export class SniperEngine {
     this.positions.onTradeFor(ev.mint);
   }
 
+  /** The curve is done: the row's price is now the graduation price, and it
+   *  is remembered WITH A TIME so that, until the pool prints, it is the
+   *  newest price the cheap read can find (priceSource.ts). */
+  private markCurveComplete(t: TrackedToken): void {
+    t.curveComplete = true;
+    if (t.row.priceSol > 0) this.rememberPrice(t.row.mint, t.row.priceSol);
+  }
+
   private onComplete(mint: string): void {
     const t = this.tokens.get(mint);
     // Migration orders must fire even for a mint the tracker has already
@@ -6293,8 +6359,12 @@ export class SniperEngine {
     });
     alerts.onTick({ mint, symbol: t?.row.symbol, migrated: true, curvePct: 100 });
     this.liveCurves.complete(mint);
+    // Every pump migration lands in the pool derived from the mint, so its
+    // swaps map back to this coin from here on — even when the amm feed's
+    // own migration event was not decoded (its gate was closed at the time).
+    this.rememberAmmPool(canonicalPoolFor(mint), mint);
     if (!t) return;
-    t.curveComplete = true;
+    this.markCurveComplete(t);
     creators.recordCompletion(t.createEvent.creator);
     this.updatePhase(t, 'completed');
     recorder.record('complete', { mint });

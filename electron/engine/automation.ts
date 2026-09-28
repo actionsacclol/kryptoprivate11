@@ -182,7 +182,8 @@ export interface AutomationHost {
   wallet(chain?: ChainKind): { sol: number | null; address: string | null };
   orders(mint?: string): OrderView[];
   placeOrder(req: NewOrderRequest): Promise<{ ok: boolean; message: string }>;
-  cancelOrders(mint: string): { ok: boolean; message: string; cancelled: number };
+  /** Every open order on the mint, or only the given kinds. */
+  cancelOrders(mint: string, kinds?: OrderKind[]): { ok: boolean; message: string; cancelled: number };
   clearCompletedOrders(): { ok: boolean; message: string; cleared: number };
   templates(): Array<{ id: string; name: string }>;
   applyTemplate(mint: string, templateId: string): Promise<{ ok: boolean; message: string }>;
@@ -744,7 +745,35 @@ export function seedBundled(list: BundledScript[]): void {
     const sha = shaOf(b.code);
     const have = scripts.find((s) => s.bundled?.key === b.key);
     if (have) {
-      if (have.bundled!.edited || have.bundled!.sha === sha) continue;
+      if (have.bundled!.sha === sha) continue;
+      // An EDITED copy follows the app too (2026-09-28): a shipped script
+      // that turned out broken must be fixed for everyone, and an edit on
+      // top of a broken base is not worth keeping in place. Nobody loses
+      // work over it — the edit is kept as a script of its own, off and in
+      // paper, when there is room for one.
+      if (have.bundled!.edited) {
+        if (scripts.length < MAX_SCRIPTS) {
+          const now = Date.now();
+          const keep: UserScript = {
+            ...have,
+            id: nextId(),
+            name: `${have.name} (your edit)`.slice(0, 60),
+            enabled: false,
+            mode: 'paper',
+            rules: { ...have.rules, conditions: [...have.rules.conditions], actions: [...have.rules.actions] },
+            budget: { ...have.budget },
+            inputs: { ...(have.inputs ?? {}) },
+            createdAt: now,
+            updatedAt: now,
+          };
+          delete keep.bundled;
+          scripts.push(keep);
+          runtimes.set(keep.id, freshRuntime());
+          slog(have, 'warn', `your edited copy is kept as "${keep.name}" (off, paper); this one now follows the version shipped with the app`);
+        } else {
+          slog(have, 'warn', `your edits were replaced by the version shipped with this app (${MAX_SCRIPTS} scripts already, so the edit could not be kept as its own script)`);
+        }
+      }
       have.code = b.code;
       have.bundled = { key: b.key, sha };
       have.updatedAt = Date.now();
@@ -1098,6 +1127,18 @@ async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, wh
   return null;
 }
 
+/** What `bot.cancelOrders(mint, kinds)` may name. */
+const CANCEL_KINDS: readonly OrderKind[] = [
+  'stop_loss',
+  'take_profit',
+  'trailing_stop',
+  'limit_buy',
+  'limit_sell',
+  'sell_on_dev_sell',
+  'sell_on_migration',
+  'buy_on_migration',
+];
+
 function orderKindOf(a: RuleAction): OrderKind | null {
   switch (a.type) {
     case 'stop_loss':
@@ -1252,8 +1293,8 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       return r;
     }
     case 'cancel_orders': {
-      const r = h.cancelOrders(mint);
-      slog(s, 'info', `cancel orders on ${what}: ${r.message}`);
+      const r = h.cancelOrders(mint, action.kinds);
+      slog(s, 'info', `cancel ${action.kinds?.length ? `${action.kinds.join('/')} ` : ''}orders on ${what}: ${r.message}`);
       return { ok: r.ok, message: r.message, count: r.cancelled };
     }
     case 'apply_template': {
@@ -2056,9 +2097,18 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         });
       }
       case 'cancelOrders': {
-        const [mint] = args;
+        const [mint, kindsArg] = args;
         if (!isMint(mint)) return answer(false, undefined, 'cancelOrders: bad mint');
-        return result(await act(s, { type: 'cancel_orders' }, await ctxFor(s, mint)));
+        // An optional list of kinds (2026-09-27): a moonbag drops its stop
+        // and keeps its take-profit rungs. A list that is not a list of
+        // kinds is a bad call, never "cancel everything".
+        let kinds: OrderKind[] | undefined;
+        if (kindsArg !== undefined) {
+          const ok = Array.isArray(kindsArg) && kindsArg.length > 0 && kindsArg.every((k) => typeof k === 'string' && (CANCEL_KINDS as readonly string[]).includes(k));
+          if (!ok) return answer(false, undefined, `cancelOrders: kinds must be a list of ${CANCEL_KINDS.join(' | ')}`);
+          kinds = kindsArg as OrderKind[];
+        }
+        return result(await act(s, kinds ? { type: 'cancel_orders', kinds } : { type: 'cancel_orders' }, await ctxFor(s, mint)));
       }
       case 'clearCompletedOrders':
         // Housekeeping, not an action — no budget cost, safe to call every tick.
@@ -2827,6 +2877,20 @@ export function wantsTicks(mint: string): boolean {
     if (!s.enabled) continue;
     const rt = runtimes.get(s.id);
     if (rt && (rt.subscribed.has(mint) || rt.opened.has(mint))) return true;
+  }
+  return false;
+}
+
+/**
+ * Does any armed script want live ticks for anything at all — a subscription
+ * or a position it opened? Mint-agnostic: asked before the pump-amm feed
+ * decodes a delivery, where the mint is not known yet (2026-09-27).
+ */
+export function wantsAnyTicks(): boolean {
+  for (const s of scripts) {
+    if (!s.enabled) continue;
+    const rt = runtimes.get(s.id);
+    if (rt && (rt.subscribed.size > 0 || rt.opened.size > 0)) return true;
   }
   return false;
 }

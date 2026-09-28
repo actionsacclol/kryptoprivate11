@@ -23,6 +23,16 @@
 //   6. update callout
 //   7. sell after hold period — or at once if the creator sells (v2.2)
 //
+// v2.3 (09-27): a coin that FINISHES ITS CURVE while watched is skipped by
+// default (or confirmed on its pool price — see "A watched coin finishes its
+// curve"); the call and every update read the cap FRESH from the market,
+// never the curve's last figure; a bag that a positions read no longer shows
+// gets no call and no update. Needs the 5.3.0 app for the price of a
+// migrated coin to move at all (5.2.1 froze it at the graduation price).
+// Releasing a moonbag now cancels only the STOP; its take-profit rungs stay
+// armed (REGULARS 09-27: the 4x rung went with the stop, then a $1M run).
+// The ladder is a setting ("Take-profit ladder": one "2x sell 50%" per line;
+// default 2x/50, 4x/50).
 //
 // DISCORD: set a webhook in the settings and each callout is posted there as
 // an embed linking to the callout on pump.fun, and each update that goes out
@@ -56,6 +66,14 @@
     "min": 1,
     "max": 100,
     "help": "SOL-side curve fill at the flag. Rug share (low<0.3x) on 575 flags: <10% 3%, 10-20 6%, 20-30 25%, 30-40 38%, 40+ 81%. 100 = off; unknown is skipped below 100."
+  },
+
+  "afterCurve": {
+    "type": "select",
+    "label": "A watched coin finishes its curve",
+    "options": ["skip it", "confirm on the pool price"],
+    "default": "skip it",
+    "help": "A runner that graduates to PumpSwap while watched. Its curve price is history and the pool is a different market: on 09-27 six calls entered 'at $50k' (the graduation price) were really $2.4k-$18k. 'confirm on the pool price' re-reads the market before buying and needs the pool's own cap to pass the confirm floor."
   },
 
   "minBuyers": {
@@ -147,7 +165,14 @@
     "type": "toggle",
     "label": "Take profits on the way up",
     "default": true,
-    "help": "Take-profit orders: 2x sells half, 4x half of the rest. The last ~25% is a moonbag left riding ONLY after a rung really filled (v2 fix). Off = the timed exit sells everything."
+    "help": "Real take-profit orders from the ladder below, armed ~30-60 s after the buy. What the rungs leave is a moonbag: at the timed exit it keeps riding with its remaining rungs armed and its stop cancelled — ONLY after a rung really filled (v2 fix). Off = the timed exit sells everything."
+  },
+
+  "takeProfitLadder": {
+    "type": "lines",
+    "label": "Take-profit ladder",
+    "default": ["2x sell 50%", "4x sell 50%"],
+    "help": "One rung per line: '<multiple>x sell <percent>%'. The multiple is of your fill price; the percent is of what is STILL held when it fires, so rungs compound (2x 50% then 4x 50% banks ~75% of the bag and leaves ~25% riding). Up to 6 rungs, lowest first. Measured 09-24: 2x/50% banks about the whole cost, so the call is free from there. A line that does not read is skipped; no readable rung = this default."
   },
 
   "stopLossPct": {
@@ -536,7 +561,24 @@ function fillLine(line, t) {
  *  `extra` adds what only the script knows (callMc for {chg} / {callmc}). */
 async function pickLine(mint, lines, extra) {
   const t = await bot.token(mint).catch(() => null);
-  const facts = t ? { ...t, ...(extra ?? {}) } : null;
+  // v2.3: cap, holders and liquidity FRESH from the market (one action).
+  // The cached copy can be the curve's last figures on a coin that moved to
+  // PumpSwap (09-27: calls posted "$50k" on coins at $2.4k). A refused read
+  // (rate limit) falls back to the cache, as before.
+  const m = await WITHIN(bot.market(mint), 5000);
+  const facts = t || m
+    ? {
+        ...(t ?? {}),
+        mint,
+        symbol: t?.symbol || m?.symbol || null,
+        name: t?.name || m?.name || null,
+        marketCapUsd: m?.marketCapUsd ?? t?.marketCapUsd ?? null,
+        holders: m?.holders ?? t?.holders ?? null,
+        liquidityUsd: m?.liquidityUsd ?? t?.liquidityUsd ?? null,
+        priceUsd: m?.priceUsd ?? t?.priceUsd ?? null,
+        ...(extra ?? {})
+      }
+    : null;
   const ready = (lines ?? []).map((l) => fillLine(l, facts)).filter((l) => l);
   return ready.length ? PICK(ready) : null;
 }
@@ -586,6 +628,14 @@ async function dumpReason(mint, hold, pos) {
 }
 
 const PICK = (l) => l[Math.floor(Math.random() * l.length)];
+
+/** The coin has finished its bonding curve and trades on PumpSwap now. */
+const MIGRATED = (t) =>
+  t?.phase === 'completed' || (t?.curvePct ?? 0) >= 100 || (t?.bondingCurvePct ?? 0) >= 100;
+
+/** The user chose to confirm a graduated coin on its pool price. */
+const CONFIRM_ON_POOL = () =>
+  bot.input.afterCurve === 'confirm on the pool price';
 
 const BETWEEN = ([lo, hi]) =>
   lo + Math.random() * (hi - lo);
@@ -652,10 +702,51 @@ async function SAVE(st0) {
 //     leaves it riding (see the EXITS section) so a coin that goes to a
 //     million-dollar cap overnight is still held. Sell it by hand if it moons.
 //     It also keeps the callout alive as long as it is worth pump's $1 floor.
-const TP_LADDER = [
+/** The ladder when the "Take-profit ladder" setting has no readable rung. */
+const TP_LADDER_DEFAULT = [
   { x: 2, sell: 50 },
   { x: 4, sell: 50 },
 ];
+
+/** Most rungs a ladder may carry — each is a real order against the app's cap. */
+const TP_LADDER_MAX = 6;
+
+/**
+ * The take-profit ladder from the "Take-profit ladder" setting (09-27): one
+ * rung per line, "<multiple>x sell <percent>%" — "2x sell 50%", "4x 50",
+ * "3.5x sell 25%". x = price multiple of the fill that fires it; sell = % of
+ * what is STILL held when it fires, so rungs compound. A line that does not
+ * read is skipped (warned once per setting); no readable rung at all = the
+ * default ladder, so an emptied box never silently disarms the plan — the
+ * toggle above is what turns it off. Lowest first, capped at TP_LADDER_MAX.
+ */
+let tpLadderWarned = null;
+function tpLadder() {
+  const lines = Array.isArray(bot.input.takeProfitLadder) ? bot.input.takeProfitLadder : [];
+  const rungs = [];
+  const bad = [];
+  for (const raw of lines) {
+    const m = String(raw).match(/^\s*(\d+(?:\.\d+)?)\s*x\b\D*?(\d+(?:\.\d+)?)\s*%?\s*$/i);
+    const x = m ? Number(m[1]) : NaN;
+    const sell = m ? Number(m[2]) : NaN;
+    if (!(x > 1 && x <= 1000) || !(sell >= 1 && sell <= 100) || rungs.some((r) => r.x === x)) {
+      bad.push(String(raw));
+      continue;
+    }
+    rungs.push({ x, sell: Math.round(sell) });
+  }
+  rungs.sort((a, b) => a.x - b.x);
+  const key = lines.join('\n');
+  if (bad.length && tpLadderWarned !== key) {
+    tpLadderWarned = key;
+    bot.warn(`take-profit ladder: ${bad.length} line(s) not readable (${bad.map((b) => JSON.stringify(b.slice(0, 20))).join(', ')}) — write each rung as "2x sell 50%"${rungs.length ? '' : '; using the default ladder'}`);
+  }
+  return rungs.length ? rungs.slice(0, TP_LADDER_MAX) : TP_LADDER_DEFAULT;
+}
+
+/** What releasing a moonbag cancels: the protective sells. The take-profit
+ *  rungs are NOT on this list — they are the plan's later exits (09-27). */
+const MOONBAG_CANCEL = ['stop_loss', 'trailing_stop', 'sell_on_dev_sell', 'sell_on_migration', 'limit_sell'];
 
 const SHORT = (m) =>
   m.slice(0, 8);
@@ -1163,6 +1254,12 @@ async function passesFilters(t) {
     }
   }
 
+  // Already graduated at the flag (v2.3): the curve is over, unless the user
+  // chose to confirm such coins on their pool price.
+  if (MIGRATED(t) && !CONFIRM_ON_POOL()) {
+    return skip(t, 'curveFull', 'finished its curve (trades on PumpSwap now)');
+  }
+
   // Graduation odds: the flag's own bucket rate. Free — it rides on the flag.
   if (
     bot.input.minOddsPct > 0 &&
@@ -1403,9 +1500,17 @@ async function enter(t) {
     }m`
   );
 
-  // The price right after the fill: the dump check's fallback basis and the
-  // start of the high-water mark (the flag price sits ~19% under a fill).
-  const pxNow = (await bot.price(t.mint).catch(() => null)) ?? t.priceSol ?? null;
+  // The price right after the fill: the dump check's basis and the start of
+  // the high-water mark (the flag price sits ~19% under a fill). bot.price
+  // first — the app's freshest print, which from 5.3.0 follows a coin onto
+  // PumpSwap instead of stopping at its graduation price (09-27) — then the
+  // position's own entry (all-in cost per token: overstates by the fees,
+  // which errs toward NOT calling), then the price the confirm saw.
+  const pxNow =
+    (await bot.price(t.mint).catch(() => null)) ??
+    ((await WITHIN(bot.positions(), 4000)) ?? []).find((p) => p.mint === t.mint)?.entryPriceSol ??
+    t.priceSol ??
+    null;
 
   const newSt = {
     ...st,
@@ -1811,12 +1916,37 @@ function watchVerdict(w) {
  */
 async function watchConfirm(w, v, src) {
   watchers.delete(w.mint);
+  const t = await WITHIN(bot.token(w.mint), 5000);
+  // v2.3: the curve finished while we watched. What the watch measured was
+  // its curve price; the pool is a different market. Skip by default, or
+  // re-read the market and judge the confirm floor on the POOL's cap.
+  let pool = null;
+  if (MIGRATED(t)) {
+    if (!CONFIRM_ON_POOL()) {
+      watchDrop(w, 'finished its curve (trades on PumpSwap now)', true);
+      return;
+    }
+    const m = await WITHIN(bot.market(w.mint), 6000);
+    if (!(m?.priceSol > 0) || !(m?.marketCapUsd > 0)) {
+      // Unknown pool price: kept, judged again on its next close.
+      bot.log(`not confirming ${NAME(w.sym, w.mint)} yet: finished its curve and its pool price is unknown`);
+      watchers.set(w.mint, w);
+      w.fresh = true;
+      return;
+    }
+    const floor = bot.input.confirmMinMcUsd ?? 0;
+    if (floor > 0 && m.marketCapUsd < floor) {
+      watchDrop(w, `finished its curve; on the pool at $${Math.round(m.marketCapUsd)} mc, under the $${floor} confirm floor`, true);
+      return;
+    }
+    pool = { priceSol: m.priceSol, marketCapUsd: m.marketCapUsd };
+    v = { ...v, mc: m.marketCapUsd };
+  }
   const st0 = await bot.getState();
   if ((st0.seen ?? []).includes(w.mint) || (st0.holds ?? []).some((h) => h.mint === w.mint)) {
     bot.unsubscribe(w.mint).catch(() => null);
     return;
   }
-  const t = await WITHIN(bot.token(w.mint), 5000);
   if (bot.input.skipIfDevSold !== false && t?.creatorSold === true) {
     bot.log(`not calling ${NAME(w.sym, w.mint)}: confirmed at +${v.i}m but the creator sold`);
     bot.unsubscribe(w.mint).catch(() => null);
@@ -1827,9 +1957,9 @@ async function watchConfirm(w, v, src) {
     mint: w.mint,
     symbol: t?.symbol || w.sym,
     name: t?.name || w.name,
-    priceSol: t?.priceSol ?? w.last,
-    marketCapUsd: t?.marketCapUsd ?? v.mc ?? null,
-    _conf: `+${v.i}m, ${v.x.toFixed(1)}x the flag`
+    priceSol: pool?.priceSol ?? t?.priceSol ?? w.last,
+    marketCapUsd: pool?.marketCapUsd ?? t?.marketCapUsd ?? v.mc ?? null,
+    _conf: `+${v.i}m, ${v.x.toFixed(1)}x the flag${pool ? ', on the pool' : ''}`
   };
   logRow('CONF ', {
     mint: w.mint,
@@ -2109,9 +2239,12 @@ bot.on('order', async (o) => {
 
   const st = await bot.getState();
   const hold = (st.holds ?? []).find((h) => h.mint === o.mint);
-  if (!hold) return; // not one of ours (or already released) — don't post
+  // A released moonbag's rung still counts and still posts (09-27): its
+  // take-profit rungs stay armed after the timed exit lets it ride.
+  const released = !hold && (st.rid ?? []).includes(o.mint);
+  if (!hold && !released) return; // not one of ours — don't post
 
-  hold.tpFilled = true;
+  if (hold) hold.tpFilled = true;
   st.counts = { ...(st.counts ?? {}), takeProfits: (st.counts?.takeProfits ?? 0) + 1 };
   await SAVE(st);
 
@@ -2119,18 +2252,18 @@ bot.on('order', async (o) => {
   // (hold.px0). The position's pnlPct is against the ALL-IN cost (fees and
   // the token-account deposit), which showed a 2.35x fill as ~2.0x.
   const pxNow = await bot.price(o.mint).catch(() => null);
-  let mult = pxNow && hold.px0 ? pxNow / hold.px0 : null;
+  let mult = pxNow && hold?.px0 ? pxNow / hold.px0 : null;
   if (mult === null) {
     const pos = await WITHIN(bot.positions(), 8000); // a hung wallet read must not hang the pass (09-27 soak)
     const p = Array.isArray(pos) ? pos.find((x) => x.mint === o.mint) : null;
     mult = p && typeof p.pnlPct === 'number' ? 1 + p.pnlPct / 100 : null;
   }
   const pct = Math.round(o.orderAmount ?? 0);
-  const sym = o.symbol || hold.symbol || null;
+  const sym = o.symbol || hold?.symbol || null;
 
   bot.log(`take-profit filled on ${NAME(sym, o.mint)}: trimmed ~${pct}%${mult ? ` at ${mult.toFixed(2)}x the fill` : ''}`);
 
-  const name = o.name || hold.name || null;
+  const name = o.name || hold?.name || null;
   queueDiscord(async () => {
     const facts = await coinFacts(o.mint);
     const link = `https://pump.fun/coin/${o.mint}`;
@@ -2507,8 +2640,9 @@ bot.every(
         if (h.pending || h.devSold || h.tpPlaced || (h.tpTries ?? 0) >= 10 || !heldMap.has(h.mint)) continue;
 
         const done = new Set(h.tpDone ?? []);
+        const ladder = tpLadder();
 
-        for (const rung of TP_LADDER) {
+        for (const rung of ladder) {
           if (done.has(rung.x)) continue;
 
           const o =
@@ -2531,11 +2665,11 @@ bot.every(
 
         h.tpDone = [...done];
 
-        if (done.size >= TP_LADDER.length) {
+        if (done.size >= ladder.length) {
           h.tpPlaced = true;
           bot.log(
             `take-profit ladder armed on ${NAME(h.symbol, h.mint)} — ${
-              TP_LADDER.map((r) => `${r.x}x/${r.sell}%`).join(', ')
+              ladder.map((r) => `${r.x}x/${r.sell}%`).join(', ')
             }`
           );
         } else {
@@ -2620,12 +2754,17 @@ bot.every(
           // the position is known to be up. Unknown or never-trimmed closes.
           // Never a moonbag once the creator sold (v2.2).
           if (tp && !h.devSold && h.tpFilled && p && typeof p.pnlPct === 'number' && p.pnlPct >= 0) {
-            await WITHIN(bot.cancelOrders(h.mint), 4000);
+            // Only the stop goes (09-27): the take-profit rungs stay armed on
+            // the moonbag. REGULARS: the 2x rung filled at 12:52, this line
+            // cancelled the 4x rung at 12:54, and the coin went on to a $1M
+            // cap with nothing left armed to sell into it. An app build
+            // before 5.3.0 ignores the list and cancels every order, as before.
+            await WITHIN(bot.cancelOrders(h.mint, MOONBAG_CANCEL), 4000);
             out.push(h.mint);
             rid.push(h.mint);
             const hc = { ...h };
             queueDiscord(() => closeCall(hc, 'moonbag'), 'close');
-            bot.log(`moonbag left riding on ${NAME(h.symbol, h.mint)} (${Math.round(p.pnlPct)}% up, a take-profit filled) — sell it by hand if it runs`);
+            bot.log(`moonbag left riding on ${NAME(h.symbol, h.mint)} (${Math.round(p.pnlPct)}% up, a take-profit filled) — its take-profit rungs stay armed; sell the rest by hand if it runs`);
             continue;
           }
 
@@ -2754,6 +2893,21 @@ async function socialStep(st, now, pos) {
       return newSt;
     }
 
+    // v2.3: sold since the buy — a take-profit, a stop, or by hand — but not
+    // reconciled yet (that takes two missed reads a minute apart, so one
+    // flaky read cannot cancel a stop). A call on a bag that is gone must
+    // never post (STAQ 09-27: sold 12 s after the buy, called 33 s later).
+    // One miss only DEFERS the call; the reconciliation drops the job when
+    // the miss is real. The 20 s grace covers a holdings read trailing a
+    // buy that just landed.
+    if (Array.isArray(pos) && now - (hold.boughtAt ?? now) > 20_000 && !pos.some((p) => p.mint === job.mint)) {
+      job.notBefore = now + 30_000;
+      bot.log(`not calling ${NAME(job.f?.sym, job.mint)} yet: missing from the positions read (sold?) — checking again`);
+      const newSt = { ...st, callq };
+      await SAVE(newSt);
+      return newSt;
+    }
+
     const bad =
       await dumpReason(job.mint, hold, pos);
 
@@ -2822,6 +2976,17 @@ async function socialStep(st, now, pos) {
       const newSt = { ...st, callq };
       await SAVE(newSt);
       reportStats(newSt);
+
+      // v2.3: the cap AT THE CALL from a FRESH market read (one action).
+      // The cached figure could be the curve's last, which made an update
+      // read "+708% since the call" on a coin up 30% (wiffomo, 09-27).
+      if (held) {
+        const fresh = await WITHIN(coinFacts(job.mint), 6000);
+        if (fresh?.mc > 0) {
+          held.callMc = fresh.mc;
+          await SAVE(newSt);
+        }
+      }
 
       // The call, to Discord — queued, posted later in this or a later pass.
       const f = job.f ?? {};
@@ -2923,6 +3088,15 @@ async function socialStep(st, now, pos) {
     );
 
   if (!ready) return st;
+
+  // v2.3: no update on a bag a positions read no longer shows (sold by an
+  // order or by hand, not yet reconciled) — deferred, like the call.
+  if (Array.isArray(pos) && !pos.some((p) => p.mint === ready.mint)) {
+    ready.nextBumpAt = now + 30_000;
+    bot.log(`no update on ${NAME(ready.symbol, ready.mint)} this pass: missing from the positions read (sold?)`);
+    await SAVE(st);
+    return st;
+  }
 
   // Same check as the call: never bump a coin that is dumping.
   const badUp =
