@@ -80,6 +80,17 @@ function migrateUnsafe(s: AppSettings, fromRevision: number): boolean {
     s.discordRpcEnabled = true;
   }
 
+  if (fromRevision < 7) {
+    // 5.4.0 (2026-09-27): onboarding runs once more for every existing
+    // install, so the keys step's new Jupiter field — and the auto-swap and
+    // scripting changes the ready screen points at — reach people who set
+    // up on an older build. The flow is safe to replay: the legal gate is
+    // skipped when the terms are already accepted, the referral field is
+    // prefilled from the saved answer and left alone when untouched, and
+    // every other step is "skip or save". The stamp stops it re-firing.
+    s.onboarded = false;
+  }
+
   s.settingsRevision = SETTINGS_REVISION;
   return true;
 }

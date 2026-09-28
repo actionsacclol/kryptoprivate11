@@ -553,7 +553,30 @@ export function attachLog(fn: HttpLog): void {
   httpLog = fn;
 }
 
-function park(id: HttpProviderId, retryAfter: string | null, quota = false): number {
+/**
+ * A route's SHAPE for the park log (2026-09-27): the path with any
+ * base58-looking segment replaced by {mint} and the query reduced to its
+ * keys. pump.fun was parked 126 times in six hours on a user's machine and
+ * the log could not say which of its routes the 429s came from — the
+ * creator list, the coin record, the Discover poll — so the budget that
+ * needed lowering could not be named. A shape, not the full path, so the
+ * support bundle's "repeated warning collapses to one line" still holds.
+ */
+export function routeShape(path: string | undefined): string {
+  if (!path) return '';
+  const [p, q] = path.split('?', 2);
+  const shaped = p
+    .split('/')
+    .map((seg) =>
+      /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(seg) ? '{mint}' : /^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(seg) ? '{sig}' : /^0x[0-9a-fA-F]{40}$/.test(seg) ? '{address}' : seg,
+    )
+    .join('/');
+  if (!q) return shaped;
+  const keys = [...new URLSearchParams(q).keys()].sort().join('&');
+  return keys ? `${shaped}?${keys}` : shaped;
+}
+
+function park(id: HttpProviderId, retryAfter: string | null, quota = false, route?: string): number {
   const now = Date.now();
   // Logged only when the park is NEW or longer than the one already running,
   // so a backlog firing into an existing park cannot fill the log with the
@@ -595,7 +618,7 @@ function park(id: HttpProviderId, retryAfter: string | null, quota = false): num
     blockedUntil.set(id, until);
     httpLog(
       'warn',
-      `provider ${id} (${providerHost(id)}) rate limited — paused ${Math.round(length / 1000)}s${count > 1 ? `, strike ${count}` : ''}${retryAfter ? ` (it asked for ${retryAfter})` : ''}. Prices and charts from it are stale until then.`,
+      `provider ${id} (${providerHost(id)}${route ? `, ${routeShape(route)}` : ''}) rate limited — paused ${Math.round(length / 1000)}s${count > 1 ? `, strike ${count}` : ''}${retryAfter ? ` (it asked for ${retryAfter})` : ''}. Prices and charts from it are stale until then.`,
     );
   }
   slowStartUntil.set(id, until + SLOW_START_MS);
@@ -1037,12 +1060,12 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         // calls and 1,743 errors, every one of them certain to fail.
         if (isQuotaExhausted(res.status, detail)) {
           transportFailures += 1;
-          const parkedMs = park(id, null, true);
+          const parkedMs = park(id, null, true, path);
           msg = `${id}: allowance spent — ${detail || `HTTP ${res.status}`}. Paused ${Math.round(parkedMs / 3_600_000)}h; top up the plan or switch it off in Settings.`;
           void res.body?.cancel().catch(() => undefined);
         } else if (res.status === 429) {
           transportFailures += 1;
-          const parkedMs = park(id, res.headers.get('retry-after'));
+          const parkedMs = park(id, res.headers.get('retry-after'), false, path);
           msg = `${id}: rate limited (429) — pausing ${Math.ceil(parkedMs / 1000)}s`;
           // An unread body pins a keep-alive socket until GC.
           void res.body?.cancel().catch(() => undefined);
@@ -1069,7 +1092,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         // refusal names a spent ALLOWANCE, which no cool-down fixes.
         transportFailures += 1;
         const spent = isQuotaExhausted(res.status, verdict.detail ?? '');
-        const parkedMs = park(id, spent ? null : res.headers.get('retry-after'), spent);
+        const parkedMs = park(id, spent ? null : res.headers.get('retry-after'), spent, path);
         const msg = spent
           ? `${id}: allowance spent — ${verdict.detail ?? `HTTP ${res.status}`}. Paused ${Math.round(parkedMs / 3_600_000)}h; top up the plan or switch it off in Settings.`
           : `${id}: rate limited (HTTP ${res.status}${verdict.detail ? ` — ${verdict.detail}` : ''}) — pausing ${Math.ceil(parkedMs / 1000)}s`;

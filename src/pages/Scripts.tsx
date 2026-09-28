@@ -1243,7 +1243,7 @@ function CodeEditor({ draft, setDraft, onReference }: { draft: Draft; setDraft: 
 function VariableGuide({ guideChain = 'solana' as ChainKind }: { guideChain?: ChainKind }) {
   const groups: Array<[string, string]> = [
     ['token', 'Launch feed'],
-    ['market', 'Market providers (when cached)'],
+    ['market', 'Market data — the providers, the Launch tab’s scan and the Links panel (when cached)'],
     ['position', 'Position (when held)'],
     ['runner', 'Runner flag'],
     ['leader', 'Followed wallet'],

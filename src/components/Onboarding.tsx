@@ -23,7 +23,6 @@ import type { RouteId } from './Sidebar';
 import { useAppState } from '../state/AppStateProvider';
 import { GhostButton, PrimaryButton } from './common';
 import { LanguagePicker } from './LanguagePicker';
-import { ThemePicker } from './ThemePicker';
 import { useLocale } from '../state/useLocale';
 import { cls } from '../utils/format';
 
@@ -212,8 +211,10 @@ export function Onboarding({
   const [touched, setTouched] = useState(false);
   const [helius, setHelius] = useState('');
   const [birdeye, setBirdeye] = useState('');
+  const [jupiter, setJupiter] = useState('');
   const [savedHelius, setSavedHelius] = useState(false);
   const [savedBirdeye, setSavedBirdeye] = useState(false);
+  const [savedJupiter, setSavedJupiter] = useState(false);
 
   const refresh = useCallback(async () => {
     const r = await window.krypt.legal.status();
@@ -240,6 +241,12 @@ export function Onboarding({
     void refresh();
   }, [refresh]);
 
+  // A returning install (the 5.4.0 replay) sees the referrer it already gave,
+  // not an empty box that reads as "none".
+  useEffect(() => {
+    if (!touched && settings.referrer && !addr) setAddr(settings.referrer);
+  }, [settings.referrer, touched, addr]);
+
   const problem = touched ? referralProblem(addr, { ownAddresses: [], treasury: TREASURY_ADDRESS }) : null;
 
   if (step === 'loading' || step === 'done') return null;
@@ -252,10 +259,15 @@ export function Onboarding({
   };
 
   /** Persist the referral choice as soon as it is made, so closing the app
-   *  mid-setup does not lose the one answer we cannot ask for again. */
+   *  mid-setup does not lose the one answer we cannot ask for again.
+   *
+   *  Only a field the user TOUCHED is saved. Onboarding replays on 5.4.0
+   *  (settings revision 7) for every existing install, and an untouched
+   *  Continue used to write the empty field over a referrer saved months
+   *  ago — the one answer this screen exists to keep. */
   const goFromFee = async (): Promise<void> => {
     setBusy(true);
-    await updateSettings({ referrer: addr.trim() });
+    if (touched) await updateSettings({ referrer: addr.trim() });
     setBusy(false);
     setStep('keys');
   };
@@ -272,6 +284,15 @@ export function Onboarding({
     if (key.length < 8) return;
     await updateSettings({ data: { ...settings.data, birdeyeApiKey: key } });
     setSavedBirdeye(true);
+  };
+
+  // The same field the Market data settings save (data.jupiterApiKey): a host
+  // switch, not a feature unlock — see MarketDataSettings for the long form.
+  const saveJupiter = async (): Promise<void> => {
+    const key = jupiter.trim();
+    if (key.length < 8) return;
+    await updateSettings({ data: { ...settings.data, jupiterApiKey: key } });
+    setSavedJupiter(true);
   };
 
   const finish = async (): Promise<void> => {
@@ -306,11 +327,11 @@ export function Onboarding({
         {/* ── 0. Language ─────────────────────── */}
         {step === 'language' && (
           <>
+            {/* Language only. The theme picker sat here too until 2026-09-27
+                and made the first screen a wall of swatches; it lives on the
+                Settings page, where a look is chosen once the app is seen. */}
             <div className="px-6 py-4 max-h-[54vh] overflow-y-auto space-y-5">
               <LanguagePicker />
-              <div className="border-t border-white/10 pt-4">
-                <ThemePicker />
-              </div>
             </div>
             <div className="px-6 py-4 border-t border-white/10 flex justify-end">
               <PrimaryButton onClick={() => setStep(legalDone ? 'referral' : 'legal')}>{lang.t('action.continue')}</PrimaryButton>
@@ -433,8 +454,8 @@ export function Onboarding({
               </div>
               <p className="text-body leading-relaxed text-krypt-muted">
                 <span className="text-white">Krypto works right now with no keys at all.</span> It races several free
-                public Solana endpoints for the launch feed. These two are free upgrades — paste them here, or skip and
-                add them any time under Settings.
+                public Solana endpoints for the launch feed. These three are free upgrades — paste them here, or skip
+                and add them any time under Settings.
               </p>
 
               <Field
@@ -465,6 +486,20 @@ export function Onboarding({
                 onLink={() => void window.krypt.app.openExternal('https://bds.birdeye.so')}
               />
 
+              <Field
+                label="Jupiter API key"
+                hint="Optional and free. It unlocks no extra data — it moves every Jupiter call, buy and sell quotes included, off lite-api.jup.ag, which Jupiter is retiring, onto api.jup.ag at its published 1 request a second."
+                value={jupiter}
+                onChange={(v) => {
+                  setJupiter(v);
+                  setSavedJupiter(false);
+                }}
+                placeholder="Jupiter API key"
+                saved={savedJupiter || !!settings.data.jupiterApiKey}
+                link="Get a free key"
+                onLink={() => void window.krypt.app.openExternal('https://portal.jup.ag')}
+              />
+
               <p className="text-label leading-relaxed text-krypt-muted/60">
                 Keys are stored on this machine only and are stripped from recordings. They are never sent to Krypt —
                 there is no Krypt server to send them to.
@@ -483,6 +518,7 @@ export function Onboarding({
                   setBusy(true);
                   if (helius.trim()) await saveHelius();
                   if (birdeye.trim()) await saveBirdeye();
+                  if (jupiter.trim()) await saveJupiter();
                   setBusy(false);
                   setStep('wallet');
                 }}

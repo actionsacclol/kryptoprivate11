@@ -35,15 +35,21 @@ import {
   fieldGuideText,
   RULE_FIELDS,
   SCRIPT_API,
+  SCRIPT_API_DOC,
   SCRIPT_EVENTS_DOC,
   emptyContext,
   withLaunchLinks,
+  withLaunchIntel,
   withMarket,
   marketFactsFromSummary,
   scriptLinksFromSummary,
+  scriptLaunchIntelFromReport,
+  scriptSecurityFromReport,
+  scriptSettingsView,
+  scrubForScript,
   mergeSnapshot,
 } from './.automationshared.mjs';
-import { SCRIPT_METHODS } from './.scriptprotocol.mjs';
+import { SCRIPT_EVENTS, SCRIPT_METHODS } from './.scriptprotocol.mjs';
 
 let passed = 0;
 const cases = [];
@@ -87,7 +93,7 @@ function makeHost(over = {}) {
   // `buyChains` / `sellChains` are recorded SEPARATELY because several pinned
   // assertions deepEqual `buys` against { mint, sol, mode } and must keep
   // exactly that shape — the same rule copytrade.test.mjs follows for `opts`.
-  const calls = { buys: [], buyChains: [], buyCaps: [], sells: [], sellChains: [], toasts: [], notifies: [], watches: [], replies: [], dispatched: [], started: [], stopped: [], orders: [], templates: [], alerts: [], subscribed: [], pins: [] };
+  const calls = { buys: [], buyChains: [], buyCaps: [], sells: [], sellChains: [], toasts: [], notifies: [], watches: [], replies: [], dispatched: [], started: [], stopped: [], orders: [], templates: [], alerts: [], subscribed: [], pins: [], reads: [], housekeeping: [] };
   const book = { paper: [], live: [] };
   const running = new Set();
   const launches = new Map();
@@ -98,16 +104,17 @@ function makeHost(over = {}) {
     launches,
     running,
     pos,
-    buy: async (mint, sol, mode, chain, ownCapSol) => {
-      calls.buys.push({ mint, sol, mode });
+    buy: async (mint, sol, mode, chain, ownCapSol, opts) => {
+      // `opts` only when the call carried some, so the older deep-equals hold.
+      calls.buys.push(opts ? { mint, sol, mode, opts } : { mint, sol, mode });
       calls.buyChains.push(chain ?? null);
       calls.buyCaps.push(ownCapSol ?? null);
       if (over.buyResult) return over.buyResult;
       book[mode].push(pos(mint, sol));
       return { ok: true, message: 'bought' };
     },
-    sell: async (mint, pct, mode, chain) => {
-      calls.sells.push({ mint, pct, mode });
+    sell: async (mint, pct, mode, chain, opts) => {
+      calls.sells.push(opts ? { mint, pct, mode, opts } : { mint, pct, mode });
       calls.sellChains.push(chain ?? null);
       if (over.sellResult) return over.sellResult;
       if (pct >= 100) book[mode] = book[mode].filter((p) => p.mint !== mint);
@@ -153,6 +160,80 @@ function makeHost(over = {}) {
     links: (mint) => over.links?.[mint] ?? null,
     security: async (mint) => over.security?.[mint] ?? null,
     creator: async (mint) => over.creator?.[mint] ?? null,
+    // The Launch tab's cohorts and every other read (2026-09-27). Each
+    // counts its calls on `over` so a test can see what the host was asked.
+    launchIntel: async (mint) => {
+      over.launchIntelCalls = (over.launchIntelCalls ?? 0) + 1;
+      return over.launchIntel?.[mint] ?? null;
+    },
+    launchIntelCached: (mint) => over.launchIntelCached?.[mint] ?? null,
+    holders: async (mint, limit) => {
+      calls.reads.push({ method: 'holders', mint, limit });
+      return over.holders?.[mint] ?? null;
+    },
+    trades: async (mint, limit) => {
+      calls.reads.push({ method: 'trades', mint, limit });
+      return over.trades?.[mint] ?? null;
+    },
+    candles: async (mint, interval, limit) => {
+      calls.reads.push({ method: 'candles', mint, interval, limit });
+      return over.candles?.[mint] ?? null;
+    },
+    search: async (query) => {
+      calls.reads.push({ method: 'search', query });
+      return over.search ?? [];
+    },
+    discover: async (column, limit, chain) => {
+      calls.reads.push({ method: 'discover', column, limit, chain });
+      return over.discover?.[column] ?? [];
+    },
+    callouts: async (limit) => {
+      calls.reads.push({ method: 'callouts', limit });
+      return over.callouts ?? null;
+    },
+    history: (limit) => (over.history ?? []).slice(0, limit),
+    holdings: async (chain) => {
+      calls.reads.push({ method: 'holdings', chain });
+      return over.holdings === undefined ? [] : over.holdings;
+    },
+    solUsd: async () => over.solUsd ?? null,
+    walletScores: (chain, window, limit, only) => ({ onRecord: 0, filtered: only, rows: [], chain, window, limit }),
+    walletRecord: (address, chain) => over.walletRecord?.[address] ?? null,
+    copyConfigs: () => ({ configs: [], stats: {}, liveExecutable: false, liveBlockedReason: 'not armed' }),
+    alerts: () => over.alerts ?? [],
+    cancelOrder: (id) => {
+      calls.housekeeping.push({ method: 'cancelOrder', id });
+      return { ok: true, message: `cancelled ${id}` };
+    },
+    resumeOrders: () => {
+      calls.housekeeping.push({ method: 'resumeOrders' });
+      return { ok: true, message: 'resumed 2' };
+    },
+    removeAlert: (id) => {
+      calls.housekeeping.push({ method: 'removeAlert', id });
+      return { ok: true, message: 'removed' };
+    },
+    muteAlert: (id, muted) => {
+      calls.housekeeping.push({ method: 'muteAlert', id, muted });
+      return { ok: true, message: muted ? 'muted' : 'unmuted' };
+    },
+    clearFiredAlerts: () => {
+      calls.housekeeping.push({ method: 'clearFiredAlerts' });
+      return { ok: true, message: 'cleared 3' };
+    },
+    saveTemplate: (t) => {
+      calls.housekeeping.push({ method: 'saveTemplate', t });
+      return t.name ? { ok: true, message: `Saved “${t.name}”` } : { ok: false, message: 'Give the template a name' };
+    },
+    deleteTemplate: (id) => {
+      calls.housekeeping.push({ method: 'deleteTemplate', id });
+      return { ok: true, message: 'deleted' };
+    },
+    setActiveTemplate: (id) => {
+      calls.housekeeping.push({ method: 'setActiveTemplate', id });
+      return { ok: true, message: id === null ? 'Auto-sell is off' : 'armed' };
+    },
+    settings: () => over.settings ?? { mode: 'paper', execution: { liveSlippagePct: 15 }, strategy: {}, data: { hasBirdeyeKey: false, hasJupiterKey: false }, alerts: {}, evm: {} },
     analyze: async (mint) => {
       over.analyzeCalls = (over.analyzeCalls ?? 0) + 1;
       if (over.analyzeError) throw new Error(over.analyzeError);
@@ -2214,6 +2295,696 @@ test('the shipped script file itself passes the app’s own validation', async (
   assert.ok(src.includes("bundled/scripts/krypto-script.js?raw"), 'built into the app from that file');
   const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   assert.ok(main.includes('automation.seedBundled(BUNDLED_SCRIPTS)'), 'seeded at startup');
+});
+
+// ── The Launch tab's cohorts, and every other read (2026-09-27) ────────
+//
+// A user saw "bundle 44 %, snipers 34 %" on the Launch tab and null in the
+// script's bundledPct / sniperPct for the same coin: the tab measures the
+// launch window itself (shared/launchintel.ts) while those two fields were
+// only ever the providers', and the providers index a new pump coin minutes
+// later, if at all. The report now crosses to scripts three ways — a call, the
+// facts object, and the security report's concentration block — and each is
+// pinned here. The rules: an incomplete scan says nothing (never 0 wallets),
+// held figures are never inferred from bought ones, a provider's number is
+// never overwritten, and the cohorts ride into the facts object only from the
+// memo — a launch event never buys a scan.
+
+const cohort = (over = {}) => ({ wallets: 0, bought: 0, boughtPct: null, sol: 0, heldPct: null, retainedPct: null, stillHolding: null, ...over });
+const fakeLaunchReport = (over = {}, analysisOver = {}) => ({
+  mint: MINT,
+  creator: 'Cre',
+  supply: 1_000_000_000,
+  analysis: {
+    launchSlot: 100,
+    launchTs: 1_700_000_000_000,
+    complete: true,
+    tradesScanned: 80,
+    slotsSpanned: 40,
+    dev: cohort({ wallets: 1, bought: 30_000_000, boughtPct: 3, sol: 1.2, heldPct: 3, retainedPct: 100, stillHolding: 1 }),
+    bundle: cohort({ wallets: 12, bought: 440_000_000, boughtPct: 44, sol: 9.8, heldPct: 38, retainedPct: 86, stillHolding: 11 }),
+    snipers: cohort({ wallets: 20, bought: 340_000_000, boughtPct: 34, sol: 8.1, heldPct: 2, retainedPct: 6, stillHolding: 3 }),
+    wallets: [
+      { address: 'B1', cohort: 'bundle', firstSlot: 100, slotOffset: 0, bought: 100_000_000, boughtPct: 10, sol: 2, soldInWindow: false, heldNow: 100_000_000, heldPct: 10 },
+      { address: 'Cre', cohort: 'dev', firstSlot: 100, slotOffset: 0, bought: 30_000_000, boughtPct: 3, sol: 1.2, soldInWindow: false, heldNow: 30_000_000, heldPct: 3 },
+    ],
+    priced: true,
+    top3BuyersPct: 27,
+    ...analysisOver,
+  },
+  sniperWindowSlots: 20,
+  source: 'pumpswap',
+  note: null,
+  balancesNote: null,
+  generatedAt: Date.now(),
+  ...over,
+});
+
+test('launch cohorts fold into the facts object: bought and held together, never inferred, provider shares left alone, incomplete scans say nothing', () => {
+  const li = scriptLaunchIntelFromReport(fakeLaunchReport());
+  // The mapping lifts the analysis and drops nothing.
+  assert.equal(li.complete, true);
+  assert.equal(li.bundle.boughtPct, 44);
+  assert.equal(li.bundle.heldPct, 38);
+  assert.equal(li.snipers.stillHolding, 3);
+  assert.equal(li.wallets.length, 2);
+  assert.equal(li.wallets[0].cohort, 'bundle');
+  assert.equal(li.wallets[0].slotOffset, 0);
+  assert.equal(li.sniperWindowSlots, 20);
+  assert.equal(li.top3BuyersPct, 27);
+
+  const c = withLaunchIntel(emptyContext(MINT), li);
+  assert.equal(c.launchDevPct, 3);
+  assert.equal(c.launchDevHeldPct, 3);
+  assert.equal(c.launchBundlePct, 44);
+  assert.equal(c.launchBundleHeldPct, 38);
+  assert.equal(c.launchBundleRetainedPct, 86);
+  assert.equal(c.launchBundleWallets, 12);
+  assert.equal(c.launchBundleStillHolding, 11);
+  assert.equal(c.launchSniperPct, 34);
+  assert.equal(c.launchSniperHeldPct, 2);
+  assert.equal(c.launchSniperRetainedPct, 6);
+  assert.equal(c.launchSniperWallets, 20);
+  assert.equal(c.launchSniperStillHolding, 3);
+  assert.equal(c.launchTop3BuyersPct, 27);
+  // No provider figure → the scan's fills the old field, so a script written
+  // against bundledPct starts seeing a number on new pump coins.
+  assert.equal(c.bundledPct, 44);
+  assert.equal(c.sniperPct, 34);
+  // A provider's figure is never overwritten.
+  const withProvider = emptyContext(MINT);
+  withProvider.bundledPct = 12;
+  withProvider.sniperPct = 5;
+  withLaunchIntel(withProvider, li);
+  assert.equal(withProvider.bundledPct, 12);
+  assert.equal(withProvider.sniperPct, 5);
+  assert.equal(withProvider.launchBundlePct, 44, 'the launch field still carries the scan');
+  // Unpriced: bought figures present, held figures null — never inferred.
+  const unpriced = scriptLaunchIntelFromReport(
+    fakeLaunchReport({}, { priced: false, bundle: cohort({ wallets: 12, bought: 440_000_000, boughtPct: 44, sol: 9.8 }), snipers: cohort({ wallets: 20, boughtPct: 34 }), dev: cohort({ wallets: 1, boughtPct: 3 }) }),
+  );
+  const u = withLaunchIntel(emptyContext(MINT), unpriced);
+  assert.equal(u.launchBundlePct, 44);
+  assert.equal(u.launchBundleHeldPct, null);
+  assert.equal(u.launchBundleRetainedPct, null);
+  assert.equal(u.launchBundleStillHolding, null);
+  assert.equal(u.launchBundleWallets, 12, 'the count is known before the balances are');
+  // Incomplete: the launch block was not isolated. Every field stays null —
+  // not "0 wallets", which would be a confident claim about a block nobody saw.
+  const inc = scriptLaunchIntelFromReport(fakeLaunchReport({ note: 'Too much launch traffic' }, { complete: false, dev: cohort(), bundle: cohort(), snipers: cohort(), wallets: [], priced: false, top3BuyersPct: null }));
+  assert.equal(inc.complete, false);
+  assert.equal(inc.note, 'Too much launch traffic');
+  const i = withLaunchIntel(emptyContext(MINT), inc);
+  for (const f of ['launchBundlePct', 'launchBundleWallets', 'launchSniperWallets', 'launchDevPct', 'launchTop3BuyersPct', 'bundledPct', 'sniperPct']) assert.equal(i[f], null, `${f} stays unknown on an incomplete scan`);
+  // No report at all: untouched.
+  const none = withLaunchIntel(emptyContext(MINT), null);
+  assert.equal(none.launchBundlePct, null);
+  // Every launch field is in the guide, Solana-only, scope market.
+  for (const f of ['launchDevPct', 'launchDevHeldPct', 'launchBundlePct', 'launchBundleHeldPct', 'launchBundleRetainedPct', 'launchBundleWallets', 'launchBundleStillHolding', 'launchSniperPct', 'launchSniperHeldPct', 'launchSniperRetainedPct', 'launchSniperWallets', 'launchSniperStillHolding', 'launchTop3BuyersPct']) {
+    const spec = RULE_FIELDS.find((x) => x.id === f);
+    assert.ok(spec, `${f} is in the variable guide`);
+    assert.equal(spec.scope, 'market');
+    assert.equal(fieldAvailableOn(f, 'bnb'), false, `${f} is Solana only`);
+    assert.equal(fieldAvailableOn(f, 'solana'), true);
+  }
+});
+
+test('the security report crosses whole: concentration, rug, odds, creator verdict — and a first launch is no record, not a pass', () => {
+  const report = {
+    mint: MINT,
+    score: 71,
+    checksResolved: 9,
+    checksTotal: 11,
+    checks: [
+      { id: 'mint', label: 'Mint authority', verdict: 'pass', detail: 'revoked', source: 'onchain', weight: 15 },
+      { id: 'bundle_share', label: 'Bundle share', verdict: 'unknown', detail: '44 % bought, 38 % held', source: 'pumpswap', weight: 0, kind: 'fact' },
+    ],
+    concentration: { devPct: 3, top10Pct: 51, top20Pct: 60, insiderPct: null, sniperPct: 34, bundledPct: 44, bundledHeldPct: 38, sniperHeldPct: 2, source: 'pumpswap' },
+    creator: { address: 'Cre', priorLaunches: 2, priorRugs: 0, source: 'derived', history: { address: 'Cre', launches: 7, graduated: 0, graduationRate: 0, firstLaunchAt: 1, lastLaunchAt: 2, medianAthUsd: null, bestAthUsd: null, recent: [], truncated: false, launchesInBusiestDay: 3 } },
+    rug: { windowS: 60, measuredOn: '2026-07-27', population: 'p', flags: [{ id: 'sells_over_buys', label: 'Sells over buys', detail: 'd', badPct: 80, deadPct: 70, gradPct: 1, n: 100, severity: 'hide' }], states: { sells_over_buys: 'fired' }, hide: true, tradesSeen: 40 },
+    volatility: [{ id: 'bundle', label: 'Bundle', detail: 'x', dumpedPct: 40, gradPct: 5, n: 300 }],
+    odds: { model: '2026-07-27', windowS: 60, regime: 'classic', graduate: { bucket: 'top', observedPct: 30, n: 100, basePct: 5, line: 'l' }, mult3: null, mult5: null, footer: 'f', tradesSeen: 40 },
+    descriptive: { socials: { hasAny: true, twitter: true, telegram: false, website: false }, dexPaid: { paid: true, paidAt: 5, boosts: 2, communityTakeover: false, source: 'dexscreener' }, note: 'n' },
+    creatorRecord: { launches: 7, graduated: 0, devMints: 9, devMigrations: 0, rugcheckCreatorRugs: false, source: 'pumpfun' },
+    generatedAt: 123,
+  };
+  const s = scriptSecurityFromReport(report, ['stale price']);
+  assert.equal(s.score, 71);
+  assert.deepEqual(s.warnings, ['stale price']);
+  assert.equal(s.checks[0].kind, 'gate', 'an older row without kind is a gate');
+  assert.equal(s.checks[1].kind, 'fact');
+  assert.equal(s.checks[1].source, 'pumpswap');
+  assert.equal(s.concentration.bundledPct, 44);
+  assert.equal(s.concentration.bundledHeldPct, 38);
+  assert.equal(s.concentration.sniperHeldPct, 2);
+  assert.equal(s.concentration.insiderPct, null, 'unknown stays null');
+  assert.equal(s.rug.hide, true);
+  assert.equal(s.rug.flags[0].id, 'sells_over_buys');
+  assert.equal(s.odds.graduate.observedPct, 30);
+  assert.equal(s.volatility[0].id, 'bundle');
+  assert.equal(s.dexPaid.paid, true);
+  assert.equal(s.dexPaid.boosts, 2);
+  assert.equal(s.creator.launches, 7);
+  assert.equal(s.creator.graduated, 0);
+  assert.equal(s.creator.launchesInBusiestDay, 3);
+  assert.equal(s.creator.devMints, 9);
+  assert.equal(s.creator.rugcheckCreatorRugs, false);
+  assert.equal(s.creator.verdict, 'warn', '7 launches, none graduated');
+  assert.match(s.creator.detail, /none graduated/);
+  assert.equal(s.generatedAt, 123);
+  // First launch: the absence of a record. Null, never green.
+  const first = scriptSecurityFromReport({ ...report, creator: { ...report.creator, history: { ...report.creator.history, launches: 1, graduated: 0 } } }, []);
+  assert.equal(first.creator.verdict, null);
+  assert.match(first.creator.detail, /no record/);
+  // No history at all: the Jupiter floor still reaches the script; verdict null.
+  const none = scriptSecurityFromReport({ ...report, creator: { ...report.creator, history: null } }, []);
+  assert.equal(none.creator.verdict, null);
+  assert.equal(none.creator.launches, 7, 'creatorRecord.launches fills in');
+  assert.equal(none.creator.graduationRate, null);
+  // A factory reads fail.
+  const factory = scriptSecurityFromReport({ ...report, creator: { ...report.creator, history: { ...report.creator.history, launches: 30, launchesInBusiestDay: 14 } } }, []);
+  assert.equal(factory.creator.verdict, 'fail');
+});
+
+test('bot.launchIntel costs an action, answers null off Solana without asking, and the cached scan rides into bot.token', async () => {
+  const report = fakeLaunchReport();
+  const li = scriptLaunchIntelFromReport(report);
+  const over = { launchIntel: { [MINT]: li }, launchIntelCached: { [MINT]: li }, market: { [MINT]: { priceSol: 0.001, priceUsd: 0.2, marketCapUsd: 200_000, liquidityUsd: 40_000, holders: 500, launchpad: 'pumpfun', symbol: 'COPY', name: 'Copy Coin' } } };
+  const h = setup(over);
+  const s = saved({ ...rulesScript(), budget: { ...rulesScript().budget, maxActionsPerMinute: 3 } });
+  auto.setEnabled(s.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'launchIntel', args: [MINT] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'launchIntel', args: ['not a mint'] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'launchIntel', args: [MINT] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 4, method: 'launchIntel', args: [MINT] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 5, method: 'launchIntel', args: [MINT] });
+  await tick();
+  assert.equal(by(1).ok, true);
+  assert.equal(by(1).value.bundle.boughtPct, 44);
+  assert.equal(by(1).value.bundle.heldPct, 38);
+  assert.equal(by(1).value.wallets[0].address, 'B1');
+  assert.equal(by(2).ok, false);
+  assert.match(by(2).error, /bad mint/);
+  assert.equal(by(5).ok, false, 'the 4th real call is over a 3-a-minute budget');
+  assert.match(by(5).error, /actions in a minute/);
+  assert.equal(over.launchIntelCalls, 3, 'the host was asked exactly three times');
+  // The facts object carries the cached scan — and bundledPct from it — with
+  // no extra request: bot.token is a free read and stays one.
+  auto.onSandboxMessage(s.id, { t: 'call', id: 6, method: 'token', args: [MINT] });
+  await tick();
+  assert.equal(by(6).ok, true, by(6).error);
+  assert.equal(by(6).value.launchBundlePct, 44);
+  assert.equal(by(6).value.launchBundleHeldPct, 38);
+  assert.equal(by(6).value.launchSniperStillHolding, 3);
+  assert.equal(by(6).value.bundledPct, 44, 'no provider figure → the scan fills bundledPct');
+  assert.equal(over.launchIntelCalls, 3, 'bot.token bought no scan');
+  // Off Solana: null, and the host is never asked.
+  const h2 = setup(over);
+  over.launchIntelCalls = 0;
+  const evm = saved({ ...defaultScript('rules', 'bnb'), name: 'E' });
+  auto.setEnabled(evm.id, true);
+  auto.onSandboxMessage(evm.id, { t: 'call', id: 1, method: 'launchIntel', args: [MINT] });
+  await tick();
+  assert.equal(h2.calls.replies.find((r) => r.cid === 1).value, null);
+  assert.equal(over.launchIntelCalls, 0);
+});
+
+test('every other read: validated, the network ones charged, the in-memory ones free, an unreadable wallet is unknown not empty', async () => {
+  const over = {
+    holders: { [MINT]: { mint: MINT, totalSupply: 1e9, holderCount: 500, rows: [{ address: 'ta', owner: 'ow', amount: 1e8, pct: 10, tags: ['dev'], label: null }], source: 'onchain', note: null } },
+    candles: { [MINT]: { mint: MINT, interval: '1m', candles: [{ time: 1, open: 1, high: 2, low: 1, close: 2, volume: 3 }], source: 'merged' } },
+    discover: { new: [{ mint: MINT2, symbol: 'NEW' }] },
+    callouts: [{ id: 'c1', mint: MINT, at: 5 }],
+    history: [{ at: 9, mint: MINT, side: 'buy', requested: 0.1, solDelta: -0.102, state: 'reconciled' }],
+    holdings: [{ mint: MINT, symbol: 'COPY', uiAmount: 1000, amountRaw: '1000000000', decimals: 6, tokenAccount: 'ta', programId: 'tok', warning: null }],
+    solUsd: 150,
+    alerts: [{ id: 'a1', kind: 'price_above' }],
+  };
+  const h = setup(over);
+  const s = saved({ ...rulesScript(), budget: { ...rulesScript().budget, maxActionsPerMinute: 100 } });
+  auto.setEnabled(s.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'holders', args: [MINT, 500] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'candles', args: [MINT, '3m', 50] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'candles', args: [MINT] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 4, method: 'discover', args: ['hot'] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 5, method: 'discover', args: ['new', 1000] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 6, method: 'callouts', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 7, method: 'history', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 8, method: 'holdings', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 9, method: 'solUsd', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 10, method: 'walletScores', args: [{ window: 'year' }] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 11, method: 'walletScores', args: [{ limit: 7, onlyWorthALook: true }] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 12, method: 'walletRecord', args: [''] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 13, method: 'search', args: ['   '] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 14, method: 'alerts', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 15, method: 'copyConfigs', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 16, method: 'trades', args: [MINT, 0] });
+  await tick();
+  assert.equal(by(1).value.rows[0].pct, 10);
+  assert.equal(h.calls.reads.find((r) => r.method === 'holders').limit, 100, 'holders limit is held to 100');
+  assert.equal(by(2).ok, false);
+  assert.match(by(2).error, /interval must be one of/);
+  assert.equal(by(3).value.candles.length, 1);
+  assert.equal(h.calls.reads.find((r) => r.method === 'candles').interval, '1m', '1m by default');
+  assert.equal(h.calls.reads.find((r) => r.method === 'candles').limit, 120, '120 bars by default');
+  assert.equal(by(4).ok, false);
+  assert.match(by(4).error, /list must be one of/);
+  assert.equal(by(5).value[0].symbol, 'NEW');
+  assert.equal(h.calls.reads.find((r) => r.method === 'discover').limit, 80, 'discover limit is held to 80');
+  assert.equal(by(6).value[0].id, 'c1');
+  assert.equal(by(7).value[0].solDelta, -0.102);
+  assert.equal(by(8).value[0].uiAmount, 1000);
+  assert.equal(by(9).value, 150);
+  assert.equal(by(10).ok, false);
+  assert.match(by(10).error, /window must be one of/);
+  assert.equal(by(11).value.limit, 7);
+  assert.equal(by(11).value.window, 'week', 'week by default');
+  assert.equal(by(11).value.filtered, true);
+  assert.equal(by(12).ok, false);
+  assert.match(by(12).error, /wallet address/);
+  assert.equal(by(13).ok, false);
+  assert.match(by(13).error, /pass some text/);
+  assert.equal(by(14).value[0].kind, 'price_above');
+  assert.equal(by(15).value.liveBlockedReason, 'not armed');
+  assert.equal(h.calls.reads.find((r) => r.method === 'trades').limit, 1, 'a zero limit is held to 1');
+  // The network reads were charged; history, solUsd, walletScores, walletRecord, copyConfigs and alerts were not.
+  const charged = auto.snapshot().scripts.find((x) => x.id === s.id);
+  assert.ok(charged, 'snapshot has the script');
+  const h2 = setup({ ...over, holdings: null });
+  const s2 = saved({ ...rulesScript(), budget: { ...rulesScript().budget, maxActionsPerMinute: 6 } });
+  auto.setEnabled(s2.id, true);
+  auto.onSandboxMessage(s2.id, { t: 'call', id: 1, method: 'holdings', args: [] });
+  // Six free reads never touch the budget…
+  for (let i = 2; i <= 7; i++) auto.onSandboxMessage(s2.id, { t: 'call', id: i, method: 'history', args: [] });
+  // …six charged ones do: holdings above plus five here fill it, the seventh is refused.
+  for (let i = 8; i <= 13; i++) auto.onSandboxMessage(s2.id, { t: 'call', id: i, method: 'holders', args: [MINT] });
+  await tick();
+  const r2 = (cid) => h2.calls.replies.find((r) => r.cid === cid);
+  assert.equal(r2(1).ok, false, 'an unreadable wallet rejects');
+  assert.match(r2(1).error, /unknown, not empty/);
+  for (let i = 2; i <= 7; i++) assert.equal(r2(i).ok, true, `history #${i} is free`);
+  for (let i = 8; i <= 12; i++) assert.equal(r2(i).ok, true, `holders #${i} fits the budget`);
+  assert.equal(r2(13).ok, false);
+  assert.match(r2(13).error, /actions in a minute/);
+  // Off Solana the Solana-only reads answer null / [] without asking the host.
+  const h3 = setup(over);
+  const evm = saved({ ...defaultScript('rules', 'robinhood'), name: 'E' });
+  auto.setEnabled(evm.id, true);
+  auto.onSandboxMessage(evm.id, { t: 'call', id: 1, method: 'holders', args: [MINT] });
+  auto.onSandboxMessage(evm.id, { t: 'call', id: 2, method: 'callouts', args: [] });
+  auto.onSandboxMessage(evm.id, { t: 'call', id: 3, method: 'alerts', args: [] });
+  auto.onSandboxMessage(evm.id, { t: 'call', id: 4, method: 'discover', args: ['new'] });
+  await tick();
+  const r3 = (cid) => h3.calls.replies.find((r) => r.cid === cid);
+  assert.equal(r3(1).value, null);
+  assert.equal(r3(2).value, null);
+  assert.deepEqual(r3(3).value, []);
+  assert.equal(h3.calls.reads.some((r) => r.method === 'holders' || r.method === 'callouts'), false, 'the host was not asked');
+  assert.equal(h3.calls.reads.find((r) => r.method === 'discover').chain, 'robinhood', 'discover follows the script’s chain');
+});
+
+test('bot.order refuses a market-cap stop instead of arming a percent one, and passes an expiry through', async () => {
+  const h = setup();
+  const live = saved(codeScript({ name: 'l', mode: 'live', budget: { maxSolPerTrade: 0.1, maxBuysPerDay: 5, maxLossSolPerDay: 1, maxOpenPositions: 5, maxActionsPerMinute: 60 } }));
+  auto.setEnabled(live.id, true);
+  // Hold the coin so a stop is allowed at all.
+  auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.05] });
+  await tick();
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  assert.equal(by(1).value.ok, true, by(1).value.message);
+  // Until 2026-09-27 this armed "sell when 20,000 % down" and said ok.
+  auto.onSandboxMessage(live.id, { t: 'call', id: 2, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'mcap_usd', triggerValue: 20_000, amount: 100 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 3, method: 'order', args: [{ mint: MINT2, kind: 'take_profit', triggerBasis: 'price_sol', triggerValue: 0.01, amount: 50 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 4, method: 'order', args: [{ mint: MINT2, kind: 'trailing_stop', triggerBasis: 'mcap_usd', triggerValue: 1, amount: 100 }] });
+  await tick();
+  for (const id of [2, 3, 4]) {
+    assert.equal(by(id).ok, false, `#${id} refused`);
+    assert.match(by(id).error, /must be 'pct'/);
+  }
+  assert.equal(h.calls.orders.length, 0, 'nothing was armed');
+  // An expiry rides through to the order; a bad one is refused, not NaN.
+  const soon = Date.now() + 3_600_000;
+  auto.onSandboxMessage(live.id, { t: 'call', id: 5, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 30, amount: 100, expiresAt: soon }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 6, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 30, amount: 100, expiresAt: 'tomorrow' }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 7, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 30, amount: 100, expiresAt: Date.now() - 1 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 8, method: 'order', args: [{ mint: MINT2, kind: 'sell_on_migration', triggerBasis: 'pct', triggerValue: null, amount: 100, expiresAt: soon }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 9, method: 'order', args: [{ mint: MINT2, kind: 'take_profit', triggerBasis: 'pct', triggerValue: 100, amount: 50 }] });
+  await tick();
+  assert.equal(by(5).value.ok, true, by(5).value.message);
+  assert.equal(h.calls.orders.find((o) => o.kind === 'stop_loss').expiresAt, soon, 'the rule path carries the expiry');
+  assert.equal(by(6).ok, false);
+  assert.match(by(6).error, /epoch milliseconds/);
+  assert.equal(by(7).ok, false);
+  assert.match(by(7).error, /in the past/);
+  assert.equal(by(8).value.ok, true, by(8).value.message);
+  assert.equal(h.calls.orders.find((o) => o.kind === 'sell_on_migration').expiresAt, soon, 'the direct path carries the expiry');
+  assert.equal(h.calls.orders.find((o) => o.kind === 'take_profit').expiresAt, null, 'no expiry is null, never undefined or NaN');
+});
+
+test('the 2026-09-27 reads are sandbox methods, documented, and say what they cost', () => {
+  // holdings answers on every chain (the EVM bridge's holdings); history is
+  // Solana's ledger and says so (empty off Solana) — audit 2026-09-27.
+  const solanaOnly = ['launchIntel', 'holders', 'trades', 'candles', 'search', 'callouts', 'history', 'alerts'];
+  const anyChain = ['discover', 'holdings', 'solUsd', 'walletScores', 'walletRecord', 'copyConfigs'];
+  for (const m of [...solanaOnly, ...anyChain]) {
+    assert.ok(SCRIPT_METHODS.includes(m), `${m} is callable`);
+    const a = SCRIPT_API.find((x) => x.method === m);
+    assert.ok(a, `${m} is documented`);
+    assert.equal(a.action, false, `${m} is a read`);
+  }
+  for (const m of solanaOnly) assert.ok(/Solana only/.test(SCRIPT_API.find((x) => x.method === m).notes), `${m} says it is Solana only`);
+  for (const m of ['launchIntel', 'holders', 'trades', 'candles', 'search', 'discover', 'callouts', 'holdings']) {
+    const a = SCRIPT_API.find((x) => x.method === m);
+    assert.ok(/costs an action/i.test(a.notes), `${m} says it costs an action`);
+    assert.equal(a.charged, true, `${m} is flagged charged, so the reference lists it under the charged reads`);
+  }
+  // Every row that says "costs an action" carries the flag, and the reference has the third group.
+  for (const a of SCRIPT_API) if (!a.action && /costs an action/i.test(a.notes)) assert.equal(a.charged, true, `${a.method} is flagged charged`);
+  assert.ok(SCRIPT_API_DOC.includes('// Reads that leave the machine'), 'the reference separates charged reads from free ones');
+  assert.ok(/REJECTS \(throws\)/.test(SCRIPT_API.find((x) => x.method === 'holdings').notes), 'holdings says it rejects on an unreadable wallet — what the dispatcher does');
+  for (const m of ['history', 'solUsd', 'walletScores', 'walletRecord', 'copyConfigs', 'alerts']) assert.ok(/Free/.test(SCRIPT_API.find((x) => x.method === m).notes), `${m} says it is free`);
+  assert.ok(/never inferred/.test(SCRIPT_API.find((x) => x.method === 'security').notes), 'security says the held shares are measured, not inferred');
+  assert.ok(/complete=false/.test(SCRIPT_API.find((x) => x.method === 'launchIntel').notes), 'launchIntel says what incomplete means');
+  // The harness exposes each one.
+  const body = sandboxPageHtml();
+  for (const m of [...solanaOnly, ...anyChain]) assert.ok(new RegExp(`\\n\\s+${m}\\s*[:(]`).test(body), `${m} is on the bot object`);
+  // And the prompt pack — generated from the same tables — names the new facts.
+  const pack = aiPromptPack();
+  assert.ok(pack.includes('launchBundleHeldPct'), 'the AI pack knows the launch fields');
+  assert.ok(pack.includes('bot.launchIntel('), 'the AI pack knows the call');
+});
+
+// ── Per-trade options, token-amount sells, housekeeping, settings, events (2026-09-27, second pass) ──
+
+const liveBudget = { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 10, maxOpenPositions: 50, maxActionsPerMinute: 100 };
+
+test('bot.buy / bot.sell take an options object: slippage rides to the host bounded, tokens become the share they really are, bad values are refused not defaulted', async () => {
+  const h = setup();
+  const live = saved(codeScript({ mode: 'live', budget: liveBudget }));
+  auto.setEnabled(live.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05, { slippagePct: 5 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 2, method: 'buy', args: [MINT2, 0.05] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 3, method: 'buy', args: [MINT3, 0.05, { slippagePct: 99 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 4, method: 'buy', args: [MINT3, 0.05, 42] });
+  await tick();
+  assert.equal(by(1).value.ok, true, by(1).value.message);
+  assert.deepEqual(h.calls.buys[0].opts, { slippagePct: 5 }, 'the buy carried its own slippage');
+  assert.equal(h.calls.buys[1].opts, undefined, 'no option → the execution setting (undefined at the host)');
+  assert.equal(by(3).ok, false);
+  assert.match(by(3).error, /slippagePct must be 0\.1–50/);
+  assert.equal(by(4).ok, false, 'a number is neither an address nor options');
+  assert.match(by(4).error, /wallet address or an options object/);
+  assert.equal(h.calls.buys.length, 2, 'the refused buys never reached the host');
+  // Sells. The stub position holds 1000 tokens and cost what the buy paid.
+  // The 100 % sell goes LAST: it closes the position, as it should.
+  auto.onSandboxMessage(live.id, { t: 'call', id: 5, method: 'sell', args: [MINT, { tokens: 250 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 7, method: 'sell', args: [MINT, { tokens: 250, pct: 10 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 8, method: 'sell', args: [MINT, { tokens: -1 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 9, method: 'sell', args: [MINT, 50, { slippagePct: 3 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 10, method: 'sell', args: [MINT, { pct: 20, slippagePct: 7 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 11, method: 'sell', args: [MINT, { tokens: 1 }, 'Wallet222222222222222222222222222222222222'] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 6, method: 'sell', args: [MINT, { tokens: 5000 }] });
+  await tick();
+  assert.equal(by(5).value.ok, true, by(5).value.message);
+  assert.equal(h.calls.sells[0].pct, 25, '250 of 1000 tokens is 25 %');
+  assert.equal(h.calls.sells[0].opts, undefined);
+  assert.equal(by(7).ok, false);
+  assert.match(by(7).error, /pct or tokens, not both/);
+  assert.equal(by(8).ok, false);
+  assert.match(by(8).error, /tokens must be a positive number/);
+  assert.equal(by(9).value.ok, true, by(9).value.message);
+  assert.equal(h.calls.sells[1].pct, 50);
+  assert.deepEqual(h.calls.sells[1].opts, { slippagePct: 3 }, 'a percent sell carries its slippage');
+  assert.equal(by(10).value.ok, true, by(10).value.message);
+  assert.equal(h.calls.sells[2].pct, 20, 'pct inside the options object');
+  assert.deepEqual(h.calls.sells[2].opts, { slippagePct: 7 });
+  assert.equal(by(11).ok, false, 'another wallet sells a percent, not a count');
+  assert.match(by(11).error, /percent, not a token count/);
+  assert.equal(by(6).value.ok, true, by(6).value.message);
+  assert.equal(h.calls.sells[3].pct, 100, 'more tokens than held sells everything, never more');
+  // A QUANTITY is capped by the script's share of the bag, never scaled by it
+  // (audit 2026-09-27): the wallet paid twice what this script did for MINT2,
+  // so 800 of 1000 tokens is 80 % asked and 50 % allowed — not 40 %.
+  h.book.live.find((p) => p.mint === MINT2).costSol = 0.1;
+  auto.onSandboxMessage(live.id, { t: 'call', id: 20, method: 'sell', args: [MINT2, { tokens: 800 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 21, method: 'sell', args: [MINT2, { tokens: 250 }] });
+  // Refused, never silently dropped: a slippage on another wallet, a wallet
+  // named twice, a token count that is not a number.
+  const W2 = 'Wallet222222222222222222222222222222222222';
+  auto.onSandboxMessage(live.id, { t: 'call', id: 22, method: 'buy', args: [MINT3, 0.05, { wallet: W2, slippagePct: 2 }] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 23, method: 'sell', args: [MINT2, { pct: 10, wallet: W2 }, W2] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 24, method: 'sell', args: [MINT2, { pct: 10, slippagePct: 2 }, W2] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 25, method: 'sell', args: [MINT2, { tokens: true }] });
+  await tick();
+  assert.equal(by(20).value.ok, true, by(20).value.message);
+  assert.equal(h.calls.sells[4].pct, 50, 'capped at the script’s share, not scaled by it');
+  assert.equal(by(21).value.ok, true, by(21).value.message);
+  assert.equal(h.calls.sells[5].pct, 25, 'under the share it is exactly what was asked');
+  for (const id of [22, 24]) {
+    assert.equal(by(id).ok, false, `#${id} refused`);
+    assert.match(by(id).error, /trading wallet only/);
+  }
+  assert.equal(by(23).ok, false);
+  assert.match(by(23).error, /name the wallet once/);
+  assert.equal(by(25).ok, false);
+  assert.match(by(25).error, /positive number/);
+  assert.equal(h.calls.sells.length, 6, 'the refused sells never reached the host');
+  // A token sell needs a visible position: a live buy seconds old has none yet.
+  const h2 = setup({ realized: 0 });
+  const fresh = saved(codeScript({ mode: 'live', budget: liveBudget }));
+  auto.setEnabled(fresh.id, true);
+  auto.onSandboxMessage(fresh.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
+  await tick();
+  h2.book.live.length = 0; // the holdings read has not caught up
+  auto.onSandboxMessage(fresh.id, { t: 'call', id: 2, method: 'sell', args: [MINT, { tokens: 10 }] });
+  auto.onSandboxMessage(fresh.id, { t: 'call', id: 3, method: 'sell', args: [MINT, 50] });
+  await tick();
+  const r2 = (cid) => h2.calls.replies.find((r) => r.cid === cid);
+  assert.equal(r2(2).value.ok, false);
+  assert.match(r2(2).value.message, /size is not known yet/);
+  assert.equal(r2(3).value.ok, true, 'a percent sell of a fresh buy still goes (the rail reads the balance)');
+});
+
+test('housekeeping: one order, the paused orders, one alert, the fired alerts, the templates — page buttons a script may press', async () => {
+  const h = setup();
+  // LIVE first: orders and templates are live-only, so this is where the
+  // calls go through. Paper is below.
+  const s0 = saved(codeScript({ mode: 'live', budget: liveBudget }));
+  auto.setEnabled(s0.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 1, method: 'cancelOrder', args: ['o_1'] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 2, method: 'cancelOrder', args: [''] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 3, method: 'resumeOrders', args: [] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 4, method: 'removeAlert', args: ['a_1'] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 5, method: 'muteAlert', args: ['a_2', false] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 6, method: 'muteAlert', args: ['a_3'] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 7, method: 'clearFiredAlerts', args: [] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 8, method: 'saveTemplate', args: [{ name: 'Moonbag', stopLossPct: 30, takeProfits: [{ gainPct: 100, sellPct: 50 }, { gainPct: 300, sellPct: 50 }], trailingPct: null, sellOnDevSell: true }] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 9, method: 'saveTemplate', args: [{ name: 'Too many', takeProfits: [{}, {}, {}, {}] }] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 10, method: 'saveTemplate', args: [{ stopLossPct: 30 }] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 11, method: 'deleteTemplate', args: [''] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 12, method: 'deleteTemplate', args: ['t_x'] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 13, method: 'setActiveTemplate', args: [null] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 14, method: 'setActiveTemplate', args: ['builtin-runner'] });
+  auto.onSandboxMessage(s0.id, { t: 'call', id: 15, method: 'settings', args: [] });
+  await tick();
+  assert.equal(by(1).value.ok, true);
+  assert.deepEqual(h.calls.housekeeping[0], { method: 'cancelOrder', id: 'o_1' });
+  assert.equal(by(2).ok, false);
+  assert.match(by(2).error, /pass an id/);
+  assert.equal(by(3).value.ok, true, 'live and unblocked: resume goes through');
+  assert.deepEqual(h.calls.housekeeping.find((x) => x.method === 'resumeOrders'), { method: 'resumeOrders' });
+  assert.equal(by(4).value.ok, true);
+  assert.deepEqual(h.calls.housekeeping.find((x) => x.method === 'muteAlert' && x.id === 'a_2'), { method: 'muteAlert', id: 'a_2', muted: false });
+  assert.deepEqual(h.calls.housekeeping.find((x) => x.method === 'muteAlert' && x.id === 'a_3'), { method: 'muteAlert', id: 'a_3', muted: true }, 'muted by default');
+  assert.equal(by(7).value.ok, true);
+  assert.equal(by(8).value.ok, true, by(8).value.message);
+  const saved8 = h.calls.housekeeping.find((x) => x.method === 'saveTemplate' && x.t.name === 'Moonbag').t;
+  assert.match(saved8.id, /^t_/, 'a new template gets an id');
+  assert.equal(saved8.takeProfits.length, 2);
+  assert.equal(saved8.sellOnDevSell, true);
+  assert.equal(saved8.trailingPct, null);
+  assert.ok(Array.isArray(by(8).value.templates), 'the list comes back');
+  assert.equal(by(9).ok, false);
+  assert.match(by(9).error, /at most 3/);
+  assert.equal(by(10).value.ok, false, 'the store’s validation reaches the script');
+  assert.match(by(10).value.message, /name/);
+  assert.equal(by(11).ok, false);
+  assert.equal(by(12).value.ok, true);
+  assert.equal(by(13).value.ok, true);
+  assert.deepEqual(h.calls.housekeeping.find((x) => x.method === 'setActiveTemplate' && x.id === null), { method: 'setActiveTemplate', id: null });
+  assert.equal(by(14).value.ok, true);
+  assert.equal(by(15).value.execution.liveSlippagePct, 15);
+  // PAPER: orders and templates are refused with the reason and the host is
+  // never asked — a rehearsal must not pull a real stop or change what the
+  // user's manual buys arm (audit 2026-09-27). Alerts are neither paper nor
+  // live and still work.
+  const hp = setup();
+  const paper = saved(codeScript({ budget: liveBudget }));
+  auto.setEnabled(paper.id, true);
+  const gated = [['cancelOrder', ['o_1']], ['resumeOrders', []], ['saveTemplate', [{ name: 'X', stopLossPct: 30, takeProfits: [], trailingPct: null }]], ['deleteTemplate', ['t_x']], ['setActiveTemplate', [null]]];
+  for (const [i, [m, a]] of gated.entries()) auto.onSandboxMessage(paper.id, { t: 'call', id: i + 1, method: m, args: a });
+  auto.onSandboxMessage(paper.id, { t: 'call', id: 20, method: 'removeAlert', args: ['a_1'] });
+  auto.onSandboxMessage(paper.id, { t: 'call', id: 21, method: 'clearFiredAlerts', args: [] });
+  await tick();
+  const rp = (cid) => hp.calls.replies.find((r) => r.cid === cid);
+  for (let i = 1; i <= gated.length; i++) {
+    assert.equal(rp(i).ok, true, `paper ${gated[i - 1][0]} answers, not throws`);
+    assert.equal(rp(i).value.ok, false, `paper ${gated[i - 1][0]} is refused`);
+    assert.match(rp(i).value.message, /paper/);
+  }
+  assert.equal(hp.calls.housekeeping.filter((x) => x.method !== 'removeAlert' && x.method !== 'clearFiredAlerts').length, 0, 'the host was never asked to touch an order or a template');
+  assert.equal(rp(20).value.ok, true, 'alerts are neither paper nor live');
+  assert.equal(rp(21).value.ok, true);
+  // Live: resume goes through when live is possible, and is refused with the reason when not.
+  const h2 = setup({ liveBlocked: 'not armed' });
+  const live = saved(codeScript({ mode: 'live', budget: liveBudget }));
+  auto.setEnabled(live.id, true);
+  auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'resumeOrders', args: [] });
+  await tick();
+  assert.equal(h2.calls.replies[0].value.ok, false);
+  assert.match(h2.calls.replies[0].value.message, /not armed/);
+  const h3 = setup();
+  const live3 = saved(codeScript({ mode: 'live', budget: liveBudget }));
+  auto.setEnabled(live3.id, true);
+  auto.onSandboxMessage(live3.id, { t: 'call', id: 1, method: 'resumeOrders', args: [] });
+  await tick();
+  assert.equal(h3.calls.replies[0].value.ok, true);
+  assert.deepEqual(h3.calls.housekeeping, [{ method: 'resumeOrders' }]);
+  // Off Solana every one is refused by name.
+  const h4 = setup();
+  const evm = saved({ ...defaultScript('code', 'bnb'), name: 'E', code: "bot.on('launch', () => {})" });
+  auto.setEnabled(evm.id, true);
+  for (const [i, m] of ['cancelOrder', 'resumeOrders', 'removeAlert', 'muteAlert', 'clearFiredAlerts', 'saveTemplate', 'deleteTemplate', 'setActiveTemplate'].entries()) {
+    auto.onSandboxMessage(evm.id, { t: 'call', id: i + 1, method: m, args: ['x'] });
+  }
+  await tick();
+  for (const r of h4.calls.replies) {
+    assert.equal(r.ok, false);
+    assert.match(r.error, /Solana only/);
+  }
+  assert.equal(h4.calls.housekeeping.length, 0);
+});
+
+test('bot.settings is scrubbed: no key, token, URL or referrer crosses, and "a key is set" is all a script learns', () => {
+  const fake = {
+    settingsRevision: 3,
+    rpc: { httpUrl: 'https://mainnet.helius-rpc.com/?api-key=SECRET-1', wssUrl: 'wss://x', heliusApiKey: 'SECRET-2', extraWssUrls: ['wss://y'] },
+    strategy: { minScore: 70, minUniqueBuyers: 12, evalWindowSec: 15 },
+    execution: { liveEnabled: true, maxLiveSol: 0.5, liveSlippagePct: 15, mevMode: 'fast', useJito: true, jitoTipPercentile: 75 },
+    data: { networkDataEnabled: true, loadTokenImages: true, providers: { jupiter: true, birdeye: false }, birdeyeApiKey: 'SECRET-3', jupiterApiKey: '', giphyApiKey: 'SECRET-4', tenorApiKey: '', discoverLimit: 40 },
+    alerts: { desktopNotifications: true, sound: false, repeatCooldownSec: 60 },
+    ai: { provider: 'openai', apiKey: 'SECRET-5' },
+    bots: { telegramToken: 'SECRET-6' },
+    mcp: { token: 'SECRET-7', port: 4321 },
+    evm: { slippagePct: 8, rpcUrl: 'https://evm.example/SECRET-8', referrer: '0xref' },
+    referrer: 'RefWallet',
+    hotkeys: { enabled: false },
+  };
+  const v = scriptSettingsView(fake);
+  const text = JSON.stringify(v);
+  for (const s of ['SECRET', 'https://', 'wss://', 'helius', 'RefWallet', '0xref', 'apiKey', 'telegramToken', '"token"', 'port']) assert.ok(!text.includes(s), `${s} never crosses`);
+  assert.equal(v.data.loadTokenImages, true, 'a name the pattern catches but that is plainly no secret is let through (audit 2026-09-27)');
+  assert.equal(v.mode, 'live');
+  assert.equal(v.execution.liveSlippagePct, 15);
+  assert.equal(v.execution.mevMode, 'fast');
+  assert.equal(v.strategy.minScore, 70);
+  assert.equal(v.data.providers.jupiter, true);
+  assert.equal(v.data.hasBirdeyeKey, true, 'THAT a key is set is fine');
+  assert.equal(v.data.hasJupiterKey, false);
+  assert.equal(v.data.birdeyeApiKey, undefined);
+  assert.equal(v.evm.slippagePct, 8);
+  assert.equal(v.alerts.repeatCooldownSec, 60);
+  assert.equal(v.rpc, undefined, 'the RPC block is not offered at all');
+  assert.equal(v.ai, undefined);
+  // The scrub itself: nested, arrays, functions.
+  const s = scrubForScript({ a: 1, secretKey: 2, nested: { url: 'x', fine: 'y', list: ['https://z', 'ok'] }, fn: () => 1 });
+  assert.deepEqual(s, { a: 1, nested: { fine: 'y', list: ['ok'] } });
+});
+
+test('new events: migration to every Solana script, devSell to holders and subscribers, holdings pushed, copyFill diffed by state, runnerExpired from the list', async () => {
+  const h = setup();
+  const c = saved(codeScript({ budget: liveBudget }));
+  auto.setEnabled(c.id, true);
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'ready' });
+  const named = (n) => h.calls.dispatched.filter((d) => d.name === n);
+  // Migration: heard whether or not the coin is held.
+  auto.onMigration(MINT);
+  await tick(30);
+  assert.equal(named('migration').length, 1);
+  assert.equal(named('migration')[0].payload.mint, MINT);
+  assert.equal(named('migration')[0].payload.migrated, true);
+  // Dev sell: not held, not subscribed → silence. Subscribed → heard, with what was sold.
+  auto.onDevSell(MINT2, { sol: 1.5, tokens: 20_000_000, priceSol: 0.00000008 });
+  await tick(30);
+  assert.equal(named('devSell').length, 0, 'a dev sell on a coin the script ignores is not delivered');
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'subscribe', args: [MINT2] });
+  await tick();
+  auto.onDevSell(MINT2, { sol: 1.5, tokens: 20_000_000, priceSol: 0.00000008 });
+  await tick(30);
+  assert.equal(named('devSell').length, 1);
+  assert.equal(named('devSell')[0].payload.devSoldSol, 1.5);
+  assert.equal(named('devSell')[0].payload.devSoldTokens, 20_000_000);
+  assert.equal(named('devSell')[0].payload.creatorSold, true);
+  assert.equal(named('devSell')[0].payload.priceSol, 0.00000008);
+  // Holdings: the engine's rows, in the script's shape; an unreadable mint is unknown, not fine.
+  auto.onEngineEvent({ kind: 'holdings', at: 77, data: [{ mint: MINT, tokenAccount: 'ta', amountRaw: '1000000000', uiAmount: 1000, decimals: 6, symbol: 'COPY', warning: null }, { mint: MINT2, tokenAccount: 'tb', amountRaw: '5', uiAmount: 5, decimals: 0, symbol: null }] });
+  await tick(30);
+  assert.equal(named('holdings').length, 1);
+  assert.equal(named('holdings')[0].payload.at, 77);
+  assert.equal(named('holdings')[0].payload.holdings[0].warning, null);
+  assert.match(named('holdings')[0].payload.holdings[1].warning, /unknown/);
+  // Copy fills: a new row, a state change, never a repeat; another chain's row never reaches a Solana script.
+  const row = { id: 'ct1', configId: 'cfg', mode: 'paper', wallet: 'Lead', mint: MINT, symbol: 'COPY', at: 5, theirSol: 2, ourSol: 0.05, entryPriceSol: 1e-8, exitPriceSol: null, closedAt: null, pnlSol: null, state: 'open', reason: null };
+  const snap = (recent) => ({ configs: [], stats: {}, recent, liveExecutable: false, liveBlockedReason: null, watch: {}, leaders: {} });
+  // The FIRST snapshot is reloaded history and only seeds the diff — it used
+  // to push up to 100 stale rows into every script's 50-slot queue (audit
+  // 2026-09-27). A repeat of it raises nothing either.
+  auto.onEngineEvent({ kind: 'copy', snapshot: snap([row]) });
+  auto.onEngineEvent({ kind: 'copy', snapshot: snap([row]) });
+  await tick(30);
+  assert.equal(named('copyFill').length, 0, 'the first snapshot seeds; a repeat is silent');
+  auto.onEngineEvent({ kind: 'copy', snapshot: snap([{ ...row, state: 'closed', pnlSol: 0.01 }, { ...row, id: 'ct2', kind: 'exit', parentId: 'ct1', state: 'closed' }, { ...row, id: 'ct3', chain: 'bnb', state: 'skipped', reason: 'budget' }]) });
+  await tick(30);
+  assert.equal(named('copyFill').length, 2, 'a changed row and a new row; the BNB row is not a Solana script’s');
+  const closed = named('copyFill').find((d) => d.payload.id === 'ct1');
+  assert.equal(closed.payload.state, 'closed');
+  assert.equal(closed.payload.pnlSol, 0.01);
+  assert.equal(closed.payload.side, 'buy');
+  assert.equal(closed.payload.configId, 'cfg');
+  assert.equal(named('copyFill').find((d) => d.payload.id === 'ct2').payload.side, 'sell', 'a mirrored exit is a sell');
+  assert.ok(!named('copyFill').some((d) => d.payload.id === 'ct3'), 'a BNB row is not a Solana script’s');
+  auto.onEngineEvent({ kind: 'copy', snapshot: snap([{ ...row, state: 'closed', pnlSol: 0.01 }]) });
+  await tick(30);
+  assert.equal(named('copyFill').length, 2, 'the same state again is not an event');
+  // Runner expiry: flagged, then gone from the list.
+  const flag = { mint: MINT3, name: 'x', symbol: 'RUN', creator: 'c', flaggedAt: Date.now(), windowS: 60, bucket: 'top', observedPct: 30, basePct: 5, n: 100 };
+  auto.onEngineEvent({ kind: 'runner', runner: flag });
+  await tick(30);
+  auto.onEngineEvent({ kind: 'runners', runners: [flag] });
+  await tick(30);
+  assert.equal(named('runnerExpired').length, 0, 'still listed → not expired');
+  auto.onEngineEvent({ kind: 'runners', runners: [] });
+  await tick(30);
+  assert.equal(named('runnerExpired').length, 1);
+  assert.equal(named('runnerExpired')[0].payload.mint, MINT3);
+  // A rules script hears none of these (no trigger exists), and nothing throws.
+  const h2 = setup();
+  const r = saved(rulesScript());
+  auto.setEnabled(r.id, true);
+  auto.onMigration(MINT);
+  auto.onEngineEvent({ kind: 'holdings', at: 1, data: [] });
+  await tick(30);
+  assert.equal(h2.calls.dispatched.length, 0);
+  // Every event is documented, and every documented event exists.
+  for (const e of SCRIPT_EVENTS) assert.ok(SCRIPT_EVENTS_DOC.some((d) => d.event === e), `${e} is documented`);
+  for (const d of SCRIPT_EVENTS_DOC) assert.ok(SCRIPT_EVENTS.includes(d.event), `${d.event} exists`);
+  const on = SCRIPT_API.find((a) => a.method === 'on');
+  for (const e of ['migration', 'devSell', 'holdings', 'copyFill', 'runnerExpired']) assert.ok(on.notes.includes(e), `bot.on lists ${e}`);
 });
 
 await run();

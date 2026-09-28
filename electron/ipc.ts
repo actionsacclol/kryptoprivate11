@@ -80,6 +80,8 @@ import * as pumpAuth from './system/pumpAuth';
 import * as pumpProfile from './system/pumpProfile';
 import * as pumpSocial from './system/pumpSocial';
 import * as swap from './engine/swap';
+import * as usdcSweep from './engine/usdcSweep';
+import { USDC_MINT } from './engine/tokenWithdraw';
 import * as bridge from './engine/bridge';
 import type { BridgeDraft } from '@shared/bridge';
 import { WSOL_MINT, type SwapDraft } from '@shared/swap';
@@ -191,6 +193,9 @@ export function getEngine(): SniperEngine {
         if ((ev.kind === 'fill' && ev.state !== 'failed') || ev.kind === 'paper') engine?.markPortfolioDirty();
         // User scripts see the same events the UI does, after it.
         automation.onEngineEvent(ev);
+        // The active wallet's token accounts changed — a USDC reward landing
+        // is exactly that. The sweep looks soon rather than at its next poll.
+        if (ev.kind === 'holdings') usdcSweep.kick();
       },
     );
   }
@@ -2566,6 +2571,25 @@ export function registerIpc(): void {
     };
   };
 
+  // Auto-swap USDC → SOL (2026-09-27). Every Solana wallet, on a slow timer
+  // and sooner when the active wallet's holdings change; the SAME swap path
+  // as the rewards panel's button below, so the fee is billed like on every
+  // swap. Rules in shared/usdcSweep.ts; the setting on the Sol Wallet page.
+  usdcSweep.attach({
+    enabled: () => store.load().execution.autoSwapUsdc !== false,
+    live: () => swapDeps().live,
+    wallets: () => wallet.list().map((w) => ({ id: w.id, publicKey: w.publicKey, label: w.label })),
+    usdcHeld: async (publicKey) => {
+      const { usdcHeld } = await import('./engine/tokenWithdraw');
+      return usdcHeld(swapDeps().httpUrl, publicKey);
+    },
+    swap: (walletId, usdc) =>
+      swap.execute({ chain: 'solana', inputMint: USDC_MINT, outputMint: WSOL_MINT, amount: usdc, slippagePct: 1, speed: 'normal' }, swapDeps(), false, walletId),
+    log: (level, line) => (level === 'warn' ? logger.warn(line) : logger.info(line)),
+    announce: (line) => getEngine().announce('info', line),
+  });
+  usdcSweep.start();
+
   const swapDraftOf = (raw: unknown): SwapDraft | null => {
     const d = raw as Partial<SwapDraft> | null;
     if (!d || typeof d.inputMint !== 'string' || typeof d.outputMint !== 'string') return null;
@@ -4493,6 +4517,9 @@ export function registerIpc(): void {
       const rows = await evmRail.holdings(chain);
       return rows.map((h) => ({ token: h.token, symbol: h.symbol, amount: h.amount, priceNative: h.priceNative }));
     },
+    // The chain's Discover column for a script on that chain — the same read
+    // the MCP find_tokens tool makes (2026-09-27).
+    discover: async (chain, column, limit) => (await evmDiscover.discover(chain, column, limit)).rows,
   });
   evmScanner.setCurveLookup((chain, curve) => evmDiscover.tokenForCurve(chain, curve));
 

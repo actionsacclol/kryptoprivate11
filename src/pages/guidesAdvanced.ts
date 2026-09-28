@@ -944,20 +944,23 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       {
         heading: 'Key bot.* calls',
         lines: [
-          'bot.buy(mint, sol, address?) and bot.sell(mint, pct, address?) run in the script’s mode. The optional address names one of your other wallets (Solana only), and only after you accept “Trading from your other wallets”.',
+          'bot.buy(mint, sol, address?) and bot.sell(mint, pct, address?) run in the script’s mode. The optional address names one of your other wallets (Solana only), and only after you accept “Trading from your other wallets”. Either call also takes an options object instead: {slippagePct} (0.1–50) for that one trade, {wallet} for the address, and on a sell {tokens} to sell a quantity instead of a percent.',
+          'Housekeeping: bot.cancelOrder(id), bot.resumeOrders(), bot.removeAlert(id), bot.muteAlert(id, muted), bot.clearFiredAlerts(), bot.saveTemplate({…}), bot.deleteTemplate(id), bot.setActiveTemplate(id | null) — the page buttons, from a script. bot.settings() reads the app’s settings with every key and URL removed.',
           'bot.subscribe(mint) streams ticks without pinning and costs no action. bot.watch(mint) also pins the coin to the Watchlist and costs one action.',
           'bot.order({mint, kind, triggerBasis, triggerValue, amount}) places a real advanced order: stop_loss, take_profit, trailing_stop, limit_buy, limit_sell, sell_on_dev_sell, sell_on_migration or buy_on_migration.',
           'bot.clearCompletedOrders() removes finished orders so the 200-order cap does not start refusing new ones. It costs no action and is Solana only. Call it every loop in a long-running script.',
           'bot.discord(\'fieldName\', embed) takes the name of a webhook-type @inputs field, never a URL. Only Discord hosts are accepted, bot.input shows the URL redacted, it works on paper, and it costs one action.',
           'bot.callout / bot.calloutReply post publicly on pump.fun with a line saying krypt.cc posted it. A script will not call the same coin from the same account twice in one run. Nothing is posted on paper.',
-          'Reads: bot.token, bot.market (slow), bot.links (free), bot.security and bot.creator (one action each), bot.analyze (spends your AI key, 20/hour per script, cached 10 min), bot.positions, bot.orders, bot.runners, bot.leaders, bot.wallet, bot.wallets.',
+          'Reads: bot.token, bot.market (slow), bot.links (free), bot.security (the whole report: concentration, rug rules, odds, creator), bot.creator, bot.launchIntel (the Launch tab’s dev / bundle / sniper cohorts, bought AND still held), bot.holders, bot.trades, bot.candles, bot.search, bot.discover, bot.callouts, bot.holdings (one action each), bot.analyze (spends your AI key, 20/hour per script, cached 10 min), and free: bot.positions, bot.orders, bot.runners, bot.leaders, bot.wallet, bot.wallets, bot.history, bot.solUsd, bot.walletScores, bot.walletRecord, bot.copyConfigs, bot.alerts.',
+          'After bot.launchIntel(mint) the cohorts ride into the facts object for 45 s as launchBundlePct, launchBundleHeldPct, launchSniperPct… and fill bundledPct / sniperPct where no provider had them. Not fetched on every launch: pump’s swap-api blocks the app past ~20 quick calls, so ask for the coins you are about to act on.',
           'State: bot.getState / bot.setState keep up to 16 KB of JSON across restarts. bot.stat / bot.stats set the widget and cost nothing. bot.every takes 5–3600 s; bot.at(\'HH:MM\') runs daily.',
         ],
       },
       {
         heading: 'Events',
         lines: [
-          'The events are launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule and interval. A script’s handlers run one at a time.',
+          'The events are launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval, migration, devSell, holdings, copyFill and runnerExpired. A script’s handlers run one at a time.',
+          'migration fires for every coin that graduates; devSell only for coins the script holds or subscribed to; holdings whenever the wallet’s token accounts change; copyFill when copy trading opens, closes or skips a copy; runnerExpired when a flag ages off the list.',
           'launchUpdate fires at most once per 2 s per token. The event queue holds 50 events and drops launch chatter first.',
           'launchUpdate keeps firing only while a coin is tracked: during the 15 s evaluation window, for 15 min after a runner flag, while held, or while subscribed or watched. Call bot.subscribe(mint) on a runner you plan to act on.',
           'position fires about every 5 s for each held position and on every fill. tick fires at most once a second per token.',

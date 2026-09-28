@@ -66,13 +66,15 @@ import * as launchIntel from '../data/launchIntel';
 import * as xStatsStore from '../data/xStats';
 import * as linkIntel from '../data/linkIntel';
 import * as siteReadStore from '../data/siteRead';
-import { marketFactsFromSummary, scriptLinksFromSummary } from '@shared/automation';
+import { marketFactsFromSummary, scriptLinksFromSummary, scriptLaunchIntelFromReport, scriptSecurityFromReport, scriptSettingsView, scriptHoldingFromWallet } from '@shared/automation';
+import * as pumpCallouts from '../data/providers/pumpCallouts';
+import { newestFirst } from '@shared/callouts';
 import { countReuse, parseXLink } from '@shared/xLink';
 import type { AiAnalysis } from '@shared/ai';
 import * as advOrders from './advOrders';
 import * as ledger from './ledger';
 import * as scout from './walletScout';
-import { rankScout, summarise, tradeId } from '@shared/walletScout';
+import { applyScoutFilters, rankScout, scoutFiltersAllOn, summarise, tradeId } from '@shared/walletScout';
 import * as paperBook from './paperBook';
 import * as walletWatcher from './walletWatcher';
 import { PAPER_FILL_MODEL, paperToPosition, modelledPaperFill, paperHistoryRows } from '@shared/paper';
@@ -286,6 +288,9 @@ export interface EvmCopyBridge {
    *  script with an EMPTY list, which refuses an exit rather than offering it
    *  the wrong chain's bags. */
   holdings?(chain: EvmChainKind): Promise<Array<{ token: string; symbol: string; amount: number; priceNative: number | null }>>;
+  /** The chain's own Discover column, for `bot.discover` on an EVM script.
+   *  Optional: a rail without one answers an empty list. (2026-09-27) */
+  discover?(chain: EvmChainKind, column: import('@shared/market').DiscoverColumn, limit: number): Promise<import('@shared/market').TokenSummary[]>;
   /** The same tokens WITH cost basis, from the EVM ledger's reconciled fills.
    *  Optional: a rail that cannot answer leaves a script with an empty list
    *  rather than positions it cannot price. */
@@ -952,8 +957,8 @@ export class SniperEngine {
       // connection reaches `hostBuy` / `hostSell` directly (2026-09-21). They
       // were duplicated for a day and that is exactly how an EVM routing rule
       // ends up fixed on one path and not the other.
-      buy: (mint, sol, mode, chain, ownCapSol) => this.hostBuy(mint, sol, mode, chain, ownCapSol),
-      sell: (mint, pct, mode, chain) => this.hostSell(mint, pct, mode, chain),
+      buy: (mint, sol, mode, chain, ownCapSol, opts) => this.hostBuy(mint, sol, mode, chain, ownCapSol, opts),
+      sell: (mint, pct, mode, chain, opts) => this.hostSell(mint, pct, mode, chain, opts),
       liveBlockedReason: (chain) =>
         chain && chain !== 'solana'
           ? (this.evmCopy ? this.evmCopy.blocked(chain) : 'EVM trading is not available in this build')
@@ -1037,18 +1042,152 @@ export class SniperEngine {
       security: async (mint, chain) => {
         if (chain && chain !== 'solana') return null;
         try {
+          // The WHOLE report (2026-09-27) — concentration, rug rules, odds,
+          // the creator record — through the one shared mapping, so the
+          // token page and the script agree about the same coin.
           const d = await market.tokenDetail(mint);
-          return {
-            score: d.security.score,
-            checksResolved: d.security.checksResolved,
-            checksTotal: d.security.checksTotal,
-            checks: d.security.checks.map((c) => ({ id: c.id, label: c.label, verdict: c.verdict, detail: c.detail })),
-            warnings: d.warnings,
-          };
+          return scriptSecurityFromReport(d.security, d.warnings);
         } catch {
           return null;
         }
       },
+      // The Launch tab's cohorts (2026-09-27). `market.launchIntel` holds the
+      // pumpswap-provider switch and the 45 s memo; the cached read is the
+      // memo alone, which is what lets the cohorts ride into every facts
+      // object without a launch event ever buying a scan.
+      launchIntel: async (mint, chain) => {
+        if (chain && chain !== 'solana') return null;
+        try {
+          return scriptLaunchIntelFromReport(await market.launchIntel(mint));
+        } catch {
+          return null;
+        }
+      },
+      launchIntelCached: (mint, chain) => {
+        if (chain && chain !== 'solana') return null;
+        const r = launchIntel.launchIntelIfCached(mint);
+        return r ? scriptLaunchIntelFromReport(r) : null;
+      },
+      // Every other read the app has (2026-09-27): what the panels and the
+      // MCP tools show, unchanged. A provider that throws answers null (or
+      // an empty list) — the script's own "unknown", never a crash.
+      holders: async (mint, limit, chain) => {
+        if (chain && chain !== 'solana') return null;
+        try {
+          return await market.holders(mint, limit);
+        } catch {
+          return null;
+        }
+      },
+      trades: async (mint, limit, chain) => {
+        if (chain && chain !== 'solana') return null;
+        try {
+          return await market.trades(mint, limit);
+        } catch {
+          return null;
+        }
+      },
+      candles: async (mint, interval, limit, chain) => {
+        if (chain && chain !== 'solana') return null;
+        try {
+          return await market.candlesFast(mint, interval, limit);
+        } catch {
+          return null;
+        }
+      },
+      search: async (query, chain) => {
+        if (chain && chain !== 'solana') return [];
+        try {
+          return await market.search(query);
+        } catch {
+          return [];
+        }
+      },
+      discover: async (column, limit, chain) => {
+        try {
+          if (chain && chain !== 'solana') return this.evmCopy?.discover ? await this.evmCopy.discover(chain, column, limit) : [];
+          return await market.discover(column, limit);
+        } catch {
+          return [];
+        }
+      },
+      callouts: async (limit, chain) => {
+        if (chain && chain !== 'solana') return null;
+        // Null, not [], when pump is not answering: "no callouts" and "we
+        // could not ask" are different answers. Newest first, as promised.
+        const rows = await pumpCallouts.calloutFeed().catch(() => null);
+        return rows ? newestFirst(rows).slice(0, limit) : null;
+      },
+      // The Solana ledger's fills plus the paper book. The EVM rails keep
+      // their own ledger, which no script read reaches yet — an empty list
+      // there, said in the API notes.
+      history: (limit, chain) => (chain && chain !== 'solana' ? [] : this.tradeHistory().slice(0, limit)),
+      holdings: async (chain) => {
+        if (chain && chain !== 'solana') {
+          if (!this.evmCopy?.holdings) return null;
+          try {
+            const rows = await this.evmCopy.holdings(chain);
+            return rows.map((r) => ({
+              mint: r.token,
+              symbol: r.symbol || null,
+              uiAmount: r.amount,
+              amountRaw: null,
+              decimals: null,
+              tokenAccount: null,
+              programId: null,
+              warning: 'not checked on this chain',
+            }));
+          } catch {
+            return null;
+          }
+        }
+        try {
+          const fast = this.holdingsCached();
+          const data = fast && !fast.stale ? fast.data : (await this.holdings()).data ?? null;
+          if (!data) return null;
+          // The one shared mapper — the `holdings` EVENT uses it too, so the
+          // read and the push can never drift apart.
+          return data.map(scriptHoldingFromWallet);
+        } catch {
+          // A thrown read is the same unknown as a failed one: null, which the
+          // dispatcher turns into "unknown, not empty" (audit 2026-09-27).
+          return null;
+        }
+      },
+      solUsd: () => market.solUsd().catch(() => null),
+      walletScores: (chain, window, limit, onlyWorthALook) => {
+        const rows = rankScout(
+          scout
+            .wallets(chain)
+            .map((x) => summarise(x, window))
+            .filter((r) => r.buys + r.sells > 0),
+          'copyScore',
+        );
+        const shown = onlyWorthALook ? applyScoutFilters(rows, scoutFiltersAllOn()) : rows;
+        return { onRecord: rows.length, filtered: onlyWorthALook, rows: shown.slice(0, limit) };
+      },
+      walletRecord: (address, chain) => {
+        // Scout keys every chain's wallets lower-cased (walletScout.ts note()).
+        const key = address.toLowerCase();
+        const rec = scout.wallets(chain).find((x) => x.address === key) ?? null;
+        return rec ? { wallet: rec, saved: scout.isSaved(chain, key) } : null;
+      },
+      copyConfigs: () => {
+        const snap = this.copySnapshot();
+        return { configs: snap.configs, stats: snap.stats, liveExecutable: snap.liveExecutable, liveBlockedReason: snap.liveBlockedReason };
+      },
+      alerts: () => alerts.all(),
+      // Housekeeping the pages have (2026-09-27): each is the page button's
+      // own engine call, so a script and a click do the same thing.
+      cancelOrder: (id) => this.cancelOrder(id),
+      resumeOrders: () => this.resumeOrders(),
+      removeAlert: (id) => this.removeAlert(id),
+      muteAlert: (id, muted) => this.muteAlert(id, muted),
+      clearFiredAlerts: () => this.clearFiredAlerts(),
+      saveTemplate: (t) => templateStore.upsert(t),
+      deleteTemplate: (id) => templateStore.remove(id),
+      setActiveTemplate: (id) => templateStore.setActive(id),
+      settings: () => scriptSettingsView(this.getSettings()),
       creator: async (mint, chain) => {
         if (chain && chain !== 'solana') return null;
         let creator = market.summaryIfCached(mint)?.creator ?? this.tokens.get(mint)?.createEvent.creator ?? null;
@@ -1341,6 +1480,7 @@ export class SniperEngine {
         this.log('info', `DBC: ${mint.slice(0, 8)}… completed its curve`);
         advOrders.onTick({ mint, priceSol: this.lastKnownPriceSol.get(mint) ?? 0, mcapUsd: null, migrated: true });
         alerts.onTick({ mint, migrated: true, curvePct: 100 });
+        automation.onMigration(mint);
       },
       log: (level, line) => this.log(level, line),
     });
@@ -6180,6 +6320,9 @@ export class SniperEngine {
         curvePct: curveProgressPct(ev.virtualSolReserves),
         devSold: creatorSold,
       });
+      // Scripts holding or subscribed to the coin hear the creator's sell
+      // as a `devSell` event (2026-09-27), with what was sold.
+      if (creatorSold) automation.onDevSell(ev.mint, { sol: Number(ev.solAmount) / 1e9, tokens: Number(ev.tokenAmount) / 1e6, priceSol });
       copyTrade.markToMarket(ev.mint, priceSol);
       // Copy trading needs BOTH sides from a followed wallet — the
       // smart-money block further down only fires on first buys.
@@ -6358,6 +6501,9 @@ export class SniperEngine {
       migrated: true,
     });
     alerts.onTick({ mint, symbol: t?.row.symbol, migrated: true, curvePct: 100 });
+    // Scripts hear it as a `migration` event (2026-09-27), the same moment
+    // the migration orders and alerts do.
+    automation.onMigration(mint);
     this.liveCurves.complete(mint);
     // Every pump migration lands in the pool derived from the mint, so its
     // swaps map back to this coin from here on — even when the amm feed's
@@ -6710,7 +6856,7 @@ export class SniperEngine {
    * do to a click. `mode` is the CALLER's paper/live, which is not always the
    * app's — a paper script on a live app must simulate.
    */
-  async hostBuy(mint: string, sol: number, mode: 'paper' | 'live', chain?: ChainKind, ownCapSol?: number): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }> {
+  async hostBuy(mint: string, sol: number, mode: 'paper' | 'live', chain?: ChainKind, ownCapSol?: number, opts?: { slippagePct?: number }): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }> {
     // Robinhood Chain / BNB go out on their own rail, the same one copy
     // trading uses. Routed BEFORE the Solana path on purpose: a caller on an
     // EVM chain whose buy fell through to `testTrade` would spend SOL on a
@@ -6732,12 +6878,14 @@ export class SniperEngine {
       const claim = traderClaimFor({ walletId: null }, mint);
       if (claim) return { ok: false, message: `Buy not sent — ${claim}` };
     }
-    const r = await this.testTrade(mint, sol, mode === 'paper', { ownCapSol });
+    // A script's own slippage for this one trade (2026-09-27); the execution
+    // setting otherwise. Bounded by the caller (automation.ts).
+    const r = await this.testTrade(mint, sol, mode === 'paper', { ownCapSol, slippagePct: opts?.slippagePct });
     return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
   }
 
   /** The sell half of `hostBuy`. Same rule: the caller's mode, the app's rails. */
-  async hostSell(mint: string, pct: number, mode: 'paper' | 'live', chain?: ChainKind): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }> {
+  async hostSell(mint: string, pct: number, mode: 'paper' | 'live', chain?: ChainKind, opts?: { slippagePct?: number }): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }> {
     if (chain && chain !== 'solana') {
       if (mode === 'paper') return this.evmPaperSell(chain, mint, pct);
       if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
@@ -6753,7 +6901,7 @@ export class SniperEngine {
       if (r.ok) this.emit({ kind: 'paper', mint, side: 'sell' });
       return { ok: r.ok, message: r.message, realizedSol: typeof r.realizedSol === 'number' ? r.realizedSol : null };
     }
-    const r = await this.manualSell(mint, pct);
+    const r = await this.manualSell(mint, pct, opts?.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {});
     return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending', realizedSol: null };
   }
 

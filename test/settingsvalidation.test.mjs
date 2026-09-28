@@ -209,7 +209,12 @@ console.log('settingsvalidation: all tests passed');
   // already on disk.
   assert.match(src, /if \(fromRevision < 6\) \{/, 'revision-6 step exists');
   assert.match(src, /s\.discordRpcEnabled = true;/, 'revision 6 turns presence on');
-  assert.match(types, /SETTINGS_REVISION = 6;/);
+  // Revision 7 (5.4.0) replays onboarding once: existing installs see the
+  // Jupiter key step. The referral answer survives the replay (Onboarding.tsx
+  // prefills it and only saves a field the user touched).
+  assert.match(src, /if \(fromRevision < 7\) \{/, 'revision-7 step exists');
+  assert.match(src, /s\.onboarded = false;/, 'revision 7 replays onboarding');
+  assert.match(types, /SETTINGS_REVISION = 7;/);
   assert.match(types, /discordRpcEnabled: true,/, 'presence is the default');
   assert.match(types, /localTxBuild: true,/, 'local builder is the default');
   console.log('ok  revision-3 migration disables only the old breaker defaults, gated by revision');

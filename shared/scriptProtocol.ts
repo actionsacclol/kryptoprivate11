@@ -73,6 +73,36 @@ export const SCRIPT_METHODS = [
   'security',
   'creator',
   'analyze',
+  // Every other read the app has (2026-09-27): the Launch tab's cohorts,
+  // holders, the trade tape, candles, search and Discover, the callouts
+  // feed, this install's fills, the wallet's bags, SOL/USD, Wallet Scout,
+  // the copy configs and the alerts. Reads, all of them.
+  'launchIntel',
+  'holders',
+  'trades',
+  'candles',
+  'search',
+  'discover',
+  'callouts',
+  'history',
+  'holdings',
+  'solUsd',
+  'walletScores',
+  'walletRecord',
+  'copyConfigs',
+  'alerts',
+  // Housekeeping the pages have and scripts did not (2026-09-27): one order
+  // by id, the paused orders, one alert, the fired alerts, the templates.
+  'cancelOrder',
+  'resumeOrders',
+  'removeAlert',
+  'muteAlert',
+  'clearFiredAlerts',
+  'saveTemplate',
+  'deleteTemplate',
+  'setActiveTemplate',
+  /** The app's settings, read-only and without a single key or URL. */
+  'settings',
   'positions',
   'orders',
   'runners',
@@ -87,7 +117,30 @@ export const SCRIPT_METHODS = [
 export type ScriptMethod = (typeof SCRIPT_METHODS)[number];
 
 /** Events main may push. */
-export const SCRIPT_EVENTS = ['launch', 'launchUpdate', 'runner', 'position', 'tick', 'leaderTrade', 'order', 'alert', 'fill', 'schedule', 'interval'] as const;
+export const SCRIPT_EVENTS = [
+  'launch',
+  'launchUpdate',
+  'runner',
+  'position',
+  'tick',
+  'leaderTrade',
+  'order',
+  'alert',
+  'fill',
+  'schedule',
+  'interval',
+  // 2026-09-27: the engine's other moments, which scripts could only infer.
+  /** A coin's curve completed and it migrated to a pool. */
+  'migration',
+  /** The creator wallet sold, on a coin the script holds or subscribed to. */
+  'devSell',
+  /** The trading wallet's token accounts changed. */
+  'holdings',
+  /** Copy trading opened, closed or skipped a copy. */
+  'copyFill',
+  /** A runner flag expired off the list. */
+  'runnerExpired',
+] as const;
 export type ScriptEvent = (typeof SCRIPT_EVENTS)[number];
 
 /** A handler that has not finished by then is a runaway. */
@@ -351,8 +404,12 @@ export function sandboxPageHtml(): string {
      * Buy with this chain's trading wallet, or with another of your own —
      * pass its ADDRESS as the third argument (see bot.wallets).
      */
-    buy: (mint, sol, wallet) => call('buy', wallet === undefined ? [mint, sol] : [mint, sol, str(wallet)]),
-    sell: (mint, pct, wallet) => call('sell', wallet === undefined ? [mint, pct] : [mint, pct, str(wallet)]),
+    // The third argument is an ADDRESS (a string) or an options object
+    // {wallet, slippagePct}; a sell's second may be a percent or
+    // {pct | tokens, slippagePct, wallet}. Objects pass through as they are:
+    // main reads and bounds every field.
+    buy: (mint, sol, wallet) => call('buy', wallet === undefined ? [mint, sol] : [mint, sol, wallet !== null && typeof wallet === 'object' ? wallet : str(wallet)]),
+    sell: (mint, pct, wallet) => call('sell', wallet === undefined ? [mint, pct] : [mint, pct, wallet !== null && typeof wallet === 'object' ? wallet : str(wallet)]),
     /** Your own wallets: [{address, label, active}]. No keys, ever. */
     wallets: () => call('wallets', []),
     sellAll: () => call('sellAll', []),
@@ -427,6 +484,30 @@ export function sandboxPageHtml(): string {
     security: (mint) => call('security', [mint]),
     creator: (mint) => call('creator', [mint]),
     analyze: (mint) => call('analyze', [mint]),
+    /** The Launch tab's cohorts: who bought the first blocks and what they hold now. */
+    launchIntel: (mint) => call('launchIntel', [mint]),
+    holders: (mint, limit) => call('holders', limit === undefined ? [mint] : [mint, Number(limit)]),
+    trades: (mint, limit) => call('trades', limit === undefined ? [mint] : [mint, Number(limit)]),
+    candles: (mint, interval, limit) => call('candles', [mint, interval === undefined ? '1m' : str(interval), limit === undefined ? 120 : Number(limit)]),
+    search: (query) => call('search', [str(query === undefined ? '' : query)]),
+    discover: (list, limit) => call('discover', [str(list === undefined ? 'new' : list), limit === undefined ? 20 : Number(limit)]),
+    callouts: (limit) => call('callouts', limit === undefined ? [] : [Number(limit)]),
+    history: (limit) => call('history', limit === undefined ? [] : [Number(limit)]),
+    holdings: () => call('holdings', []),
+    solUsd: () => call('solUsd', []),
+    walletScores: (opts) => call('walletScores', [opts && typeof opts === 'object' ? opts : {}]),
+    walletRecord: (address) => call('walletRecord', [str(address === undefined ? '' : address)]),
+    copyConfigs: () => call('copyConfigs', []),
+    alerts: () => call('alerts', []),
+    cancelOrder: (id) => call('cancelOrder', [str(id === undefined ? '' : id)]),
+    resumeOrders: () => call('resumeOrders', []),
+    removeAlert: (id) => call('removeAlert', [str(id === undefined ? '' : id)]),
+    muteAlert: (id, muted) => call('muteAlert', [str(id === undefined ? '' : id), muted !== false]),
+    clearFiredAlerts: () => call('clearFiredAlerts', []),
+    saveTemplate: (tpl) => call('saveTemplate', [tpl && typeof tpl === 'object' ? tpl : {}]),
+    deleteTemplate: (id) => call('deleteTemplate', [str(id === undefined ? '' : id)]),
+    setActiveTemplate: (id) => call('setActiveTemplate', [id === null || id === undefined ? null : str(id)]),
+    settings: () => call('settings', []),
     positions: () => call('positions', []),
     orders: (mint) => call('orders', mint === undefined ? [] : [mint]),
     runners: () => call('runners', []),

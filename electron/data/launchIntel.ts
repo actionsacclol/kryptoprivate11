@@ -147,6 +147,18 @@ export async function launchIntel(mint: string, httpUrl: string): Promise<Launch
   return hit ?? empty(mint, 'analysis failed');
 }
 
+/**
+ * The report from the memo alone — no fetch, no RPC. Null when nothing is
+ * cached (or it has aged out). This is how a script's facts object carries
+ * the Launch tab's cohorts without a launch event ever buying a scan: the
+ * numbers ride along for the 45 s after `bot.launchIntel(mint)` or
+ * `bot.security(mint)`, or after a person opens the coin's page — the page
+ * fills this memo once, on open, so they age out 45 s later. (2026-09-27)
+ */
+export function launchIntelIfCached(mint: string): LaunchIntelReport | null {
+  return cached<LaunchIntelReport>(`li:${mint}`);
+}
+
 // ── The shared launch source ──────────────────────────────────────────
 //
 // Both the token page (`launchIntel`) and the rug filter (`rugReportFor`)

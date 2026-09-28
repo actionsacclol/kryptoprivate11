@@ -25,6 +25,7 @@ import {
   clearCache,
   setJupiterApiKey,
   jupiterKeyed,
+  routeShape,
 } from './.http.mjs';
 
 let hits = [];
@@ -562,6 +563,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   });
   assert.equal(gone, null, 'past grace there is nothing to serve');
   console.log('ok  grace expires — a stale value is a bridge, not a memory');
+}
+
+// 2026-09-27: the park log names the route's SHAPE. pump.fun was parked 126
+// times in six hours on a user's machine and the log could not say whether
+// the creator list, the coin record or the Discover poll was doing it. A
+// shape — mints and addresses replaced, the query reduced to its keys — so
+// two parks on the same route still read as one repeated line in the
+// support bundle, whichever coin or creator each asked about.
+{
+  assert.equal(routeShape('/coins?offset=100&limit=100&creator=Cre111&sort=created_timestamp&order=DESC&includeNsfw=true'), '/coins?creator&includeNsfw&limit&offset&order&sort');
+  assert.equal(routeShape('/coins-v2/5vPUcAb7HVr7dKB5FXYuKYufgLL1DtzgAcdYzME3pump'), '/coins-v2/{mint}');
+  assert.equal(routeShape('/coins/5vPUcAb7HVr7dKB5FXYuKYufgLL1DtzgAcdYzME3pump?sync=true'), '/coins/{mint}?sync');
+  assert.equal(routeShape('/tokens/0x1234567890abcdef1234567890abcdef12345678'), '/tokens/{address}');
+  assert.equal(routeShape('/tx/4AqMzoBvFUHzGUExPWmZcEw3MvtCf32NPwA2zFYZdUT5Jt72DcePPFUBvVhqZCCirvTU6RAwSZyKb48okfJwHBKL'), '/tx/{sig}', 'a signature is masked too');
+  assert.equal(routeShape('/home-feed'), '/home-feed');
+  assert.equal(routeShape(''), '');
+  assert.equal(routeShape(undefined), '');
+  // Two creators' lists are one shape.
+  assert.equal(routeShape('/coins?creator=A111&limit=100'), routeShape('/coins?creator=B222&limit=100'));
+  console.log('ok  the park log names the route shape, never the coin or creator');
 }
 
 console.log('\nhttp layer: all rate-limit rules hold');

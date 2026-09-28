@@ -778,6 +778,12 @@ export function WalletPage() {
                 description="When pump.fun upgrades its program, live switches off while the app re-checks it against real launches — usually within seconds. With this on, live switches back on by itself if the check passes and live was on before. A failed check never re-arms. You get a notification either way."
               />
               <Switch
+                checked={settings.execution.autoSwapUsdc !== false}
+                onChange={(v) => void updateSettings({ execution: { ...settings.execution, autoSwapUsdc: v } })}
+                label="Auto-swap USDC to SOL"
+                description="Any USDC that lands in one of your Solana wallets — callout rewards, mostly — is swapped to SOL within minutes while live is armed, through the same path as the Swap page (Krypt's fee applies, like on every swap). Minimum 0.25 USDC, one attempt per wallet every 10 minutes. Turn off to hold USDC or send it out yourself from the callout rewards panel."
+              />
+              <Switch
                 checked={settings.execution.autoSellOnExit}
                 onChange={(v) => void updateSettings({ execution: { ...settings.execution, autoSellOnExit: v } })}
                 label="Auto-sell on stop or crash"

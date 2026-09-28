@@ -46,6 +46,7 @@ import {
   withGlobals,
   withLeader,
   withLaunchLinks,
+  withLaunchIntel,
   withMarket,
   withOrder,
   withPosition,
@@ -62,6 +63,10 @@ import {
   type ScriptLinks,
   type ScriptSecurity,
   type ScriptCreator,
+  type ScriptLaunchIntel,
+  type ScriptHolding,
+  type ScriptSettingsView,
+  scriptHoldingFromWallet,
   type RuleAction,
   type RuleContext,
   type ScriptLogLine,
@@ -76,11 +81,19 @@ import { MAX_STAT_KEYS, MIN_INTERVAL_S, type SandboxToMain, type ScriptStatValue
 import { REPLY_BUDGET, THESIS_BUDGET, calloutPageUrl } from '@shared/calloutAuto';
 import { redactWebhook, scriptEmbed, type ScriptEmbed } from '@shared/webhook';
 import type { EngineEvent, LaunchRow } from '@shared/types';
+import { CANDLE_INTERVALS, DISCOVER_COLUMNS, type CandleInterval, type CandleSeries, type DiscoverColumn, type HolderReport, type TokenSummary, type TradeRow } from '@shared/market';
+import type { Callout } from '@shared/callouts';
+import type { TradeHistoryRow } from '@shared/portfolio';
+import type { ScoutRow, ScoutWallet, ScoutWindow } from '@shared/walletScout';
+import type { CopySnapshot } from '@shared/copytrade';
+import type { Alert } from '@shared/alerts';
+import type { OrderTemplate } from '@shared/orderTemplates';
+import type { CopyTrade } from '@shared/copytrade';
 import { nativeSymbolOf } from '@shared/evm';
 import type { ChainKind } from '@shared/evm';
 import type { EvmScanLaunch } from '@shared/evmScan';
 import type { RunnerFlag } from '@shared/runners';
-import { TRIGGER_BASES } from '@shared/orders';
+import { TRIGGER_BASES, isPctKind } from '@shared/orders';
 import type { NewOrderRequest, OrderKind, TriggerBasis } from '@shared/orders';
 import type { AlertKind, NewAlertRequest } from '@shared/alerts';
 import * as recorder from './recorder';
@@ -136,10 +149,10 @@ export interface AutomationHost {
    * enforced. It replaces the app's manual per-trade cap for this buy rather
    * than adding to it — a script's budget is the authority on its own size.
    */
-  buy(mint: string, sol: number, mode: ScriptMode, chain?: ChainKind, ownCapSol?: number): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }>;
+  buy(mint: string, sol: number, mode: ScriptMode, chain?: ChainKind, ownCapSol?: number, opts?: ScriptTradeOpts): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }>;
   /** A sell of `pct`% of what is held, in the script's mode. `realizedSol`
    *  when the fill can say (paper: exact). */
-  sell(mint: string, pct: number, mode: ScriptMode, chain?: ChainKind): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }>;
+  sell(mint: string, pct: number, mode: ScriptMode, chain?: ChainKind, opts?: ScriptTradeOpts): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }>;
   /** Why NO live action can execute right now, or null. Paper ignores it. */
   liveBlockedReason(chain?: ChainKind): string | null;
   /** Why a live BUY specifically cannot (entry breakers). Never blocks a sell. */
@@ -163,6 +176,56 @@ export interface AutomationHost {
   security(mint: string, chain?: ChainKind): Promise<ScriptSecurity | null>;
   /** The creator's launch record — a round trip. Solana only. */
   creator(mint: string, chain?: ChainKind): Promise<ScriptCreator | null>;
+  /**
+   * The Launch tab's cohorts — a round trip (1–2 pump swap-api calls plus one
+   * RPC batch, memoised 45 s by the data layer). Solana only. (2026-09-27)
+   */
+  launchIntel(mint: string, chain?: ChainKind): Promise<ScriptLaunchIntel | null>;
+  /** The same report from the memo alone — free, null when nothing is
+   *  cached. This is how the cohorts ride into every facts object without a
+   *  launch event ever buying a scan. Optional so a test host can leave it out. */
+  launchIntelCached?(mint: string, chain?: ChainKind): ScriptLaunchIntel | null;
+  // ── Every other read the app has (2026-09-27) ─────────────────────────
+  // Each is what the matching panel or MCP tool shows, unchanged. The
+  // network ones are charged as actions by the dispatcher; the in-memory
+  // ones are free. Solana-only ones answer null off Solana.
+  /** The Holders panel. */
+  holders(mint: string, limit: number, chain?: ChainKind): Promise<HolderReport | null>;
+  /** The Trades panel: the app's own tape when it has one, else a provider's. */
+  trades(mint: string, limit: number, chain?: ChainKind): Promise<{ rows: TradeRow[]; source: string; note: string | null } | null>;
+  /** The chart's candles, tape merged with providers. */
+  candles(mint: string, interval: CandleInterval, limit: number, chain?: ChainKind): Promise<CandleSeries | null>;
+  /** Token search (Jupiter). */
+  search(query: string, chain?: ChainKind): Promise<TokenSummary[]>;
+  /** A Discover column, on the script's chain. */
+  discover(column: DiscoverColumn, limit: number, chain?: ChainKind): Promise<TokenSummary[]>;
+  /** pump.fun's public callouts feed, newest first. Null when pump is not answering. */
+  callouts(limit: number, chain?: ChainKind): Promise<Callout[] | null>;
+  /** Every fill this install made, newest first. */
+  history(limit: number, chain?: ChainKind): TradeHistoryRow[];
+  /** Every token the active wallet holds on the chain. Null when the wallet could not be read. */
+  holdings(chain?: ChainKind): Promise<ScriptHolding[] | null>;
+  /** SOL in USD from the cached price provider. */
+  solUsd(): Promise<number | null>;
+  /** The Wallet Scout board on a chain. */
+  walletScores(chain: ChainKind, window: ScoutWindow, limit: number, onlyWorthALook: boolean): { onRecord: number; filtered: boolean; rows: ScoutRow[] };
+  /** One wallet's Scout record on a chain. */
+  walletRecord(address: string, chain: ChainKind): { wallet: ScoutWallet; saved: boolean } | null;
+  /** The Copy Trading configs and their records — never the recent-rows firehose. */
+  copyConfigs(): Pick<CopySnapshot, 'configs' | 'stats' | 'liveExecutable' | 'liveBlockedReason'>;
+  /** Every alert on the Alerts page. */
+  alerts(): Alert[];
+  // ── Housekeeping the pages have (2026-09-27) ───────────────────────────
+  cancelOrder(id: string): { ok: boolean; message: string };
+  resumeOrders(): { ok: boolean; message: string };
+  removeAlert(id: string): { ok: boolean; message: string };
+  muteAlert(id: string, muted: boolean): { ok: boolean; message: string };
+  clearFiredAlerts(): { ok: boolean; message: string };
+  saveTemplate(t: OrderTemplate): { ok: boolean; message: string };
+  deleteTemplate(id: string): { ok: boolean; message: string };
+  setActiveTemplate(id: string | null): { ok: boolean; message: string };
+  /** The app's settings, scrubbed of every key and URL (shared/automation.ts). */
+  settings(): ScriptSettingsView;
   /** The AI second opinion. Spends the user's own key on an uncached call;
    *  throws with the reason when AI is off. Solana only. */
   analyze(mint: string, chain?: ChainKind): Promise<AiAnalysis>;
@@ -382,6 +445,15 @@ let positionTimer: NodeJS.Timeout | null = null;
 const orderStates = new Map<string, string>();
 /** Alert id → last fired-at seen. */
 const alertFires = new Map<string, number | null>();
+/** Runner flags seen, so an expiry can be told from a list that never had
+ *  the mint (2026-09-27). Bounded: pruned to what the last list still held. */
+let knownRunners = new Set<string>();
+/** Copy trade id → last state seen, to diff snapshots into copyFill events. */
+const copyStates = new Map<string, string>();
+/** False until the first copy snapshot has seeded the map (it is history). */
+let copySeeded = false;
+/** Most copyFill events one snapshot may raise — a real burst is a few. */
+const COPY_FILLS_PER_SNAPSHOT = 10;
 
 export function attach(h: AutomationHost): void {
   host = h;
@@ -1020,6 +1092,7 @@ async function ctxFor(s: UserScript, mint: string, base?: RuleContext): Promise<
   let c = base ?? (row ? contextFromLaunch(row, now) : emptyContext(mint, pos?.symbol, pos?.name));
   c = withMarket(c, h.marketCached(mint, scriptChain(s)));
   c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(mint) ?? null) : null);
+  c = withLaunchIntel(c, scriptChain(s) === 'solana' ? (h.launchIntelCached?.(mint) ?? null) : null);
   c = withPosition(c, mine && pos ? withPeak(s.mode, pos) : null, now);
   c = withGlobals(c, { walletSol: h.wallet().sol, now });
   return c;
@@ -1186,11 +1259,54 @@ function chain<T>(s: UserScript, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-function act(s: UserScript, action: RuleAction, ctx: RuleContext | null): Promise<ActResult> {
-  return chain(s, () => actInner(s, action, ctx));
+/** Per-trade options a script may pass (2026-09-27). `slippagePct` replaces
+ *  the execution setting for this one trade; the host bounds it. */
+export interface ScriptTradeOpts {
+  slippagePct?: number;
 }
 
-async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | null): Promise<ActResult> {
+/** What a call may add to an action that the rule form has no field for:
+ *  an order's expiry (epoch ms; null / absent = never expires), a trade's
+ *  slippage, a sell sized in TOKENS rather than percent. */
+interface ActOpts {
+  expiresAt?: number | null;
+  slippagePct?: number;
+  /** Sell this many tokens (UI units) — converted to a percent of the
+   *  position the app can see, in sellOne. */
+  tokens?: number;
+}
+
+/** Slippage a script may ask for on one trade: a percent from 0.1 to 50. */
+const SLIPPAGE_MIN = 0.1;
+const SLIPPAGE_MAX = 50;
+
+/**
+ * The trailing argument of bot.buy / bot.sell: an ADDRESS (a string) or an
+ * options object {wallet, slippagePct}. Anything else is a bad call, never
+ * "the trading wallet with defaults" — a typo in a wallet address must not
+ * quietly spend from the main wallet.
+ */
+function tradeExtras(v: unknown, what: string): { ok: true; wallet: string; slippagePct?: number } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, wallet: '' };
+  if (typeof v === 'string') return { ok: true, wallet: v.trim() };
+  if (typeof v !== 'object' || Array.isArray(v)) return { ok: false, error: `${what}: the last argument is a wallet address or an options object` };
+  const o = v as Record<string, unknown>;
+  const wallet = o.wallet === undefined || o.wallet === null ? '' : typeof o.wallet === 'string' ? o.wallet.trim() : null;
+  if (wallet === null) return { ok: false, error: `${what}: wallet must be an address` };
+  let slippagePct: number | undefined;
+  if (o.slippagePct !== undefined && o.slippagePct !== null) {
+    const n = Number(o.slippagePct);
+    if (!Number.isFinite(n) || n < SLIPPAGE_MIN || n > SLIPPAGE_MAX) return { ok: false, error: `${what}: slippagePct must be ${SLIPPAGE_MIN}–${SLIPPAGE_MAX}` };
+    slippagePct = n;
+  }
+  return { ok: true, wallet, slippagePct };
+}
+
+function act(s: UserScript, action: RuleAction, ctx: RuleContext | null, opts: ActOpts = {}): Promise<ActResult> {
+  return chain(s, () => actInner(s, action, ctx, opts));
+}
+
+async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | null, opts: ActOpts = {}): Promise<ActResult> {
   const h = host;
   if (!h) return { ok: false, message: 'no host' };
   const rt = rtFor(s);
@@ -1224,7 +1340,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       // says "every script is off" and must not be overtaken by a buy that was
       // already past its checks.
       if (!s.enabled || killSwitch) return { ok: false, message: 'script is disabled' };
-      const r = await h.buy(mint, sol, s.mode, scriptChain(s), s.budget.maxSolPerTrade);
+      const r = await h.buy(mint, sol, s.mode, scriptChain(s), s.budget.maxSolPerTrade, opts.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : undefined);
       if (r.ok || r.pending) {
         rt.buysToday += 1;
         rt.opened.set(mint, openedWithBuy(rt.opened.get(mint), sol, now, r.signature));
@@ -1239,9 +1355,13 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       return { ok: false, message: r.message };
     }
     case 'sell': {
+      // A sell sized in TOKENS carries a placeholder percent; sellOne turns
+      // the quantity into the share it really is against the position it can
+      // see, and refuses when it cannot see one.
+      if (opts.tokens !== undefined) return sellOne(s, rt, mint, 100, what, { slippagePct: opts.slippagePct, tokens: opts.tokens });
       const pct = Math.round(Number(action.pct));
       if (!Number.isFinite(pct) || pct < 1 || pct > 100) return refuse(s, 'sell: percent must be 1–100');
-      return sellOne(s, rt, mint, pct, what);
+      return sellOne(s, rt, mint, pct, what, { slippagePct: opts.slippagePct });
     }
     case 'sell_all': {
       // "Everything THIS SCRIPT holds" — which is what the action's own label,
@@ -1280,7 +1400,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
         slog(s, 'info', `PAPER ${describeAction(action)} on ${what} — recorded, not placed (orders execute for real; switch the script to live to place them)`);
         return { ok: true, message: 'paper: order noted, not placed' };
       }
-      const r = await h.placeOrder({ mint, symbol: ctx?.symbol ?? '', kind, triggerBasis: basis, triggerValue, amount: Number(amount) });
+      const r = await h.placeOrder({ mint, symbol: ctx?.symbol ?? '', kind, triggerBasis: basis, triggerValue, amount: Number(amount), expiresAt: opts.expiresAt ?? null });
       if (r.ok && isBuy) {
         rt.buysToday += 1;
         rt.opened.set(mint, openedWithBuy(rt.opened.get(mint), Number(amount), now, null));
@@ -1348,7 +1468,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
   }
 }
 
-async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, what: string): Promise<ActResult> {
+async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, what: string, extra: { slippagePct?: number; tokens?: number } = {}): Promise<ActResult> {
   const h = host as AutomationHost;
   // Only what this script opened — the same rule as sell_all. `h.positions`
   // is the whole wallet; a script must never be able to exit a position the
@@ -1356,6 +1476,21 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   if (!rt.opened.has(mint)) return refuse(s, `sell ${what}: this script does not hold it`);
   const held = await h.positions(s.mode, scriptChain(s));
   const before = held.find((p) => p.mint === mint);
+  // A quantity, not a share (2026-09-27). Converted here against the position
+  // the app can SEE, so the sell rail — percentage-of-balance all the way
+  // down — gets the share the tokens really are. Unknown size = refused, not
+  // guessed: a buy seconds old has no holdings row yet and would otherwise
+  // read as "sell 100 %". The share-of-cost cap further down still applies,
+  // so a script cannot sell hand-bought tokens by naming a big enough number.
+  if (extra.tokens !== undefined) {
+    const want = Number(extra.tokens);
+    if (!Number.isFinite(want) || want <= 0) return refuse(s, `sell ${what}: tokens must be a positive number`);
+    const size = before?.tokens ?? null;
+    if (size === null || !Number.isFinite(size) || size <= 0) return refuse(s, `sell ${what}: the position's size is not known yet — sell a percent, or try again next pass`);
+    // Rounded UP to a hundredth of a percent: selling short and leaving dust
+    // is the failure this exists to avoid; one basis point over is not.
+    pct = Math.max(0.01, Math.min(100, Math.ceil((want / size) * 10_000) / 100));
+  }
   // A live buy this script made moments ago may not be in the holdings read
   // yet. The sell reads the balance itself when it builds, so let it go and
   // let the chain answer; it sells the percentage asked for, the same branch
@@ -1396,9 +1531,18 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   const walletCost = before ? before.costSol : null;
   if (walletCost !== null && Number.isFinite(walletCost) && walletCost > 0 && ourCost > 0) {
     const ratio = Math.min(1, ourCost / walletCost);
-    pctOfWallet = Math.max(1, Math.min(100, Math.round(pct * ratio)));
+    // A PERCENT is a share of the script's own part of the bag, so it scales
+    // by the share. A QUANTITY is already an absolute share of the whole
+    // holding, so the script's share is a CEILING on it, not a multiplier —
+    // scaling it sold want × ratio tokens (audit 2026-09-27: 500 of a 2,000
+    // bag the script half-owns came out as 250). Two decimals for a quantity,
+    // or a 250-token sell of a 100,000-token bag rounds to 0.
+    pctOfWallet =
+      extra.tokens !== undefined
+        ? Math.max(0.01, Math.min(pct, Math.round(ratio * 10_000) / 100))
+        : Math.max(1, Math.min(100, Math.round(pct * ratio)));
   }
-  const r = await h.sell(mint, pctOfWallet, s.mode, scriptChain(s));
+  const r = await h.sell(mint, pctOfWallet, s.mode, scriptChain(s), extra.slippagePct !== undefined ? { slippagePct: extra.slippagePct } : undefined);
   if (r.ok || r.pending) {
     rt.sellsToday += 1;
     // Paper says exactly what it realised. A live fill's own number is not
@@ -1933,6 +2077,14 @@ export function onSandboxGone(scriptId: string, reason: string): void {
 }
 
 const isMint = (v: unknown): v is string => typeof v === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v);
+/** An optional count from a script, held to [lo, hi]; absent or unusable = the default. */
+const clampInt = (v: unknown, lo: number, hi: number, dflt: number): number => {
+  if (v === undefined || v === null) return dflt;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return dflt;
+  return Math.max(lo, Math.min(hi, Math.round(n)));
+};
+const SCOUT_WINDOWS = ['day', 'week', 'month', 'all'] as const;
 const ORDER_KINDS: OrderKind[] = ['limit_buy', 'limit_sell', 'take_profit', 'stop_loss', 'trailing_stop', 'sell_on_dev_sell', 'sell_on_migration', 'buy_on_migration'];
 
 
@@ -2015,16 +2167,47 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       case 'buy': {
         const [mint, sol, who] = args;
         if (!isMint(mint)) return answer(false, undefined, 'buy: bad mint');
-        const addr = typeof who === 'string' ? who.trim() : '';
-        if (!addr) return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint)));
-        return result(await chain(s, () => walletTrade(s, 'buy', addr, mint, Number(sol))));
+        const x = tradeExtras(who, 'buy');
+        if (!x.ok) return answer(false, undefined, x.error);
+        if (!x.wallet) return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint), { slippagePct: x.slippagePct }));
+        // Another wallet trades at the execution setting's slippage; a value
+        // that would be dropped on the floor is refused (audit 2026-09-27).
+        if (x.slippagePct !== undefined) return answer(false, undefined, 'buy: slippagePct applies to the trading wallet only — drop it, or the wallet');
+        return result(await chain(s, () => walletTrade(s, 'buy', x.wallet, mint, Number(sol))));
       }
       case 'sell': {
-        const [mint, pct, who] = args;
+        const [mint, how, who] = args;
         if (!isMint(mint)) return answer(false, undefined, 'sell: bad mint');
-        const addr = typeof who === 'string' ? who.trim() : '';
-        if (!addr) return result(await act(s, { type: 'sell', pct: Number(pct) }, await ctxFor(s, mint)));
-        return result(await chain(s, () => walletTrade(s, 'sell', addr, mint, Number(pct))));
+        // The second argument is a percent, or {pct | tokens, slippagePct,
+        // wallet}; the third an address or the same options (2026-09-27).
+        let pct: unknown = how;
+        let tokens: number | undefined;
+        let extras: unknown = who;
+        if (typeof how === 'object' && how !== null && !Array.isArray(how)) {
+          const o = how as Record<string, unknown>;
+          if (o.tokens !== undefined && o.pct !== undefined) return answer(false, undefined, 'sell: pass pct or tokens, not both');
+          if (o.tokens !== undefined) {
+            // A number, not anything Number() would coerce ({tokens: true} is 1).
+            if (typeof o.tokens !== 'number' || !Number.isFinite(o.tokens) || o.tokens <= 0) return answer(false, undefined, 'sell: tokens must be a positive number');
+            tokens = o.tokens;
+          }
+          pct = o.pct;
+          const named = o.wallet !== undefined && o.wallet !== null && o.wallet !== '';
+          // The wallet is named ONCE. Until the audit of 2026-09-27 a third
+          // argument silently won over the options' wallet and slippage.
+          if (who !== undefined && named) return answer(false, undefined, 'sell: name the wallet once — in the options or as the third argument, not both');
+          extras = who === undefined ? { wallet: o.wallet, slippagePct: o.slippagePct } : typeof who === 'string' ? { wallet: who, slippagePct: o.slippagePct } : who;
+        }
+        const x = tradeExtras(extras, 'sell');
+        if (!x.ok) return answer(false, undefined, x.error);
+        if (!x.wallet) {
+          return result(await act(s, { type: 'sell', pct: tokens !== undefined ? 100 : Number(pct) }, await ctxFor(s, mint), { slippagePct: x.slippagePct, tokens }));
+        }
+        if (tokens !== undefined) return answer(false, undefined, 'sell: a sell from another wallet is a percent, not a token count');
+        // The other wallets trade at the execution setting; a slippage that
+        // would be dropped on the floor is refused instead (audit 2026-09-27).
+        if (x.slippagePct !== undefined) return answer(false, undefined, 'sell: slippagePct applies to the trading wallet only — drop it, or the wallet');
+        return result(await chain(s, () => walletTrade(s, 'sell', x.wallet, mint, Number(pct))));
       }
       case 'wallets':
         return answer(true, h.wallets());
@@ -2042,6 +2225,26 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (basis === 'pct' && (kind === 'limit_buy' || kind === 'limit_sell')) {
           return answer(false, undefined, `order: ${kind} needs an absolute level — triggerBasis must be price_sol or mcap_usd`);
         }
+        // The mirror image (2026-09-27): the percent kinds are measured from
+        // a reference price and nothing else — the engine's trigger test and
+        // the Orders form both know only 'pct' for them. A stop_loss sent
+        // with mcap_usd was silently armed as a PERCENT stop at that number
+        // and reported success: a "$20,000 market-cap stop" became "sell
+        // when 20,000 % down", which is never.
+        if (basis !== 'pct' && isPctKind(kind)) {
+          return answer(false, undefined, `order: ${kind} is measured in percent from the reference price — triggerBasis must be 'pct' (for an absolute level use limit_sell or limit_buy with price_sol or mcap_usd)`);
+        }
+        // Optional expiry, epoch ms — the Orders form has had it since
+        // orders existed; a script's request dropped it on the floor until
+        // 2026-09-27. Same rule as the form: unknown is null, never a NaN that
+        // quietly means "never expires"; a time already past is a bad call.
+        let expiresAt: number | null = null;
+        if (req.expiresAt !== undefined && req.expiresAt !== null) {
+          const e = Number(req.expiresAt);
+          if (!Number.isFinite(e)) return answer(false, undefined, 'order: expiresAt must be a time in epoch milliseconds (e.g. bot.now() + 3600000)');
+          if (e <= Date.now()) return answer(false, undefined, 'order: expiresAt is already in the past');
+          expiresAt = e;
+        }
         const value = Number(req.triggerValue);
         const amount = Number(req.amount);
         let action: RuleAction | null = null;
@@ -2050,7 +2253,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         else if (kind === 'take_profit') action = { type: 'take_profit', gainPct: value, sellPct: amount };
         else if (kind === 'limit_buy') action = { type: 'limit_buy', basis: basis as 'price_sol' | 'mcap_usd', value, sol: amount };
         else if (kind === 'limit_sell') action = { type: 'limit_sell', basis: basis as 'price_sol' | 'mcap_usd', value, pct: amount };
-        if (action) return result(await act(s, action, await ctxFor(s, req.mint)));
+        if (action) return result(await act(s, action, await ctxFor(s, req.mint), { expiresAt }));
         // The migration / dev-sell kinds have no rule form; place directly,
         // same gates — and on the SAME per-script chain act() uses, or the
         // gates below read counters that a call already on the wire has not
@@ -2084,7 +2287,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           const gate = await buyGate(s, rt, orderMint, amount, label);
           if (gate) return result(gate);
           }
-          const r = await h.placeOrder({ mint: orderMint, symbol: ctx.symbol, kind, triggerBasis: basis, triggerValue: Number.isFinite(value) ? value : null, amount });
+          const r = await h.placeOrder({ mint: orderMint, symbol: ctx.symbol, kind, triggerBasis: basis, triggerValue: Number.isFinite(value) ? value : null, amount, expiresAt });
           // An armed buy_on_migration is a buy this script has committed to:
           // reserve it now, or the budget counts it only once it fires.
           if (r.ok && kind === 'buy_on_migration') {
@@ -2376,6 +2579,177 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `creator: over ${s.budget.maxActionsPerMinute} actions in a minute`);
         return answer(true, await h.creator(mint, scriptChain(s)));
       }
+      // ── Every other read the app has (2026-09-27) ──────────────────────
+      // The Launch tab's cohorts, then the rest of the token page and the
+      // app: holders, tape, candles, search, Discover, callouts, this
+      // install's fills, the wallet's bags, SOL/USD, Wallet Scout, the copy
+      // configs, the alerts. A read that leaves the machine costs an action,
+      // exactly like market; one answered from memory is free. A Solana-only
+      // read on an EVM script answers null (or an empty list) rather than
+      // rejecting, so one script body can run on any chain.
+      case 'launchIntel': {
+        const [mint] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'launchIntel: bad mint');
+        if (scriptChain(s) !== 'solana') return answer(true, null);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `launchIntel: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.launchIntel(mint, scriptChain(s)));
+      }
+      case 'holders':
+      case 'trades': {
+        const [mint, limitArg] = args;
+        if (!isMint(mint)) return answer(false, undefined, `${method}: bad mint`);
+        if (scriptChain(s) !== 'solana') return answer(true, null);
+        const limit = method === 'holders' ? clampInt(limitArg, 1, 100, 50) : clampInt(limitArg, 1, 200, 60);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `${method}: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, method === 'holders' ? await h.holders(mint, limit, scriptChain(s)) : await h.trades(mint, limit, scriptChain(s)));
+      }
+      case 'candles': {
+        const [mint, intervalArg, limitArg] = args;
+        if (!isMint(mint)) return answer(false, undefined, 'candles: bad mint');
+        if (scriptChain(s) !== 'solana') return answer(true, null);
+        const interval = intervalArg === undefined ? '1m' : intervalArg;
+        if (!(CANDLE_INTERVALS as readonly unknown[]).includes(interval)) return answer(false, undefined, `candles: interval must be one of ${CANDLE_INTERVALS.join(', ')}`);
+        const limit = clampInt(limitArg, 10, 500, 120);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `candles: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.candles(mint, interval as CandleInterval, limit, scriptChain(s)));
+      }
+      case 'search': {
+        const q = typeof args[0] === 'string' ? args[0].trim().slice(0, 100) : '';
+        if (!q) return answer(false, undefined, 'search: pass some text or a mint');
+        if (scriptChain(s) !== 'solana') return answer(true, []);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `search: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.search(q, scriptChain(s)));
+      }
+      case 'discover': {
+        const [listArg, limitArg] = args;
+        const list = listArg === undefined ? 'new' : listArg;
+        if (!(DISCOVER_COLUMNS as readonly unknown[]).includes(list)) return answer(false, undefined, `discover: list must be one of ${DISCOVER_COLUMNS.join(', ')}`);
+        const limit = clampInt(limitArg, 1, 80, 20);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `discover: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.discover(list as DiscoverColumn, limit, scriptChain(s)));
+      }
+      case 'callouts': {
+        const limit = clampInt(args[0], 1, 50, 20);
+        if (scriptChain(s) !== 'solana') return answer(true, null);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `callouts: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.callouts(limit, scriptChain(s)));
+      }
+      case 'history':
+        // This install's own record — free, like orders.
+        return answer(true, h.history(clampInt(args[0], 1, 200, 50), scriptChain(s)));
+      case 'holdings': {
+        // A chain read unless one landed in the last two seconds, so it is
+        // charged like market. NULL when the wallet could not be read: the
+        // same "unknown is not empty" rule positions learned (2026-09-27).
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `holdings: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        const rows = await h.holdings(scriptChain(s));
+        if (rows === null) return answer(false, undefined, 'holdings: the wallet could not be read just now — unknown, not empty; try again next pass');
+        return answer(true, rows);
+      }
+      case 'solUsd':
+        return answer(true, await h.solUsd());
+      case 'walletScores': {
+        const o = (typeof args[0] === 'object' && args[0] !== null ? args[0] : {}) as Record<string, unknown>;
+        const window = o.window === undefined ? 'week' : o.window;
+        if (!(SCOUT_WINDOWS as readonly unknown[]).includes(window)) return answer(false, undefined, `walletScores: window must be one of ${SCOUT_WINDOWS.join(', ')}`);
+        return answer(true, h.walletScores(scriptChain(s), window as ScoutWindow, clampInt(o.limit, 1, 50, 20), o.onlyWorthALook === true));
+      }
+      case 'walletRecord': {
+        const address = typeof args[0] === 'string' ? args[0].trim().slice(0, 64) : '';
+        if (!address) return answer(false, undefined, 'walletRecord: pass a wallet address');
+        return answer(true, h.walletRecord(address, scriptChain(s)));
+      }
+      case 'copyConfigs':
+        return answer(true, h.copyConfigs());
+      case 'alerts':
+        // Alerts are a Solana-side feature (shared/alerts.ts carries no chain).
+        return answer(true, scriptChain(s) === 'solana' ? h.alerts() : []);
+      // ── Housekeeping the pages have (2026-09-27) ─────────────────────────
+      // Each is the matching page button. Side effects, so they are charged
+      // as actions and refused off Solana (orders, alerts and templates are
+      // Solana-side features); the fired-alerts sweep is free like
+      // clearCompletedOrders.
+      case 'cancelOrder':
+      case 'removeAlert': {
+        const id = typeof args[0] === 'string' ? args[0].trim().slice(0, 64) : '';
+        if (!id) return answer(false, undefined, `${method}: pass an id`);
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, `${method}: Solana only`);
+        // Orders are live-only, and this cancels ANY order by id — a paper
+        // script must not be able to pull a hand-placed live stop
+        // (audit 2026-09-27). Alerts are neither paper nor live.
+        if (method === 'cancelOrder' && s.mode === 'paper') return answer(true, { ok: false, message: 'paper: orders are live-only, nothing was cancelled' });
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `${method}: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        const r = method === 'cancelOrder' ? h.cancelOrder(id) : h.removeAlert(id);
+        slog(s, r.ok ? 'info' : 'warn', `${method} ${id.slice(0, 12)}: ${r.message}`);
+        return answer(true, r);
+      }
+      case 'muteAlert': {
+        const id = typeof args[0] === 'string' ? args[0].trim().slice(0, 64) : '';
+        if (!id) return answer(false, undefined, 'muteAlert: pass an id');
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, 'muteAlert: Solana only');
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `muteAlert: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        const r = h.muteAlert(id, args[1] !== false);
+        slog(s, r.ok ? 'info' : 'warn', `${args[1] !== false ? 'mute' : 'unmute'} alert ${id.slice(0, 12)}: ${r.message}`);
+        return answer(true, r);
+      }
+      case 'clearFiredAlerts':
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, 'clearFiredAlerts: Solana only');
+        return answer(true, h.clearFiredAlerts());
+      case 'resumeOrders': {
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, 'resumeOrders: Solana only');
+        // Re-arming spends for real when an order fires: a paper script keeps
+        // its paper, and live has to be possible, the same gates an order
+        // placed by this script passes.
+        if (s.mode === 'paper') return answer(true, { ok: false, message: 'paper: orders are live-only, nothing was resumed' });
+        const blocked = h.liveBlockedReason('solana');
+        if (blocked) return answer(true, { ok: false, message: `not resumed — ${blocked}` });
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `resumeOrders: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        const r = h.resumeOrders();
+        slog(s, r.ok ? 'info' : 'warn', `resume paused orders: ${r.message}`);
+        return answer(true, r);
+      }
+      case 'saveTemplate': {
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, 'saveTemplate: Solana only');
+        // Templates arm REAL orders on the user's manual buys: a paper script
+        // rehearses trading, not the user's live setup (audit 2026-09-27).
+        if (s.mode === 'paper') return answer(true, { ok: false, message: 'paper: templates arm live orders, nothing was saved' });
+        const t = (typeof args[0] === 'object' && args[0] !== null ? args[0] : {}) as Record<string, unknown>;
+        const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+        const tps = Array.isArray(t.takeProfits) ? t.takeProfits : [];
+        if (tps.length > 3) return answer(false, undefined, 'saveTemplate: at most 3 take-profit rungs');
+        const clean: OrderTemplate = {
+          id: typeof t.id === 'string' && t.id.trim() ? t.id.trim().slice(0, 64) : `t_${Date.now().toString(36)}`,
+          // Not cut to 40 here: validateTemplate refuses an over-long name
+          // with its reason, which the doc promises; a silent trim would not.
+          name: String(t.name ?? '').trim().slice(0, 200),
+          stopLossPct: num(t.stopLossPct),
+          takeProfits: tps.map((x) => {
+            const o = (typeof x === 'object' && x !== null ? x : {}) as Record<string, unknown>;
+            return { gainPct: Number(o.gainPct), sellPct: Number(o.sellPct) };
+          }),
+          trailingPct: num(t.trailingPct),
+          sellOnDevSell: t.sellOnDevSell === true,
+        };
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `saveTemplate: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        const r = h.saveTemplate(clean);
+        slog(s, r.ok ? 'info' : 'warn', `save template "${clean.name}": ${r.message}`);
+        return answer(true, { ...r, templates: h.templates() });
+      }
+      case 'deleteTemplate':
+      case 'setActiveTemplate': {
+        if (scriptChain(s) !== 'solana') return answer(false, undefined, `${method}: Solana only`);
+        if (s.mode === 'paper') return answer(true, { ok: false, message: 'paper: templates arm live orders, nothing was changed' });
+        const raw = args[0];
+        if (method === 'deleteTemplate' && (typeof raw !== 'string' || !raw.trim())) return answer(false, undefined, 'deleteTemplate: pass a template id');
+        if (method === 'setActiveTemplate' && raw !== null && (typeof raw !== 'string' || !raw.trim())) return answer(false, undefined, 'setActiveTemplate: pass a template id, or null for off');
+        const id = typeof raw === 'string' ? raw.trim().slice(0, 64) : null;
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `${method}: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        const r = method === 'deleteTemplate' ? h.deleteTemplate(id as string) : h.setActiveTemplate(id);
+        slog(s, r.ok ? 'info' : 'warn', `${method} ${id ?? 'null'}: ${r.message}`);
+        return answer(true, method === 'deleteTemplate' ? { ...r, templates: h.templates() } : r);
+      }
+      case 'settings':
+        return answer(true, h.settings());
       case 'analyze': {
         // The one read that spends the user's own money: their AI key, per
         // uncached call. Rate-limited as an action AND capped per hour, so a
@@ -2418,6 +2792,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
           c = withMarket(c, h.marketCached(p.mint, scriptChain(s)));
           c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(p.mint) ?? null) : null);
+          c = withLaunchIntel(c, scriptChain(s) === 'solana' ? (h.launchIntelCached?.(p.mint) ?? null) : null);
           c = withPosition(c, withPeak(s.mode, p), now);
           out.push(withGlobals(c, { walletSol: h.wallet().sol, now }));
         }
@@ -2569,6 +2944,82 @@ function bounded<T>(p: Promise<T>): Promise<T> {
 }
 const CHATTER = new Set(['launch', 'launchUpdate', 'tick']);
 
+/**
+ * One payload to every RUNNING code script on a chain (2026-09-27). Rules
+ * have no trigger for these events — the rule editor's triggers are a fixed
+ * list — so only scripts hear them. Same back-pressure as fanOut: a script
+ * already building BUILD_CAP payloads drops this one and counts it.
+ */
+function toCodeScripts(eventName: string, chain: ChainKind, build: (s: UserScript) => Promise<unknown>, only?: (s: UserScript, rt: Runtime) => boolean): void {
+  for (const s of scripts) {
+    if (!s.enabled || s.kind !== 'code') continue;
+    if (scriptChain(s) !== chain) continue;
+    const rt = rtFor(s);
+    if (!rt.running) continue;
+    if (only && !only(s, rt)) continue;
+    if (rt.building >= BUILD_CAP) {
+      rt.health.dropped += 1;
+      continue;
+    }
+    rt.building += 1;
+    void bounded(build(s))
+      .then((payload) => enqueue(s, eventName, payload))
+      .catch(() => undefined)
+      .finally(() => {
+        rt.building -= 1;
+      });
+  }
+}
+
+function copyFillPayload(t: CopyTrade): Record<string, unknown> {
+  return {
+    id: t.id,
+    configId: t.configId,
+    wallet: t.wallet,
+    mint: t.mint,
+    symbol: t.symbol,
+    side: t.kind === 'exit' ? 'sell' : 'buy',
+    mode: t.mode,
+    state: t.state,
+    theirSol: t.theirSol,
+    ourSol: t.ourSol,
+    pnlSol: t.pnlSol,
+    reason: t.reason,
+    direction: t.direction ?? 'copy',
+    at: t.at,
+  };
+}
+
+/**
+ * A coin's curve completed and it migrated (pump.fun, Meteora DBC). Every
+ * Solana script hears it: graduations are a few a minute, and the coins a
+ * script cares about are often ones it does not hold yet.
+ */
+export function onMigration(mint: string): void {
+  if (!host || !scripts.some((s) => s.enabled)) return;
+  toCodeScripts('migration', 'solana', async (s) => ({ ...(await ctxFor(s, mint)), migrated: true }));
+}
+
+/**
+ * The creator wallet sold on a pump curve. Only scripts that hold or
+ * subscribed to the coin hear it — dev sells happen on most launches, and a
+ * script screening the firehose has creatorSold on every launchUpdate.
+ */
+export function onDevSell(mint: string, facts: { sol: number; tokens: number; priceSol: number }): void {
+  if (!host || !scripts.some((s) => s.enabled)) return;
+  toCodeScripts(
+    'devSell',
+    'solana',
+    async (s) => {
+      const c = await ctxFor(s, mint);
+      c.creatorSold = true;
+      if (facts.priceSol > 0) c.priceSol = facts.priceSol;
+      return { ...c, devSoldSol: facts.sol, devSoldTokens: facts.tokens };
+    },
+    (_s, rt) => rt.opened.has(mint) || rt.subscribed.has(mint),
+  );
+}
+
 /** The engine's events, as they happen. Cheap on the hot path: nothing is
  *  built for a script that is not listening. */
 export function onEngineEvent(ev: EngineEvent): void {
@@ -2584,7 +3035,47 @@ export function onEngineEvent(ev: EngineEvent): void {
     }
     case 'runner': {
       const f = ev.runner;
+      knownRunners.add(f.mint);
       fanOut('runner', 'runner', f.mint, 'solana', (s) => ctxFor(s, f.mint, contextFromRunner(f, h.launch(f.mint), Date.now())));
+      return;
+    }
+    // The whole list, pushed when expiry removed some of it: every mint that
+    // was flagged and is no longer listed has expired (2026-09-27).
+    case 'runners': {
+      const still = new Set(ev.runners.map((r) => r.mint));
+      const gone = [...knownRunners].filter((m) => !still.has(m));
+      knownRunners = still;
+      for (const mint of gone) toCodeScripts('runnerExpired', 'solana', (s) => ctxFor(s, mint));
+      return;
+    }
+    // The trading wallet's token accounts changed — the same rows
+    // bot.holdings answers, pushed rather than polled (2026-09-27).
+    case 'holdings': {
+      const rows = ev.data.map(scriptHoldingFromWallet);
+      const at = ev.at;
+      toCodeScripts('holdings', 'solana', async () => ({ at, holdings: rows }));
+      return;
+    }
+    // Copy trading's rows, diffed into "this copy changed state": opened,
+    // closed (a mirrored exit), skipped (2026-09-27). The leader's own
+    // trade is `leaderTrade`; this is what the app did about it.
+    case 'copy': {
+      // The FIRST snapshot is history — copy trading reloads its persisted
+      // rows and puts the newest 100 in `recent` — so it seeds the diff and
+      // announces nothing (audit 2026-09-27: it would have pushed 100 stale
+      // copyFill events into every script's 50-slot queue). From then on a
+      // new row or a changed state is an event, at most a handful a snapshot.
+      let announced = 0;
+      for (const t of ev.snapshot.recent) {
+        const prev = copyStates.get(t.id);
+        copyStates.set(t.id, t.state);
+        if (copyStates.size > 4_000) copyStates.delete(copyStates.keys().next().value as string);
+        if (!copySeeded || prev === t.state) continue;
+        if (++announced > COPY_FILLS_PER_SNAPSHOT) continue;
+        const row = t;
+        toCodeScripts('copyFill', row.chain ?? 'solana', async () => copyFillPayload(row));
+      }
+      copySeeded = true;
       return;
     }
     case 'tick': {
@@ -2722,6 +3213,7 @@ export async function pollPositions(): Promise<void> {
       let c = row ? contextFromLaunch(row, now) : emptyContext(p.mint, p.symbol, p.name);
       c = withMarket(c, h.marketCached(p.mint, scriptChain(s)));
       c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(p.mint) ?? null) : null);
+      c = withLaunchIntel(c, scriptChain(s) === 'solana' ? (h.launchIntelCached?.(p.mint) ?? null) : null);
       c = withPosition(c, withPeak(s.mode, p), now);
       c = withGlobals(c, { walletSol: h.wallet().sol, now });
       if (s.kind === 'rules') await runRules(s, c);
@@ -2768,6 +3260,9 @@ export function _reset(): void {
   runtimes.clear();
   orderStates.clear();
   alertFires.clear();
+  knownRunners = new Set();
+  copyStates.clear();
+  copySeeded = false;
   peaks.clear();
   restartWindow.clear();
   startChains.clear();

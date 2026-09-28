@@ -17,7 +17,7 @@
 // see and do: the field guide, the API table and the AI prompt pack are all
 // generated from the tables below, so they cannot drift from the code.
 
-import type { LaunchRow } from './types';
+import type { AppSettings, LaunchRow, WalletHolding } from './types';
 import type { OrderKind } from './orders';
 import type { RunnerFlag } from './runners';
 import type { AlertKind } from './alerts';
@@ -25,7 +25,10 @@ import { nativeSymbolOf, type ChainKind } from './evm';
 import type { EvmLaunchWindow, EvmScanLaunch } from './evmScan';
 import { parseXLink, type XLinkKind } from './xLink';
 import { launchpadSite } from './tokenLinks';
-import type { TokenSummary } from './market';
+import type { SecurityReport, TokenSummary } from './market';
+import { creatorVerdict, type LaunchIntelReport } from './launchintel';
+import type { RugReport, VolatilityNote } from './rugrules';
+import type { OddsReport } from './odds';
 import type { XStats } from './xStats';
 import { domainAgeDays, type LinkIntelFacts } from './linkIntel';
 import { EVENT_HARD_MS, EVENT_TIMEOUT_MS, type ScriptStatValue } from './scriptProtocol';
@@ -74,6 +77,21 @@ export const SOLANA_ONLY_FIELDS: ReadonlySet<RuleField> = new Set<RuleField>([
   'insiderPct',
   'bundledPct',
   'sniperPct',
+  // The Launch tab's cohorts (2026-09-27): pump.fun's launch window, so
+  // Solana only by construction.
+  'launchDevPct',
+  'launchDevHeldPct',
+  'launchBundlePct',
+  'launchBundleHeldPct',
+  'launchBundleRetainedPct',
+  'launchBundleWallets',
+  'launchBundleStillHolding',
+  'launchSniperPct',
+  'launchSniperHeldPct',
+  'launchSniperRetainedPct',
+  'launchSniperWallets',
+  'launchSniperStillHolding',
+  'launchTop3BuyersPct',
   'smartHolders',
   'volume5mUsd',
   'buys5m',
@@ -311,6 +329,22 @@ export type RuleField =
   | 'priceChange5mPct'
   | 'curveRegime'
   | 'isMayhem'
+  // launch cohorts — the Launch tab's dev / bundle / sniper shares, bought
+  // AND still held (2026-09-27). Filled when the app has the coin's launch
+  // scan cached: after bot.launchIntel(mint), or while its page is open.
+  | 'launchDevPct'
+  | 'launchDevHeldPct'
+  | 'launchBundlePct'
+  | 'launchBundleHeldPct'
+  | 'launchBundleRetainedPct'
+  | 'launchBundleWallets'
+  | 'launchBundleStillHolding'
+  | 'launchSniperPct'
+  | 'launchSniperHeldPct'
+  | 'launchSniperRetainedPct'
+  | 'launchSniperWallets'
+  | 'launchSniperStillHolding'
+  | 'launchTop3BuyersPct'
   // links — what the token's creator published, and what the X link IS
   | 'hasTwitter'
   | 'hasWebsite'
@@ -446,8 +480,29 @@ export const RULE_FIELDS: FieldSpec[] = [
   { id: 'devHoldingPct', label: 'Dev holding %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'What the creator wallet holds', nullWhen: 'unknown to the providers' },
   { id: 'top10Pct', label: 'Top 10 holders %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: '', nullWhen: 'unknown to the providers' },
   { id: 'insiderPct', label: 'Insiders %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'Held by wallets the providers tag as insiders', nullWhen: 'unknown to the providers' },
-  { id: 'bundledPct', label: 'Bundled %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'Bought in the launch bundle', nullWhen: 'unknown to the providers' },
-  { id: 'sniperPct', label: 'Snipers %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: '', nullWhen: 'unknown to the providers' },
+  { id: 'bundledPct', label: 'Bundled %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'Bought in the launch bundle, as the providers report it — null on nearly every new pump.fun coin. Falls back to launchBundlePct once the launch scan is cached (see bot.launchIntel).', nullWhen: 'unknown to the providers and no launch scan is cached' },
+  { id: 'sniperPct', label: 'Snipers %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'As the providers report it; falls back to launchSniperPct once the launch scan is cached', nullWhen: 'unknown to the providers and no launch scan is cached' },
+  // The Launch tab's cohorts (2026-09-27). The provider shares above are
+  // null on nearly every new pump.fun coin — the providers index a launch
+  // minutes later, if at all — while the app had already measured these
+  // itself from pump's swap-api launch window plus one RPC batch
+  // (shared/launchintel.ts) and shown them on the token page. Scripts could
+  // not see them. Bought and still-held travel together on purpose: a 40 %
+  // bundle that has left is history; one that still holds 38 % is the
+  // reason not to buy, and one number cannot say which.
+  { id: 'launchDevPct', label: 'Launch: dev bought %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'What the creator wallet bought in the launch window — the Launch tab’s dev cohort. Filled for 45 s after bot.launchIntel(mint) or bot.security(mint), or after someone opens the coin’s page; null once that memo ages out.', nullWhen: 'the launch scan is not cached, the launch block could not be isolated, or the supply is unknown' },
+  { id: 'launchDevHeldPct', label: 'Launch: dev holds %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'What the creator wallet holds NOW, of supply — read from the chain with the scan', nullWhen: 'the launch scan is not cached, or the balances could not be read' },
+  { id: 'launchBundlePct', label: 'Launch: bundle bought %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'Bought in the launch block itself by wallets other than the creator — the number people mean by “bundled”. Same-slot buys were arranged in advance: nobody can react to a block they cannot yet see. 0 is a real zero (the block was scanned and held no other buyer).', nullWhen: 'the launch scan is not cached, the launch block could not be isolated, or the supply is unknown' },
+  { id: 'launchBundleHeldPct', label: 'Launch: bundle holds %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'What the bundle wallets hold NOW, of supply. Read next to launchBundlePct: bought 40 % and holds 2 % has distributed; bought 40 % and holds 38 % has not.', nullWhen: 'the launch scan is not cached, or the balances could not be read' },
+  { id: 'launchBundleRetainedPct', label: 'Launch: bundle kept %', kind: 'number', scope: 'market', unit: 'percent of what they bought', hint: 'Of what the bundle wallets bought, the share still held — 100 means nobody has sold', nullWhen: 'the launch scan is not cached, the balances could not be read, or nothing was bought' },
+  { id: 'launchBundleWallets', label: 'Launch: bundle wallets', kind: 'number', scope: 'market', unit: 'wallets', hint: 'How many non-creator wallets bought in the launch block', nullWhen: 'the launch scan is not cached, or the launch block could not be isolated' },
+  { id: 'launchBundleStillHolding', label: 'Launch: bundle wallets still in', kind: 'number', scope: 'market', unit: 'wallets', hint: 'Of the bundle wallets, how many still hold anything', nullWhen: 'the launch scan is not cached, or the balances could not be read' },
+  { id: 'launchSniperPct', label: 'Launch: snipers bought %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'Bought within 20 slots (about 8 s) AFTER the launch block by wallets that were not in it — fast, but reactive rather than pre-arranged, so kept apart from the bundle', nullWhen: 'the launch scan is not cached, the launch block could not be isolated, or the supply is unknown' },
+  { id: 'launchSniperHeldPct', label: 'Launch: snipers hold %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'What the sniper wallets hold NOW, of supply', nullWhen: 'the launch scan is not cached, or the balances could not be read' },
+  { id: 'launchSniperRetainedPct', label: 'Launch: snipers kept %', kind: 'number', scope: 'market', unit: 'percent of what they bought', hint: 'Of what the snipers bought, the share still held', nullWhen: 'the launch scan is not cached, the balances could not be read, or nothing was bought' },
+  { id: 'launchSniperWallets', label: 'Launch: sniper wallets', kind: 'number', scope: 'market', unit: 'wallets', hint: 'How many wallets sniped inside the window', nullWhen: 'the launch scan is not cached, or the launch block could not be isolated' },
+  { id: 'launchSniperStillHolding', label: 'Launch: sniper wallets still in', kind: 'number', scope: 'market', unit: 'wallets', hint: 'Of the sniper wallets, how many still hold anything', nullWhen: 'the launch scan is not cached, or the balances could not be read' },
+  { id: 'launchTop3BuyersPct', label: 'Launch: top 3 buyers %', kind: 'number', scope: 'market', unit: 'percent of supply', hint: 'The three largest non-creator buys in the launch window, summed — a concentration (volatility) fact, not a verdict', nullWhen: 'the launch scan is not cached, the launch block could not be isolated, or nobody but the creator bought' },
   { id: 'smartHolders', label: 'Smart-money holders', kind: 'number', scope: 'market', unit: 'wallets', hint: 'Per the providers’ smart-money lists', nullWhen: 'unknown to the providers' },
   { id: 'volume5mUsd', label: 'Volume 5m (USD)', kind: 'number', scope: 'market', unit: 'USD', hint: '', nullWhen: 'no 5-minute window from the providers' },
   { id: 'buys5m', label: 'Buys 5m', kind: 'number', scope: 'market', unit: 'count', hint: '', nullWhen: 'no 5-minute window from the providers' },
@@ -807,13 +862,217 @@ export interface ScriptLinks {
   site: (SiteRead & { readAt: number }) | null;
 }
 
-/** The security report, as `bot.security()` hands it to a script. */
+/**
+ * The security report, as `bot.security()` hands it to a script.
+ *
+ * Until 2026-09-27 this was the score, the checks and the warnings — the
+ * report's concentration block (dev / bundle / sniper shares, and what those
+ * wallets STILL hold), the measured rug rules, the graduation odds and the
+ * creator record were computed for the token page and dropped at this
+ * wall. Now the whole report crosses, on the rule that any data the app has,
+ * a script may have. Every share is % of supply; null is unknown, never 0.
+ */
 export interface ScriptSecurity {
   score: number | null;
   checksResolved: number;
   checksTotal: number;
-  checks: Array<{ id: string; label: string; verdict: string; detail: string }>;
+  checks: Array<{ id: string; label: string; verdict: string; detail: string; source: string; weight: number; kind: 'gate' | 'fact' }>;
   warnings: string[];
+  /** The supply-share block the token page charts. bundledPct / sniperPct
+   *  are the provider's when it has them, else the launch scan's; the
+   *  *HeldPct are what those wallets hold NOW and are never inferred. */
+  concentration: SecurityReport['concentration'];
+  creator: {
+    address: string | null;
+    /** Launches / rugs this install itself observed. */
+    priorLaunches: number | null;
+    priorRugs: number | null;
+    /** pump.fun-wide record, when the source answered. */
+    launches: number | null;
+    graduated: number | null;
+    graduationRate: number | null;
+    launchesInBusiestDay: number | null;
+    /** Jupiter's cross-launchpad counts (include this mint). */
+    devMints: number | null;
+    devMigrations: number | null;
+    /** RugCheck's "creator history of rugged tokens" risk. Null when silent. */
+    rugcheckCreatorRugs: boolean | null;
+    /** The one-line verdict the token page shows: pass · warn · fail, null without a record. */
+    verdict: 'pass' | 'warn' | 'fail' | null;
+    detail: string;
+  };
+  /** Measured rug rules for the launch window. Null when no window exists. */
+  rug: RugReport | null;
+  /** Two-sided concentration notes — what each supply-share row has meant historically. */
+  volatility: VolatilityNote[];
+  /** Graduation odds for the launch window (+60 s / +120 s). Null when unjudged. */
+  odds: OddsReport | null;
+  /** DexScreener's paid listing, boosts and community takeover — descriptive, never scored. */
+  dexPaid: { paid: boolean | null; paidAt: number | null; boosts: number | null; communityTakeover: boolean | null };
+  generatedAt: number;
+}
+
+/**
+ * One token the active wallet holds, as `bot.holdings()` hands it over. The
+ * same shape on every chain: the Solana fields the EVM rails cannot fill
+ * (token account, raw units, decimals, program) are null there, not
+ * invented. `warning` says why a bag may not be sellable; null means the
+ * mint was checked and carries nothing suspicious.
+ */
+export interface ScriptHolding {
+  mint: string;
+  symbol: string | null;
+  uiAmount: number;
+  amountRaw: string | null;
+  decimals: number | null;
+  tokenAccount: string | null;
+  programId: string | null;
+  warning: string | null;
+}
+
+/** A wallet holding as the engine reads it → what a script gets. Absent
+ *  `warning` means the mint could not be read — unknown is not "fine". */
+export function scriptHoldingFromWallet(h: WalletHolding): ScriptHolding {
+  return {
+    mint: h.mint,
+    symbol: h.symbol,
+    uiAmount: h.uiAmount,
+    amountRaw: h.amountRaw,
+    decimals: h.decimals,
+    tokenAccount: h.tokenAccount,
+    programId: h.programId ?? null,
+    warning: h.warning === undefined ? 'unknown — the mint could not be read' : h.warning,
+  };
+}
+
+/**
+ * The app's settings as `bot.settings()` hands them over — read-only, and
+ * scrubbed (2026-09-27).
+ *
+ * A script may want to know the slippage it will trade at, whether live is
+ * on, the per-trade cap, which providers are switched on, the scanner's
+ * thresholds. It must never learn a key or an endpoint: the Helius key is
+ * embedded in the RPC URLs, the AI key sits in `ai`, the bots' tokens in
+ * `bots`, the MCP bearer in `mcp`. So the whole tree is copied through one
+ * scrub — any field whose NAME says key / token / secret / password / url /
+ * wss / http goes, and any string VALUE that reads as a URL goes — and then
+ * only the blocks a script has a use for are handed back. A field that was
+ * scrubbed is absent, never blanked, so `undefined` reads as "not shown".
+ */
+export interface ScriptSettingsView {
+  /** 'live' or 'paper': the app's own switch, not this script's mode. */
+  mode: 'live' | 'paper';
+  execution: Record<string, unknown>;
+  strategy: Record<string, unknown>;
+  data: Record<string, unknown> & { hasBirdeyeKey: boolean; hasJupiterKey: boolean };
+  alerts: Record<string, unknown>;
+  evm: Record<string, unknown>;
+}
+
+const SECRET_KEY = /key|token|secret|password|passphrase|bearer|url|wss|http|referrer/i;
+/** Names the pattern catches that are plainly not secrets (audit 2026-09-27). */
+const SAFE_KEYS = new Set(['loadTokenImages']);
+const LOOKS_LIKE_URL = /^(https?|wss?):\/\//i;
+
+/** A deep copy with every secret-shaped field and URL-shaped value removed. */
+export function scrubForScript(v: unknown, depth = 0): unknown {
+  if (depth > 6) return undefined;
+  if (Array.isArray(v)) return v.map((x) => scrubForScript(x, depth + 1)).filter((x) => x !== undefined);
+  if (typeof v === 'object' && v !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (SECRET_KEY.test(k) && !SAFE_KEYS.has(k)) continue;
+      const s = scrubForScript(val, depth + 1);
+      if (s !== undefined) out[k] = s;
+    }
+    return out;
+  }
+  if (typeof v === 'string' && LOOKS_LIKE_URL.test(v.trim())) return undefined;
+  if (typeof v === 'function') return undefined;
+  return v;
+}
+
+export function scriptSettingsView(s: AppSettings): ScriptSettingsView {
+  const pick = (block: unknown): Record<string, unknown> => (scrubForScript(block) as Record<string, unknown> | undefined) ?? {};
+  const data = pick(s.data);
+  return {
+    mode: s.execution?.liveEnabled ? 'live' : 'paper',
+    execution: pick(s.execution),
+    strategy: pick(s.strategy),
+    data: { ...data, hasBirdeyeKey: !!(s.data?.birdeyeApiKey ?? '').trim(), hasJupiterKey: !!(s.data?.jupiterApiKey ?? '').trim() },
+    alerts: pick(s.alerts),
+    evm: pick(s.evm),
+  };
+}
+
+/** One launch cohort (dev / bundle / snipers), as `bot.launchIntel()` hands it over. */
+export interface ScriptLaunchCohort {
+  /** Wallets in the cohort. */
+  wallets: number;
+  /** Tokens bought during the window, UI units. */
+  bought: number;
+  /** % of total supply bought during the window. Null when supply is unknown. */
+  boughtPct: number | null;
+  /** SOL spent during the window. */
+  sol: number;
+  /** % of total supply these wallets hold NOW. Null until balances are read. */
+  heldPct: number | null;
+  /** Of what they bought, the % still held. Null until read, or when nothing was bought. */
+  retainedPct: number | null;
+  /** How many of them still hold anything. Null until read. */
+  stillHolding: number | null;
+}
+
+export interface ScriptLaunchWallet {
+  address: string;
+  cohort: 'dev' | 'bundle' | 'sniper' | 'early';
+  /** Slots after the launch slot; 0 is the launch block itself. */
+  slotOffset: number;
+  bought: number;
+  boughtPct: number | null;
+  sol: number;
+  /** Sold again inside the window that was scanned. */
+  soldInWindow: boolean;
+  /** Current balance, UI units. Null until read. */
+  heldNow: number | null;
+  heldPct: number | null;
+}
+
+/**
+ * The Launch tab's answer for one pump.fun mint — who bought the first
+ * blocks and what they hold now — as `bot.launchIntel()` hands it over. The
+ * token page's LaunchIntelReport with its analysis lifted to the top level.
+ */
+export interface ScriptLaunchIntel {
+  mint: string;
+  creator: string | null;
+  /** Total supply, UI units. Null ⇒ every percentage in here is null. */
+  supply: number | null;
+  /** True when the scan reached the token's genuine first trade. False means
+   *  the launch block could not be isolated: every cohort is empty, the
+   *  counts null, and `note` says why. Never an approximation. */
+  complete: boolean;
+  launchSlot: number | null;
+  launchTs: number | null;
+  tradesScanned: number;
+  slotsSpanned: number;
+  /** How many slots after the launch block still count as a snipe (20 ≈ 8 s). */
+  sniperWindowSlots: number;
+  /** True once the wallets' current balances were read; the held figures stay null before that. */
+  priced: boolean;
+  dev: ScriptLaunchCohort;
+  bundle: ScriptLaunchCohort;
+  snipers: ScriptLaunchCohort;
+  /** Sum of the three largest NON-creator bought shares, of supply. */
+  top3BuyersPct: number | null;
+  /** Every wallet that bought in the window, largest first. */
+  wallets: ScriptLaunchWallet[];
+  source: 'pumpswap' | 'engine' | 'none';
+  /** Why the analysis is missing or partial. Null when it is whole. */
+  note: string | null;
+  /** Why current balances are missing. Null when they were read. */
+  balancesNote: string | null;
+  generatedAt: number;
 }
 
 /** The creator's record, as `bot.creator()` hands it to a script. */
@@ -1083,6 +1342,130 @@ export function withLaunchLinks(c: RuleContext, l: LaunchLinks | null): RuleCont
   if (c.website === null && l.websiteUrl) c.website = l.websiteUrl;
   if (c.telegram === null && l.telegramUrl) c.telegram = l.telegramUrl;
   return c;
+}
+
+/**
+ * The Launch tab's cohorts onto a context (2026-09-27).
+ *
+ * Filled only from a scan that reached the launch block (`complete`): an
+ * incomplete report carries empty cohorts whose counts read 0, and 0 wallets
+ * would be a confident answer about a block nobody isolated. The held figures
+ * stay null until the balances were read — `applyBalances` in
+ * shared/launchintel.ts never infers them, and neither does this.
+ *
+ * The provider's bundledPct / sniperPct are left alone when present and
+ * filled from the scan when null — the same fallback the token page's
+ * security report makes — so a script written against `bundledPct` starts
+ * seeing a number on new pump.fun coins once the scan is cached.
+ */
+export function withLaunchIntel(c: RuleContext, li: ScriptLaunchIntel | null): RuleContext {
+  if (!li || !li.complete) return c;
+  c.launchDevPct = num(li.dev.boughtPct);
+  c.launchDevHeldPct = num(li.dev.heldPct);
+  c.launchBundlePct = num(li.bundle.boughtPct);
+  c.launchBundleHeldPct = num(li.bundle.heldPct);
+  c.launchBundleRetainedPct = num(li.bundle.retainedPct);
+  c.launchBundleWallets = num(li.bundle.wallets);
+  c.launchBundleStillHolding = num(li.bundle.stillHolding);
+  c.launchSniperPct = num(li.snipers.boughtPct);
+  c.launchSniperHeldPct = num(li.snipers.heldPct);
+  c.launchSniperRetainedPct = num(li.snipers.retainedPct);
+  c.launchSniperWallets = num(li.snipers.wallets);
+  c.launchSniperStillHolding = num(li.snipers.stillHolding);
+  c.launchTop3BuyersPct = num(li.top3BuyersPct);
+  if (c.bundledPct === null) c.bundledPct = c.launchBundlePct;
+  if (c.sniperPct === null) c.sniperPct = c.launchSniperPct;
+  return c;
+}
+
+/** The token page's LaunchIntelReport → what a script gets: the analysis
+ *  lifted to the top level, nothing dropped, nothing invented. */
+export function scriptLaunchIntelFromReport(r: LaunchIntelReport): ScriptLaunchIntel {
+  const a = r.analysis;
+  const cohort = (c: LaunchIntelReport['analysis']['dev']): ScriptLaunchCohort => ({
+    wallets: c.wallets,
+    bought: c.bought,
+    boughtPct: c.boughtPct,
+    sol: c.sol,
+    heldPct: c.heldPct,
+    retainedPct: c.retainedPct,
+    stillHolding: c.stillHolding,
+  });
+  return {
+    mint: r.mint,
+    creator: r.creator,
+    supply: r.supply,
+    complete: a.complete,
+    launchSlot: a.launchSlot,
+    launchTs: a.launchTs,
+    tradesScanned: a.tradesScanned,
+    slotsSpanned: a.slotsSpanned,
+    sniperWindowSlots: r.sniperWindowSlots,
+    priced: a.priced,
+    dev: cohort(a.dev),
+    bundle: cohort(a.bundle),
+    snipers: cohort(a.snipers),
+    top3BuyersPct: a.top3BuyersPct,
+    wallets: a.wallets.map((w) => ({
+      address: w.address,
+      cohort: w.cohort,
+      slotOffset: w.slotOffset,
+      bought: w.bought,
+      boughtPct: w.boughtPct,
+      sol: w.sol,
+      soldInWindow: w.soldInWindow,
+      heldNow: w.heldNow,
+      heldPct: w.heldPct,
+    })),
+    source: r.source,
+    note: r.note,
+    balancesNote: r.balancesNote,
+    generatedAt: r.generatedAt,
+  };
+}
+
+/**
+ * The token page's SecurityReport → what a script gets. One mapping, so the
+ * page and `bot.security()` say the same thing about the same coin. The
+ * creator's verdict follows the Launch tab: a first launch is the ABSENCE of
+ * a record, not a pass, so it reads null rather than green.
+ */
+export function scriptSecurityFromReport(r: SecurityReport, warnings: string[]): ScriptSecurity {
+  const h = r.creator.history;
+  const firstLaunch = !h || h.launches <= 1;
+  const v = firstLaunch ? { verdict: null, detail: h ? 'First launch from this wallet on pump.fun — no record.' : 'Creator history unavailable.' } : creatorVerdict(h);
+  return {
+    score: r.score,
+    checksResolved: r.checksResolved,
+    checksTotal: r.checksTotal,
+    checks: r.checks.map((c) => ({ id: c.id, label: c.label, verdict: c.verdict, detail: c.detail, source: c.source, weight: c.weight, kind: c.kind ?? 'gate' })),
+    warnings,
+    concentration: { ...r.concentration },
+    creator: {
+      address: r.creator.address,
+      priorLaunches: r.creator.priorLaunches,
+      priorRugs: r.creator.priorRugs,
+      launches: h?.launches ?? r.creatorRecord.launches,
+      graduated: h?.graduated ?? r.creatorRecord.graduated,
+      graduationRate: h?.graduationRate ?? null,
+      launchesInBusiestDay: h?.launchesInBusiestDay ?? null,
+      devMints: r.creatorRecord.devMints,
+      devMigrations: r.creatorRecord.devMigrations,
+      rugcheckCreatorRugs: r.creatorRecord.rugcheckCreatorRugs,
+      verdict: v.verdict,
+      detail: v.detail,
+    },
+    rug: r.rug,
+    volatility: r.volatility,
+    odds: r.odds,
+    dexPaid: {
+      paid: r.descriptive.dexPaid.paid,
+      paidAt: r.descriptive.dexPaid.paidAt,
+      boosts: r.descriptive.dexPaid.boosts,
+      communityTakeover: r.descriptive.dexPaid.communityTakeover,
+    },
+    generatedAt: r.generatedAt,
+  };
 }
 
 /**
@@ -1531,6 +1914,13 @@ export interface ApiSpec {
   /** Counts as an action against the budget. */
   action: boolean;
   /**
+   * A READ that leaves the machine (a provider round trip), so the dispatcher
+   * charges it against actions-per-minute exactly like an action — while it
+   * is still a read, not a side effect. Rendered as its own group in the
+   * reference so the cost is not undersold (audit 2026-09-27).
+   */
+  charged?: true;
+  /**
    * Answered inside the sandbox, so it is NOT one of SCRIPT_METHODS and never
    * crosses the wire. Handlers, the logger, the clock, and the two facts about
    * the script's own chain, which ride along with the code in `init`.
@@ -1541,15 +1931,24 @@ export interface ApiSpec {
 /** The whole `bot` object. The harness, the dispatcher and the docs all
  *  follow this table. */
 export const SCRIPT_API: ApiSpec[] = [
-  { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval. Handlers for one script run one at a time. One is checked at 3 s; if it is still awaiting bot calls it gets more time, up to 30 s — a stuck one is killed and counts as an error.', action: false },
+  { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval, migration, devSell, holdings, copyFill, runnerExpired. Handlers for one script run one at a time. One is checked at 3 s; if it is still awaiting bot calls it gets more time, up to 30 s — a stuck one is killed and counts as an error.', action: false },
   { method: 'every', signature: 'bot.every(seconds, async () => {})', returns: 'Promise<number> (the seconds used)', notes: 'A timer. 5 s minimum, 3600 max.', action: false },
   { method: 'at', signature: "bot.at('HH:MM', async () => {})", returns: 'Promise<string>', notes: 'Once a day at that local time.', action: false },
-  { method: 'buy', signature: 'await bot.buy(mint, sol, address?)', returns: '{ok, message}', notes: 'Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over THIS SCRIPT’S budget — max per trade, buys per day, open positions, actions per minute — or while live is blocked (not armed, execution off, a breaker). The app’s manual per-trade cap does NOT apply: a script’s own budget is the authority on its size. Pass another of your own wallet ADDRESSES (see bot.wallets) to buy with that wallet instead — refused until you accept “Trading from your other wallets” on the Scripts page. The app does not space these out or cap how many of your wallets touch a coin: the script does what it is written to, inside its own budget. Solana only, and paper spends nothing.', action: true },
-  { method: 'sell', signature: 'await bot.sell(mint, pct, address?)', returns: '{ok, message}', notes: 'pct 1–100 of what is held in the script’s mode. Refused when nothing is held. Pass another of your own wallet ADDRESSES to sell from that one instead — only a mint this script opened, and only on Solana.', action: true },
+  { method: 'buy', signature: 'await bot.buy(mint, sol, address? | { wallet?, slippagePct? })', returns: '{ok, message}', notes: 'Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over THIS SCRIPT’S budget — max per trade, buys per day, open positions, actions per minute — or while live is blocked (not armed, execution off, a breaker). The app’s manual per-trade cap does NOT apply: a script’s own budget is the authority on its size. The third argument is either another of your own wallet ADDRESSES (see bot.wallets) to buy with that wallet — refused until you accept “Trading from your other wallets” on the Scripts page — or an options object: {wallet} is that same address, {slippagePct} (0.1–50) replaces the execution setting’s slippage for THIS buy only — trading wallet, Solana; the other wallets and the EVM rails keep the setting, so slippagePct together with wallet is refused rather than silently dropped. The app does not space these out or cap how many of your wallets touch a coin: the script does what it is written to, inside its own budget. Paper spends nothing.', action: true },
+  { method: 'sell', signature: 'await bot.sell(mint, pct | { pct?, tokens?, slippagePct?, wallet? }, address?)', returns: '{ok, message}', notes: 'pct 1–100 of what this script holds in its mode. Or an options object: {tokens} sells that many tokens (UI units) instead of a percent — converted against the position the app can see, so it is refused while a fresh buy is not in the holdings read yet, and capped at what this script itself bought when the bag also holds hand-bought tokens; {slippagePct} (0.1–50) replaces the slippage setting for this sell only (trading wallet, Solana) — a LIVE sell never runs below the app’s 15 % exit floor, so asking for less runs at 15; {wallet} names another of your own wallet ADDRESSES to sell from that one — only a mint this script opened, only on Solana, only as a percent (tokens with wallet is refused), at the execution setting’s slippage (slippagePct with wallet is refused). Name the wallet once: in the options or as the third argument, not both. Refused when nothing is held.', action: true },
   { method: 'sellAll', signature: 'await bot.sellAll()', returns: '{ok, message, sold: number}', notes: 'Sell 100 % of every position this script holds.', action: true },
   { method: 'order', signature: "await bot.order({ mint, kind, triggerBasis, triggerValue, amount })", returns: '{ok, message}', notes: "kind: stop_loss | take_profit | trailing_stop | limit_buy | limit_sell | sell_on_dev_sell | sell_on_migration | buy_on_migration. triggerBasis: 'pct' (from the price now) | 'mcap_usd' | 'price_sol'. amount: SOL for buys, % for sells. Placed as a real advanced order. 'pct' is measured from your position's fill price (fees and the token-account deposit excluded), or from the price now when nothing is held. An app restart brings every armed order back PAUSED and never resumes it by itself: the script gets an 'order' event with orderState 'paused' for its coins, and must cancelOrders + order again to re-arm.", action: true },
   { method: 'cancelOrders', signature: 'await bot.cancelOrders(mint, kinds?)', returns: '{ok, message, cancelled: number}', notes: "Cancel every open order on the token — or, with kinds (e.g. ['stop_loss', 'trailing_stop']), only those kinds, leaving the rest armed: a moonbag can drop its stop and keep its take-profit rungs. An app build before 5.3.0 ignores the list and cancels every order.", action: true },
   { method: 'clearCompletedOrders', signature: 'await bot.clearCompletedOrders()', returns: '{ok, message, cleared: number}', notes: 'Prune every FINISHED order (filled, cancelled, expired, failed) from the Orders list. Finished orders otherwise pile up against the 200-order cap and eventually get new orders (your take-profit rungs) refused, so a long-running script that places orders should call this each loop. Housekeeping — costs no action, touches no open order. Solana only.', action: false },
+  { method: 'cancelOrder', signature: 'await bot.cancelOrder(orderId)', returns: '{ok, message}', notes: 'Cancel ONE order by the id bot.orders() shows — any armed or paused order, whoever placed it, the same as the Orders page’s cancel button. An order that is executing cannot be recalled and is refused. Refused on a paper script (orders are live-only; a rehearsal must not pull a real stop). Costs an action. Solana only.', action: true },
+  { method: 'resumeOrders', signature: 'await bot.resumeOrders()', returns: '{ok, message}', notes: 'Re-arm every order an app restart left PAUSED — the Orders page’s Resume button. Orders that were mid-execution when the app stopped are NOT re-armed (their trade may have landed) and the message says how many need a human to check the wallet. Refused on a paper script (orders are live-only) and while live is blocked. Costs an action. Solana only.', action: true },
+  { method: 'removeAlert', signature: 'await bot.removeAlert(alertId)', returns: '{ok, message}', notes: 'Delete one alert by the id bot.alerts() shows — yours or a script’s. Costs an action. Solana only.', action: true },
+  { method: 'muteAlert', signature: 'await bot.muteAlert(alertId, muted = true)', returns: '{ok, message}', notes: 'Silence (or un-silence with false) one alert without deleting it. Costs an action. Solana only.', action: true },
+  { method: 'clearFiredAlerts', signature: 'await bot.clearFiredAlerts()', returns: '{ok, message}', notes: 'Remove every alert that has already fired and does not repeat. Housekeeping — free. Solana only.', action: false },
+  { method: 'saveTemplate', signature: "await bot.saveTemplate({ id?, name, stopLossPct, takeProfits: [{gainPct, sellPct}], trailingPct, sellOnDevSell })", returns: '{ok, message, templates}', notes: 'Create or update an order template — the same shape the Templates page saves: name (≤ 40 chars), stopLossPct (percent below entry, or null), up to 3 takeProfits each {gainPct, sellPct of what remains}, trailingPct (or null), sellOnDevSell (true/false). Pass an existing id to update it; leave it out for a new one; a built-in id saves a copy you own. At most 8 templates. Validated the page’s way and refused with the reason. Returns the list afterwards. Refused on a paper script: templates arm REAL orders on the user’s manual buys. Costs an action. Solana only.', action: true },
+  { method: 'deleteTemplate', signature: 'await bot.deleteTemplate(templateId)', returns: '{ok, message, templates}', notes: 'Delete one of your templates. The built-in ones cannot be deleted. Refused on a paper script. Costs an action. Solana only.', action: true },
+  { method: 'setActiveTemplate', signature: 'await bot.setActiveTemplate(templateId | null)', returns: '{ok, message}', notes: 'Choose the template the app arms on every MANUAL buy (the Templates page’s “auto-arm” pick), or null to turn that off. It changes what happens when the user clicks Buy, so say so in the script’s description. Refused on a paper script. Costs an action. Solana only.', action: true },
+  { method: 'settings', signature: 'await bot.settings()', returns: 'Settings', notes: 'The app’s settings, read-only and SCRUBBED: {mode: live · paper, execution: {liveEnabled, maxLiveSol, liveSlippagePct, mevMode, feeUrgency, useJito, jitoTipPercentile, autoSellOnExit, maxLiveSessionLossSol, maxLiveConsecutiveLosses, …}, strategy: {the scanner’s thresholds}, data: {networkDataEnabled, providers: {jupiter, dexscreener, pumpfun, …}, hasBirdeyeKey, hasJupiterKey, …}, alerts, evm}. Every field whose name says key, token, secret, password, url or http is removed before it crosses, and so is any value that is a URL — a script can learn THAT a key is set, never the key. Nothing here can be changed from a script: settings writes stay with the user. Free.', action: false },
   { method: 'templates', signature: 'await bot.templates()', returns: 'Array<{id, name}>', notes: 'Saved order templates.', action: false },
   { method: 'applyTemplate', signature: 'await bot.applyTemplate(mint, templateId)', returns: '{ok, message}', notes: 'Arm a template’s stops and take profits on a token.', action: true },
   { method: 'alert', signature: "await bot.alert({ mint, kind, threshold, repeat })", returns: '{ok, message}', notes: 'kind: price_above | price_below | mcap_above | mcap_below | volume_above | liquidity_below | holders_above | curve_above. Fires an alert event back to scripts.', action: true },
@@ -1572,11 +1971,25 @@ export const SCRIPT_API: ApiSpec[] = [
   { local: true, method: 'stats', signature: "bot.stats({ 'Callouts': 12, 'Likes': 30, 'PnL (SOL)': 0.42 })", returns: 'void', notes: 'Set several widget stats at once — same rules as bot.stat.', action: false },
   { local: true, method: 'clearStats', signature: 'bot.clearStats()', returns: 'void', notes: 'Empty this script’s widget.', action: false },
   { method: 'price', signature: 'await bot.price(mint)', returns: 'number | null', notes: 'SOL per token from what the app already knows. Null when nothing local knows it.', action: false },
-  { method: 'token', signature: 'await bot.token(mint)', returns: 'Token | null', notes: 'The same facts a rule sees (see the variable guide), from the launch feed and the cached market data. Null when the app has never seen the token.', action: false },
-  { method: 'market', signature: 'await bot.market(mint)', returns: 'Market | null', notes: 'Asks the market providers (a network round trip inside the app): priceSol, priceUsd, marketCapUsd, liquidityUsd, holders, launchpad, symbol, name, imageUrl. Slow — a second or more; not for every tick.', action: false },
+  { method: 'token', signature: 'await bot.token(mint)', returns: 'Token | null', notes: 'The same facts a rule sees (see the variable guide), from the launch feed and the cached market data — and, for 45 s after bot.launchIntel(mint) or bot.security(mint) (or after someone opens the coin’s page), the Launch tab’s cohorts (launchDevPct, launchBundlePct, launchSniperPct, their *HeldPct, wallet counts, launchTop3BuyersPct). Null when the app has never seen the token.', action: false },
+  { method: 'market', signature: 'await bot.market(mint)', returns: 'Market | null', notes: 'Asks the market providers (a network round trip inside the app): priceSol, priceUsd, marketCapUsd, liquidityUsd, holders, launchpad, symbol, name, imageUrl. Slow — a second or more; not for every tick.', action: false, charged: true },
   { method: 'links', signature: 'await bot.links(mint)', returns: 'Links | null', notes: 'The token’s published links and what its X link IS, from cached facts — free, costs no action (the first call for a token starts its Telegram and domain lookups; their answers appear on later calls): {twitter, website, telegram, launchpadLabel, launchpadUrl, x: {kind, handle, postId, label, accountReuse, postReuse, stats, statsReadAt}, telegramStats, domain, site}. stats is what the Links panel read off the X page when a person opened it there — {page, handle, followers, following, joined, verified, likes, reposts, replies, views, bookmarks, loginWall} — else null; nothing is fetched for it. telegramStats is what t.me’s public preview says about the Telegram link — {kind: channel · group · account · invite · unknown, members, countWord, online, title, readAt} — else null (a private invite shows no count). domain is the website’s registry record — {name, registeredAt, registrar, hostedOn, readAt} — hostedOn naming a shared platform (Vercel, GitHub Pages…) when the site has no domain of its own; else null. site is what the Links panel read off the website when a person opened it there — {namesContract, xHandles, telegramLinks, outboundHosts, wordCount, generator, mentionsConnectWallet, readAt} — else null; the app never fetches a token’s website itself. kind is profile · post · community · search · other-x · not-x · none; accountReuse / postReuse count OTHER launches in view on the same account or post. Null when the app has no cached facts for the token (call bot.market first). The app never visits the links. Solana only.', action: false },
-  { method: 'security', signature: 'await bot.security(mint)', returns: 'Security | null', notes: 'The token page’s security report (a round trip inside the app; costs an action like market): {score, checksResolved, checksTotal, checks: [{id, label, verdict, detail}], warnings}. verdict is pass · warn · fail · unknown. Null when it could not be read. Solana only.', action: false },
-  { method: 'creator', signature: 'await bot.creator(mint)', returns: 'Creator | null', notes: 'The creator wallet’s launch record from pump.fun (a round trip; costs an action): {address, launches, graduated, graduationRate, medianAthUsd, bestAthUsd, firstLaunchAt, lastLaunchAt, truncated}. Null when the creator is unknown or the source did not answer. Solana only.', action: false },
+  { method: 'security', signature: 'await bot.security(mint)', returns: 'Security | null', notes: 'The token page’s WHOLE security report (a round trip inside the app; costs an action like market): {score, checksResolved, checksTotal, checks: [{id, label, verdict, detail, source, weight, kind}], warnings, concentration: {devPct, top10Pct, top20Pct, insiderPct, bundledPct, bundledHeldPct, sniperPct, sniperHeldPct, source}, creator: {address, priorLaunches, priorRugs, launches, graduated, graduationRate, launchesInBusiestDay, devMints, devMigrations, rugcheckCreatorRugs, verdict, detail}, rug: {windowS, hide, tradesSeen, flags: [{id, label, detail, severity}], states} | null, volatility: [{id, label, detail, dumpedPct, gradPct, n}], odds: {windowS, regime, graduate: {bucket, observedPct, basePct, n, line} | null, mult3, mult5, footer} | null, dexPaid: {paid, paidAt, boosts, communityTakeover}, generatedAt}. checks[].verdict is pass · warn · fail · unknown; creator.verdict is pass · warn · fail, or null when there is no record (a first launch is the absence of a record, not a pass). Every share is % of supply and null means unknown, never 0. concentration.bundledPct / sniperPct are the provider’s when it has them, else the launch scan’s (bot.launchIntel); the *HeldPct are what those wallets hold NOW and are never inferred from what they bought. Null when it could not be read. Solana only.', action: false, charged: true },
+  { method: 'creator', signature: 'await bot.creator(mint)', returns: 'Creator | null', notes: 'The creator wallet’s launch record from pump.fun (a round trip; costs an action): {address, launches, graduated, graduationRate, medianAthUsd, bestAthUsd, firstLaunchAt, lastLaunchAt, truncated}. Null when the creator is unknown or the source did not answer. Solana only.', action: false, charged: true },
+  { method: 'launchIntel', signature: 'await bot.launchIntel(mint)', returns: 'LaunchIntel | null', notes: 'The Launch tab for a pump.fun coin — who bought the first blocks and what they hold NOW (a round trip: 1–2 pump.fun swap-api calls plus one RPC batch, cached 45 s; costs an action): {mint, creator, supply, complete, launchSlot, launchTs, tradesScanned, slotsSpanned, sniperWindowSlots, priced, dev, bundle, snipers, top3BuyersPct, wallets, source, note, balancesNote, generatedAt}. dev / bundle / snipers are each {wallets, bought, boughtPct, sol, heldPct, retainedPct, stillHolding}: boughtPct = % of supply bought in the window, heldPct = % of supply those wallets hold now, retainedPct = of what they bought, the % kept, stillHolding = how many still hold anything. dev is the creator wallet; bundle is every other wallet whose FIRST buy landed in the launch block itself (pre-arranged — nobody can react to a block they cannot yet see); snipers bought within sniperWindowSlots (20 ≈ 8 s) after it. wallets lists every early buyer largest first: {address, cohort, slotOffset, bought, boughtPct, sol, soldInWindow, heldNow, heldPct}. complete=false means the launch block could not be isolated: every cohort is empty and note says why — never a guess. Once fetched, the same numbers ride into the facts object for 45 s as launchDevPct, launchBundlePct, launchSniperPct, launchBundleHeldPct… (see the variable guide) and fill bundledPct / sniperPct where no provider had them. NOT fetched on every launch by itself: pump’s swap-api blocks the app for ~35 s past ~20 quick calls, so ask for the few coins you are about to act on. pump.fun coins only (anything else answers complete=false with a note). Solana only.', action: false, charged: true },
+  { method: 'holders', signature: 'await bot.holders(mint, limit?)', returns: 'Holders | null', notes: 'The Holders panel: {mint, totalSupply, holderCount, rows: [{address, owner, amount, pct, tags, label}], source, note}, largest first, up to 100 (default 50). tags are dev · insider · sniper · bundle · smart · fresh · whale · lp · unknown. pct is of total supply and null when the supply is unknown. A round trip (Birdeye with a key, else the RPC’s top 20 accounts, else RugCheck); costs an action. Null when nothing could answer. Solana only.', action: false, charged: true },
+  { method: 'trades', signature: 'await bot.trades(mint, limit?)', returns: 'Trades | null', notes: 'The Trades panel: {rows: [{signature, at, side, wallet, walletLabel, sol, tokens, priceSol, priceUsd, mcapUsd, program, …}], source, note}, newest first, up to 200 (default 60). The app’s own live tape when it has one for the coin, else a provider’s list. A round trip; costs an action. Solana only.', action: false, charged: true },
+  { method: 'candles', signature: "await bot.candles(mint, interval?, limit?)", returns: 'Candles | null', notes: 'The chart: {mint, interval, candles: [{time, open, high, low, close, volume}], source, …}, oldest first, 10–500 bars (default 120). interval is 1s · 5s · 15s · 1m · 5m · 15m · 1h · 4h (default 1m). Built from the app’s own tape merged with its providers, so the recent bars are what this install saw. A round trip; costs an action. Solana only.', action: false, charged: true },
+  { method: 'search', signature: "await bot.search('text or mint')", returns: 'Market[]', notes: 'Token search (Jupiter), up to 100 characters of text: the same summary objects bot.market returns, best match first; a pasted mint returns that coin. A round trip; costs an action. Empty when nothing matched or the provider is off. Solana only.', action: false, charged: true },
+  { method: 'discover', signature: "await bot.discover('new' | 'graduating' | 'migrated' | 'trending', limit?)", returns: 'Market[]', notes: 'The Discover page’s columns, as the app is showing them right now: brand-new launches, coins nearing graduation, coins that migrated to a pool, and trending. Up to 80 rows (default 20), same summary objects as bot.market. On BNB and Robinhood the chain’s own Discover. A round trip; costs an action. What the app is watching, not a recommendation.', action: false, charged: true },
+  { method: 'callouts', signature: 'await bot.callouts(limit?)', returns: 'Callout[] | null', notes: 'pump.fun’s public callouts feed, newest first, up to 50 (default 20): [{id, mint, chain, name, symbol, at, thesis, calledAtMcapUsd, mcapUsdNow, calloutPriceUsd, multiple, caller: {address, username, …}, coinCallouts, …}]. pump’s own feed, as it stands — the numbers are the callers’ claims about themselves; coinCallouts is how many callouts the COIN has, not the caller’s record. Null (not an empty list) when pump is not answering. A round trip; costs an action. Solana only.', action: false, charged: true },
+  { method: 'history', signature: 'await bot.history(limit?)', returns: 'Fill[]', notes: 'Every fill this install has made — by hand, by orders, by copy trading, by any script — newest first, up to 200 (default 50): [{at, mint, symbol, side, requested, solDelta, tokenDelta, feeSol, signature, state, …}]. solDelta is the chain’s own lamport delta (fees, tips and slippage included), null while unreconciled; paper fills are included and marked. Free. Solana only — an empty list on BNB and Robinhood (their ledgers are not reachable from scripts yet).', action: false },
+  { method: 'holdings', signature: 'await bot.holdings()', returns: 'Holding[]', notes: 'Every token the active trading wallet holds right now — including bags this script did not open and cannot sell: [{mint, tokenAccount, amountRaw, uiAmount, decimals, symbol, programId, warning}]. warning names why a bag may not be sellable (a Token-2022 permanent delegate, a transfer hook); null means the mint was checked and carries nothing suspicious. Answered from the last chain read when it is under 2 s old, else a fresh one. REJECTS (throws) when the wallet could not be read — unknown is not empty, the same rule as bot.positions — so wrap it in try/catch and try again next pass. Costs an action. On BNB and Robinhood it is that chain’s own holdings, with amountRaw, decimals, tokenAccount and programId null and warning "not checked on this chain".', action: false, charged: true },
+  { method: 'solUsd', signature: 'await bot.solUsd()', returns: 'number | null', notes: 'SOL in USD, as the app’s price provider last said it (shared, cached). Null when no provider answered. Free.', action: false },
+  { method: 'walletScores', signature: "await bot.walletScores({ window?, limit?, onlyWorthALook? })", returns: '{onRecord, filtered, rows: ScoutRow[]}', notes: 'The Wallet Scout board for this script’s chain, ranked by Copy score — what a FOLLOWER would have realised mirroring each wallet at a 2 s lag and 1.5 %/side, not what the wallet made. window: day · week · month · all (default week); limit up to 50 (default 20); onlyWorthALook applies the board’s five filters. Rows: {address, buys, sells, roundTrips, wins, losses, pnl, volume, returnPct, winRatePct, medianHoldMs, lastSeen, ranked, looksAutomated, fTrips, fPnl, copyScore, …}. The app’s own research found no group of wallets profitable to copy: this ranks least-bad, and is not an edge. Free (in memory).', action: false },
+  { method: 'walletRecord', signature: 'await bot.walletRecord(address)', returns: '{wallet, saved} | null', notes: 'One wallet’s Scout record on this script’s chain — its trades, trips, and the checks behind its Copy score — plus whether it is saved. Null when the app has never seen the address. Free.', action: false },
+  { method: 'copyConfigs', signature: 'await bot.copyConfigs()', returns: '{configs, stats, liveExecutable, liveBlockedReason}', notes: 'The Copy Trading page’s configs — who is followed, direction, paper or live, armed or not — and each one’s record. Read only: arming one starts unattended spending and stays something the user does in the app. Free.', action: false },
+  { method: 'alerts', signature: 'await bot.alerts()', returns: 'Alert[]', notes: 'Every alert on the Alerts page — yours and the ones scripts created — with kind, threshold, whether it repeats, and when it last fired. Free. Solana only.', action: false },
   { method: 'analyze', signature: 'await bot.analyze(mint)', returns: 'Analysis', notes: 'The AI second opinion from the token page: {score, verdict, summary, bullish, bearish, provider, model, at}. It spends YOUR key (Settings → AI) on every uncached call, so it is capped at 20 per hour per script and cached 10 minutes per token, and it counts as an action. Only public on-chain facts about the token are sent — never a wallet or a key. Rejects with the reason when AI is off or capped. Solana only.', action: true },
   { method: 'positions', signature: 'await bot.positions()', returns: 'Position[]', notes: 'Every position THIS SCRIPT opened, in its mode, as the same facts object plus held=true, pnlPct, pnlSol, holdMinutes, drawdownFromPeakPct, costSol. Bags the user opened by hand are not listed and cannot be sold.', action: false },
   { method: 'orders', signature: 'await bot.orders(mint?)', returns: 'Order[]', notes: '{id, mint, symbol, kind, state, triggerBasis, triggerValue, amount, interrupted}. All orders, or the token’s. interrupted = paused because the app stopped while it was executing (its trade may have landed): never re-place one without checking the wallet.', action: false },
@@ -1619,6 +2032,14 @@ export const SCRIPT_EVENTS_DOC: EventSpec[] = [
   { event: 'fill', payload: '{mint, side, ok}', when: 'one of this script’s own trades landed or failed' },
   { event: 'schedule', payload: '{at: "HH:MM"}', when: 'the time set with bot.at' },
   { event: 'interval', payload: '{at: ms}', when: 'the timer set with bot.every' },
+  // The engine's other moments (2026-09-27). Until now a script could only
+  // infer a graduation from curvePct reaching 100 on a launchUpdate it might
+  // not be receiving, and a dev sell from creatorSold flipping.
+  { event: 'migration', payload: 'Token + migrated: true', when: 'a coin’s bonding curve completed and it migrated to a pool (pump.fun and Meteora DBC) — every Solana script hears every migration, whether it holds the coin or not' },
+  { event: 'devSell', payload: 'Token + devSoldSol, devSoldTokens', when: 'the creator wallet SOLD on a coin this script holds or subscribed to (bot.subscribe / bot.watch); creatorSold on the facts is true from then on. Solana (pump.fun curve) only' },
+  { event: 'holdings', payload: '{at, holdings: Holding[]}', when: 'the trading wallet’s token accounts were re-read and differ from the last read — after any fill, yours or a script’s (the same rows bot.holdings returns). Solana only' },
+  { event: 'copyFill', payload: '{id, configId, wallet, mint, symbol, side, mode, state, theirSol, ourSol, pnlSol, reason, direction, at}', when: 'copy trading opened, closed or skipped a copy (state open · closed · skipped; side buy, or sell for a mirrored exit) — the leader’s own trade is the separate leaderTrade event. Scripts on the copy’s chain only' },
+  { event: 'runnerExpired', payload: 'Token', when: 'a runner flag aged off the list (15 minutes after the flag) — the last moment a runner script still has the flag’s facts' },
 ];
 
 /** Rendered beside the editor. Generated, so it is always the truth about `bot`. */
@@ -1629,8 +2050,11 @@ export const SCRIPT_API_DOC: string = [
   '// Actions — every one is checked against your budget in the app, not here.',
   ...SCRIPT_API.filter((a) => a.action).map((a) => `${a.signature}  // -> ${a.returns}`),
   '',
-  '// Reads and timers',
-  ...SCRIPT_API.filter((a) => !a.action && a.method !== 'on').map((a) => `${a.signature}  // -> ${a.returns}`),
+  '// Reads that leave the machine — each counts against your actions-per-minute like an action does.',
+  ...SCRIPT_API.filter((a) => !a.action && a.charged).map((a) => `${a.signature}  // -> ${a.returns}`),
+  '',
+  '// Reads and timers — free.',
+  ...SCRIPT_API.filter((a) => !a.action && !a.charged && a.method !== 'on').map((a) => `${a.signature}  // -> ${a.returns}`),
   '',
   '// Not available: fetch, XMLHttpRequest, WebSocket, require, keys, files.',
   '// Unknown facts are null — never treat null as zero.',
@@ -1698,6 +2122,23 @@ bot.on('leaderTrade', async (t) => {
 });`,
   },
   {
+    name: 'Skip bundled runners',
+    description: 'On a runner flag, read the Launch tab’s cohorts and pass only when the bundle has left and nobody early still sits on the supply.',
+    code: `// Runner flags, filtered by who bought the first block — and whether they are still in.
+bot.on('runner', async (t) => {
+  if (t.isMayhem) return;
+  const li = await bot.launchIntel(t.mint);          // costs an action; a few per minute is fine
+  if (!li || !li.complete) return;                    // the launch block could not be isolated: unknown, not clean
+  bot.log(\`\${t.symbol}: bundle \${li.bundle.boughtPct?.toFixed(1) ?? '—'}% bought, holds \${li.bundle.heldPct?.toFixed(1) ?? '—'}% · snipers \${li.snipers.boughtPct?.toFixed(1) ?? '—'}%\`);
+  if (li.bundle.heldPct === null || li.snipers.heldPct === null) return;   // balances unread — do not guess
+  if (li.bundle.heldPct + li.snipers.heldPct > 15) return;                  // early wallets still hold > 15 % of supply
+  if (li.dev.heldPct !== null && li.dev.heldPct > 5) return;
+  const r = await bot.buy(t.mint, 0.02);
+  bot.log(\`buy \${t.symbol}: \${r.message}\`);
+  if (r.ok) await bot.order({ mint: t.mint, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 30, amount: 100 });
+});`,
+  },
+  {
     name: 'Runner alert to watchlist',
     description: 'When the scanner flags a runner with strong odds, pin it and notify — no trade.',
     code: `// Watch and notify on strong runner flags. Buys nothing.
@@ -1723,7 +2164,7 @@ bot.at('23:55', async () => {
 export function fieldGuideText(): string {
   const groups: Array<[FieldScope, string]> = [
     ['token', 'Launch feed (any token the app saw launch)'],
-    ['market', 'Market providers (when cached)'],
+    ['market', 'Market data — the providers, the Launch tab’s scan and the Links panel (when cached)'],
     ['position', 'Position (when held by this script)'],
     ['runner', 'Runner flag'],
     ['leader', 'Followed wallet'],
@@ -1735,7 +2176,8 @@ export function fieldGuideText(): string {
   for (const [scope, title] of groups) {
     out.push(`## ${title}`);
     for (const f of RULE_FIELDS.filter((x) => x.scope === scope)) {
-      out.push(`- ${f.id} (${f.kind}, ${f.unit}) — ${f.hint || f.label}. null when ${f.nullWhen}.`);
+      // A hint that already ends in a full stop must not get a second one.
+      out.push(`- ${f.id} (${f.kind}, ${f.unit}) — ${(f.hint || f.label).replace(/\.$/, '')}. null when ${f.nullWhen}.`);
     }
     out.push('');
   }
@@ -1757,7 +2199,7 @@ export function aiPromptPack(): string {
   const examples = SCRIPT_EXAMPLES.map((e) => `### ${e.name}\n${e.description}\n\n\`\`\`js\n${e.code}\n\`\`\``).join('\n\n');
   return `# Write a Krypto Bot script
 
-You are writing a JavaScript automation script for **Krypto Bot**, a memecoin trading terminal for Solana, Robinhood Chain and BNB Chain. The script runs inside the app, in a sandbox, against a small API called \`bot\`. Each script runs on ONE chain, chosen by the user: read it from \`bot.chain\`, and write amounts in \`bot.nativeSymbol\` (SOL, ETH or BNB). Methods marked "Solana only" below are refused on the other chains. Follow every rule below; the app enforces them and a script that ignores them simply gets refused.
+You are writing a JavaScript automation script for **Krypto Bot**, a memecoin trading terminal for Solana, Robinhood Chain and BNB Chain. The script runs inside the app, in a sandbox, against a small API called \`bot\`. Each script runs on ONE chain, chosen by the user: read it from \`bot.chain\`, and write amounts in \`bot.nativeSymbol\` (SOL, ETH or BNB). Methods marked "Solana only" below are refused on the other chains when they ACT, and answer null or an empty list when they READ — so one script body can run on any chain if it checks for null. Follow every rule below; the app enforces them and a script that ignores them simply gets refused.
 
 ## What you are writing
 
@@ -1771,7 +2213,7 @@ You are writing a JavaScript automation script for **Krypto Bot**, a memecoin tr
 
 - The script has a **budget** set by the user in the app: max SOL per buy, buys per day, open positions, actions per minute, and a daily realised-loss stop that turns the script off. Any \`bot.buy\` over the cap is **refused**, not shrunk — check \`r.ok\` and \`r.message\`.
 - The script runs in **paper** (simulated fills into a paper book) or **live** mode, chosen by the user. The code is identical; do not branch on mode.
-- Buys and sells go through the app's own pipeline. Sells are a percentage of what is held in the script's mode.
+- Buys and sells go through the app's own pipeline. Sells are a percentage — or, with \`{tokens}\`, a token count — of what is held in the script's mode.
 - **Public actions** — \`bot.callout\`, \`bot.calloutReply\`, \`bot.follow\`, \`bot.like\` and their undo methods — post under the user's own pump.fun account for anyone to see, and every callout ends with a "Called with krypt.cc/bot" line the app adds. On paper they send nothing and return ok with a "paper:" message, so paper tests the trading and filters, not the posting.
 - Treat \`null\` as **unknown, never as zero**. Every numeric fact can be null; write \`if (t.score === null || t.score < 70) return;\` not \`if (t.score < 70)\`.
 
@@ -1785,7 +2227,7 @@ ${api}
 
 ## The facts object ("Token" / "Position")
 
-Every event except \`fill\`, \`schedule\` and \`interval\` receives one object with these fields (null = unknown):
+Every event except \`fill\`, \`schedule\`, \`interval\`, \`holdings\` and \`copyFill\` (whose payloads are described in the events list above) receives one object with these fields (null = unknown):
 
 ${fieldGuideText()}
 

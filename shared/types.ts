@@ -393,6 +393,14 @@ export interface ExecutionSettings {
    * every buy for eight hours.
    */
   rearmAfterVerifiedUpgrade: boolean;
+  /**
+   * Swap any USDC that lands in a Solana wallet to SOL, by itself, while live
+   * is armed (2026-09-27). pump.fun pays callout rewards in USDC and this is
+   * a SOL terminal; the swap takes the same path as the Swap page, fee
+   * included. Absent on an older save = on. Off to hold or withdraw USDC.
+   * Rules in shared/usdcSweep.ts.
+   */
+  autoSwapUsdc: boolean;
   /** Sweep realized live profits to the wallet's withdrawal address. */
   autoCashout: boolean;
   /** Sweep once unswept live profit reaches this many SOL. */
@@ -423,7 +431,7 @@ export interface WalletHolding {
  *  Saved settings are merged OVER defaults, so changing a default alone never
  *  reaches a user who already has the old value on disk — see
  *  `settings-store.ts` migrateUnsafe(). */
-export const SETTINGS_REVISION = 6;
+export const SETTINGS_REVISION = 7;
 
 import { defaultBotSettings, type BotSettings } from './bots';
 import { DEFAULT_MCP_SETTINGS, type McpSettings } from './mcp';
@@ -1136,6 +1144,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     // separately.
     autoSellOnExit: false,
     rearmAfterVerifiedUpgrade: true,
+    autoSwapUsdc: true,
     autoCashout: false,
     cashoutThresholdSol: 0.05,
   },

@@ -82,6 +82,19 @@ test('full sell applies the 1% model once and realizes proceeds − cost', () =>
   assert.ok(near(paperRealizedSol(r.book), expected - 1));
 });
 
+test('a fractional percent sells that fraction — two decimals, never rounded to a whole percent', () => {
+  // A script's {tokens} sell and a copied sell arrive as the exact share they
+  // are; rounding to a whole percent booked 0.25 % as 1 % (audit 2026-09-27).
+  const b = openPaper(emptyPaperBook(), { mint: MINT, symbol: 'PPR', tokens: 1000, costSol: 1, decimalsKnown: true }, T0).book;
+  const r = sellPaper(b, MINT, 12.5, 0.001, T0 + 1);
+  assert.equal(r.ok, true);
+  assert.equal(r.tokensSold, 125, '12.5 % of 1000 is 125, not 130');
+  const r2 = sellPaper(b, MINT, 0.25, 0.001, T0 + 1);
+  assert.equal(r2.tokensSold, 2.5, '0.25 % sells 2.5 tokens, not 10');
+  const r3 = sellPaper(b, MINT, 0.004, 0.001, T0 + 1);
+  assert.equal(r3.tokensSold, 0.1, 'the floor is a hundredth of a percent');
+});
+
 test('partial sell keeps the remainder at average cost', () => {
   const b = openPaper(emptyPaperBook(), { mint: MINT, symbol: 'PPR', tokens: 1000, costSol: 1, decimalsKnown: true }, T0).book;
   const r = sellPaper(b, MINT, 25, 0.001, T0 + 1); // gross 0.25 SOL

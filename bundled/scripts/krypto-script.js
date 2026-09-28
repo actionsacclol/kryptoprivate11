@@ -2,6 +2,13 @@
 //
 // Youtube Guide: https://www.youtube.com/watch?v=WBaRjgaLLgo
 //
+// v2.5 (09-27): when pump.fun's creator record cannot be read (its list is
+// rate-limited for minutes at a time) the new "When pump.fun's creator record
+// cannot be read" setting falls back to the app's own record of the creator
+// instead of skipping the coin; and an unknown market cap at the flag no
+// longer skips a coin when the cap floor is 0 — the watch prices the cap
+// itself (SOL/USD × pump's fixed supply) and the ceiling applies at confirm.
+//
 // This will on average breakeven or lose slightly, where we win is callout rewards
 //
 // The cycle per coin:
@@ -120,6 +127,14 @@
     "min": 0,
     "max": 100000,
     "help": "The creator's launch count (bot.creator), looked up at the flag. 09-24: 17 of 18 losers came from creators with 24-5,376 launches, the winner 6. 0 = off. Unknown never passes."
+  },
+
+  "devUnknown": {
+    "type": "select",
+    "label": "When pump.fun's creator record cannot be read",
+    "options": ["use the app's own record", "skip"],
+    "default": "use the app's own record",
+    "help": "pump.fun's creator list is rate-limited for minutes at a time (09-27: parked 126 times in six hours; 234 flags were skipped as 'creator record unknown', and 12 of the 22 coins that later did 2x were among them). 'use the app's own record' falls back to the launches and rugs THIS app has seen from the creator — a floor: a factory it has watched for days shows up, a first-timer shows nothing — plus the scanner's creator risk flags. 'skip' keeps the old rule: unknown never passes."
   },
 
   "skipIfDevSold": {
@@ -1327,15 +1342,19 @@ async function passesFilters(t) {
 
   scoreNote(t.mint, { mc0: mc });
 
-  if (
-    mc === null ||
-    mc < bot.input.minMcUsd
-  ) {
-    return skip(t, 'mcap', mc === null ? 'market cap unknown' : `mc $${Math.round(mc)} < $${bot.input.minMcUsd}`);
+  // v2.5 (09-27): an UNKNOWN cap only fails a floor that is SET. With the
+  // floor at 0 (the default since F0) every coin the providers had not priced
+  // yet was skipped regardless — 18 in six hours, 3 of them later 2x — though
+  // the cap is only decided on at CONFIRM, and the watch prices it there
+  // (from SOL/USD and pump's fixed supply when no provider has).
+  const minMc = bot.input.minMcUsd ?? 0;
+  if (minMc > 0 && (mc === null || mc < minMc)) {
+    return skip(t, 'mcap', mc === null ? 'market cap unknown' : `mc $${Math.round(mc)} < $${minMc}`);
   }
 
   // Ceiling (09-26): a flag that is already big ran before the flag fired.
-  if (bot.input.maxMcUsd > 0 && mc >= bot.input.maxMcUsd) {
+  // A cap unknown here is checked again at confirm (watchVerdict).
+  if (bot.input.maxMcUsd > 0 && mc !== null && mc >= bot.input.maxMcUsd) {
     return skip(t, 'mcap', `mc $${Math.round(mc)} >= max $${bot.input.maxMcUsd}`);
   }
 
@@ -1374,10 +1393,35 @@ async function passesDev(t) {
     return true;
   }
   const d = await devLookup(t.mint, createdAtOf(t));
-  if (!d) return skip(t, 'dev', 'creator record unknown');
+  if (!d) return passesDevLocal(t, max);
   if (d.n > max) {
     return skip(t, 'dev', `creator has ${d.n}${d.truncated ? '+' : ''} launches > ${max}`);
   }
+  return true;
+}
+
+/**
+ * v2.5 (09-27): pump.fun's creator record could not be read.
+ *
+ * pump's creator list is parked for minutes at a time (126 parks in six
+ * hours on 09-27), and "unknown never passes" threw away 234 flags — 12 of
+ * the 22 coins that later did 2x among them. The fallback is the app's OWN
+ * record: the launches and rugs this install has seen from the creator (a
+ * floor — a factory it has watched for days shows up, a first-timer shows
+ * nothing) and the scanner's creator risk flags. Optional: 'skip' keeps the
+ * old rule. The SCORE row marks the source (devSrc 'local').
+ */
+function passesDevLocal(t, max) {
+  if (bot.input.devUnknown === 'skip') return skip(t, 'dev', 'creator record unknown');
+  const prior = typeof t.creatorPriorLaunches === 'number' ? t.creatorPriorLaunches : null;
+  const rugs = typeof t.creatorPriorRugs === 'number' ? t.creatorPriorRugs : null;
+  const flags = (Array.isArray(t.riskFlags) ? t.riskFlags : []).filter((f) => /creator/i.test(String(f)));
+  if (prior === null) return skip(t, 'dev', 'creator record unknown (pump.fun parked, and this app has no record of the creator)');
+  if (rugs !== null && rugs > 0) return skip(t, 'dev', `creator rugged ${rugs} coin${rugs === 1 ? '' : 's'} this app saw (pump.fun record unavailable)`);
+  if (flags.length) return skip(t, 'dev', `creator risk flag ${flags.join(', ')} (pump.fun record unavailable)`);
+  if (prior + 1 > max) return skip(t, 'dev', `creator has ${prior + 1}+ launches this app saw > ${max} (pump.fun record unavailable)`);
+  scoreNote(t.mint, { dev: prior + 1, devSrc: 'local' });
+  bot.log(`${NAME(t.symbol, t.mint)}: pump.fun creator record unavailable — passing on the app's own record (${prior} prior launch${prior === 1 ? '' : 'es'} seen, no rugs)`);
   return true;
 }
 
@@ -1748,6 +1792,9 @@ async function scoreTick(st) {
       dev: e.dev,
       dg: e.devGrads,
       d24: e.d24,
+      // v2.5: 'local' when the dev count came from the app's own record
+      // (pump.fun parked), so research rows can tell the two sources apart.
+      ds: e.devSrc ?? null,
       devSold: e.devSold,
       xOwn: e.xOwn,
       site: e.site,
@@ -1862,6 +1909,8 @@ function watchStart(t) {
     m: 0,
     cl: [],
     mcPerPx: typeof mc === 'number' && mc > 0 ? mc / px0 : null,
+    // v2.5: false = the flag had no cap, so the ceiling is applied at confirm.
+    capAtFlag: typeof mc === 'number' && mc > 0,
     fresh: false
   });
   bot.subscribe(t.mint).catch(() => null);
@@ -1898,6 +1947,10 @@ function watchVerdict(w) {
   if ((I.confirmMinX ?? 0) > 0 && x < I.confirmMinX) return false;
   const mc = w.mcPerPx ? c * w.mcPerPx : null;
   if ((I.confirmMinMcUsd ?? 0) > 0 && (mc === null || mc < I.confirmMinMcUsd)) return false;
+  // v2.5: the flag-time ceiling, applied here for a coin whose cap the flag
+  // did not know. A coin the flag DID price under the ceiling keeps its
+  // confirm as before — running past it is what a confirmation is.
+  if (w.capAtFlag === false && (I.maxMcUsd ?? 0) > 0 && mc !== null && mc >= I.maxMcUsd) return false;
   const dd = w.hi > 0 ? (1 - c / w.hi) * 100 : 100;
   if ((I.confirmMaxDrawdownPct ?? 100) < 100 && dd > I.confirmMaxDrawdownPct) return false;
   const n = Math.round(I.confirmRisingMins ?? 0);
@@ -1986,7 +2039,9 @@ function packWatch() {
   const P4 = (n) => (typeof n === 'number' && n > 0 ? Number(n.toPrecision(4)) : null);
   return [...watchers.values()].slice(-watchCap()).map((w) => [
     w.mint, w.at, P4(w.px0), P4(w.hi), w.m, P4(w.last),
-    w.mcPerPx ? Math.round(w.mcPerPx) : null, w.sym ? String(w.sym).slice(0, 10) : null
+    w.mcPerPx ? Math.round(w.mcPerPx) : null, w.sym ? String(w.sym).slice(0, 10) : null,
+    // v2.5: 0 = the flag had no cap (the ceiling applies at confirm).
+    w.capAtFlag === false ? 0 : 1
   ]);
 }
 
@@ -1995,8 +2050,10 @@ function unpackWatch(st) {
   restoredWatch = true;
   for (const a of st.wat ?? []) {
     if (!Array.isArray(a) || watchers.has(a[0]) || !(a[2] > 0)) continue;
-    const [mint, at, px0, hi, m, last, mcPerPx, sym] = a;
-    watchers.set(mint, { mint, sym, name: null, at, px0, hi: hi ?? px0, last: last ?? px0, m: m ?? 0, cl: [], mcPerPx, fresh: false });
+    const [mint, at, px0, hi, m, last, mcPerPx, sym, capAtFlag] = a;
+    // A row saved before v2.5 has no 9th field: read it as "cap known", so
+    // no ceiling is applied at confirm that the flag never asked for.
+    watchers.set(mint, { mint, sym, name: null, at, px0, hi: hi ?? px0, last: last ?? px0, m: m ?? 0, cl: [], mcPerPx, capAtFlag: capAtFlag !== 0, fresh: false });
     bot.subscribe(mint).catch(() => null);
   }
 }
@@ -2033,10 +2090,19 @@ async function watchPass(st, late) {
     if (!watchers.has(w.mint)) continue;
     watchNote(w, prices[k], now);
     // The cap per price, when the flag did not know the cap (one ask a pass).
-    if (!w.mcPerPx && (bot.input.confirmMinMcUsd ?? 0) > 0 && mcAsks < 1) {
+    if (!w.mcPerPx && ((bot.input.confirmMinMcUsd ?? 0) > 0 || (bot.input.maxMcUsd ?? 0) > 0) && mcAsks < 1) {
       mcAsks++;
       const t = await WITHIN(bot.token(w.mint), 3000);
       if (t?.marketCapUsd > 0 && t?.priceSol > 0) w.mcPerPx = t.marketCapUsd / t.priceSol;
+      // v2.5: no provider has priced it yet — the usual case minutes after a
+      // launch, and the reason 18 flags a night were "market cap unknown". A
+      // pump curve's cap is price × SOL/USD × its fixed 1e9 supply, and
+      // bot.solUsd (5.4+ builds) is the cached provider figure, free. Derived,
+      // so the SCORE row's mc0 stays null and only the confirm rule uses it.
+      if (!w.mcPerPx && typeof bot.solUsd === 'function') {
+        const usd = await WITHIN(bot.solUsd(), 3000);
+        if (typeof usd === 'number' && usd > 0) w.mcPerPx = usd * 1e9;
+      }
     }
     // Wall-clock, not w.m: w.m only moves when a price arrives, so a coin that
     // stopped trading (no ticks, no price) never expired and held a slot

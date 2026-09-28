@@ -185,7 +185,11 @@ export function sellPaper(
   const fail = (message: string): PaperSellResult => ({ ok: false, message, book, tokensSold: 0, proceedsSol: 0, realizedSol: 0, closed: false });
   const pos = book.open.find((x) => samePaperKey(x, { mint, chain }));
   if (!pos) return fail('No paper position in this token');
-  const share = Math.max(1, Math.min(100, Math.round(pct))) / 100;
+  // Two decimals, like manualSell: a caller that knows a QUANTITY (a script's
+  // {tokens} sell, a copied sell) has already turned it into the share it
+  // really is, and rounding that to a whole percent booked a 0.25 % sell as
+  // 1 % — four times what was asked (audit 2026-09-27).
+  const share = Math.max(0.01, Math.min(100, Math.round(pct * 100) / 100)) / 100;
   const tokensSold = share >= 1 ? pos.tokens : round(pos.tokens * share);
   const costOut = share >= 1 ? pos.costSol : round(pos.costSol * share);
 

@@ -253,6 +253,156 @@ asked exactly 20 times, an AI refusal reaching the script as a reason, and
 the four methods in SCRIPT_METHODS and the API table (the prompt-pack parity
 test covers the docs).
 
+## The Launch tab's cohorts, and every other read the app has (2026-09-27)
+
+A user saw the Launch tab say "KAYA: bundle 44 %, snipers 34 %" and asked
+why a script's `bundledPct` / `sniperPct` were null for the same coin. Two
+different measurements: the tab runs the app's own launch-window scan
+(shared/launchintel.ts — pump's swap-api trades from the creation
+timestamp, cohorts by first-buy slot, current balances from one
+getMultipleAccounts), while the two script fields were only ever the
+providers', and the providers index a new pump coin minutes later, if at
+all. `bot.security()` did not help either: it handed over the score, the
+checks and the warnings, and dropped the report's concentration block, the
+rug rules, the odds and the creator record at the wall.
+
+**The Launch tab, three ways.**
+
+- `bot.launchIntel(mint)` — the whole report: `{complete, dev, bundle,
+  snipers, wallets, top3BuyersPct, note, …}`, each cohort `{wallets, bought,
+  boughtPct, sol, heldPct, retainedPct, stillHolding}`. A round trip (1–2
+  swap-api calls + one RPC batch, memoised 45 s by the data layer), charged
+  as an action. `complete=false` means the launch block could not be
+  isolated and every cohort is empty with the reason in `note` — the tab's
+  "no approximately mode", kept.
+- **Variables** (scope `market`, Solana only): `launchDevPct`,
+  `launchDevHeldPct`, `launchBundlePct`, `launchBundleHeldPct`,
+  `launchBundleRetainedPct`, `launchBundleWallets`,
+  `launchBundleStillHolding`, `launchSniperPct`, `launchSniperHeldPct`,
+  `launchSniperRetainedPct`, `launchSniperWallets`,
+  `launchSniperStillHolding`, `launchTop3BuyersPct`. Filled by
+  `withLaunchIntel` from the memo ALONE (`launchIntelIfCached`) — so they
+  ride into every facts object for the 45 s after a script called
+  `bot.launchIntel` or `bot.security`, or after a person opened the coin's
+  page (the page fills the memo once, on open — they age out 45 s later),
+  and a launch event never buys a scan (the swap-api blocks the app ~35 s past
+  ~20 quick calls, measured 2026-09-21). An incomplete scan fills nothing —
+  not "0 wallets". `bundledPct` / `sniperPct` fall back to the scan when
+  the provider had nothing, the same fallback the security report makes,
+  and a provider's number is never overwritten.
+- `bot.security()` now crosses whole through `scriptSecurityFromReport`:
+  `concentration` (dev / top10 / top20 / insider / bundled / sniper, and
+  `bundledHeldPct` / `sniperHeldPct` — what those wallets hold NOW, never
+  inferred from what they bought), `creator` with the Launch tab's verdict
+  (a first launch is null — the absence of a record, not a pass), `rug`,
+  `volatility`, `odds`, `dexPaid`, and each check's `source`, `weight`
+  and `kind`.
+
+**Every other read the app has**, on the rule stated 09-20 ("any data the
+app has, a script may have"), after a survey of the IPC surface and the MCP
+tools found these had no `bot.*` at all: `bot.holders(mint, limit?)` (the
+Holders panel), `bot.trades(mint, limit?)` (the tape), `bot.candles(mint,
+interval?, limit?)` (the chart), `bot.search(text)`, `bot.discover(list,
+limit?)` (the Discover columns, on the script's chain — the EVM bridge
+gained an optional `discover`), `bot.callouts(limit?)` (pump's feed,
+newest first, null when pump is silent), `bot.history(limit?)` (this
+install's fills with the chain's cost basis), `bot.holdings()` (every bag
+in the active wallet — including ones the script cannot sell; it REJECTS
+when the wallet could not be read, like `bot.positions` — the "unknown is
+not empty" rule positions learned the same day; on the EVM chains it is
+that chain's own holdings with the Solana-only fields null), `bot.solUsd()`, `bot.walletScores({window, limit,
+onlyWorthALook})` and `bot.walletRecord(address)` (Wallet Scout),
+`bot.copyConfigs()`, `bot.alerts()`. The network ones are charged as
+actions like `market`; the in-memory ones are free; Solana-only ones answer
+null (or `[]`) on an EVM script rather than rejecting, so one body runs on
+any chain. Each is the matching panel's or MCP tool's answer, unchanged.
+
+**Two `bot.order` fixes found by the same survey.** A `stop_loss`,
+`take_profit` or `trailing_stop` sent with `triggerBasis: 'mcap_usd'` was
+silently armed as a PERCENT order at that number and reported success (a
+"$20,000 market-cap stop" became "sell when 20,000 % down", which is
+never); it is now refused with the reason, the mirror of the limit-kind
+refusal. And `expiresAt`, which the Orders form has always had, was
+dropped from a script's request; it now rides through both paths,
+validated the form's way (finite epoch ms, not in the past; absent = null,
+never NaN).
+
+Pinned in test/automation.test.mjs: the fold-in (complete only, held never
+inferred, provider left alone, incomplete says nothing), the security
+mapping (verdicts, first launch null, Jupiter floor), `launchIntel` charged
+and off-Solana null with the host never asked, the cached scan riding into
+`bot.token` without a request, every new read's validation and cost, the
+unreadable-wallet rejection, the two order fixes, and the methods in
+SCRIPT_METHODS, the API table, the harness and the AI pack.
+
+**Second pass, the same day** — the user's brief was "full user control":
+
+- **Per-trade options.** `bot.buy(mint, sol, {wallet?, slippagePct?})` and
+  `bot.sell(mint, pct | {pct? | tokens?, slippagePct?, wallet?}, …)`. The
+  trailing argument is still an address, or now an options object; a
+  number is refused, never read as "the trading wallet with defaults".
+  `slippagePct` (0.1–50) rides through `hostBuy` / `hostSell` to
+  `testTrade` / `manualSell` for that one trade on the trading wallet
+  (other wallets and the EVM rails keep the setting). `tokens` sells a
+  QUANTITY: `sellOne` converts it against the position the app can see
+  (refused, not guessed, while a fresh buy has no holdings row), rounds UP
+  to a hundredth of a percent, and the share-of-cost cap still applies —
+  a script cannot sell hand-bought tokens by naming a big number.
+- **Housekeeping the pages had**: `bot.cancelOrder(id)`,
+  `bot.resumeOrders()` (refused on paper and while live is blocked),
+  `bot.removeAlert(id)`, `bot.muteAlert(id, muted)`,
+  `bot.clearFiredAlerts()` (free), `bot.saveTemplate({…})`,
+  `bot.deleteTemplate(id)`, `bot.setActiveTemplate(id | null)`. Each is
+  the page button's own engine call; all Solana-only, charged as actions.
+- **`bot.settings()`**, read-only and SCRUBBED by `scriptSettingsView`:
+  every field whose name says key / token / secret / password / url / wss /
+  http / referrer is dropped, so is any string value that is a URL, and
+  only execution, strategy, data (plus `hasBirdeyeKey` / `hasJupiterKey`),
+  alerts and evm are offered — never rpc, ai, bots or mcp. A script learns
+  THAT a key is set, never the key. No settings writes from a script.
+- **Five events**: `migration` (every Solana script, from `onComplete` and
+  the DBC `onCurveComplete`), `devSell` (holders and subscribers only,
+  with `devSoldSol` / `devSoldTokens`, from the pump curve trade handler),
+  `holdings` (the engine's `holdings` event, in `bot.holdings`' shape),
+  `copyFill` (the copy snapshot's `recent` rows diffed by state; a
+  mirrored exit is `side: 'sell'`; the row's chain decides who hears it),
+  `runnerExpired` (the `runners` list diffed against flags seen). Code
+  scripts only — the rule editor's triggers are a fixed list. Delivered by
+  `toCodeScripts`, with fanOut's back-pressure.
+
+**Audit swarm, the same evening** (four lenses: API parity, variables,
+dispatcher correctness, docs). Parity across the six places a method lives
+was clean. What it caught and what changed: a `{tokens}` sell multiplied an
+absolute share by the script's share-of-cost (500 of a half-owned 2,000 bag
+sold 250) — the share is now a CEILING, not a multiplier; paper sells
+rounded to whole percents (a 0.25 % sell booked as 1 %) — two decimals now,
+like `manualSell`; the first copy snapshot after start is reloaded history
+and would have raised up to 100 `copyFill` events into a 50-slot queue — it
+seeds the diff and raises nothing, later snapshots raise at most 10; a
+paper script could cancel a hand-placed LIVE stop by id and change the
+templates the user's manual buys arm — `cancelOrder`, `saveTemplate`,
+`deleteTemplate`, `setActiveTemplate` are refused on paper like
+`resumeOrders` (alerts stay allowed); a `slippagePct` given with another
+wallet, or an options wallet plus a third-argument wallet, was silently
+dropped — both are refused; `{tokens: true}` no longer coerces to 1;
+`bot.holdings()` was documented as answering null on an unreadable wallet
+while it rejects (it rejects, like `positions`, and is not Solana-only);
+`bot.history()` is Solana's ledger and says so; the AI pack's "Solana only
+= refused" rule now distinguishes acting (refused) from reading (null);
+the reference lists charged reads (`charged: true` on the API rows) in
+their own group so their cost is not undersold; a live sell's 15 % exit
+floor is documented; the launch-cohort hint no longer claims the numbers
+stay while the page is open (the page fills the memo once). Version bumped
+to 5.4.0 (the shipped script's "5.4+ builds" comment); release notes in
+docs/RELEASE-NOTES-5.4.0.md.
+
+Not built: outbound HTTP. A `bot.http` that names a user-typed base URL
+(the webhook-input shape) was designed and then dropped — the sandbox's
+no-network promise is the safety story, and the tooling this was written
+with refused to weaken it; if it is ever wanted, that design is the only
+one worth building. Also not built: rule-editor triggers for the new
+events, and any settings write.
+
 ## The page's shape (2026-09-20)
 
 One top bar, three views — My scripts, New, Reference — with the arm switch,

@@ -189,7 +189,7 @@ export function CalloutRewards() {
             </div>
           )}
           <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">
-            Swap to SOL needs live armed. Sending goes only to the withdrawal address you confirmed for that wallet on the Sol Wallet page — the app will not send USDC anywhere else.
+            While “Auto-swap USDC to SOL” is on (Sol Wallet page, on by default) and live is armed, USDC here is swapped for you within minutes — these buttons are for doing it now, or for sending USDC out instead. Swap to SOL needs live armed. Sending goes only to the withdrawal address you confirmed for that wallet on the Sol Wallet page — the app will not send USDC anywhere else.
           </p>
         </div>
       </Card>
