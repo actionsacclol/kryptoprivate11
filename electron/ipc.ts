@@ -189,6 +189,9 @@ export function getEngine(): SniperEngine {
         // and forty watched runners at up to 8 ticks a second each is IPC the
         // renderer would route and throw away.
         if (ev.kind !== 'tick' || tape.isSubscribed(ev.mint)) broadcast(ev);
+        // The window no longer pops most engine notices up (2026-09-29), so
+        // the Console is where they are kept.
+        if (ev.kind === 'toast') logger[ev.level === 'success' ? 'info' : ev.level](`[notice] ${ev.message}`);
         // A fill, real or paper, dates the kept portfolio build.
         if ((ev.kind === 'fill' && ev.state !== 'failed') || ev.kind === 'paper') engine?.markPortfolioDirty();
         // User scripts see the same events the UI does, after it.

@@ -13,6 +13,7 @@ import { useState } from 'react';
 import { ChevronRight, PlayCircle } from 'lucide-react';
 import { Card, Section } from './common';
 import { cls } from '../utils/format';
+import { APP_WALKTHROUGH_URL } from '../guideVideos';
 
 export interface Guide {
   id: string;
@@ -236,7 +237,7 @@ export function GuidePanel() {
     >
       <Card padded={false} className="space-y-2 p-3">
         <button
-          onClick={() => void window.krypt.app.openExternal('https://www.youtube.com/watch?v=pqIWxrocy68')}
+          onClick={() => void window.krypt.app.openExternal(APP_WALKTHROUGH_URL)}
           className="flex w-full items-center gap-3 rounded-lg border border-krypt-purple/40 bg-krypt-purple/10 px-4 py-3 text-left transition hover:bg-krypt-purple/20"
         >
           <PlayCircle className="h-5 w-5 flex-shrink-0 text-krypt-purple" />

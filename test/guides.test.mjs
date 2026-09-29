@@ -16,7 +16,7 @@ const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
 const page = read('../src/pages/Guides.tsx');
 const sectionIds = [...page.matchAll(/^  ([a-z]+): \{$/gm)].map((m) => m[1]).filter((id) => id !== 'guides');
 const extraIds = [...page.matchAll(/^  \{ id: '([^']+)', title: /gm)].map((m) => m[1]);
-const cards = ['start', ...sectionIds, ...extraIds];
+const cards = ['start', 'memecoins', 'api-setup', ...sectionIds, ...extraIds];
 
 {
   assert.ok(sectionIds.length >= 8 && extraIds.length >= 8, `the page's cards are findable (${cards.length})`);
@@ -52,6 +52,35 @@ const cards = ['start', ...sectionIds, ...extraIds];
   assert.ok(/video: \{ url: PUMP_QUICKSTART_URL/.test(page) && /openExternal\(guide\.video!\.url\)/.test(page), 'and so does the pump.fun guide card');
   assert.ok(!/href=\{?["']https:\/\/www\.youtube/.test(accounts + page), 'always through main, never a bare href');
   ok('the pump.fun quickstart video is on the accounts page and the guide');
+}
+
+{
+  const videos = read('../src/guideVideos.ts');
+  assert.ok(/API_KEYS_VIDEO_URL = 'https:\/\/www\.youtube\.com\/watch\?v=C-q1Vl1YvBY'/.test(videos), 'the API keys video link is https');
+  for (const host of ['dashboard.helius.dev', 'bds.birdeye.so', 'portal.jup.ag']) assert.ok(videos.includes(`url: 'https://${host}'`), `${host} is linked`);
+  const onboarding = read('../src/components/Onboarding.tsx');
+  const keysStep = onboarding.slice(onboarding.indexOf("step === 'keys'"), onboarding.indexOf('label="Helius API key"'));
+  assert.ok(/openExternal\(API_KEYS_VIDEO_URL\)/.test(keysStep), 'onboarding offers the video above the three key fields');
+  assert.ok(/video: \{ url: API_KEYS_VIDEO_URL/.test(page) && /links: API_KEY_SITES/.test(page), 'the API setup card has the video and the three sites');
+  assert.ok(/openExternal\(l\.url\)/.test(page), 'site links go through main');
+  const start = page.indexOf('id="start"');
+  const api = page.indexOf('id="api-setup"');
+  assert.ok(start > 0 && api > start && api < page.indexOf('{sections.map((w) => ('), 'API setup sits right under Start here');
+  ok('the API keys video is on the onboarding keys step and the API setup guide, with the three sites');
+}
+
+{
+  const videos = read('../src/guideVideos.ts');
+  assert.ok(/MEMECOIN_GUIDE_URL = 'https:\/\/www\.youtube\.com\/watch\?v=W3vsxuDTey0'/.test(videos), 'the memecoin guide link is https');
+  const listed = videos.slice(videos.indexOf('GUIDE_VIDEOS'));
+  const consts = [...videos.matchAll(/^export const ([A-Z_]+_URL) = /gm)].map((m) => m[1]);
+  assert.ok(consts.length >= 5, 'every video is a named constant');
+  for (const c of consts) assert.ok(listed.includes(`url: ${c}`), `${c} is in the Videos row`);
+  const src = ['../src/pages/Hub.tsx', '../src/components/Onboarding.tsx', '../src/components/GuidePanel.tsx'].map(read).join('\n') + page;
+  assert.ok(!/youtube\.com|youtu\.be/.test(src), 'no page carries its own video URL — they all live in guideVideos.ts');
+  assert.ok(page.indexOf('<VideoRow />') > 0 && page.indexOf('<VideoRow />') < page.indexOf('id="start"'), 'the Videos row is the first thing on the page');
+  assert.ok(/video: \{ url: MEMECOIN_GUIDE_URL/.test(page), 'the memecoin card has its video');
+  ok('every video is in one row at the top of Guides, and the memecoin guide is there');
 }
 
 console.log(`\nguides: ${passed}/${passed} passed`);

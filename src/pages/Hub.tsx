@@ -17,6 +17,7 @@ import { WORKSPACES, type WorkspaceId, type WorkspaceSpec } from '../workspaces'
 import { useAppState } from '../state/AppStateProvider';
 import { useToast } from '../state/ToastProvider';
 import { KryptoCard } from '../components/KryptoCard';
+import { APP_TUTORIAL_URL } from '../guideVideos';
 
 const ICONS: Record<WorkspaceSpec['icon'], LucideIcon> = {
   compass: Compass,
@@ -37,9 +38,6 @@ interface CardStatus {
   tone: 'live' | 'idle' | 'warn';
 }
 
-/** The tutorial. A constant so there is one place to change it, and so the
- *  markup does not carry a bare URL. */
-const TUTORIAL_URL = 'https://www.youtube.com/watch?v=BIvWbqcKgf4';
 
 export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void; onOpenToken: (mint: string) => void }) {
   const { status, positions, settings, updateSettings } = useAppState();
@@ -249,7 +247,7 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
           silently does nothing is worse than no link. */}
       <LiquidGlass surface="tile" className="fixed bottom-4 left-4 z-20 rounded-full border border-white/10 transition hover:border-krypt-purple/50">
       <button
-        onClick={() => void window.krypt.app.openExternal(TUTORIAL_URL)}
+        onClick={() => void window.krypt.app.openExternal(APP_TUTORIAL_URL)}
         title="Watch the tutorial on YouTube — opens in your browser"
         className="flex items-center gap-2 rounded-full px-3 py-1.5 text-body text-krypt-muted transition hover:text-white"
       >

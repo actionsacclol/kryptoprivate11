@@ -18,12 +18,12 @@
 // from the code. test/guides.test.mjs fails if a card has no advanced twin.
 
 import { useEffect, useRef, useState } from 'react';
-import { AtSign, BookOpen, Bot, Code2, Coins, Compass, Cpu, KeyRound, LayoutGrid, Megaphone, Percent, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
+import { AtSign, BookOpen, ExternalLink, Flame, Bot, Code2, Coins, Compass, Cpu, KeyRound, LayoutGrid, Megaphone, Percent, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
 import { WORKSPACES, type WorkspaceId } from '../workspaces';
 import { Card, Page } from '../components/common';
 import { GuidePanel } from '../components/GuidePanel';
 import { cls } from '../utils/format';
-import { PUMP_QUICKSTART_URL } from '../guideVideos';
+import { API_KEY_SITES, API_KEYS_VIDEO_URL, GUIDE_VIDEOS, MEMECOIN_GUIDE_URL, PUMP_QUICKSTART_URL } from '../guideVideos';
 import { ADVANCED_GUIDES, type AdvancedGuide } from './guidesAdvanced';
 
 export interface SectionGuide {
@@ -35,6 +35,8 @@ export interface SectionGuide {
   careful: string[];
   /** A video walk-through, opened in the system browser. */
   video?: { url: string; label: string };
+  /** Sites the steps send people to, opened in the system browser. */
+  links?: readonly { name: string; url: string }[];
 }
 
 /** Whether the Advanced switch is on. A per-viewer convenience, so browser
@@ -81,6 +83,55 @@ export const START_GUIDE: SectionGuide = {
     'Paper mode is practice with fake money. Live mode is real money. The switch is in the top bar. Check it before you click Buy.',
     'If you lose your key, nobody can get it back. Not even us.',
   ],
+};
+
+/**
+ * Memecoins in general, before any button (2026-09-29), with krypt cc's
+ * memecoin trading video. Honest numbers only: the graduation base rate and
+ * the fee drag are the measured ones (docs/insight-swarm-2026-08-30.md,
+ * docs/breakeven-swarm-2026-09-28.md).
+ */
+export const MEMECOIN_GUIDE: SectionGuide = {
+  what: 'A memecoin is a coin with nothing behind it — no company, no product. Its price moves only because people buy and sell it. On pump.fun every new coin starts on a "bonding curve": the price goes up as people buy and down as they sell. If enough people buy, it "graduates" to a normal market. Only about 2 in every 100 new coins get that far. Most go to zero within hours.',
+  steps: [
+    'Before you start, pick an amount you are fine losing completely. Only ever trade with that.',
+    'Split it up. Put a small slice into each coin, never the whole amount into one.',
+    'Before you buy, open the coin page. Read the warnings and the Security tab. A creator who already sold, or one who has made lots of coins that all died, is a bad sign.',
+    'Decide how you will get out before you get in: a price to take profit and a price to cut the loss. Set them as orders so they happen even if you look away.',
+    'When a coin doubles, think about selling half. That takes your money back out, and the rest is free to ride.',
+    'Check the Trades page now and then. It shows what you really made after every fee.',
+  ],
+  careful: [
+    'A rug pull is when the creator or a big holder sells everything at once. The price can fall to almost nothing in seconds, before you can click.',
+    'Fees add up. Krypt takes 0.5% on the buy and again on the sell, pump.fun takes 1% while a coin is on its curve, and the network charges a small fixed fee. On very small buys that fixed fee can be a big share of the trade.',
+    'Nobody can tell you which coin will go up — not a Telegram group, not an influencer, not this app. A runner alert means "look at this", not "buy this". When we tested automatic strategies on real data, they lost money on average.',
+    'Anyone who promises a sure thing, DMs you a coin, or asks for your key is trying to take your money.',
+    'This is not financial advice.',
+  ],
+  video: { url: MEMECOIN_GUIDE_URL, label: 'Watch the memecoin trading guide' },
+};
+
+/**
+ * The three free API keys, with krypt cc's walk-through (2026-09-29). Right
+ * under Start here: the keys are the first thing after a wallet that makes
+ * the app faster, and onboarding offers the same video on its keys step.
+ */
+export const API_SETUP_GUIDE: SectionGuide = {
+  what: 'The app works with no keys at all. Three free keys make it better: Helius makes trades send and confirm faster and shows holders, Birdeye adds second-by-second chart candles, and Jupiter moves price quotes onto its main servers. Each takes a couple of minutes to get.',
+  steps: [
+    'Helius: open the Helius link below and sign up. On the dashboard, copy your API key. You can also copy the whole RPC URL — the app takes either.',
+    'Birdeye: open the Birdeye link below and sign up. Copy the API key it gives you.',
+    'Jupiter: open the Jupiter link below and sign up. Make a new API key and copy it.',
+    'In the app, open Settings. Paste the Helius key under Solana RPC, and the Birdeye and Jupiter keys under Market data.',
+    'Not sure where a button is? The video goes through all three, start to finish.',
+  ],
+  careful: [
+    'A key is like a password for your account on that site. Do not post it in a chat, a screenshot or a video.',
+    'Keys stay on this computer. They are never sent to Krypt.',
+    'All three are free. If a site asks you to pay, you picked a paid plan — go back and choose the free one.',
+  ],
+  video: { url: API_KEYS_VIDEO_URL, label: 'Watch the API setup video' },
+  links: API_KEY_SITES,
 };
 
 /**
@@ -428,6 +479,21 @@ function GuideCard({
         <div className="mb-1 text-label uppercase tracking-label text-krypt-muted">{advanced ? 'Workflow' : 'Do this'}</div>
         <Steps steps={advanced ? advanced.steps : guide.steps} />
       </div>
+      {guide.links && guide.links.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {guide.links.map((l) => (
+            <button
+              key={l.url}
+              onClick={() => void window.krypt.app.openExternal(l.url)}
+              title={`Opens ${l.url.replace('https://', '')} in your browser`}
+              className="flex items-center gap-1.5 rounded-md border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-1.5 text-body font-semibold text-white transition hover:bg-krypt-purple/20"
+            >
+              {l.name}
+              <ExternalLink className="h-3.5 w-3.5 text-krypt-purple" />
+            </button>
+          ))}
+        </div>
+      )}
       {advanced?.details.map((d) => (
         <div key={d.heading}>
           <div className="mb-1 text-label uppercase tracking-label text-krypt-muted">{d.heading}</div>
@@ -440,6 +506,38 @@ function GuideCard({
           <Bullets lines={careful} tone="amber" />
         </div>
       )}
+    </Card>
+  );
+}
+
+/** Every video in one place, first thing on the page (2026-09-29): one button
+ *  per video in a card header was easy to miss. The per-card buttons stay. */
+function VideoRow() {
+  return (
+    <Card className="scroll-mt-4 space-y-3">
+      <div id="guide-videos" className="flex items-center gap-2">
+        <span className="rounded-lg border border-white/10 bg-white/5 p-1.5 text-krypt-pink">
+          <PlayCircle className="h-4 w-4" />
+        </span>
+        <h2 className="font-display text-value font-semibold text-white">Videos</h2>
+        <span className="text-label text-krypt-muted">Open in your browser</span>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {GUIDE_VIDEOS.map((v) => (
+          // Through main, never a bare href: the renderer must not navigate.
+          <button
+            key={v.url}
+            onClick={() => void window.krypt.app.openExternal(v.url)}
+            className="flex items-center gap-3 rounded-md border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-2.5 text-left transition hover:bg-krypt-purple/20"
+          >
+            <PlayCircle className="h-5 w-5 flex-shrink-0 text-krypt-purple" />
+            <span className="min-w-0">
+              <span className="block text-body font-semibold text-white">{v.title}</span>
+              <span className="block text-label leading-relaxed text-krypt-muted">{v.blurb}</span>
+            </span>
+          </button>
+        ))}
+      </div>
     </Card>
   );
 }
@@ -458,7 +556,7 @@ const EXTRA_GUIDES: { id: string; title: string; guide: SectionGuide; icon: Luci
 
 export function GuidesPage() {
   const sections = WORKSPACES.filter((w) => w.id !== 'guides');
-  const [active, setActive] = useState<string>('start');
+  const [active, setActive] = useState<string>('videos');
   const [advanced, setAdvanced] = useState<boolean>(readAdvanced);
   const listRef = useRef<HTMLDivElement | null>(null);
   const adv = (id: string): AdvancedGuide | null => (advanced ? ADVANCED_GUIDES[id] ?? null : null);
@@ -471,7 +569,7 @@ export function GuidesPage() {
     const onScroll = (): void => {
       const marks = [...document.querySelectorAll<HTMLElement>('[id^="guide-"]')];
       const top = root.getBoundingClientRect().top + 80;
-      let current = 'start';
+      let current = 'videos';
       for (const m of marks) {
         if (m.getBoundingClientRect().top <= top) current = m.id.replace('guide-', '');
       }
@@ -524,14 +622,20 @@ export function GuidesPage() {
     >
       <div className="grid gap-4 lg:grid-cols-[220px_1fr] items-start">
         <div ref={listRef} className="lg:sticky lg:top-0 space-y-1">
+          {navButton('videos', 'Videos')}
           {navButton('start', 'Start here')}
+          {navButton('memecoins', 'Memecoin basics')}
+          {navButton('api-setup', 'API setup')}
           {sections.map((w) => navButton(w.id, w.title))}
           {EXTRA_GUIDES.map((g) => navButton(g.id, g.title))}
           {navButton('more', 'More detail')}
         </div>
 
         <div className="space-y-4 max-w-3xl">
+          <VideoRow />
           <GuideCard id="start" title="Start here" guide={START_GUIDE} icon={BookOpen} advanced={adv('start')} />
+          <GuideCard id="memecoins" title="Memecoin basics" guide={MEMECOIN_GUIDE} icon={Flame} advanced={adv('memecoins')} />
+          <GuideCard id="api-setup" title="API setup" guide={API_SETUP_GUIDE} icon={KeyRound} advanced={adv('api-setup')} />
           {sections.map((w) => (
             <GuideCard key={w.id} id={w.id} title={w.title} guide={SECTION_GUIDES[w.id as Exclude<WorkspaceId, 'hub'>]} icon={ICONS[w.id]} advanced={adv(w.id)} />
           ))}

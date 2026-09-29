@@ -84,6 +84,70 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       'Not financial advice. Most new coins go to zero.',
     ],
   },
+  memecoins: {
+    what: 'A pump.fun coin trades against a bonding curve: a constant-product formula over virtual reserves, so every buy raises the price and every sell lowers it, with no order book and no counterparty but the curve. When the curve’s SOL reserve fills, the coin graduates and its liquidity moves to a PumpSwap pool, where it trades like any AMM pair. In the app’s own measurement (73,890 launches, three days of July 2026) 2.1% of launches graduated, and a third of those graduated within one second of creation, too fast to trade.',
+    steps: [
+      'Fix a bankroll and a per-coin size before the session. Size so a string of total losses — the common case — does not end the session.',
+      'Read the coin page’s rug flags and the graduation odds badge rather than the raw security thresholds; the page explains each.',
+      'Decide entry and exit together. Arm a stop and a take-profit rung (Orders, or an auto-sell template) the moment the buy lands.',
+      'Take a partial at a fixed multiple so the rest of the position is house money.',
+      'Review Trades weekly. Its PnL is from on-chain balance changes, so every fee and slippage is in it.',
+    ],
+    details: [
+      {
+        heading: 'What the data says (2026-08-30 study)',
+        lines: [
+          'The rules that worked: one buy is 50% or more of all SOL bought; sells at 1.5× buys or more; creator sold with the curve under 2%; two or fewer buyers of 3 SOL or more; a creator with 30 or more launches and no graduations. Together they removed 70% of dead launches and hid 9.6% of graduations — and 77% of what was left was still bad.',
+          'Holder concentration (dev share, top-10, bundles, snipers) predicts volatility, not direction: concentrated coins both dumped and graduated more often. It is shown, never used to hide a coin.',
+          'Socials and “smart wallet” buys were anti-signals: coins with socials graduated 1.4% of the time against 4.1% without.',
+          'Graduation is rankable: the odds model’s top 5% at +60 s graduated 17% of the time against a 2.1% base. Graduating is still not a profit — a runner can graduate and then fall.',
+        ],
+      },
+      {
+        heading: 'Costs',
+        lines: [
+          'Krypt 0.5% per side (0.25% with 1,000,000 $KRYPTO held). pump.fun 1% on curve trades; PumpSwap 1.25% down to 0.30% by market-cap tier.',
+          'Priority fees and tips are fixed amounts, not percentages, so they weigh most on small buys. Plus about 0.002 SOL token-account rent, returned when a 100% sell closes the account.',
+          'A slippage setting is a ceiling, not a cost: the curve fill came in at about 1.007× the quote in measured fills.',
+        ],
+      },
+    ],
+    careful: [
+      'Every automated strategy the app’s research tested lost money held out. The runner-confirm entry lost 21% before any fee (2026-09-28).',
+      'All numbers here come from a few days of data and pump.fun changes its rules; treat them as dated, not as laws.',
+    ],
+  },
+  'api-setup': {
+    what: 'Three optional keys, each saved to this machine’s settings and nowhere else. Helius (rpc.heliusApiKey) becomes the execution lane: simulate, send, confirm, send-time fee estimates and holder reads. Birdeye (data.birdeyeApiKey) adds chart history and sub-minute candles. Jupiter (data.jupiterApiKey) moves every Jupiter call off lite-api.jup.ag, which Jupiter is retiring, onto api.jup.ag. None is required; with none set, the app runs on free public endpoints.',
+    steps: [
+      'Make the three accounts from the links on this card (dashboard.helius.dev, bds.birdeye.so, portal.jup.ag). The video walks through each.',
+      'Settings → Solana RPC: paste the Helius key, or the whole https://…?api-key=… URL — the key is pulled out of it.',
+      'Settings → Market data: paste the Birdeye and Jupiter keys. The provider list there shows each provider’s calls, queue and last error.',
+      'Have your own paid RPC? Put it in Execution endpoint instead; when set it wins over the Helius key.',
+    ],
+    details: [
+      {
+        heading: 'What each key changes',
+        lines: [
+          'Helius: only the calls that decide a trade. Launch scanning and plain account reads stay on the free endpoints, so the key’s credits go to trades. Without it, holder lists fail: the free public RPC refuses them with HTTP 429.',
+          'Birdeye: history comes from Birdeye when a key is set, otherwise GeckoTerminal, merged with the app’s own tape. Sub-minute candles need the tape or a Birdeye key.',
+          'Jupiter: unlocks no extra data. It moves buy and sell quotes and every other Jupiter call to api.jup.ag at its published 1 request a second.',
+        ],
+      },
+      {
+        heading: 'Limits',
+        lines: [
+          'On the free Helius plan leave Helius feed socket off; it bills by bytes.',
+          'When a provider says its allowance is spent (Birdeye’s free compute units, for example), it is paused for 6 hours rather than retried, and the log says so.',
+          'Keys are redacted from logs, recordings and the support bundle.',
+        ],
+      },
+    ],
+    careful: [
+      'A key is a credential for your account on that site. Anyone who has it spends your allowance.',
+      'Pick the free plan on each site. The app never needs a paid one.',
+    ],
+  },
   terminal: {
     what: 'Terminal is where you trade by hand. Discover and Runners find coins, the token page shows what is known about one, and every Buy, Sell, quick buy and hotkey goes through the same signer. Nothing in Terminal opens a position on its own; the only thing that trades without a click at that moment is an advanced order you wrote. Every number the app could not get shows as —.',
     steps: [

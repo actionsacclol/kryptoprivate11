@@ -26,6 +26,7 @@ import { GhostButton, PrimaryButton } from './common';
 import { LanguagePicker } from './LanguagePicker';
 import { useLocale } from '../state/useLocale';
 import { cls } from '../utils/format';
+import { API_KEYS_VIDEO_URL, APP_WALKTHROUGH_URL } from '../guideVideos';
 
 // First run.
 //
@@ -174,9 +175,6 @@ function Field({
     </div>
   );
 }
-
-/** The guide video, offered at the end of onboarding and from About. */
-const VIDEO_URL = 'https://www.youtube.com/watch?v=pqIWxrocy68';
 
 export function Onboarding({
   onNavigate,
@@ -463,6 +461,19 @@ export function Onboarding({
                 and add them any time under Settings.
               </p>
 
+              <button
+                onClick={() => void window.krypt.app.openExternal(API_KEYS_VIDEO_URL)}
+                className="flex w-full items-center gap-3 rounded-md border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-2.5 text-left transition hover:bg-krypt-purple/20"
+              >
+                <PlayCircle className="h-5 w-5 flex-shrink-0 text-krypt-purple" />
+                <span>
+                  <span className="block text-body font-semibold text-white">Watch: getting all three keys</span>
+                  <span className="block text-label leading-relaxed text-krypt-muted">
+                    Making the accounts and copying each key, step by step. Opens in your browser.
+                  </span>
+                </span>
+              </button>
+
               <Field
                 label="Helius API key"
                 hint="Free tier. Used where it matters — trade simulation, sending, confirmation, fee estimates, and the holder reads the public RPC refuses with 429. Launch scanning stays on public endpoints. Paste the key or the whole URL."
@@ -633,7 +644,7 @@ export function Onboarding({
                   just made a wallet is the person most likely to watch it,
                   and it opens in their browser so it never blocks setup. */}
               <button
-                onClick={() => void window.krypt.app.openExternal(VIDEO_URL)}
+                onClick={() => void window.krypt.app.openExternal(APP_WALKTHROUGH_URL)}
                 className="flex w-full items-center gap-3 rounded-md border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-2.5 text-left transition hover:bg-krypt-purple/20"
               >
                 <PlayCircle className="h-5 w-5 flex-shrink-0 text-krypt-purple" />
