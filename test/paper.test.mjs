@@ -18,6 +18,7 @@ import {
   MAX_OPEN_PAPER_POSITIONS,
   PAPER_FILL_MODEL,
   samePaperKey,
+  modelledPaperFill,
 } from './.paper.mjs';
 
 let passed = 0;
@@ -289,3 +290,20 @@ await run();
   console.log('ok  a position saved before chains existed still reads as Solana');
 }
 
+
+{
+  // Unattended paper pays the lane's fixed fees (2026-09-29): a paper record
+  // of a 0.02 SOL script used to show none of the ~17 % the floors cost live.
+  const f0 = modelledPaperFill(0.02, 1e-7);
+  const f1 = modelledPaperFill(0.02, 1e-7, 0.001061);
+  assert.equal(f0.costSol, 0.02, 'no fee = the old model');
+  assert.ok(Math.abs(f1.costSol - 0.021061) < 1e-12, 'the buy fee is paid on top');
+  assert.equal(f1.tokens, f0.tokens, 'and buys no fewer tokens');
+  let b = openPaper(emptyPaperBook(), { mint: 'FEE', symbol: 'F', tokens: 1000, costSol: 0.02, decimalsKnown: true }).book;
+  const plain = sellPaper(b, 'FEE', 100, 0.00002, Date.now());
+  const fee = sellPaper(b, 'FEE', 100, 0.00002, Date.now(), 'solana', 0.002443);
+  assert.ok(Math.abs(plain.proceedsSol - fee.proceedsSol - 0.002443) < 1e-9, 'the sell fee comes out of the proceeds');
+  const dust = sellPaper(b, 'FEE', 100, 1e-9, Date.now(), 'solana', 0.002443);
+  assert.equal(dust.proceedsSol, 0, 'never below zero');
+  console.log('ok  unattended paper charges the fee lane’s fixed cost on both sides');
+}

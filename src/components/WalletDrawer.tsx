@@ -13,6 +13,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { LiquidGlass } from './LiquidGlass';
 import { Bookmark, BookmarkCheck, Copy, Download, Loader2, X } from 'lucide-react';
 import { EVM_CHAIN_META } from '@shared/evm';
 import {
@@ -205,16 +206,17 @@ export function WalletDrawer({ chain, address, window: win, row, saved, followin
     <AnimatePresence>
       {address && (
         <>
-          <motion.div key="wallet-drawer-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
+          <motion.div key="wallet-drawer-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-40 bg-black/50" onClick={onClose} />
           <motion.aside
             key="wallet-drawer"
-            initial={{ x: 40, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 40, opacity: 0 }}
+            initial={{ x: 40 }}
+            animate={{ x: 0 }}
+            exit={{ x: 40 }}
             transition={{ duration: 0.18 }}
-            className="fixed right-0 top-0 bottom-0 z-50 flex w-[440px] max-w-full flex-col border-l border-white/10 bg-krypt-panel/95 shadow-krypt-card backdrop-blur-md"
+            className="fixed right-0 top-0 bottom-0 z-50 flex w-[440px] max-w-full"
             data-testid="wallet-drawer"
           >
+            <LiquidGlass surface="sheet" display="flex" className="min-w-0 flex-1 flex-col border-l border-white/10">
             <div className="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
               <div className="min-w-0">
                 <div className="text-micro uppercase tracking-label text-krypt-muted/70">Wallet · {SCOUT_WINDOW_LABEL[win]}</div>
@@ -394,6 +396,7 @@ export function WalletDrawer({ chain, address, window: win, row, saved, followin
                   </>
                 ))}
             </div>
+            </LiquidGlass>
           </motion.aside>
         </>
       )}

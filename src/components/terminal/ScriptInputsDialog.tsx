@@ -14,6 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Settings2, X } from 'lucide-react';
+import { LiquidGlass } from '../LiquidGlass';
 import {
   coerceInputs,
   defaultsFor,
@@ -98,18 +99,21 @@ export function ScriptInputsDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
+      {/* The glass is the frame and the dialog scrolls INSIDE it, so the lit
+          rim stays put while the form moves. */}
+      <LiquidGlass surface="sheet" display="flex" className="max-h-[85vh] w-full max-w-lg rounded-xl border border-white/10">
       <div
         ref={panel}
         role="dialog"
         aria-modal="true"
         aria-label="Script settings"
         tabIndex={-1}
-        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-white/10 bg-krypt-panel p-4 shadow-2xl outline-none"
+        className="min-h-0 flex-1 overflow-y-auto p-4 outline-none"
       >
         <div className="mb-3 flex items-center gap-2">
           <Settings2 className="h-4 w-4 text-krypt-purple" />
@@ -142,6 +146,7 @@ export function ScriptInputsDialog({
           <GhostButton onClick={onClose}>Cancel</GhostButton>
         </div>
       </div>
+      </LiquidGlass>
     </div>
   );
 }

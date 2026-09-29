@@ -304,7 +304,7 @@ export function Sidebar({
     }))
     .filter((g) => g.items.length > 0);
   return (
-    <aside className="relative flex flex-col w-[210px] flex-shrink-0 border-r border-white/10 bg-krypt-panel/70  shadow-[inset_-14px_0_28px_rgba(0,0,0,0.35)]">
+    <aside className="glass-chrome relative flex flex-col w-[210px] flex-shrink-0 border-r border-white/10 bg-krypt-panel/70">
       <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-arc-gold/25 to-transparent" aria-hidden="true" />
 
       <div className="px-5 pt-5 pb-4 flex items-center gap-3">

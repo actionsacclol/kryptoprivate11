@@ -21,6 +21,7 @@ import {
   inputsProblem,
   parseInputs,
   inputsForScript,
+  migrateInputDefaults,
 } from './.scriptinputs.mjs';
 
 let passed = 0;
@@ -211,6 +212,22 @@ bot.log(bot.input.mint);`;
   assert.equal(v.cap, 80, 'and not its minimum');
   assert.equal(coerceInputs(specs, { stop: 0 }).stop, 0, 'a deliberate 0 is still 0');
   ok('a newly added field starts at its own default');
+}
+
+{
+  // A shipped script updated (2026-09-29): answers still at the OLD default follow the NEW one; changed answers stay.
+  const oldS = { links: { type: 'select', options: ['none', 'X and website'], default: 'none' }, watch: { type: 'number', default: 60, min: 1, max: 120 }, buy: { type: 'range', default: [0.01, 0.02], min: 0, max: 5 }, hook: { type: 'webhook', default: '' }, gone: { type: 'number', default: 1, min: 0, max: 9 } };
+  const newS = { links: { type: 'select', options: ['none', 'X and website'], default: 'X and website' }, watch: { type: 'number', default: 30, min: 1, max: 120 }, buy: { type: 'range', default: [0.02, 0.03], min: 0, max: 5 }, hook: { type: 'webhook', default: '' }, fresh: { type: 'number', default: 7, min: 0, max: 9 } };
+  const r = migrateInputDefaults(oldS, newS, { links: 'none', watch: 45, buy: [0.01, 0.02], hook: '', gone: 3 });
+  assert.deepEqual(r.moved.sort(), ['buy', 'links'], 'only the answers still at the old default move');
+  assert.equal(r.values.links, 'X and website');
+  assert.deepEqual(r.values.buy, [0.02, 0.03]);
+  assert.equal(r.values.watch, 45, 'a changed answer is the user’s and stays');
+  assert.equal(r.values.hook, '', 'a webhook is never touched');
+  assert.equal(r.values.gone, 3, 'a field the new version dropped is kept');
+  assert.equal('fresh' in r.values, false, 'a new field is not written — it takes its default when read');
+  assert.deepEqual(migrateInputDefaults(oldS, oldS, { links: 'none' }).moved, [], 'same defaults: nothing moves');
+  ok('an update moves settings still at the old default, and keeps what the user changed');
 }
 
 console.log(`\nscriptinputs: ${passed}/${passed} passed`);

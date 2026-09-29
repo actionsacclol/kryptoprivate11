@@ -355,7 +355,10 @@ export function registerIpc(): void {
     // Solana feed reaches automation from `onEngineEvent`; the EVM rails have
     // no equivalent event, so the scanner hands them over directly.
     onLaunchWindow: (chain, launch) => automation.onEvmLaunch(chain, launch),
+    // …and the chain's runner flags, as their runner event and bot.runners().
+    onRunner: (chain, flag, launch) => automation.onEvmRunner(chain, flag, launch),
   });
+  automation.setEvmRunnerSource((chain) => evmScanner.flagged(chain));
   // Recorder mode follows the firehose switch: off = launch tape (creates,
   // first 30 min of trades per mint, completions, health), on = everything.
   recorder.setMode(store.load().recordFirehose ? 'firehose' : 'launch');
@@ -3719,7 +3722,8 @@ export function registerIpc(): void {
     const pct = percent === undefined ? 100 : Number(percent);
     if (!Number.isFinite(pct) || pct <= 0 || pct > 100) return fail('Sell percent must be between 1 and 100');
     try {
-      const res = await getEngine().manualSell(mint, pct);
+      // The Sell button: a human, now — it follows the Execution fee mode.
+      const res = await getEngine().manualSell(mint, pct, { manual: true });
       return res.ok ? ok(res.message, res) : { ok: false, message: res.message, data: res };
     } catch (err) {
       return fail(`Sell error: ${(err as Error).message}`);
@@ -4749,6 +4753,10 @@ export function registerIpc(): void {
         maxSolPerTrade: Number(budgetIn.maxSolPerTrade),
         maxBuysPerDay: Number(budgetIn.maxBuysPerDay),
         maxLossSolPerDay: Number(budgetIn.maxLossSolPerDay),
+        // Optional: absent stays absent (the default applies), never NaN.
+        ...(budgetIn.maxLossPctOfWallet === undefined || budgetIn.maxLossPctOfWallet === null || budgetIn.maxLossPctOfWallet === ''
+          ? {}
+          : { maxLossPctOfWallet: Number(budgetIn.maxLossPctOfWallet) }),
         maxOpenPositions: Number(budgetIn.maxOpenPositions),
         maxActionsPerMinute: Number(budgetIn.maxActionsPerMinute),
       },

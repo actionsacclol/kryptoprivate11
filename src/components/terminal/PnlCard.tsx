@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, Download, Image as ImageIcon, Loader2, Sparkles, Video, Volume2, VolumeX, X } from 'lucide-react';
+import { LiquidGlass } from '../LiquidGlass';
 import type { ClosedTrade, Position } from '@shared/portfolio';
 import { cls, fmtUsd } from '../../utils/format';
 import { CARD_H, CARD_PAD, CARD_W, cardLayout } from './cardLayout';
@@ -645,10 +646,10 @@ export function PnlCard({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
     >
-      <div className="plate rounded-xl p-4 max-w-3xl w-full animate-pop-in" onClick={(e) => e.stopPropagation()}>
+      <LiquidGlass surface="sheet" className="plate rounded-xl p-4 max-w-3xl w-full animate-pop-in" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2 mb-3">
           <h3 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted">
             {subject.kind === 'trade' ? 'Trade card' : 'PnL card'}
@@ -845,7 +846,7 @@ export function PnlCard({
             )}
           </p>
         </div>
-      </div>
+      </LiquidGlass>
     </div>
   );
 }

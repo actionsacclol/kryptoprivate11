@@ -47,6 +47,37 @@
 // exists — i.e. the stop has not fired.
 //
 
+// v2.7 (09-29): the farm now requires the coin's OWN X account AND a real
+// homepage ("Links required" = X and website) and watches a flag for 30
+// minutes, not 60. This decides WHICH coins get a call, not whether the bag
+// pays: measured on five days of flags (09-24..28, 4,935 classic runners on
+// 1-minute candles, links read from every coin's own metadata file), the
+// confirm entry lost 21% a trade at 0.03 SOL with no link rule (137 calls)
+// and 25% with both links required (70 calls, CI -39..-10) — the same loss
+// on fewer, realer coins. No link rule, cap floor, watch window or exit
+// made it >= 0; an earlier same-day reading of +11% on 22 calls came from
+// Jupiter's partial link index and was wrong. The callouts are the product
+// and the bags are their cost, about $0.5-1 each at 0.03 SOL. $20k for the
+// cap floor added calls that lost more; $25k stays.
+//
+// v2.8 (09-29): the farm trades on the app's LEAN fee lane. Its 95 real
+// round trips lost 0.693 SOL, and the priority fee was half of that (the
+// 0.001 / 0.002 SOL floors, built for sniping) while the price move was a
+// third. The buy and the timed sell now pass {lane: 'lean'}: the live median
+// priority, no floor, no tips — about 0.00001 SOL a side. That cuts a
+// 0.03 SOL bag's zero-move round trip from ~14 % to ~2.6 %. A sell after the
+// creator sold stays on the fast lane, and a lean sell that fails to land is
+// retried by the app on the fast lane. An app built before 09-29 ignores the
+// lane and trades as before.
+//
+// v2.9 (09-29): a call stays on pump's feed only while its caller still
+// holds the coin — 0 of 1,702 feed callouts sampled on 09-29 had a caller
+// holding nothing, 3 had under $5. So once a call went out, the timed exit
+// sells DOWN to a small bag ("Keep this much", default $1.50) and sells the
+// rest at "Keep it until" (default 15 min after the buy). The kept bag
+// rides the price: expect ~$0.30 of a $1.50 bag to go, the cost of 10 more
+// minutes on the feed. 0 turns it off. A creator sell still sells it all.
+//
 /* @inputs
 {
   "curve": {
@@ -69,7 +100,7 @@
   "maxCurvePct": {
     "type": "number",
     "label": "Skip if the curve is already this full (%)",
-    "default": 100,
+    "default": 30,
     "min": 1,
     "max": 100,
     "help": "SOL-side curve fill at the flag. Rug share (low<0.3x) on 575 flags: <10% 3%, 10-20 6%, 20-30 25%, 30-40 38%, 40+ 81%. 100 = off; unknown is skipped below 100."
@@ -155,8 +186,8 @@
     "type": "select",
     "label": "Links required",
     "options": ["X and website", "X only", "X or website", "none"],
-    "default": "none",
-    "help": "A website counts only when it is a homepage (bare domain or one short path) on a host that is not a social, chart, launchpad or search site. Most pump coins link X and no site."
+    "default": "X and website",
+    "help": "A website counts only as a homepage on a host that is not a social, chart, launchpad or search site. Picks WHICH coins get called, not whether they pay (09-29: both links -25% a trade, no rule -21%)."
   },
 
   "xOwnAccount": {
@@ -199,6 +230,25 @@
     "help": "0 = no stop. Placed once the app lists the position. A one-candle rug gaps through it (09-24: a 60% stop filled at -63% to -97%). A stop that fires before the call cancels the call."
   },
 
+  "keepForCallUsd": {
+    "type": "number",
+    "label": "Keep this much (USD) after the timed exit, so the call stays up",
+    "default": 1.5,
+    "min": 0,
+    "max": 100,
+    "step": 0.5,
+    "help": "pump's feed only shows callers who still hold the coin (09-29: 0 of 1,702 feed calls had a caller at 0, 3 under $5). The exit sells down to this, not to zero. 0 = sell everything, as before."
+  },
+
+  "keepForCallMins": {
+    "type": "number",
+    "label": "Keep it until (minutes after the buy), then sell the rest",
+    "default": 15,
+    "min": 1,
+    "max": 240,
+    "help": "How long the call should stay visible. The kept bag rides the price meanwhile: after a confirm the median coin is down ~20% more by minute 15, about $0.30 of a $1.50 bag."
+  },
+
   "holdMins": {
     "type": "range",
     "label": "Hold for (minutes), then sell",
@@ -212,10 +262,10 @@
   "watchMins": {
     "type": "number",
     "label": "Watch each flag for (minutes)",
-    "default": 60,
+    "default": 30,
     "min": 1,
     "max": 120,
-    "help": "After the flag the coin is watched this long; the call + buy happen the first minute the rule below holds. Not confirmed by then = never called."
+    "help": "After the flag the coin is watched this long; the call + buy happen the first minute the rule holds. Not confirmed by then = never called. v2.7: 30 (was 60): fewer coins, fewer price subscriptions."
   },
 
   "confirmMinAgeMins": {
@@ -244,7 +294,7 @@
     "min": 0,
     "max": 100000000,
     "step": 1000,
-    "help": "Minute close x the coin's cap per price at the flag. 0 = off. Unknown cap never confirms while this is set."
+    "help": "Minute close x the coin's cap per price at the flag. 0 = off. Unknown cap never confirms while this is set. 09-29: $20k added calls that lost more; $25k stays."
   },
 
   "confirmMaxDrawdownPct": {
@@ -521,6 +571,23 @@ const MAX_SELL_TRIES = 6;
 /** Below this many SOL of value a leftover is not worth a sell (fix 10):
  *  ten leftovers on 09-24/25 returned less than their own fee. */
 const DUST_SOL = 0.002;
+/**
+ * v2.6 (09-28): what an unattended night taught.
+ *
+ * 50 buys, 6 winners, −0.34 SOL on 0.84 deployed, and the wallet drained to
+ * 0.013 SOL. Three things changed here (the app's own guards changed too):
+ *   • a creator the app has NEVER seen no longer passes as "0 launches" when
+ *     pump's record is parked — unknown is unknown (passesDevLocal);
+ *   • no buy when the wallet holds less than the buy plus this reserve — the
+ *     app used to fit the last buy to whatever was left;
+ *   • the curve cap defaults to 30 %, the number the rug data pointed at.
+ * The app now also refuses a buy under 0.03 SOL, pauses buys for an hour
+ * after three losing exits, and counts order-driven exits toward the loss
+ * stop. Set the budget's open positions to 2 and confirmRisingMins to 2.
+ */
+const WALLET_RESERVE_SOL = 0.05;
+/** v2.8: the fee lane for the buy and the timed sell ('lean' or 'fast'). */
+const FEE_LANE = 'lean';
 /** Two missed position reads this far apart before a bag counts as gone (fix 3). */
 const MISS_GAP_MS = 60_000;
 /** Mayhem / mixed coins are only re-priced this often between checkpoints. */
@@ -1417,6 +1484,10 @@ function passesDevLocal(t, max) {
   const rugs = typeof t.creatorPriorRugs === 'number' ? t.creatorPriorRugs : null;
   const flags = (Array.isArray(t.riskFlags) ? t.riskFlags : []).filter((f) => /creator/i.test(String(f)));
   if (prior === null) return skip(t, 'dev', 'creator record unknown (pump.fun parked, and this app has no record of the creator)');
+  // v2.6: "0 prior launches seen" is what a factory the app has never
+  // watched looks like too. On 09-28 nearly every buy passed on this line
+  // while pump's record was parked; unknown does not pass.
+  if (prior === 0) return skip(t, 'dev', 'creator record unknown (pump.fun parked, and this app has never seen the creator before)');
   if (rugs !== null && rugs > 0) return skip(t, 'dev', `creator rugged ${rugs} coin${rugs === 1 ? '' : 's'} this app saw (pump.fun record unavailable)`);
   if (flags.length) return skip(t, 'dev', `creator risk flag ${flags.join(', ')} (pump.fun record unavailable)`);
   if (prior + 1 > max) return skip(t, 'dev', `creator has ${prior + 1}+ launches this app saw > ${max} (pump.fun record unavailable)`);
@@ -1449,6 +1520,17 @@ async function enter(t) {
     BETWEEN(bot.input.holdMins) *
     60_000;
 
+  // v2.6: the wallet must hold the buy AND a reserve to sell it again. The
+  // app fitted the last buy of 09-28 down to 0.006 SOL, a bag too small to
+  // call; it now refuses such a buy, and this refuses one pass earlier.
+  {
+    const w = await bot.wallet().catch(() => null);
+    if (w && typeof w.sol === 'number' && w.sol < sol + WALLET_RESERVE_SOL) {
+      bot.warn(`not buying ${NAME(t.symbol, t.mint)}: the wallet holds ${w.sol.toFixed(4)} SOL, under the ${sol} SOL buy plus the ${WALLET_RESERVE_SOL} SOL reserve`);
+      return await bot.getState();
+    }
+  }
+
   {
     const st0 = await bot.getState();
     const seen0 = new Set(st0.seen ?? []);
@@ -1477,7 +1559,7 @@ async function enter(t) {
   // of the handler: that would count toward the five-errors auto-off.
   let r;
   try {
-    r = (await WITHIN(bot.buy(t.mint, sol), 15_000)) ??
+    r = (await WITHIN(bot.buy(t.mint, sol, { lane: FEE_LANE }), 15_000)) ??
       { ok: false, landing: true, message: 'buy still landing after 15 s — the pass adopts it if it lands (no call)' };
   } catch (e) {
     r = { ok: false, message: e?.message ?? String(e) };
@@ -2848,9 +2930,51 @@ bot.every(
             continue;
           }
 
+          // v2.9 KEEP FOR THE CALL: pump's feed only shows a callout while its
+          // caller still holds the coin, so the timed exit sells DOWN to a
+          // small bag (keepForCallUsd) and sells the rest at keepForCallMins.
+          // Only when the call really went out; never once the creator sold.
+          {
+            const keepUsd = Number(bot.input.keepForCallUsd ?? 0);
+            const keepMins = Number(bot.input.keepForCallMins ?? 0);
+            const keepUntil = (h.boughtAt ?? now) + keepMins * 60_000;
+            if (!h.devSold && !h.keepPhase && h.calledAt && keepUsd > 0 && keepMins > 0 && now < keepUntil) {
+              const vSol = valueOf(p);
+              const usd = typeof bot.solUsd === 'function' ? await WITHIN(bot.solUsd(), 3000) : null;
+              if (vSol !== null && typeof usd === 'number' && usd > 0) {
+                const vUsd = vSol * usd;
+                const pct = Math.floor(100 * (1 - keepUsd / vUsd));
+                if (pct >= 10) {
+                  let rk;
+                  try {
+                    rk = await bot.sell(h.mint, { pct, lane: FEE_LANE });
+                  } catch (e) {
+                    rk = { ok: false, message: e?.message ?? String(e) };
+                  }
+                  if (rk.ok) {
+                    h.keepPhase = true;
+                    h.sellAt = keepUntil;
+                    h.sellTries = 0;
+                    sold += 1;
+                    bot.log(`sold ${pct}% of ${NAME(h.symbol, h.mint)}, keeping ~$${keepUsd} so the call stays up until +${keepMins} min: ${rk.message}`);
+                    continue;
+                  }
+                  bot.log(`partial sell failed on ${NAME(h.symbol, h.mint)} (${rk.message}) — selling it all instead`);
+                } else {
+                  // Already about the size to keep: hold it all until then.
+                  h.keepPhase = true;
+                  h.sellAt = keepUntil;
+                  bot.log(`keeping all of ${NAME(h.symbol, h.mint)} (~$${vUsd.toFixed(2)}) so the call stays up until +${keepMins} min`);
+                  continue;
+                }
+              }
+            }
+          }
+
           let r;
           try {
-            r = await bot.sell(h.mint, 100);
+            // Lean for the timed exit; fast once the creator has sold (v2.8).
+            r = await bot.sell(h.mint, { pct: 100, lane: h.devSold ? 'fast' : FEE_LANE });
           } catch (e) {
             r = { ok: false, message: e?.message ?? String(e) };
           }

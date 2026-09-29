@@ -18,7 +18,7 @@ import { inputsProblem } from '@shared/scriptInputs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, BookOpen, Clipboard, Code2, Eraser, FolderOpen, ListChecks, Play, Plus, Power, RotateCcw, Settings2, Trash2 } from 'lucide-react';
 import { nativeSymbolOf, type ChainKind } from '@shared/evm';
-import {
+import { DEFAULT_LOSS_PCT_OF_WALLET,
   ALERT_KINDS,
   DEFAULT_BUDGET,
   OPS_FOR_KIND,
@@ -726,7 +726,7 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                   )}
 
                   {/* Budget */}
-                  <div className="grid grid-cols-5 gap-3">
+                  <div className="grid grid-cols-6 gap-3">
                     <Field label="Max per trade" hint={nativeSymbolOf(scriptChain(draft))}>
                       <input type="number" step="0.01" value={draft.budget.maxSolPerTrade} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxSolPerTrade: Number(e.target.value) } })} className={inputCls} />
                     </Field>
@@ -736,6 +736,9 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                     <Field label="Daily loss stop" hint={nativeSymbolOf(scriptChain(draft))}>
                       <input type="number" step="0.01" value={draft.budget.maxLossSolPerDay} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxLossSolPerDay: Number(e.target.value) } })} className={inputCls} />
                     </Field>
+                    <Field label="Loss stop, % of wallet" hint="whichever is smaller">
+                      <input type="number" value={draft.budget.maxLossPctOfWallet ?? DEFAULT_LOSS_PCT_OF_WALLET} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxLossPctOfWallet: Number(e.target.value) } })} className={inputCls} />
+                    </Field>
                     <Field label="Open positions">
                       <input type="number" value={draft.budget.maxOpenPositions} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxOpenPositions: Number(e.target.value) } })} className={inputCls} />
                     </Field>
@@ -744,7 +747,7 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                     </Field>
                   </div>
                   <div className="text-body text-krypt-muted">
-                    Every action a script takes is checked against this budget in the app, not in the script. A buy over the cap is refused, not shrunk. Past the daily loss stop the script turns itself off.
+                    Every action a script takes is checked against this budget in the app, not in the script. A buy over the cap is refused, not shrunk, and so is a buy the wallet can only part-fund. The daily loss stop counts every exit — stop-loss and take-profit orders included, priced from the chain — and is the SOL figure or the wallet share, whichever is smaller; past it the script turns itself off. Three losing exits in a row pause a live script's buys for an hour. A live buy under 0.03 SOL is refused: the priority-fee floors would take more than a tenth of it on the round trip.
                     {' '}
                     <button className="underline text-krypt-muted hover:text-white" onClick={() => setDraft({ ...draft, budget: { ...DEFAULT_BUDGET } })}>
                       Reset to defaults

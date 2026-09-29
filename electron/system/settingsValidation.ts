@@ -166,6 +166,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   skin: SKINS,
   'execution.feeUrgency': ['normal', 'competitive', 'high', 'emergency'],
   'execution.mevMode': ['off', 'fast', 'private'],
+  'execution.feeLane': ['fast', 'lean'],
   'execution.jitoTipPercentile': [50, 75, 95],
   'strategy.runnerAlerts.minBucket': ['top1', 'top1_5', 'top5_10'],
   'strategy.runnerAlerts.windows': ['both', '60', '120'],

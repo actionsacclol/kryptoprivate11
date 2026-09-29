@@ -285,3 +285,43 @@ export function inputsForScript(specs: ScriptInputSpecs, values: ScriptInputValu
   }
   return out;
 }
+
+/**
+ * A shipped script was updated: move every saved answer that still equals
+ * the OLD version's default to the NEW version's default (2026-09-29).
+ *
+ * The settings form saves every field when it is saved, so a user who opened
+ * it once had the old defaults pinned for good, and an update that changed
+ * a recommended default (Callout Farm v2.7: links "none" -> "X and website",
+ * watch 60 -> 30) never reached them. An answer the user CHANGED differs
+ * from the old default and is kept; a field the new version no longer
+ * declares is kept too (harmless, and restored if it comes back). A field
+ * that is new has no saved answer and takes its default anyway
+ * (coerceInputs). Returns the keys it moved, for the log.
+ */
+export function migrateInputDefaults(
+  oldSpecs: ScriptInputSpecs,
+  newSpecs: ScriptInputSpecs,
+  values: ScriptInputValues,
+): { values: ScriptInputValues; moved: string[] } {
+  const same = (a: unknown, b: unknown): boolean => {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  };
+  const out: ScriptInputValues = { ...values };
+  const moved: string[] = [];
+  for (const [k, spec] of Object.entries(newSpecs)) {
+    const old = oldSpecs[k];
+    if (!old || !Object.prototype.hasOwnProperty.call(values, k)) continue;
+    // A secret is never touched: its default is blank and so is "not set".
+    if (spec.type === 'webhook' || old.type !== spec.type) continue;
+    if (same(values[k], old.default) && !same(old.default, spec.default)) {
+      out[k] = spec.default;
+      moved.push(k);
+    }
+  }
+  return { values: out, moved };
+}

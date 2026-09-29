@@ -23,6 +23,7 @@ import type { RunnerFlag } from './runners';
 import type { AlertKind } from './alerts';
 import { nativeSymbolOf, type ChainKind } from './evm';
 import type { EvmLaunchWindow, EvmScanLaunch } from './evmScan';
+import type { EvmRunnerFlag } from './evmRunners';
 import { parseXLink, type XLinkKind } from './xLink';
 import { launchpadSite } from './tokenLinks';
 import type { SecurityReport, TokenSummary } from './market';
@@ -224,8 +225,17 @@ export interface ScriptBudget {
   maxSolPerTrade: number;
   /** Buys per calendar day. */
   maxBuysPerDay: number;
-  /** Realised loss in a day that DISABLES the script, SOL. */
+  /** Realised loss in a day that DISABLES the script, SOL. Counts EVERY
+   *  exit — the script's own sells and the stop-loss / take-profit orders
+   *  that sold its bags — priced from the chain. */
   maxLossSolPerDay: number;
+  /**
+   * The same stop as a share of the WALLET, whichever is smaller (2026-09-28).
+   * A 0.5 SOL stop on a 0.36 SOL wallet could never bind, and a script ran
+   * that wallet to dust overnight. Optional: a script saved before this
+   * existed reads as DEFAULT_LOSS_PCT_OF_WALLET.
+   */
+  maxLossPctOfWallet?: number;
   /** Positions this script may hold open at once. */
   maxOpenPositions: number;
   /** Any action (buy, sell, order, notify…) per minute — the runaway guard.
@@ -239,14 +249,22 @@ export const BUDGET_BOUNDS = {
   maxSolPerTrade: { min: 0.001, max: 50 },
   maxBuysPerDay: { min: 1, max: 500 },
   maxLossSolPerDay: { min: 0.01, max: 100 },
+  maxLossPctOfWallet: { min: 1, max: 100 },
   maxOpenPositions: { min: 1, max: 50 },
   maxActionsPerMinute: { min: 1, max: 120 },
 } as const;
+
+/** Budget fields a saved script may lack; the default applies then. */
+const OPTIONAL_BUDGET_KEYS: ReadonlySet<keyof ScriptBudget> = new Set(['maxLossPctOfWallet']);
+
+/** What `maxLossPctOfWallet` reads as when a script does not say. */
+export const DEFAULT_LOSS_PCT_OF_WALLET = 25;
 
 export const DEFAULT_BUDGET: ScriptBudget = {
   maxSolPerTrade: 0.05,
   maxBuysPerDay: 20,
   maxLossSolPerDay: 0.5,
+  maxLossPctOfWallet: DEFAULT_LOSS_PCT_OF_WALLET,
   maxOpenPositions: 5,
   maxActionsPerMinute: 30,
 };
@@ -1216,6 +1234,20 @@ export function contextFromRunner(flag: RunnerFlag, launch: LaunchRow | null, no
   return c;
 }
 
+/**
+ * A runner flag from an EVM chain's scanner (Robinhood, BNB) as a script sees
+ * it — the chain's launch facts when it still has the launch, else the flag's
+ * own. Solana-only facts (curve regime, mayhem) stay null.
+ */
+export function contextFromEvmRunner(flag: EvmRunnerFlag, launch: EvmScanLaunch | null, now: number): RuleContext {
+  const c = launch ? contextFromEvmLaunch(launch, now) : emptyContext(flag.token, flag.symbol ?? '', flag.name ?? '');
+  if (c.uniqueBuyers === null) c.uniqueBuyers = num(flag.uniqueBuyers);
+  c.runnerOddsPct = num(flag.ratePct);
+  c.curveRegime = null;
+  c.isMayhem = null;
+  return c;
+}
+
 /** Position facts onto a context (from the launch row when there is one). */
 export function withPosition(c: RuleContext, pos: ScriptPosition | null, now: number): RuleContext {
   if (!pos) {
@@ -1643,6 +1675,10 @@ export function evaluateRules(rules: RuleSet, ctx: RuleContext): { fire: boolean
 export function validateBudget(b: ScriptBudget): { ok: boolean; message: string } {
   for (const key of Object.keys(BUDGET_BOUNDS) as Array<keyof ScriptBudget>) {
     const v = b[key];
+    if (v === undefined) {
+      if (OPTIONAL_BUDGET_KEYS.has(key)) continue;
+      return { ok: false, message: key + " is missing" };
+    }
     const { min, max } = BUDGET_BOUNDS[key];
     if (!Number.isFinite(v) || v < min || v > max) return { ok: false, message: `${key} must be between ${min} and ${max}` };
   }
@@ -1842,8 +1878,15 @@ export interface ScriptLogLine {
 export interface ScriptStats {
   buysToday: number;
   sellsToday: number;
-  /** Realised today, SOL (paper: exact; live: from the position's PnL at the sell). */
+  /** Realised today, SOL (paper: exact; live: every settled sell of a bag
+   *  the script opened, priced from the chain — orders included). */
   realizedSolToday: number;
+  /** The loss stop in force: the SOL figure or the wallet share, whichever is smaller. */
+  lossCapSol?: number;
+  /** Losing exits in a row (live). */
+  lossStreak?: number;
+  /** While set, the script's buys are refused: the cool-off after a losing streak. */
+  coolOffUntil?: number | null;
   errorsInARow: number;
   lastRunAt: number | null;
   lastError: string | null;
@@ -1934,8 +1977,8 @@ export const SCRIPT_API: ApiSpec[] = [
   { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval, migration, devSell, holdings, copyFill, runnerExpired. Handlers for one script run one at a time. One is checked at 3 s; if it is still awaiting bot calls it gets more time, up to 30 s — a stuck one is killed and counts as an error.', action: false },
   { method: 'every', signature: 'bot.every(seconds, async () => {})', returns: 'Promise<number> (the seconds used)', notes: 'A timer. 5 s minimum, 3600 max.', action: false },
   { method: 'at', signature: "bot.at('HH:MM', async () => {})", returns: 'Promise<string>', notes: 'Once a day at that local time.', action: false },
-  { method: 'buy', signature: 'await bot.buy(mint, sol, address? | { wallet?, slippagePct? })', returns: '{ok, message}', notes: 'Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over THIS SCRIPT’S budget — max per trade, buys per day, open positions, actions per minute — or while live is blocked (not armed, execution off, a breaker). The app’s manual per-trade cap does NOT apply: a script’s own budget is the authority on its size. The third argument is either another of your own wallet ADDRESSES (see bot.wallets) to buy with that wallet — refused until you accept “Trading from your other wallets” on the Scripts page — or an options object: {wallet} is that same address, {slippagePct} (0.1–50) replaces the execution setting’s slippage for THIS buy only — trading wallet, Solana; the other wallets and the EVM rails keep the setting, so slippagePct together with wallet is refused rather than silently dropped. The app does not space these out or cap how many of your wallets touch a coin: the script does what it is written to, inside its own budget. Paper spends nothing.', action: true },
-  { method: 'sell', signature: 'await bot.sell(mint, pct | { pct?, tokens?, slippagePct?, wallet? }, address?)', returns: '{ok, message}', notes: 'pct 1–100 of what this script holds in its mode. Or an options object: {tokens} sells that many tokens (UI units) instead of a percent — converted against the position the app can see, so it is refused while a fresh buy is not in the holdings read yet, and capped at what this script itself bought when the bag also holds hand-bought tokens; {slippagePct} (0.1–50) replaces the slippage setting for this sell only (trading wallet, Solana) — a LIVE sell never runs below the app’s 15 % exit floor, so asking for less runs at 15; {wallet} names another of your own wallet ADDRESSES to sell from that one — only a mint this script opened, only on Solana, only as a percent (tokens with wallet is refused), at the execution setting’s slippage (slippagePct with wallet is refused). Name the wallet once: in the options or as the third argument, not both. Refused when nothing is held.', action: true },
+  { method: 'buy', signature: 'await bot.buy(mint, sol, address? | { wallet?, slippagePct?, lane? })', returns: '{ok, message}', notes: '{lane: \x27lean\x27} (2026-09-29) sends THIS trade at the live median priority with no fee floor, no Jito or Helius tip and the public lane only: about 0.00001 SOL a side instead of the 0.001 / 0.002 floors, which on a 0.02 SOL bag were most of the loss. It lands in seconds, not the first slot, so it suits timed exits and patient entries, never a snipe or a rug exit. A lean sell that fails to land is retried once on the fast lane. The smallest live buy is 0.03 SOL on the fast lane and 0.0025 SOL on the lean one. Trading wallet only. Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over THIS SCRIPT’S budget — max per trade, buys per day, open positions, actions per minute — or while live is blocked (not armed, execution off, a breaker). The app’s manual per-trade cap does NOT apply: a script’s own budget is the authority on its size. The third argument is either another of your own wallet ADDRESSES (see bot.wallets) to buy with that wallet — refused until you accept “Trading from your other wallets” on the Scripts page — or an options object: {wallet} is that same address, {slippagePct} (0.1–50) replaces the execution setting’s slippage for THIS buy only — trading wallet, Solana; the other wallets and the EVM rails keep the setting, so slippagePct together with wallet is refused rather than silently dropped. The app does not space these out or cap how many of your wallets touch a coin: the script does what it is written to, inside its own budget. Paper spends nothing.', action: true },
+  { method: 'sell', signature: 'await bot.sell(mint, pct | { pct?, tokens?, slippagePct?, wallet?, lane? }, address?)', returns: '{ok, message, realizedSol?}', notes: '{lane: \x27lean\x27} (2026-09-29) sends THIS trade at the live median priority with no fee floor, no Jito or Helius tip and the public lane only: about 0.00001 SOL a side instead of the 0.001 / 0.002 floors, which on a 0.02 SOL bag were most of the loss. It lands in seconds, not the first slot, so it suits timed exits and patient entries, never a snipe or a rug exit. A lean sell that fails to land is retried once on the fast lane. The smallest live buy is 0.03 SOL on the fast lane and 0.0025 SOL on the lean one. Trading wallet only. realizedSol (2026-09-29): what the sell realised in the chain’s coin — exact on paper, null on a live sell until its fill settles (the script’s own stats carry it then). pct 1–100 of what this script holds in its mode. Or an options object: {tokens} sells that many tokens (UI units) instead of a percent — converted against the position the app can see, so it is refused while a fresh buy is not in the holdings read yet, and capped at what this script itself bought when the bag also holds hand-bought tokens; {slippagePct} (0.1–50) replaces the slippage setting for this sell only (trading wallet, Solana) — a LIVE sell never runs below the app’s 15 % exit floor, so asking for less runs at 15; {wallet} names another of your own wallet ADDRESSES to sell from that one — only a mint this script opened, only on Solana, only as a percent (tokens with wallet is refused), at the execution setting’s slippage (slippagePct with wallet is refused). Name the wallet once: in the options or as the third argument, not both. Refused when nothing is held.', action: true },
   { method: 'sellAll', signature: 'await bot.sellAll()', returns: '{ok, message, sold: number}', notes: 'Sell 100 % of every position this script holds.', action: true },
   { method: 'order', signature: "await bot.order({ mint, kind, triggerBasis, triggerValue, amount })", returns: '{ok, message}', notes: "kind: stop_loss | take_profit | trailing_stop | limit_buy | limit_sell | sell_on_dev_sell | sell_on_migration | buy_on_migration. triggerBasis: 'pct' (from the price now) | 'mcap_usd' | 'price_sol'. amount: SOL for buys, % for sells. Placed as a real advanced order. 'pct' is measured from your position's fill price (fees and the token-account deposit excluded), or from the price now when nothing is held. An app restart brings every armed order back PAUSED and never resumes it by itself: the script gets an 'order' event with orderState 'paused' for its coins, and must cancelOrders + order again to re-arm.", action: true },
   { method: 'cancelOrders', signature: 'await bot.cancelOrders(mint, kinds?)', returns: '{ok, message, cancelled: number}', notes: "Cancel every open order on the token — or, with kinds (e.g. ['stop_loss', 'trailing_stop']), only those kinds, leaving the rest armed: a moonbag can drop its stop and keep its take-profit rungs. An app build before 5.3.0 ignores the list and cancels every order.", action: true },
@@ -2035,7 +2078,7 @@ export const SCRIPT_EVENTS_DOC: EventSpec[] = [
   // The engine's other moments (2026-09-27). Until now a script could only
   // infer a graduation from curvePct reaching 100 on a launchUpdate it might
   // not be receiving, and a dev sell from creatorSold flipping.
-  { event: 'migration', payload: 'Token + migrated: true', when: 'a coin’s bonding curve completed and it migrated to a pool (pump.fun and Meteora DBC) — every Solana script hears every migration, whether it holds the coin or not' },
+  { event: 'migration', payload: 'Token + migrated: true, isMayhem: true | false | null', when: 'a coin’s bonding curve completed and it migrated to a pool (pump.fun and Meteora DBC) — every Solana script hears every migration, whether it holds the coin or not. isMayhem is read from the create event (null = the app could not tell); the pool itself may print a few seconds later — subscribe and wait for a tick' },
   { event: 'devSell', payload: 'Token + devSoldSol, devSoldTokens', when: 'the creator wallet SOLD on a coin this script holds or subscribed to (bot.subscribe / bot.watch); creatorSold on the facts is true from then on. Solana (pump.fun curve) only' },
   { event: 'holdings', payload: '{at, holdings: Holding[]}', when: 'the trading wallet’s token accounts were re-read and differ from the last read — after any fill, yours or a script’s (the same rows bot.holdings returns). Solana only' },
   { event: 'copyFill', payload: '{id, configId, wallet, mint, symbol, side, mode, state, theirSol, ourSol, pnlSol, reason, direction, at}', when: 'copy trading opened, closed or skipped a copy (state open · closed · skipped; side buy, or sell for a mirrored exit) — the leader’s own trade is the separate leaderTrade event. Scripts on the copy’s chain only' },

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader2, Search } from 'lucide-react';
+import { LiquidGlass } from '../LiquidGlass';
 import { imageSrc, type TokenSummary } from '@shared/market';
 import { EVM_CHAIN_META, isEvmChain, type ChainKind } from '@shared/evm';
 import { useTerminal } from '../../state/TerminalProvider';
@@ -121,7 +122,7 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKi
       </div>
 
       {open && query.trim() && (
-        <div className="absolute z-50 mt-1 w-full rounded-lg border border-white/12 bg-krypt-panel/98 backdrop-blur-md shadow-krypt-card overflow-hidden">
+        <LiquidGlass surface="sheet" className="absolute z-50 mt-1 w-full rounded-lg border border-white/12 overflow-hidden">
           {isMint ? (
             <button
               onClick={submit}
@@ -177,7 +178,7 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKi
               ))}
             </div>
           )}
-        </div>
+        </LiquidGlass>
       )}
     </div>
   );

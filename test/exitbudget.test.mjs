@@ -3,7 +3,7 @@
 // 0.002 SOL priority fee, the wallet held 0.00167, and the transaction could
 // not even be loaded.
 import assert from 'node:assert';
-import { BASE_FEE_LAMPORTS, LEAN_EXIT_LAMPORTS, explainFeeFailure, planExitBudget } from './.exitbudget.mjs';
+import { BASE_FEE_LAMPORTS, LEAN_EXIT_LAMPORTS, explainFeeFailure, planExitBudget, planBuySize, UNATTENDED_MIN_FILL_SHARE, roundTripFeeShare, minUnattendedBuySol, shouldHoldAsDust, leanPriorityFeeSol, leanExec, laneRoundTripPrioritySol, LEAN_MIN_MICRO_PER_CU, LEAN_MAX_MICRO_PER_CU, FEE_LANES, paperFixedFeeSol } from './.exitbudget.mjs';
 
 const SOL = 1e9;
 
@@ -134,4 +134,73 @@ const SOL = 1e9;
 
   console.log('ok  pump revert codes read as English, and only the real ones match');
 }
+{
+  // 2026-09-28: an UNATTENDED buy is refused rather than shrunk. The last buy
+  // of a drained wallet that night asked for 0.0151 SOL and got 0.0063.
+  const bal = 0.0213 * SOL;
+  const want = Math.round(0.0151 * SOL);
+  const clicked = planBuySize(bal, want);
+  assert.equal(clicked.refused, false, 'a click is trimmed, as before');
+  assert.ok(clicked.lamports > 0 && clicked.lamports < want);
+  const script = planBuySize(bal, want, { minShare: UNATTENDED_MIN_FILL_SHARE });
+  assert.equal(script.refused, true, 'a script is refused');
+  assert.equal(script.lamports, 0);
+  assert.match(script.note, /refused rather than shrunk below 80%/);
+  // Just over the bar: 85 % affordable is still a trim, not a refusal.
+  const nearly = planBuySize(0.015 * SOL + 0.85 * want, want, { minShare: UNATTENDED_MIN_FILL_SHARE });
+  assert.equal(nearly.refused, false);
+  assert.ok(nearly.lamports >= 0.85 * want - 1);
+  const fine = planBuySize(0.1 * SOL, want, { minShare: UNATTENDED_MIN_FILL_SHARE });
+  assert.equal(fine.refused, false);
+  assert.equal(fine.lamports, want);
+
+  // The fee floors' share of a round trip, and the size they imply.
+  assert.ok(Math.abs(roundTripFeeShare(0.016) - 0.1875) < 1e-9, '0.003 of 0.016');
+  assert.equal(roundTripFeeShare(0), Infinity);
+  assert.equal(minUnattendedBuySol(), 0.03);
+  assert.equal(minUnattendedBuySol('fast'), 0.03, 'the fast lane is the old rule, unchanged');
+
+  // Dust: a KNOWN estimate under the priority fee holds the sell; unknown never does.
+  assert.equal(shouldHoldAsDust(1_500_000, 2_005_000), true);
+  assert.equal(shouldHoldAsDust(3_000_000, 2_005_000), false);
+  assert.equal(shouldHoldAsDust(undefined, 2_005_000), false, 'unknown never blocks an exit');
+  assert.equal(shouldHoldAsDust(null, 2_005_000), false);
+  assert.equal(shouldHoldAsDust(1_000, 0), false, 'no fee, nothing to hold for');
+  console.log('ok  an unattended buy is refused rather than shrunk; the fee share and the dust rule');
+}
 console.log('exitbudget: all tests passed');
+
+{
+  // Fee lanes (2026-09-29). The farm's 95 round trips lost 0.693 SOL and the
+  // priority fee was half of it; pump curve trades land at a median 0.000032
+  // SOL of priority. 'lean' prices from the live median with no floor.
+  assert.deepEqual([...FEE_LANES], ['fast', 'lean']);
+  // micro-lamports/CU × CU → SOL is ÷ 1e15 (a ÷ 1e12 slip would be 1,000× too dear).
+  assert.ok(Math.abs(leanPriorityFeeSol(100_000, 120_000) - 0.000012) < 1e-12, '100k µlam × 120k CU = 12,000 lamports');
+  assert.ok(Math.abs(leanPriorityFeeSol(1, 120_000) - (LEAN_MIN_MICRO_PER_CU * 120_000) / 1e15) < 1e-15, 'never under the floor price');
+  assert.ok(Math.abs(leanPriorityFeeSol(9e9, 120_000) - (LEAN_MAX_MICRO_PER_CU * 120_000) / 1e15) < 1e-15, 'a wild estimate is capped');
+  assert.ok(Math.abs(leanPriorityFeeSol(null, 120_000) - 0.000012) < 1e-12, 'no estimate = the default price');
+  assert.ok(Math.abs(leanPriorityFeeSol(NaN, 0) - 0.000012) < 1e-12, 'nonsense in, the default out');
+  // Every lean fee is far under the fast floors, at any estimate.
+  assert.ok(leanPriorityFeeSol(9e9, 250_000) < 0.001 / 5, 'the lean ceiling is < a fifth of the buy floor');
+  assert.ok(Math.abs(laneRoundTripPrioritySol('lean') - 0.00025) < 1e-12, 'guarded at the ceiling price and PumpSwap limit');
+  assert.equal(laneRoundTripPrioritySol('fast'), 0.003);
+  assert.equal(minUnattendedBuySol('lean'), 0.0025);
+  assert.ok(roundTripFeeShare(0.02, 'lean') <= 0.1, 'a farm-sized 0.02 SOL bag passes the lean guard');
+  assert.ok(roundTripFeeShare(0.02, 'fast') > 0.1, 'and not the fast one');
+  const exec = { useJito: true, useHeliusSender: true, mevMode: 'fast', jitoTipPercentile: 75, liveSlippagePct: 10 };
+  const lean = leanExec(exec);
+  assert.deepEqual([lean.useJito, lean.useHeliusSender, lean.mevMode], [false, false, 'off'], 'no tips, public lane');
+  assert.equal(lean.liveSlippagePct, 10, 'everything else is untouched');
+  assert.equal(exec.useJito, true, 'the settings object itself is not mutated');
+  console.log('ok  lean lane: live-median priority, no floor, no tips, guarded at its ceiling');
+}
+
+{
+  // What a paper fill charges per side: the fast lane's floor + measured mean tip + base fee; the lean lane's default.
+  assert.ok(Math.abs(paperFixedFeeSol('fast', 'buy') - 0.001061) < 1e-12);
+  assert.ok(Math.abs(paperFixedFeeSol('fast', 'sell') - 0.002443) < 1e-12);
+  assert.ok(Math.abs(paperFixedFeeSol('lean', 'buy') - 0.000017) < 1e-12);
+  assert.ok(paperFixedFeeSol('lean', 'sell') * 100 < paperFixedFeeSol('fast', 'sell'), 'lean is two orders of magnitude cheaper on a sell');
+  console.log('ok  paper fixed fees per lane and side');
+}

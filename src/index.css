@@ -140,19 +140,28 @@ html[data-skin='classic'] {
   /* Engraved instrument plate — the standard card surface. Hairline border,
      inner top highlight, and etched corner ticks (the "corner runes"). */
   /*
-   * NOTE ON BLUR. `backdrop-blur` makes the compositor re-blur whatever sits
-   * behind an element every frame that anything beneath it moves. On the
-   * chrome that is ALWAYS on screen (top bar, sidebar) over a scrolling list,
-   * that is a per-frame cost for an effect nobody can see through anyway, so
-   * those two use a near-opaque background instead. Blur is kept for the
-   * transient surfaces — modals, drawers, the search palette — where it is
-   * both visible and short-lived.
+   * NOTE ON BLUR. `backdrop-filter` makes the compositor re-run the filter
+   * over whatever sits behind an element every frame that anything beneath
+   * it changes. The rule since 2026-09-28: a filtered surface may sit over
+   * the BACKDROP LAYER (the liquid-metal sheet, which repaints at 15–30 fps
+   * and is the thing worth seeing through) or over the page for as long as
+   * an overlay is open — never over a scrolling list for the life of the
+   * app. The displacement pass of the liquid-glass LENS costs ~5 ms per
+   * surface per frame (measured, src/state/glass.ts), so it is reserved for
+   * overlays; surfaces that stay on screen over the backdrop get FROST
+   * (blur + saturate, measured free), and the top bar and sidebar — on
+   * screen for the life of the app — carry no filter at all. Lite mode
+   * removes every filter at once.
    */
   .plate {
     position: relative;
     border: 1px solid rgb(var(--krypt-text) / 0.09);
     background-color: rgb(var(--krypt-panel) / 0.82);
-    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgb(var(--krypt-text) / 0.045);
+    /* The wash is what the glass surfaces do with light; the plate gets a
+       faint version so a page of cards and a glass drawer read as one
+       material family. 4 % of the text colour, gone by 40 % down. */
+    background-image: linear-gradient(180deg, rgb(var(--krypt-text) / 0.04), transparent 40%);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgb(var(--krypt-text) / 0.08), inset 0 0 0 1px rgb(var(--krypt-text) / 0.02);
   }
   .plate::after {
     content: '';
@@ -209,6 +218,92 @@ html[data-skin='classic'] {
   .card-list > .card {
     content-visibility: auto;
     contain-intrinsic-size: auto 132px;
+  }
+
+  /* ── Liquid glass (2026-09-28) ─────────────────────────────────────
+   *
+   * Four classes and a pseudo-element, one material each (the table that
+   * picks between them is src/state/glass.ts):
+   *   .glass-lens   the LENS — frost + SVG displacement over the page behind,
+   *                 applied inline by @samasante/liquid-glass; this sheet
+   *                 only gives it a drop. Overlays only: it costs frames.
+   *   .glass-frost  blur + saturate + a lit rim, no displacement. Free.
+   *   .glass-chrome the frame: a dark fill and a lit edge, no filter.
+   *   .glass        the same box with no filter at all — Lite mode, and the
+   *                 Hacker and Retro looks.
+   * The hairline border is always the call site's own Tailwind class, so a
+   * bar can keep a bottom edge only.
+   *
+   * Neither carries the accent. The tint is the look's panel colour, the
+   * rim is white light; emerald, rose and gold stay data. */
+  .glass-lens {
+    box-shadow: 0 18px 50px rgb(var(--krypt-ink) / 0.45), 0 2px 8px rgb(var(--krypt-ink) / 0.25);
+  }
+  /* FROST: blur + saturate and the same lit rim the lens draws, with no
+     displacement pass. Measured free over the animating backdrop where the
+     lens cost ~5 ms per surface per frame, so this is what a surface that
+     stays on screen gets (the Hub's tiles, the Widgets panels). The rim is
+     white light, like the library's, so a frosted tile and a lensed sheet
+     read as the same material. */
+  .glass-frost {
+    backdrop-filter: blur(10px) saturate(1.2);
+    -webkit-backdrop-filter: blur(10px) saturate(1.2);
+    background-image: linear-gradient(180deg, rgb(255 255 255 / 0.07), transparent 42%);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.34),
+      inset 0 0 0 1px rgb(255 255 255 / 0.07),
+      inset 0 12px 28px -18px rgb(255 255 255 / 0.22),
+      0 18px 50px rgb(var(--krypt-ink) / 0.45);
+    isolation: isolate;
+  }
+  /* The specular band needs a positioned box; a call site that already
+     positions the surface (a fixed pill) keeps its own. */
+  .glass-frost:not([class~='fixed']):not([class~='absolute']) {
+    position: relative;
+  }
+  /* The specular band: a soft diagonal streak across the top-left corner,
+     the one cue that says 'polished surface' rather than 'tinted panel'.
+     Under the children (z-index -1 inside the isolated box) so text never
+     sits behind a highlight. */
+  .glass-frost::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    border-radius: inherit;
+    background: linear-gradient(118deg, rgb(255 255 255 / 0.10) 0%, rgb(255 255 255 / 0.03) 22%, transparent 42%);
+  }
+  /* CHROME: the frame. A dark fill the call site chooses, a lit top edge and
+     a faint top-down wash, and NO filter — the frame is on screen for the
+     life of the app, and a frosted bar over the backdrop read worse than
+     the old near-black one anyway (user, 2026-09-28). */
+  .glass-chrome {
+    background-image: linear-gradient(180deg, rgb(var(--krypt-text) / 0.035), transparent 60%);
+    box-shadow: inset 0 1px 0 rgb(var(--krypt-text) / 0.07);
+  }
+  .glass {
+    background-color: rgb(var(--krypt-panel) / 0.94);
+    background-image: linear-gradient(180deg, rgb(var(--krypt-text) / 0.05), transparent 45%);
+    box-shadow: 0 18px 50px rgb(var(--krypt-ink) / 0.45), inset 0 1px 0 rgb(var(--krypt-text) / 0.10);
+  }
+  /* A control lit from above: a highlight over the top half, a shade under
+     the bottom. Drawn on a pseudo-element so it composes with whatever
+     background the button already has (the accent gradient, a rose wash)
+     instead of replacing it. `overflow: hidden` keeps it inside the corners. */
+  .glass-btn {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .glass-btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    border-radius: inherit;
+    background: linear-gradient(180deg, rgb(var(--krypt-text) / 0.16), rgb(var(--krypt-text) / 0.03) 48%, transparent 52%, rgb(var(--krypt-ink) / 0.14));
   }
 
   .plate-gold::after { --tick: rgba(217, 180, 91, 0.4); }
@@ -297,14 +392,37 @@ html.lite .bg-krypt-radial {
   mask-image: none !important;
   -webkit-mask-image: none !important;
 }
-html.lite [class*='backdrop-blur'] {
+html.lite [class*='backdrop-blur'],
+html.lite [data-liquid-glass],
+html.lite .glass-frost {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
+/* A lens with its filter stripped is a translucent wash over an unblurred
+   page — worse than flat. Give it the flat surface's fill instead. */
+html.lite .glass-lens,
+html.lite .glass-frost {
+  background-color: rgb(var(--krypt-panel) / 0.94) !important;
+  background-image: none !important;
+}
+html.lite .glass-btn::before {
+  display: none;
+}
 html.lite [class*='shadow-'],
 html.lite .plate,
-html.lite .card {
+html.lite .card,
+html.lite .glass,
+html.lite .glass-lens,
+html.lite .glass-frost,
+html.lite .glass-chrome {
   box-shadow: none !important;
+}
+html.lite .glass-chrome {
+  background-image: none !important;
+}
+html.lite .plate,
+html.lite .glass {
+  background-image: none !important;
 }
 /* The corner runes: eight gradient layers per plate. */
 html.lite .plate::after {
@@ -412,7 +530,10 @@ html[data-skin='futuristic'] {
 }
 html[data-skin='futuristic'] .font-display { text-transform: uppercase; letter-spacing: 0.12em; }
 html[data-skin='futuristic'] .plate,
-html[data-skin='futuristic'] .card {
+html[data-skin='futuristic'] .card,
+html[data-skin='futuristic'] .glass,
+html[data-skin='futuristic'] .glass-lens,
+html[data-skin='futuristic'] .glass-frost {
   border-color: rgb(var(--krypt-accent) / 0.25);
   box-shadow: inset 0 0 0 1px rgb(var(--krypt-accent) / 0.05), 0 0 24px rgb(var(--krypt-accent) / 0.07);
 }
@@ -447,8 +568,11 @@ html[data-skin='minimal'] {
   font-size: 16.5px;
 }
 html[data-skin='minimal'] .font-display { letter-spacing: -0.01em; font-weight: 600; }
+html[data-skin='minimal'] .glass-lens { box-shadow: 0 12px 40px rgb(var(--krypt-ink) / 0.35); }
+html[data-skin='minimal'] .glass-frost { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18), 0 12px 40px rgb(var(--krypt-ink) / 0.35); }
 html[data-skin='minimal'] .plate,
-html[data-skin='minimal'] .card {
+html[data-skin='minimal'] .card,
+html[data-skin='minimal'] .glass {
   background-color: rgb(var(--krypt-panel));
   border-color: rgb(var(--krypt-text) / 0.08);
   box-shadow: none;
@@ -492,12 +616,16 @@ html[data-skin='hacker'] .font-display { font-size: 1.2em; letter-spacing: 0.04e
 html[data-skin='hacker'] main h1::after { content: '_'; margin-left: 0.15em; animation: caret-blink 1s steps(1) infinite; }
 @keyframes caret-blink { 50% { opacity: 0; } }
 html[data-skin='hacker'] .plate,
-html[data-skin='hacker'] .card {
+html[data-skin='hacker'] .card,
+html[data-skin='hacker'] .glass {
   background-color: rgb(var(--krypt-panel) / 0.92);
   border-color: rgb(var(--krypt-accent) / 0.35);
   box-shadow: none;
 }
 html[data-skin='hacker'] .plate::after { display: none; }
+html[data-skin='hacker'] .plate,
+html[data-skin='hacker'] .glass { background-image: none; }
+html[data-skin='hacker'] .glass-btn::before { display: none; }
 html[data-skin='hacker'] .bg-krypt-radial { background-image: none; }
 html[data-skin='hacker'] .stars-backdrop {
   background-image: repeating-linear-gradient(to bottom, rgb(var(--krypt-text) / 0.04) 0, rgb(var(--krypt-text) / 0.04) 1px, transparent 1px, transparent 3px);
@@ -539,12 +667,16 @@ html[data-skin='retro'] {
 html[data-skin='retro'] .font-display { font-family: 'Share Tech Mono', 'JetBrains Mono', monospace; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
 html[data-skin='retro'] main h1.font-display { font-family: 'Press Start 2P', 'Share Tech Mono', monospace; font-size: 0.8em; line-height: 1.5; letter-spacing: 0.02em; text-shadow: 3px 3px 0 rgb(var(--krypt-accent) / 0.6); }
 html[data-skin='retro'] .plate,
-html[data-skin='retro'] .card {
+html[data-skin='retro'] .card,
+html[data-skin='retro'] .glass {
   border: 2px solid rgb(var(--krypt-text) / 0.28);
   background-color: rgb(var(--krypt-panel) / 0.94);
   box-shadow: 5px 5px 0 rgb(var(--krypt-ink) / 0.55);
 }
 html[data-skin='retro'] .plate::after { display: none; }
+html[data-skin='retro'] .plate,
+html[data-skin='retro'] .glass { background-image: none; }
+html[data-skin='retro'] .glass-btn::before { display: none; }
 html[data-skin='retro'] .stars-backdrop {
   background-image: repeating-linear-gradient(to bottom, rgb(var(--krypt-ink) / 0.16) 0, rgb(var(--krypt-ink) / 0.16) 1px, transparent 1px, transparent 4px);
   background-size: auto;
@@ -582,8 +714,19 @@ html[data-skin='xp'] {
   color-scheme: light;
 }
 html[data-skin='xp'] .font-display { font-weight: 700; letter-spacing: 0; text-transform: none; }
+html[data-skin='xp'] .glass-lens {
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.16), 0 1px 3px rgb(0 0 0 / 0.12);
+}
+html[data-skin='xp'] .glass-frost {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.9), inset 0 0 0 1px rgb(255 255 255 / 0.5), 0 10px 30px rgb(0 0 0 / 0.16);
+}
+html[data-skin='xp'] .glass-chrome {
+  background-image: linear-gradient(180deg, rgb(255 255 255 / 0.5), transparent 60%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.9);
+}
 html[data-skin='xp'] .plate,
-html[data-skin='xp'] .card {
+html[data-skin='xp'] .card,
+html[data-skin='xp'] .glass {
   background-color: rgb(var(--krypt-panel));
   border: 1px solid rgb(0 84 227 / 0.35);
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.12), inset 0 3px 0 rgb(0 84 227 / 0.85);

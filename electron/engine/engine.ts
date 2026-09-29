@@ -97,7 +97,7 @@ import { buildShadowPlan } from './sender';
 import { shouldRetrySell, shouldRetryPreBroadcast, escalatedSellSlippagePct, nextConsecutiveLosses, liveBreakerReason } from '@shared/liveBreakers';
 import { pctForClaim } from '@shared/botStrategy';
 import * as pumpChain from '../data/pumpChain';
-import { LEAN_EXIT_LAMPORTS, planBuySize, planExitBudget } from '@shared/exitBudget';
+import { LEAN_EXIT_LAMPORTS, PRIORITY_FEE_FLOOR_SOL, UNATTENDED_MIN_FILL_SHARE, leanExec, leanPriorityFeeSol, paperFixedFeeSol, planBuySize, planExitBudget, shouldHoldAsDust, type FeeLane } from '@shared/exitBudget';
 import { describeTemplate, ordersForTemplate } from '@shared/orderTemplates';
 import { isPctKind } from '@shared/orders';
 import * as templateStore from '../system/templateStore';
@@ -692,7 +692,7 @@ export class SniperEngine {
         return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
       },
       sell: async (mint, percent) => {
-        const r = await this.manualSell(mint, percent);
+        const r = await this.manualSell(mint, percent, { dustGuard: true });
         return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
       },
       blockedReason: () => this.executionBlockedReason(),
@@ -959,6 +959,15 @@ export class SniperEngine {
       // ends up fixed on one path and not the other.
       buy: (mint, sol, mode, chain, ownCapSol, opts) => this.hostBuy(mint, sol, mode, chain, ownCapSol, opts),
       sell: (mint, pct, mode, chain, opts) => this.hostSell(mint, pct, mode, chain, opts),
+      // Every reconciled fill, its sell priced against the wallet's own basis.
+      // This is how a script's loss stop learns about a stop-loss or a
+      // take-profit ORDER selling its bag: on 2026-09-28, 61 of a script's 65
+      // overnight exits were orders and the stop counted none of them.
+      onFillSettled: (fn) =>
+        ledger.onSettled((f) => {
+          if (f.state !== 'reconciled') return;
+          fn({ mint: f.mint, side: f.side, at: f.at, wallet: f.wallet, requested: f.requested, realizedSol: f.side === 'sell' ? ledger.realizedPnlForSell(f) : null });
+        }),
       liveBlockedReason: (chain) =>
         chain && chain !== 'solana'
           ? (this.evmCopy ? this.evmCopy.blocked(chain) : 'EVM trading is not available in this build')
@@ -986,6 +995,7 @@ export class SniperEngine {
         const px = this.cheapPriceSol(mint);
         return px !== null && px !== t.row.priceSol ? { ...t.row, priceSol: px } : t.row;
       },
+      launchMayhem: (mint) => this.tokens.get(mint)?.createEvent.isMayhem ?? null,
       launchLinks: (mint) => {
         const t = this.tokens.get(mint);
         const so = t?.socials;
@@ -2221,8 +2231,18 @@ export class SniperEngine {
        * a clamp.
        */
       ownCapSol?: number;
+      /** 'lean' (a script's choice, 2026-09-29): priority from the live
+       *  estimate with no floor, no tips, public lane. See shared/exitBudget. */
+      feeLane?: FeeLane;
+      /** A script or the AI connection (hostBuy): a PAPER fill charges the
+       *  lane's fixed fees, so a paper record predicts the live one. */
+      unattended?: boolean;
     } = {},
   ): Promise<EngineTradeResult> {
+    // A hand-placed trade takes the Execution page's fee mode unless the
+    // caller named one; everything else is fast unless it asked.
+    if (opts.manual && opts.feeLane === undefined && this.getSettings().execution.feeLane === 'lean') opts = { ...opts, feeLane: 'lean' };
+    const paperBuyFee = opts.unattended ? paperFixedFeeSol(opts.feeLane ?? 'fast', 'buy') : 0;
     const { executeTrade } = await import('./liveSigner');
     const s = this.getSettings();
     const wantBroadcast = !simulateOnly;
@@ -2282,7 +2302,11 @@ export class SniperEngine {
     // exited — which happened for real on 2026-09-05. This is arithmetic,
     // not a policy cap: it only ever trims, and it says so.
     if (!simulateOnly && this.walletBalanceLamports !== null) {
-      const plan = planBuySize(this.walletBalanceLamports, Math.round(capped * 1e9));
+      // A click keeps the trim (the user sees the toast). An unattended buy is
+      // refused instead once less than 80 % of it is affordable: a script that
+      // was told "bought 0.0151" while the wallet paid 0.0063 held a bag it
+      // could neither call nor sell for its fee (2026-09-28).
+      const plan = planBuySize(this.walletBalanceLamports, Math.round(capped * 1e9), opts.manual ? {} : { minShare: UNATTENDED_MIN_FILL_SHARE });
       if (plan.refused) {
         this.log('warn', `buy refused: ${plan.note}`);
         return { ok: false, stage: 'validate', message: plan.note ?? 'Not enough SOL to trade' };
@@ -2317,7 +2341,7 @@ export class SniperEngine {
         : bal !== null && bal < LEAN_EXIT_LAMPORTS
           ? 'the wallet has too little SOL to simulate a transaction'
           : null;
-      if (cannot) return this.paperFillFromPrice(mint, capped, decimals, cannot);
+      if (cannot) return this.paperFillFromPrice(mint, capped, decimals, cannot, paperBuyFee);
     }
 
     const res = await executeTrade({
@@ -2329,7 +2353,7 @@ export class SniperEngine {
       // per-follower `maxSlippagePct`, which had no execution path at all
       // before 2026-09-09). Everything else takes the execution setting.
       slippagePct: opts.slippagePct !== undefined && opts.slippagePct > 0 ? opts.slippagePct : s.execution.liveSlippagePct,
-      priorityFeeSol: this.priorityFeeSolFor('buy'),
+      priorityFeeSol: opts.feeLane === 'lean' ? this.leanPriorityFeeSol() : this.priorityFeeSolFor('buy'),
       httpUrl,
       simulateOnly,
       decimals,
@@ -2337,7 +2361,7 @@ export class SniperEngine {
       // its curve state on demand so the local builder can build it.
       local: await this.localBuildParamsAsync(mint),
       localWhy: s.execution.localTxBuild ? this.localUnavailable.get(mint) : undefined,
-      exec: s.execution,
+      exec: opts.feeLane === 'lean' ? leanExec(s.execution) : s.execution,
       wssUrl: this.confirmWssUrl(),
       onProcessed: (sig) => this.emitFill(mint, 'buy', sig, 'landed'),
     });
@@ -2388,7 +2412,7 @@ export class SniperEngine {
         mint,
         symbol,
         tokens: res.simulatedTokensReceived,
-        costSol: res.simulatedCostSol,
+        costSol: res.simulatedCostSol + paperBuyFee,
         decimalsKnown: res.decimalsKnown === true,
       });
       if (opened.ok) {
@@ -2411,7 +2435,7 @@ export class SniperEngine {
     if (simulateOnly && !res.ok) {
       const why = res.stage === 'simulate' ? 'the chain simulation could not run' : `the ${res.stage} step failed`;
       this.log('info', `PAPER buy: ${res.message} — modelling the fill instead`);
-      return this.paperFillFromPrice(mint, capped, decimals, why);
+      return this.paperFillFromPrice(mint, capped, decimals, why, paperBuyFee);
     }
     // `sentSol` is what was actually submitted after the exit-headroom trim —
     // not the same thing as what the chain took, but never the wish either.
@@ -2458,9 +2482,10 @@ export class SniperEngine {
     sol: number,
     decimals: number | undefined,
     why: string,
+    fixedFeeSol = 0,
   ): Promise<import('./liveSigner').LiveTradeResult> {
     const price = await this.paperFillPrice(mint);
-    const fill = price === null ? null : modelledPaperFill(sol, price);
+    const fill = price === null ? null : modelledPaperFill(sol, price, fixedFeeSol);
     if (!fill) {
       return {
         ok: false,
@@ -3123,6 +3148,9 @@ export class SniperEngine {
    *  result (may still land) is never retried. See shared/liveBreakers.ts. */
   private async sellWithRetry(
     params: import('./liveSigner').LiveTradeParams,
+    /** The fast lane, for a LEAN sell's retry: the first attempt saved the
+     *  fee, the second one gets out. */
+    fallback?: { priorityFeeSol: number; exec: import('@shared/types').ExecutionSettings },
   ): Promise<import('./liveSigner').LiveTradeResult> {
     const { executeTrade } = await import('./liveSigner');
     let res = await executeTrade(params);
@@ -3148,7 +3176,8 @@ export class SniperEngine {
       );
       // Long enough for a fresh blockhash to differ; the old 1 s was arbitrary.
       await new Promise((r) => setTimeout(r, 250));
-      res = await executeTrade({ ...params, slippagePct: retrySlippage });
+      res = await executeTrade({ ...params, slippagePct: retrySlippage, ...(fallback ? { priorityFeeSol: fallback.priorityFeeSol, exec: fallback.exec } : {}) });
+      if (fallback) this.log('info', `sell ${params.mint.slice(0, 8)}… retried on the fast lane (${fallback.priorityFeeSol} SOL priority)`);
       if (res.ok) this.log('info', `sell ${params.mint.slice(0, 8)}… landed on the wider retry (${retrySlippage}% slippage)`);
     }
     return res;
@@ -4391,9 +4420,13 @@ export class SniperEngine {
   async manualSell(
     mint: string,
     percent = 100,
-    opts: { slippagePct?: number } = {},
+    /** `dustGuard`: an UNATTENDED sell (a script's, an order's) is refused when
+     *  it would return less than its own priority fee. Never set by a click. */
+    opts: { slippagePct?: number; dustGuard?: boolean; feeLane?: FeeLane; manual?: boolean } = {},
   ): Promise<import('./liveSigner').LiveTradeResult> {
     const s = this.getSettings();
+    // The sell button follows the Execution page's fee mode, like the buy.
+    if (opts.manual && opts.feeLane === undefined && s.execution.feeLane === 'lean') opts = { ...opts, feeLane: 'lean' };
     // Two decimals: a caller that knows a token QUANTITY (copy trading) has
     // already converted it to the share of the balance it really is, and
     // rounding that to a whole percent here would put up to 1 % of the
@@ -4413,7 +4446,27 @@ export class SniperEngine {
     // far. Never rejects: the estimator already returns undefined on error.
     const estProceeds = this.estSellProceedsLamports(mint, pct).catch(() => undefined);
     // What this wallet can actually afford to spend getting out.
-    const exit = this.exitParams(s.execution);
+    const fastExit = this.exitParams(s.execution);
+    // A lean sell (a script's timed exit, 2026-09-29) goes out at the live
+    // median with no tips; if it does not land, the retry below takes the
+    // fast lane — saving a fee never leaves a bag stuck.
+    const lean = opts.feeLane === 'lean';
+    const exit = lean
+      ? { priorityFeeSol: Math.min(fastExit.priorityFeeSol, this.leanPriorityFeeSol()), exec: leanExec(fastExit.exec), note: fastExit.note }
+      : fastExit;
+    // Five stop-loss sells on 2026-09-28 handed back less SOL than they cost
+    // to send. An unattended exit that would return less than its priority
+    // fee is held as dust instead — and only when the estimate is KNOWN: an
+    // unpriced sell goes out, because a stale price must not block an exit.
+    if (opts.dustGuard) {
+      const est = await Promise.race([estProceeds, new Promise<undefined>((r) => setTimeout(() => r(undefined), 400))]);
+      const feeLamports = Math.round(exit.priorityFeeSol * 1e9);
+      if (shouldHoldAsDust(est, feeLamports)) {
+        const msg = `Held as dust — selling ${pct}% would return about ${((est as number) / 1e9).toFixed(5)} SOL, under the ${(feeLamports / 1e9).toFixed(4)} SOL priority fee it would pay.`;
+        this.log('warn', `sell refused (${mint.slice(0, 8)}): ${msg}`);
+        return { ok: false, stage: 'validate', message: msg };
+      }
+    }
     const res = await this.sellWithRetry({
       action: 'sell',
       mint,
@@ -4437,8 +4490,8 @@ export class SniperEngine {
       exec: exit.exec,
       wssUrl: this.confirmWssUrl(),
       onProcessed: (sig) => this.emitFill(mint, 'sell', sig, 'landed'),
-    });
-    recorder.record('manual_sell', { mint, pct, ok: res.ok, stage: res.stage, signature: res.signature ?? null, note: res.message.slice(0, 220), timing: res.timing ?? null });
+    }, lean ? { priorityFeeSol: fastExit.priorityFeeSol, exec: fastExit.exec } : undefined);
+    recorder.record('manual_sell', { mint, pct, ok: res.ok, stage: res.stage, signature: res.signature ?? null, note: res.message.slice(0, 220), timing: res.timing ?? null, lane: lean ? 'lean' : 'fast', priorityFeeSol: exit.priorityFeeSol });
     if (res.signature) {
       if (res.ok) this.emitFill(mint, 'sell', res.signature, 'landed');
       else if (res.stage === 'confirm') this.emitFill(mint, 'sell', res.signature, 'failed');
@@ -5405,8 +5458,15 @@ export class SniperEngine {
     }
   }
 
+  /** A lean priority fee (shared/exitBudget): the live median CU price, no
+   *  floor, clamped; the same for a buy and a sell (no urgency bump). */
+  private leanPriorityFeeSol(): number {
+    const s = this.getSettings();
+    return leanPriorityFeeSol(this.feeEstimate?.p50 ?? null, s.execution.computeUnitLimit || 120_000);
+  }
+
   private priorityFeeSolFor(action: 'buy' | 'sell'): number {
-    const floor = action === 'buy' ? 0.001 : 0.002;
+    const floor = PRIORITY_FEE_FLOOR_SOL[action];
     const est = this.feeEstimate;
     if (!est) return floor;
     const s = this.getSettings();
@@ -6856,7 +6916,7 @@ export class SniperEngine {
    * do to a click. `mode` is the CALLER's paper/live, which is not always the
    * app's — a paper script on a live app must simulate.
    */
-  async hostBuy(mint: string, sol: number, mode: 'paper' | 'live', chain?: ChainKind, ownCapSol?: number, opts?: { slippagePct?: number }): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }> {
+  async hostBuy(mint: string, sol: number, mode: 'paper' | 'live', chain?: ChainKind, ownCapSol?: number, opts?: { slippagePct?: number; feeLane?: FeeLane }): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean }> {
     // Robinhood Chain / BNB go out on their own rail, the same one copy
     // trading uses. Routed BEFORE the Solana path on purpose: a caller on an
     // EVM chain whose buy fell through to `testTrade` would spend SOL on a
@@ -6880,12 +6940,12 @@ export class SniperEngine {
     }
     // A script's own slippage for this one trade (2026-09-27); the execution
     // setting otherwise. Bounded by the caller (automation.ts).
-    const r = await this.testTrade(mint, sol, mode === 'paper', { ownCapSol, slippagePct: opts?.slippagePct });
+    const r = await this.testTrade(mint, sol, mode === 'paper', { ownCapSol, slippagePct: opts?.slippagePct, feeLane: opts?.feeLane, unattended: true });
     return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending' };
   }
 
   /** The sell half of `hostBuy`. Same rule: the caller's mode, the app's rails. */
-  async hostSell(mint: string, pct: number, mode: 'paper' | 'live', chain?: ChainKind, opts?: { slippagePct?: number }): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }> {
+  async hostSell(mint: string, pct: number, mode: 'paper' | 'live', chain?: ChainKind, opts?: { slippagePct?: number; feeLane?: FeeLane }): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; realizedSol?: number | null }> {
     if (chain && chain !== 'solana') {
       if (mode === 'paper') return this.evmPaperSell(chain, mint, pct);
       if (!this.evmCopy) return { ok: false, message: 'EVM trading is not available in this build' };
@@ -6896,12 +6956,12 @@ export class SniperEngine {
       const pos = paperBook.get(mint);
       if (!pos) return { ok: false, message: 'no paper position in this token' };
       const priceSol = pos.decimalsKnown ? await this.paperFillPrice(mint) : null;
-      const r = paperBook.sell(mint, pct, priceSol);
-      recorder.record('paper_sell', { mint, pct, ok: r.ok, priceSol, proceedsSol: r.proceedsSol, realizedSol: r.realizedSol, note: r.message.slice(0, 220), by: 'script' });
+      const r = paperBook.sell(mint, pct, priceSol, 'solana', paperFixedFeeSol(opts?.feeLane ?? 'fast', 'sell'));
+      recorder.record('paper_sell', { mint, pct, ok: r.ok, priceSol, proceedsSol: r.proceedsSol, realizedSol: r.realizedSol, note: r.message.slice(0, 220), by: 'script', lane: opts?.feeLane ?? 'fast' });
       if (r.ok) this.emit({ kind: 'paper', mint, side: 'sell' });
       return { ok: r.ok, message: r.message, realizedSol: typeof r.realizedSol === 'number' ? r.realizedSol : null };
     }
-    const r = await this.manualSell(mint, pct, opts?.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {});
+    const r = await this.manualSell(mint, pct, { ...(opts?.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {}), ...(opts?.feeLane ? { feeLane: opts.feeLane } : {}), dustGuard: true });
     return { ok: r.ok, message: r.message, signature: r.signature, pending: r.stage === 'pending', realizedSol: null };
   }
 

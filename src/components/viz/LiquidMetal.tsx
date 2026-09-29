@@ -48,8 +48,15 @@ import { useReduceEffects } from './useReduceEffects';
 //
 // Full (the Hub, the moment of arrival): half resolution, 30 fps.
 // Quiet (everywhere else): a third of each axis — a NINTH of the pixels —
-// and 15 fps. At the opacity the quiet variant runs at, neither is visible
-// as a difference; together they are roughly an 18x cut in shader work.
+// and STILL: one frame, then the loop stops (2026-09-29). The motion was
+// never the cost — the shader is ~1 % of the GPU process — but every frosted
+// panel and every lens above it re-runs its backdrop-filter each time the
+// pixels behind it change. MEASURED on Widgets (18 frosted panels, RTX 3080):
+// backdrop moving at 15 fps, GPU process 3.9 % / viz 5.4 %; backdrop still,
+// 0.1 % / 1.4 %. With the callouts rail's lens open: 7.1 % / 10.3 % and
+// 222 fps against 240. At the opacity the quiet variant runs at, a still
+// field and a slowly moving one are the same picture; a laptop GPU is not
+// the same machine.
 const RENDER_SCALE_FULL = 0.5;
 const RENDER_SCALE_QUIET = 0.34;
 const TARGET_FPS_FULL = 30;
@@ -243,6 +250,21 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
   let scale = initialIntensity >= 1 ? RENDER_SCALE_FULL : RENDER_SCALE_QUIET;
   let frameGap = 1000 / (initialIntensity >= 1 ? TARGET_FPS_FULL : TARGET_FPS_QUIET);
 
+  // Loop state, declared BEFORE resize(): resize runs at once below and
+  // reads `running` (2026-09-29: declared after it, the first resize threw
+  // "Cannot access running before initialization" and no backdrop drew).
+  let running = true;
+  // Quiet = still: the loop draws until `stillAfter` (so a change of
+  // intensity lands on screen), then stops. `drawOnce` repaints a still
+  // field after a resize or an accent change without restarting it.
+  let still = initialIntensity < 1;
+  let stillAfter = performance.now() + 250;
+  let lost = false;
+  const drawOnce = (): void => {
+    if (lost) return;
+    renderer.render(scene, camera);
+  };
+
   const resize = (): void => {
     const w = Math.max(1, Math.floor(mount.clientWidth * scale));
     const h = Math.max(1, Math.floor(mount.clientHeight * scale));
@@ -250,6 +272,8 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
     // full size by the style above, which is the whole point of the scale.
     renderer.setSize(w, h, false);
     uniforms.uRes.value.set(w, h);
+    // setSize clears the canvas; a still field has no next frame coming.
+    if (!running) drawOnce();
   };
   resize();
   const ro = new ResizeObserver(resize);
@@ -258,27 +282,38 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
   const started = performance.now();
   let raf = 0;
   let lastDraw = 0;
-  let running = true;
 
   const loop = (now: number): void => {
     if (!running) return;
+    if (now - lastDraw >= frameGap) {
+      lastDraw = now;
+      uniforms.uTime.value = (now - started) / 1000;
+      renderer.render(scene, camera);
+    }
+    if (still && now >= stillAfter && lastDraw > 0) {
+      running = false; // holds its pose until the Hub asks for motion again
+      return;
+    }
     raf = requestAnimationFrame(loop);
-    if (now - lastDraw < frameGap) return;
-    lastDraw = now;
-    uniforms.uTime.value = (now - started) / 1000;
-    renderer.render(scene, camera);
   };
   raf = requestAnimationFrame(loop);
+
+  const startLoop = (): void => {
+    if (running || lost || document.hidden) return;
+    running = true;
+    lastDraw = 0;
+    raf = requestAnimationFrame(loop);
+  };
 
   // A Hub left open behind another window should cost nothing at all.
   const onVisibility = (): void => {
     if (document.hidden) {
       running = false;
       cancelAnimationFrame(raf);
-    } else if (!running) {
-      running = true;
-      lastDraw = 0;
-      raf = requestAnimationFrame(loop);
+    } else if (still) {
+      drawOnce();
+    } else {
+      startLoop();
     }
   };
   document.addEventListener('visibilitychange', onVisibility);
@@ -288,6 +323,7 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
   const onLost = (e: Event): void => {
     e.preventDefault();
     running = false;
+    lost = true;
     cancelAnimationFrame(raf);
     canvas.style.opacity = '0';
   };
@@ -304,6 +340,7 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
     setAccent: (): void => {
       uniforms.uAccent.value.set(...accentVec3());
       uniforms.uAccentSoft.value.set(...accentSoftVec3());
+      if (!running) drawOnce();
     },
     setIntensity: (v: number): void => {
       const next = Math.max(0, Math.min(1, v));
@@ -314,6 +351,13 @@ function build(mount: HTMLDivElement, initialIntensity: number): { dispose: () =
       if (wantScale !== scale) {
         scale = wantScale;
         resize();
+      }
+      // Quiet pages hold a still frame; the Hub moves.
+      still = next < 1;
+      stillAfter = performance.now() + 250;
+      if (!running) {
+        if (still) drawOnce();
+        startLoop();
       }
     },
     dispose: (): void => {

@@ -8,6 +8,7 @@
 // below with a NEW key (the key is how a user's copy is recognised; never
 // reuse or rename one).
 import kryptoScript from '../../bundled/scripts/krypto-script.js?raw';
+import graduationScalper from '../../bundled/scripts/graduation-scalper.js?raw';
 import type { BundledScript } from '@shared/automation';
 
 /** The name a user sees: the first line's "// Name — …" if present. */
@@ -18,4 +19,7 @@ export function bundledName(code: string, fallback: string): string {
 
 export const BUNDLED_SCRIPTS: BundledScript[] = [
   { key: 'krypto-script', name: bundledName(kryptoScript, 'Krypto Script'), code: kryptoScript },
+  // 2026-09-29: buy the graduation, sell into the pool's first minutes.
+  // Paper-first; the header of the script says what was measured.
+  { key: 'graduation-scalper', name: bundledName(graduationScalper, 'Graduation Scalper'), code: graduationScalper },
 ];

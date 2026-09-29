@@ -977,7 +977,7 @@ function ScriptsBody(): ReactNode {
             const st = snap.stats[sc.id];
             const chain = scriptChain(sc);
             // Against the script's OWN cap — the number that disables it.
-            const lossCap = sc.budget.maxLossSolPerDay;
+            const lossCap = st?.lossCapSol ?? sc.budget.maxLossSolPerDay;
             const down = st ? Math.max(0, -st.realizedSolToday) : 0;
             return (
               <div key={sc.id} className="rounded border border-white/5 bg-white/[0.02] px-2 py-1.5">

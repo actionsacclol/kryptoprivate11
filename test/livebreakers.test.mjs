@@ -263,7 +263,7 @@ test('the engine retries a pre-broadcast rate-limit refusal before the wider-sli
   assert.ok(body.slice(pre, wide).includes('res = await executeTrade(params)'), 'the retry re-sends the SAME params (same slippage: the host moved, not the price)');
   // And the stop-loss path reaches it: the advanced-order host sells through manualSell, which sells through sellWithRetry.
   const flat = engineSrc.replace(/\s+/g, ' ');
-  assert.ok(flat.includes('sell: async (mint, percent) => { const r = await this.manualSell(mint, percent);'), 'advanced orders sell through manualSell');
+  assert.ok(flat.includes('sell: async (mint, percent) => { const r = await this.manualSell(mint, percent, { dustGuard: true });'), 'advanced orders sell through manualSell, as an unattended sell (dust guard on, 2026-09-28)');
   const ms = engineSrc.indexOf('async manualSell(');
   assert.ok(ms > -1 && engineSrc.slice(ms, ms + 4000).includes('this.sellWithRetry('), 'manualSell goes through sellWithRetry');
 });

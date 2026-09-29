@@ -37,6 +37,7 @@ import {
   defaultScript,
   contextFromLaunch,
   contextFromRunner,
+  contextFromEvmRunner,
   describeAction,
   describeRules,
   emptyContext,
@@ -77,6 +78,9 @@ import {
   type UserScript,
   type BundledScript,
 } from '@shared/automation';
+import { DEFAULT_LOSS_PCT_OF_WALLET } from '@shared/automation';
+import { migrateInputDefaults, parseInputs as parseInputSpecs } from '@shared/scriptInputs';
+import { FEE_LANES, MAX_UNATTENDED_FEE_SHARE, minUnattendedBuySol, roundTripFeeShare, type FeeLane } from '@shared/exitBudget';
 import { MAX_STAT_KEYS, MIN_INTERVAL_S, type SandboxToMain, type ScriptStatValue } from '@shared/scriptProtocol';
 import { REPLY_BUDGET, THESIS_BUDGET, calloutPageUrl } from '@shared/calloutAuto';
 import { redactWebhook, scriptEmbed, type ScriptEmbed } from '@shared/webhook';
@@ -92,6 +96,8 @@ import type { CopyTrade } from '@shared/copytrade';
 import { nativeSymbolOf } from '@shared/evm';
 import type { ChainKind } from '@shared/evm';
 import type { EvmScanLaunch } from '@shared/evmScan';
+import type { EvmRunnerFlag } from '@shared/evmRunners';
+import type { EvmChainKind } from '@shared/evm';
 import type { RunnerFlag } from '@shared/runners';
 import { TRIGGER_BASES, isPctKind } from '@shared/orders';
 import type { NewOrderRequest, OrderKind, TriggerBasis } from '@shared/orders';
@@ -110,6 +116,13 @@ const POSITION_POLL_MS = 5_000;
 const ERRORS_TO_DISABLE = 5;
 const QUEUE_CAP = 50;
 const MAX_SUBSCRIBED = 50;
+/** bot.every timers one script may run at once. */
+const MAX_INTERVAL_TIMERS = 8;
+
+function clearIntervals(rt: { intervalTimers: Map<number, NodeJS.Timeout> }): void {
+  for (const t of rt.intervalTimers.values()) clearInterval(t);
+  rt.intervalTimers.clear();
+}
 
 export interface OrderView {
   id: string;
@@ -141,6 +154,19 @@ export interface LeaderTrade extends LeaderFacts {
   chain?: ChainKind;
 }
 
+/** A fill the ledger reconciled against the chain (host.onFillSettled). */
+export interface SettledFill {
+  mint: string;
+  side: 'buy' | 'sell';
+  at: number;
+  wallet: string | null;
+  /** SOL asked for on a buy; PERCENT sold on a sell. */
+  requested: number;
+  /** A sell's realised result against the wallet's own average cost, fees
+   *  included; null when the basis is unknown. Always null for a buy. */
+  realizedSol: number | null;
+}
+
 export interface AutomationHost {
   /** A buy in the script's mode: paper = simulated fill into the paper book;
    *  live = the real pipeline. */
@@ -165,6 +191,9 @@ export interface AutomationHost {
   /** Which links the launch's own metadata file published, as the scanner
    *  read it at create time — free. Null until that read resolves. */
   launchLinks?(mint: string): LaunchLinks | null;
+  /** Whether the launch is a mayhem-mode curve, from its create event —
+   *  free. Null when the app could not tell or never saw the launch. */
+  launchMayhem?(mint: string): boolean | null;
   /** Provider facts already cached — free. */
   marketCached(mint: string, chain?: ChainKind): MarketFacts | null;
   /** Provider facts, fetched — a round trip. */
@@ -242,6 +271,13 @@ export interface AutomationHost {
    * Optional so a test host can leave it out; `reconcileOpened` then skips.
    */
   heldMints?(mode: ScriptMode, chain?: ChainKind): Promise<Set<string> | null>;
+  /**
+   * Every fill the ledger settles against the chain, as it settles. This is
+   * how a script's loss stop counts the exits it did not make itself — a
+   * stop-loss or take-profit order selling its bag (2026-09-28). Optional
+   * so a test host can leave it out; the stop then counts paper sells only.
+   */
+  onFillSettled?(fn: (f: SettledFill) => void): () => void;
   wallet(chain?: ChainKind): { sol: number | null; address: string | null };
   orders(mint?: string): OrderView[];
   placeOrder(req: NewOrderRequest): Promise<{ ok: boolean; message: string }>;
@@ -341,6 +377,17 @@ interface OpenedEntry {
    */
   sigs?: string[];
   sigless?: boolean;
+  /** Realised so far on this bag from settled sells (partial exits). */
+  realized?: number;
+}
+
+/** A bag the script opened and no longer holds: what it came to. */
+interface ClosedEntry {
+  at: number;
+  costSol: number;
+  realized: number;
+  /** Set once the episode has been counted toward the losing streak. */
+  judged?: boolean;
 }
 
 /** Keep the signature list bounded; past this the entry counts as sigless. */
@@ -374,6 +421,13 @@ interface Runtime {
   analyses: number[];
   /** Positions this script opened (or placed a limit buy for): mint → cost. */
   opened: Map<string, OpenedEntry>;
+  /** Bags this script opened that are gone, newest last — a fill that
+   *  settles after the position poll noticed the sale still finds its bag. */
+  closed: Map<string, ClosedEntry>;
+  /** Losing exits in a row (live). */
+  lossStreak: number;
+  /** While set and in the future, buys are refused: the cool-off. */
+  coolOffUntil: number | null;
   /** Mints the script asked to stream ticks for. */
   subscribed: Set<string>;
   /**
@@ -391,7 +445,10 @@ interface Runtime {
   lastUpdateAt: Map<string, number>;
   lastTickAt: Map<string, number>;
   intervalSec: number | null;
-  intervalTimer: NodeJS.Timeout | null;
+  /** One per bot.every call, keyed by the sandbox's timer id (2026-09-29:
+   *  a single timer shared by every call made the LAST interval win, so a
+   *  bot.every(3600) stopped every shorter timer in the script). */
+  intervalTimers: Map<number, NodeJS.Timeout>;
   /** Consecutive failed starts, and the timer for the next attempt. A start
    *  can fail for reasons that have nothing to do with the script (a slow
    *  machine, a provider parked behind a 429), and disarming on the first one
@@ -427,6 +484,9 @@ interface PersistedRuntime {
    *  every `cooldownSec`, which is a wall the user set. */
   lastFireAt?: Record<string, number>;
   opened: Record<string, OpenedEntry>;
+  closed?: Record<string, ClosedEntry>;
+  lossStreak?: number;
+  coolOffUntil?: number | null;
   subscribed?: string[];
   kv: Record<string, unknown>;
 }
@@ -455,8 +515,12 @@ let copySeeded = false;
 /** Most copyFill events one snapshot may raise — a real burst is a few. */
 const COPY_FILLS_PER_SNAPSHOT = 10;
 
+let offSettled: (() => void) | null = null;
+
 export function attach(h: AutomationHost): void {
   host = h;
+  offSettled?.();
+  offSettled = h.onFillSettled?.((f) => onFillSettled(f)) ?? null;
 }
 
 // ── Persistence ───────────────────────────────────────────────────────
@@ -513,6 +577,9 @@ export function init(userDataDir: string): void {
         rt.firedMints = new Set(Array.isArray(p.firedMints) ? p.firedMints : []);
         rt.lastFireAt = new Map(Object.entries(p.lastFireAt ?? {}).filter(([, v]) => typeof v === 'number'));
         rt.opened = new Map(Object.entries(p.opened ?? {}));
+        rt.closed = new Map(Object.entries(p.closed ?? {}));
+        rt.lossStreak = typeof p.lossStreak === 'number' ? p.lossStreak : 0;
+        rt.coolOffUntil = typeof p.coolOffUntil === 'number' ? p.coolOffUntil : null;
         rt.subscribed = new Set(Array.isArray(p.subscribed) ? p.subscribed : []);
         rt.kv = p.kv && typeof p.kv === 'object' ? p.kv : {};
       }
@@ -580,6 +647,9 @@ function persistNow(): void {
       firedMints: [...rt.firedMints].slice(-5_000),
       lastFireAt: Object.fromEntries([...rt.lastFireAt].slice(-5_000)),
       opened: Object.fromEntries(rt.opened),
+      closed: Object.fromEntries([...rt.closed].slice(-CLOSED_KEEP)),
+      lossStreak: rt.lossStreak,
+      coolOffUntil: rt.coolOffUntil,
       subscribed: [...rt.subscribed],
       kv: rt.kv,
     };
@@ -709,13 +779,16 @@ function freshRuntime(): Runtime {
     actions: [],
     analyses: [],
     opened: new Map(),
+    closed: new Map(),
+    lossStreak: 0,
+    coolOffUntil: null,
     subscribed: new Set(),
     calledOut: new Map(),
     kv: {},
     lastUpdateAt: new Map(),
     lastTickAt: new Map(),
     intervalSec: null,
-    intervalTimer: null,
+    intervalTimers: new Map(),
     startFails: 0,
     startRetry: null,
     pausedUntil: null,
@@ -846,6 +919,17 @@ export function seedBundled(list: BundledScript[]): void {
           slog(have, 'warn', `your edits were replaced by the version shipped with this app (${MAX_SCRIPTS} scripts already, so the edit could not be kept as its own script)`);
         }
       }
+      // Settings still at the old version's default follow the new default;
+      // anything the user changed stays (shared/scriptInputs.ts).
+      if (have.inputs && Object.keys(have.inputs).length) {
+        const oldSpecs = parseInputSpecs(have.code).specs;
+        const newSpecs = parseInputSpecs(b.code).specs;
+        const mig = migrateInputDefaults(oldSpecs, newSpecs, have.inputs);
+        if (mig.moved.length) {
+          have.inputs = mig.values;
+          slog(have, 'info', `settings still at their old defaults moved to the new ones: ${mig.moved.join(', ')}`);
+        }
+      }
       have.code = b.code;
       have.bundled = { key: b.key, sha };
       have.updatedAt = Date.now();
@@ -958,7 +1042,7 @@ export function remove(id: string): { ok: boolean; message: string } {
   clearSchedules(rtFor(s));
   scripts = scripts.filter((x) => x.id !== id);
   const rt = runtimes.get(id);
-  if (rt?.intervalTimer) clearInterval(rt.intervalTimer);
+  if (rt) clearIntervals(rt);
   runtimes.delete(id);
   persist();
   changed();
@@ -1031,6 +1115,9 @@ function statsFor(s: UserScript): ScriptStats {
     buysToday: rt.buysToday,
     sellsToday: rt.sellsToday,
     realizedSolToday: rt.realizedToday,
+    lossCapSol: effectiveLossCap(s, rt).cap,
+    lossStreak: rt.lossStreak,
+    coolOffUntil: rt.coolOffUntil,
     errorsInARow: rt.errorsInARow,
     lastRunAt: rt.lastRunAt,
     lastError: rt.lastError,
@@ -1114,7 +1201,9 @@ function withPeak(mode: ScriptMode, p: ScriptPosition): ScriptPosition {
 
 // ── Actions under budget ──────────────────────────────────────────────
 
-type ActResult = { ok: boolean; message: string; count?: number };
+/** `realizedSol`: what a sell realised — paper says exactly, a live sell
+ *  answers null until its fill settles on the chain (2026-09-29). */
+type ActResult = { ok: boolean; message: string; count?: number; realizedSol?: number | null };
 
 function rateLimited(s: UserScript, rt: Runtime, now: number): boolean {
   rt.actions = rt.actions.filter((t) => now - t < 60_000);
@@ -1151,7 +1240,108 @@ async function reconcileOpened(s: UserScript, rt: Runtime): Promise<void> {
   for (const [mint, e] of [...rt.opened]) {
     if (held.has(mint) || e.wallet || now - e.at < OPEN_GRACE_MS) continue;
     if (h.orders(mint).some((o) => o.kind === 'limit_buy' && (o.state === 'armed' || o.state === 'paused'))) continue;
-    rt.opened.delete(mint);
+    closeEntry(rt, mint);
+  }
+}
+
+// ── The loss stop, the cool-off, and what a settled fill teaches ──────
+//
+// 2026-09-28: a live script ran a wallet from ~0.36 SOL to 0.013 overnight
+// under a 0.5 SOL daily loss stop that read −0.0088. The stop only counted
+// the script's OWN sells; 61 of its 65 exits were stop-loss and take-profit
+// orders, which it never heard about. Now every reconciled sell of a bag
+// the script opened is counted from the chain (host.onFillSettled), the
+// stop is also a share of the wallet so it can never exceed the money in
+// play, and three losing exits in a row pause buys for an hour.
+
+/** Losing exits in a row that start the cool-off, and how long it lasts. */
+export const COOL_OFF_AFTER_LOSSES = 3;
+export const COOL_OFF_MS = 60 * 60_000;
+/** Closed episodes remembered, so a late-settling fill still finds its bag. */
+const CLOSED_KEEP = 300;
+
+const hhmm = (ms: number): string => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+/** The bag is gone from `opened`; remember what it came to. */
+function closeEntry(rt: Runtime, mint: string): void {
+  const e = rt.opened.get(mint);
+  rt.opened.delete(mint);
+  const prev = rt.closed.get(mint);
+  // Re-inserted last so the map stays ordered by close time for pruning.
+  rt.closed.delete(mint);
+  rt.closed.set(mint, { at: Date.now(), costSol: e?.costSol ?? prev?.costSol ?? 0, realized: (prev?.realized ?? 0) + (e?.realized ?? 0), judged: prev?.judged === true && !e });
+  while (rt.closed.size > CLOSED_KEEP) rt.closed.delete(rt.closed.keys().next().value as string);
+}
+
+/** The loss stop in force: the SOL figure, or the wallet share, whichever is smaller. */
+function effectiveLossCap(s: UserScript, rt: Runtime): { cap: number; why: string } {
+  const abs = s.budget.maxLossSolPerDay;
+  const pct = s.budget.maxLossPctOfWallet ?? DEFAULT_LOSS_PCT_OF_WALLET;
+  const sol = host?.wallet(scriptChain(s)).sol ?? null;
+  if (typeof sol === 'number' && Number.isFinite(sol) && sol > 0 && pct > 0) {
+    // What the wallet held before today's realised losses came out of it.
+    const start = sol - Math.min(0, rt.realizedToday);
+    const share = Math.max(0.001, (start * pct) / 100);
+    if (share < abs) return { cap: Math.round(share * 1e6) / 1e6, why: `${pct}% of the ${start.toFixed(3)} SOL wallet` };
+  }
+  return { cap: abs, why: `the ${abs} SOL loss limit` };
+}
+
+/** Disable the script when today's realised loss has reached the stop. True when it did. */
+function checkLossCap(s: UserScript, rt: Runtime): boolean {
+  const { cap, why } = effectiveLossCap(s, rt);
+  if (rt.realizedToday > -cap) return false;
+  disable(s, `down ${Math.abs(rt.realizedToday).toFixed(3)} SOL today, past ${why}`);
+  return true;
+}
+
+/** A bag the script opened has been fully sold: count the streak (live only). */
+function noteEpisodeClosed(s: UserScript, rt: Runtime, mint: string, realized: number): void {
+  if (s.mode !== 'live') return;
+  if (realized < 0) rt.lossStreak += 1;
+  else if (realized > 0) rt.lossStreak = 0;
+  if (rt.lossStreak < COOL_OFF_AFTER_LOSSES) return;
+  if (rt.coolOffUntil !== null && Date.now() < rt.coolOffUntil) return;
+  rt.coolOffUntil = Date.now() + COOL_OFF_MS;
+  rt.lossStreak = 0;
+  const why = `${COOL_OFF_AFTER_LOSSES} losing exits in a row (last: ${mint.slice(0, 8)}) — buys are paused until ${hhmm(rt.coolOffUntil)}; sells and orders still run`;
+  slog(s, 'warn', `COOLING OFF — ${why}`);
+  host?.toast('warn', `Script "${s.name}" cooling off: ${why}`);
+  host?.notify(`Script cooling off: ${s.name}`, why.slice(0, 200));
+}
+
+/** A reconciled fill from the chain (host.onFillSettled). */
+function onFillSettled(f: SettledFill): void {
+  if (f.side !== 'sell' || f.realizedSol === null || !Number.isFinite(f.realizedSol)) return;
+  for (const s of scripts) {
+    if (s.mode !== 'live') continue;
+    const rt = rtFor(s);
+    const open = rt.opened.get(f.mint);
+    const closed = rt.closed.get(f.mint);
+    if (!open && !closed) continue;
+    // Another wallet's fill of the same mint is not this script's exit.
+    const owner = open?.wallet ?? null;
+    if (owner && f.wallet && f.wallet !== owner) continue;
+    rt.realizedToday += f.realizedSol;
+    if (open) open.realized = (open.realized ?? 0) + f.realizedSol;
+    else if (closed) closed.realized += f.realizedSol;
+    slog(
+      s,
+      f.realizedSol < 0 ? 'warn' : 'info',
+      `exit on ${f.mint.slice(0, 8)} realised ${f.realizedSol >= 0 ? '+' : ''}${f.realizedSol.toFixed(4)} SOL (from the chain, ${f.requested}% sold) — today ${rt.realizedToday >= 0 ? '+' : ''}${rt.realizedToday.toFixed(4)} SOL`,
+    );
+    // A full sell ends the episode; judge it once.
+    if (f.requested >= 100) {
+      if (open) closeEntry(rt, f.mint);
+      const e = rt.closed.get(f.mint);
+      if (e && !e.judged) {
+        e.judged = true;
+        noteEpisodeClosed(s, rt, f.mint, e.realized);
+      }
+    }
+    checkLossCap(s, rt);
+    persist();
+    changed();
   }
 }
 
@@ -1161,14 +1351,16 @@ function refuse(s: UserScript, why: string): ActResult {
 }
 
 /** The budget gate every BUY-like action passes: caps, live gates, size. */
-async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, what: string, wallet: { address?: string | null } = {}): Promise<ActResult | null> {
+async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, what: string, wallet: { address?: string | null } = {}, lane: FeeLane = 'fast'): Promise<ActResult | null> {
   const h = host as AutomationHost;
   if (!Number.isFinite(sol) || sol <= 0) return refuse(s, `buy ${what}: amount must be a positive number of SOL`);
   if (sol > s.budget.maxSolPerTrade) return refuse(s, `buy ${what}: ${sol} SOL is over the script's max per trade (${s.budget.maxSolPerTrade})`);
   if (rt.buysToday >= s.budget.maxBuysPerDay) return refuse(s, `buy ${what}: ${s.budget.maxBuysPerDay} buys today already`);
-  if (rt.realizedToday <= -s.budget.maxLossSolPerDay) {
-    disable(s, `down ${Math.abs(rt.realizedToday).toFixed(3)} SOL today, past the ${s.budget.maxLossSolPerDay} SOL loss limit`);
-    return { ok: false, message: 'daily loss limit' };
+  if (checkLossCap(s, rt)) return { ok: false, message: 'daily loss limit' };
+  if (rt.coolOffUntil !== null) {
+    if (Date.now() < rt.coolOffUntil) return refuse(s, `buy ${what}: cooling off after ${COOL_OFF_AFTER_LOSSES} losing exits in a row, until ${hhmm(rt.coolOffUntil)}`);
+    rt.coolOffUntil = null;
+    rt.lossStreak = 0;
   }
   await reconcileOpened(s, rt);
   if (!rt.opened.has(mint) && rt.opened.size >= s.budget.maxOpenPositions) return refuse(s, `buy ${what}: already holding ${rt.opened.size} positions (max ${s.budget.maxOpenPositions})`);
@@ -1190,6 +1382,17 @@ async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, wh
         ? traderClaimFor(wallet.address ? { address: wallet.address } : { walletId: null }, mint)
         : traderClaimFor({ walletId: null, address: wallet.address ?? null, chain }, mint);
     if (claim) return refuse(s, `buy ${what}: not executed — ${claim}`);
+    // The two priority-fee floors are a fixed cost of every live Solana round
+    // trip; on a 0.016 SOL bag they were 19 % (2026-09-28). A script may not
+    // size a real buy so that they take more than a tenth of it. Paper pays
+    // no fee and rehearses any size. Last of the live checks: an engine that
+    // is not armed says so before a size is judged.
+    if (chain === 'solana') {
+      const share = roundTripFeeShare(sol, lane);
+      if (share > MAX_UNATTENDED_FEE_SHARE) {
+        return refuse(s, `buy ${what}: ${sol} SOL would pay ${Math.round(share * 100)}% of itself in priority fees on the round trip — the smallest live buy is ${minUnattendedBuySol(lane)} SOL on the ${lane} lane${lane === 'fast' ? ` (${minUnattendedBuySol('lean')} SOL with {lane: 'lean'})` : ''}`);
+      }
+    }
     // The app's MANUAL per-trade cap deliberately does NOT apply (2026-09-22).
     // `maxSolPerTrade` above is this script's own, set on the same screen as
     // its code, and it is the authority on its size. Two caps for one decision
@@ -1263,6 +1466,8 @@ function chain<T>(s: UserScript, fn: () => Promise<T>): Promise<T> {
  *  the execution setting for this one trade; the host bounds it. */
 export interface ScriptTradeOpts {
   slippagePct?: number;
+  /** 'lean' = live-median priority, no floor, no tips (2026-09-29). */
+  feeLane?: FeeLane;
 }
 
 /** What a call may add to an action that the rule form has no field for:
@@ -1271,6 +1476,8 @@ export interface ScriptTradeOpts {
 interface ActOpts {
   expiresAt?: number | null;
   slippagePct?: number;
+  /** The fee lane for this one trade; absent = 'fast'. */
+  feeLane?: FeeLane;
   /** Sell this many tokens (UI units) — converted to a percent of the
    *  position the app can see, in sellOne. */
   tokens?: number;
@@ -1286,7 +1493,7 @@ const SLIPPAGE_MAX = 50;
  * "the trading wallet with defaults" — a typo in a wallet address must not
  * quietly spend from the main wallet.
  */
-function tradeExtras(v: unknown, what: string): { ok: true; wallet: string; slippagePct?: number } | { ok: false; error: string } {
+function tradeExtras(v: unknown, what: string): { ok: true; wallet: string; slippagePct?: number; feeLane?: FeeLane } | { ok: false; error: string } {
   if (v === undefined || v === null) return { ok: true, wallet: '' };
   if (typeof v === 'string') return { ok: true, wallet: v.trim() };
   if (typeof v !== 'object' || Array.isArray(v)) return { ok: false, error: `${what}: the last argument is a wallet address or an options object` };
@@ -1299,7 +1506,12 @@ function tradeExtras(v: unknown, what: string): { ok: true; wallet: string; slip
     if (!Number.isFinite(n) || n < SLIPPAGE_MIN || n > SLIPPAGE_MAX) return { ok: false, error: `${what}: slippagePct must be ${SLIPPAGE_MIN}–${SLIPPAGE_MAX}` };
     slippagePct = n;
   }
-  return { ok: true, wallet, slippagePct };
+  let feeLane: FeeLane | undefined;
+  if (o.lane !== undefined && o.lane !== null) {
+    if (typeof o.lane !== 'string' || !(FEE_LANES as readonly string[]).includes(o.lane)) return { ok: false, error: `${what}: lane must be one of ${FEE_LANES.join(', ')}` };
+    feeLane = o.lane as FeeLane;
+  }
+  return { ok: true, wallet, slippagePct, ...(feeLane ? { feeLane } : {}) };
 }
 
 function act(s: UserScript, action: RuleAction, ctx: RuleContext | null, opts: ActOpts = {}): Promise<ActResult> {
@@ -1334,13 +1546,14 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
   switch (action.type) {
     case 'buy': {
       const sol = Number(action.sol);
-      const gate = await buyGate(s, rt, mint, sol, what);
+      const gate = await buyGate(s, rt, mint, sol, what, {}, opts.feeLane ?? 'fast');
       if (gate) return gate;
       // The gate awaited: re-read the arm bit before spending. The kill switch
       // says "every script is off" and must not be overtaken by a buy that was
       // already past its checks.
       if (!s.enabled || killSwitch) return { ok: false, message: 'script is disabled' };
-      const r = await h.buy(mint, sol, s.mode, scriptChain(s), s.budget.maxSolPerTrade, opts.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : undefined);
+      const tradeOpts: ScriptTradeOpts = { ...(opts.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {}), ...(opts.feeLane ? { feeLane: opts.feeLane } : {}) };
+      const r = await h.buy(mint, sol, s.mode, scriptChain(s), s.budget.maxSolPerTrade, Object.keys(tradeOpts).length ? tradeOpts : undefined);
       if (r.ok || r.pending) {
         rt.buysToday += 1;
         rt.opened.set(mint, openedWithBuy(rt.opened.get(mint), sol, now, r.signature));
@@ -1358,10 +1571,10 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       // A sell sized in TOKENS carries a placeholder percent; sellOne turns
       // the quantity into the share it really is against the position it can
       // see, and refuses when it cannot see one.
-      if (opts.tokens !== undefined) return sellOne(s, rt, mint, 100, what, { slippagePct: opts.slippagePct, tokens: opts.tokens });
+      if (opts.tokens !== undefined) return sellOne(s, rt, mint, 100, what, { slippagePct: opts.slippagePct, tokens: opts.tokens, feeLane: opts.feeLane });
       const pct = Math.round(Number(action.pct));
       if (!Number.isFinite(pct) || pct < 1 || pct > 100) return refuse(s, 'sell: percent must be 1–100');
-      return sellOne(s, rt, mint, pct, what, { slippagePct: opts.slippagePct });
+      return sellOne(s, rt, mint, pct, what, { slippagePct: opts.slippagePct, feeLane: opts.feeLane });
     }
     case 'sell_all': {
       // "Everything THIS SCRIPT holds" — which is what the action's own label,
@@ -1468,7 +1681,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
   }
 }
 
-async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, what: string, extra: { slippagePct?: number; tokens?: number } = {}): Promise<ActResult> {
+async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, what: string, extra: { slippagePct?: number; tokens?: number; feeLane?: FeeLane } = {}): Promise<ActResult> {
   const h = host as AutomationHost;
   // Only what this script opened — the same rule as sell_all. `h.positions`
   // is the whole wallet; a script must never be able to exit a position the
@@ -1542,28 +1755,28 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
         ? Math.max(0.01, Math.min(pct, Math.round(ratio * 10_000) / 100))
         : Math.max(1, Math.min(100, Math.round(pct * ratio)));
   }
-  const r = await h.sell(mint, pctOfWallet, s.mode, scriptChain(s), extra.slippagePct !== undefined ? { slippagePct: extra.slippagePct } : undefined);
+  const sellOpts: ScriptTradeOpts = { ...(extra.slippagePct !== undefined ? { slippagePct: extra.slippagePct } : {}), ...(extra.feeLane ? { feeLane: extra.feeLane } : {}) };
+  const r = await h.sell(mint, pctOfWallet, s.mode, scriptChain(s), Object.keys(sellOpts).length ? sellOpts : undefined);
   if (r.ok || r.pending) {
     rt.sellsToday += 1;
-    // Paper says exactly what it realised. A live fill's own number is not
-    // known here, so the position's PnL at the moment of the sell stands
-    // in — an estimate, and the loss limit counts it.
-    const realized =
-      typeof r.realizedSol === 'number' && Number.isFinite(r.realizedSol)
-        ? r.realizedSol
-        : typeof before?.pnlSol === 'number'
-          ? before.pnlSol * (pct / 100)
-          : null;
+    // Paper says exactly what it realised, and the stop counts it here. A
+    // LIVE sell is counted when its fill settles on the chain
+    // (onFillSettled) — the same path a stop-loss order's sell takes — so
+    // nothing is booked twice and nothing is an estimate. Until 2026-09-28
+    // the position's PnL at the moment of the sell stood in, which under-
+    // counted every exit and missed the orders' entirely.
+    const realized = typeof r.realizedSol === 'number' && Number.isFinite(r.realizedSol) ? r.realizedSol : null;
     if (realized !== null) rt.realizedToday += realized;
-    if (pct >= 100) rt.opened.delete(mint);
+    if (pct >= 100) {
+      closeEntry(rt, mint);
+      if (realized !== null) noteEpisodeClosed(s, rt, mint, realized);
+    }
     slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}sell ${pct}% ${what}: ${r.message}${realized !== null ? ` (realised ${realized >= 0 ? '+' : ''}${realized.toFixed(4)} SOL${typeof r.realizedSol === 'number' ? '' : ', estimated'})` : ''}`);
     recorder.record('script_sell', { scriptId: s.id, name: s.name, mode: s.mode, mint, pct, ok: r.ok, realizedSol: realized, signature: r.signature ?? null });
     persist();
     changed();
-    if (rt.realizedToday <= -s.budget.maxLossSolPerDay) {
-      disable(s, `down ${Math.abs(rt.realizedToday).toFixed(3)} SOL today, past the ${s.budget.maxLossSolPerDay} SOL loss limit`);
-    }
-    return { ok: true, message: r.message };
+    checkLossCap(s, rt);
+    return { ok: true, message: r.message, realizedSol: realized };
   }
   slog(s, 'warn', `sell ${pct}% ${what} failed: ${r.message}`);
   return { ok: false, message: r.message };
@@ -1749,10 +1962,7 @@ async function startCodeInner(s: UserScript): Promise<void> {
   // The last run's bot.every too: a restart (watchdog, crash, an edit) goes
   // through here without stopCode, and a new run that no longer calls
   // bot.every kept receiving the old one's timer for the life of the app.
-  if (rt.intervalTimer) {
-    clearInterval(rt.intervalTimer);
-    rt.intervalTimer = null;
-  }
+  clearIntervals(rt);
   rt.intervalSec = null;
   const chain = scriptChain(s);
   // Coerced against the code being STARTED, so a script whose @inputs block
@@ -1850,10 +2060,7 @@ async function stopCode(s: UserScript, reason: string): Promise<void> {
   }
   rt.pausedUntil = null;
   rt.startFails = 0;
-  if (rt.intervalTimer) {
-    clearInterval(rt.intervalTimer);
-    rt.intervalTimer = null;
-  }
+  clearIntervals(rt);
   rt.intervalSec = null;
   rt.queue = [];
   // Unconditional: a start queued behind this call has not created its box
@@ -2157,7 +2364,13 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
   const h = host;
   if (!h) return;
   const answer = (ok: boolean, value?: unknown, error?: string): void => h.sandbox.reply(s.id, id, ok, value, error);
-  const result = (r: ActResult): void => answer(true, { ok: r.ok, message: r.message, ...(r.count !== undefined ? { count: r.count, sold: r.count, cancelled: r.count } : {}) });
+  const result = (r: ActResult): void =>
+    answer(true, {
+      ok: r.ok,
+      message: r.message,
+      ...(r.realizedSol !== undefined ? { realizedSol: r.realizedSol } : {}),
+      ...(r.count !== undefined ? { count: r.count, sold: r.count, cancelled: r.count } : {}),
+    });
   // A disabled script answers nothing. Its sandbox may still be draining a
   // handler that started before the switch moved, and every read below costs
   // something — `positions` walks the book, `market` hits a live provider.
@@ -2169,10 +2382,11 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (!isMint(mint)) return answer(false, undefined, 'buy: bad mint');
         const x = tradeExtras(who, 'buy');
         if (!x.ok) return answer(false, undefined, x.error);
-        if (!x.wallet) return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint), { slippagePct: x.slippagePct }));
+        if (!x.wallet) return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint), { slippagePct: x.slippagePct, feeLane: x.feeLane }));
         // Another wallet trades at the execution setting's slippage; a value
         // that would be dropped on the floor is refused (audit 2026-09-27).
         if (x.slippagePct !== undefined) return answer(false, undefined, 'buy: slippagePct applies to the trading wallet only — drop it, or the wallet');
+        if (x.feeLane !== undefined) return answer(false, undefined, 'buy: lane applies to the trading wallet only — drop it, or the wallet');
         return result(await chain(s, () => walletTrade(s, 'buy', x.wallet, mint, Number(sol))));
       }
       case 'sell': {
@@ -2196,17 +2410,18 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           // The wallet is named ONCE. Until the audit of 2026-09-27 a third
           // argument silently won over the options' wallet and slippage.
           if (who !== undefined && named) return answer(false, undefined, 'sell: name the wallet once — in the options or as the third argument, not both');
-          extras = who === undefined ? { wallet: o.wallet, slippagePct: o.slippagePct } : typeof who === 'string' ? { wallet: who, slippagePct: o.slippagePct } : who;
+          extras = who === undefined ? { wallet: o.wallet, slippagePct: o.slippagePct, lane: o.lane } : typeof who === 'string' ? { wallet: who, slippagePct: o.slippagePct, lane: o.lane } : who;
         }
         const x = tradeExtras(extras, 'sell');
         if (!x.ok) return answer(false, undefined, x.error);
         if (!x.wallet) {
-          return result(await act(s, { type: 'sell', pct: tokens !== undefined ? 100 : Number(pct) }, await ctxFor(s, mint), { slippagePct: x.slippagePct, tokens }));
+          return result(await act(s, { type: 'sell', pct: tokens !== undefined ? 100 : Number(pct) }, await ctxFor(s, mint), { slippagePct: x.slippagePct, tokens, feeLane: x.feeLane }));
         }
         if (tokens !== undefined) return answer(false, undefined, 'sell: a sell from another wallet is a percent, not a token count');
         // The other wallets trade at the execution setting; a slippage that
         // would be dropped on the floor is refused instead (audit 2026-09-27).
         if (x.slippagePct !== undefined) return answer(false, undefined, 'sell: slippagePct applies to the trading wallet only — drop it, or the wallet');
+        if (x.feeLane !== undefined) return answer(false, undefined, 'sell: lane applies to the trading wallet only — drop it, or the wallet');
         return result(await chain(s, () => walletTrade(s, 'sell', x.wallet, mint, Number(pct))));
       }
       case 'wallets':
@@ -2805,6 +3020,10 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       }
       case 'runners': {
         const now = Date.now();
+        const c = scriptChain(s);
+        // A Robinhood or BNB script reads its OWN chain's flags (2026-09-29:
+        // it was handed Solana's list — base58 mints it could not trade).
+        if (c !== 'solana') return answer(true, (evmRunnerSource?.(c as EvmChainKind) ?? []).map((f) => contextFromEvmRunner(f, null, now)));
         return answer(true, h.runners().map((f) => contextFromRunner(f, h.launch(f.mint), now)));
       }
       case 'leaders':
@@ -2836,9 +3055,18 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       case 'every': {
         const sec = Math.max(MIN_INTERVAL_S, Math.min(3_600, Math.round(Number(args[0]) || 0)));
         const rt = rtFor(s);
-        rt.intervalSec = sec;
-        if (rt.intervalTimer) clearInterval(rt.intervalTimer);
-        rt.intervalTimer = setInterval(() => enqueue(s, 'interval', { at: Date.now() }), sec * 1000);
+        // The sandbox numbers each bot.every call; an older harness sends no
+        // id and keeps the old single-timer behaviour under id 0.
+        const rawId = Number(args[1]);
+        const id = Number.isInteger(rawId) && rawId > 0 && rawId < 1_000 ? rawId : 0;
+        if (!rt.intervalTimers.has(id) && rt.intervalTimers.size >= MAX_INTERVAL_TIMERS) {
+          return answer(false, undefined, `every: at most ${MAX_INTERVAL_TIMERS} timers per script`);
+        }
+        const old = rt.intervalTimers.get(id);
+        if (old) clearInterval(old);
+        rt.intervalTimers.set(id, setInterval(() => enqueue(s, 'interval', { at: Date.now(), id: id || undefined }), sec * 1000));
+        // The fastest timer, for the monitor's "every N s".
+        rt.intervalSec = rt.intervalSec === null ? sec : Math.min(rt.intervalSec, sec);
         slog(s, 'info', `timer every ${sec} s`);
         return answer(true, sec);
       }
@@ -2997,7 +3225,11 @@ function copyFillPayload(t: CopyTrade): Record<string, unknown> {
  */
 export function onMigration(mint: string): void {
   if (!host || !scripts.some((s) => s.enabled)) return;
-  toCodeScripts('migration', 'solana', async (s) => ({ ...(await ctxFor(s, mint)), migrated: true }));
+  // isMayhem rides along (2026-09-29): a script buying graduations has to
+  // tell a classic curve from a mayhem one at the moment it hears this, and
+  // the launch context only carries the flag on runner events.
+  const isMayhem = host.launchMayhem?.(mint) ?? null;
+  toCodeScripts('migration', 'solana', async (s) => ({ ...(await ctxFor(s, mint)), migrated: true, isMayhem }));
 }
 
 /**
@@ -3165,6 +3397,24 @@ export function onEngineEvent(ev: EngineEvent): void {
  * its `launch`; every later one is a `launch_update`, which keeps the two
  * rails' triggers meaning the same thing to a rule.
  */
+/** Where an EVM chain's runner flags are read (the chain scanner, wired in
+ *  ipc.ts beside its launch hook). Null = none (tests, a build without it). */
+let evmRunnerSource: ((chain: EvmChainKind) => EvmRunnerFlag[]) | null = null;
+export function setEvmRunnerSource(fn: ((chain: EvmChainKind) => EvmRunnerFlag[]) | null): void {
+  evmRunnerSource = fn;
+}
+
+/**
+ * The chain scanner flagged a runner on Robinhood or BNB (2026-09-29). Scripts
+ * on that chain hear the same `runner` event a Solana script does; until now
+ * they heard nothing, and bot.runners() gave them Solana's list.
+ */
+export function onEvmRunner(chain: ChainKind, flag: EvmRunnerFlag, launch: EvmScanLaunch | null): void {
+  if (!host || !scripts.some((s) => s.enabled && scriptChain(s) === chain)) return;
+  const base = contextFromEvmRunner(flag, launch, Date.now());
+  fanOut('runner', 'runner', flag.token, chain, async (s) => ctxFor(s, flag.token, base));
+}
+
 export function onEvmLaunch(chain: ChainKind, launch: EvmScanLaunch): void {
   if (!host || !scripts.some((s) => s.enabled && scriptChain(s) === chain)) return;
   const first = (launch.windows?.length ?? 0) <= 1;
@@ -3235,8 +3485,7 @@ export function stopTimers(): void {
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = null;
   for (const rt of runtimes.values()) {
-    if (rt.intervalTimer) clearInterval(rt.intervalTimer);
-    rt.intervalTimer = null;
+    clearIntervals(rt);
     if (rt.startRetry) clearTimeout(rt.startRetry);
     rt.startRetry = null;
     clearSchedules(rt);
@@ -3253,6 +3502,8 @@ export async function shutdown(): Promise<void> {
 // ── Test seams ────────────────────────────────────────────────────────
 
 export function _reset(): void {
+  offSettled?.();
+  offSettled = null;
   stopTimers();
   scripts = [];
   bundledSeen = [];
@@ -3435,6 +3686,7 @@ export function _diag(): { global: Record<string, number>; scripts: Record<strin
       queue: rt.queue.length,
       building: rt.building,
       intervalSec: rt.intervalSec ?? 0,
+      intervalTimers: rt.intervalTimers.size,
       errorsInARow: rt.errorsInARow,
       kvBytes,
     };

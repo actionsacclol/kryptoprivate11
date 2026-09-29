@@ -21,6 +21,7 @@ import { coinCallsLabel, newestFirst, type Callout } from '@shared/callouts';
 import { refreshCallouts, useCallouts, useCoinCallouts } from '../state/callouts';
 import { CalloutRow } from './CalloutRow';
 import { cls, fmtAgo } from '../utils/format';
+import { LiquidGlass } from './LiquidGlass';
 
 const OPEN_KEY = 'krypt.callouts.open.v1';
 
@@ -123,12 +124,20 @@ export function CalloutsRail({
       <AnimatePresence>
         {open && (
           <motion.aside
-            initial={{ x: 24, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 24, opacity: 0 }}
+            // Transform only. An opacity animation on this element would make it
+            // the backdrop root for the glass inside, which would then see
+            // nothing but this panel until the fade finished.
+            initial={{ x: 24 }}
+            animate={{ x: 0 }}
+            exit={{ x: 24 }}
             transition={{ duration: 0.16, ease: 'easeOut' }}
-            className="absolute inset-0 z-20 flex flex-col border-l border-white/10 bg-krypt-panel/95"
+            className="absolute inset-0 z-20 flex"
           >
+            {/* FROST, not the lens (2026-09-29): the rail stays open beside the
+                page for a whole session, and a lens that never closes cost
+                +3 % GPU / +9 % compositor and 240 -> 222 fps on its own
+                (measured). Sheet-strength tint so the feed stays readable. */}
+            <LiquidGlass surface="tile" tint="bg-krypt-panel/80" display="flex" className="min-w-0 flex-1 flex-col border-l border-white/10">
             <header className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
               <Megaphone className="h-3.5 w-3.5 text-krypt-pink" />
               <span className="font-display text-label uppercase tracking-heading text-white/90">Callouts</span>
@@ -214,6 +223,7 @@ export function CalloutsRail({
             <footer className="border-t border-white/10 px-3 py-1.5 text-nano text-krypt-muted">
               {lastCheckedAt ? `checked ${fmtAgo(lastCheckedAt)}` : 'not checked yet'} · intel only, nothing here trades
             </footer>
+            </LiquidGlass>
           </motion.aside>
         )}
       </AnimatePresence>

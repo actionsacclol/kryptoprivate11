@@ -68,14 +68,19 @@ export function TradePanel({
     // fees" understated what the same transaction charges, on the screen
     // where the user decides the size.
     const krypt = splitFee(Math.round(amountSol * 1e9), false, holderFeeBps(FEE_BPS, waiver.halved)).totalLamports / 1e9;
-    const priority = 0.002; // modeled; the real figure comes from the fee estimator
-    // Landing tips are paid on the same transaction whenever a fast lane is on.
-    const tips = settings.execution.useJito || settings.execution.useHeliusSender ? 0.0005 : 0;
+    // The buy's priority fee by the Execution fee mode (2026-09-29: this was a
+    // hard-coded 0.002 — the SELL floor — so no setting ever moved it). Fast
+    // is the buy floor (the estimate can only raise it); lean is the live
+    // median at the default price on a 120k limit.
+    const lean = settings.execution.feeLane === 'lean';
+    const priority = lean ? 0.000012 : 0.001;
+    // Landing tips are paid whenever a fast lane is on — never on lean.
+    const tips = !lean && (settings.execution.useJito || settings.execution.useHeliusSender) ? 0.0005 : 0;
     const network = 0.000005;
     const rent = 0.00204; // ATA creation, refundable via rent sweep
     const total = protocol + relayer + krypt + priority + tips + network + rent;
     return { usd, protocol, relayer, krypt, priority, tips, network, rent, total };
-  }, [amountSol, solUsd, waiver.halved, settings.execution.localTxBuild, settings.execution.useJito, settings.execution.useHeliusSender]);
+  }, [amountSol, solUsd, waiver.halved, settings.execution.localTxBuild, settings.execution.useJito, settings.execution.useHeliusSender, settings.execution.feeLane]);
 
   const toUsd = (sol: number): string => (solUsd ? fmtUsd(sol * solUsd) : `${sol.toFixed(5)} SOL`);
 
@@ -226,7 +231,7 @@ export function TradePanel({
               waiver.halved
                 ? `Krypt ${holderFeePctLabel()} per side (halved from ${feePctLabel()} — you hold ${waiver.tokens.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${KRYPTO_TOKEN.symbol}): ${toUsd(cost.krypt)}`
                 : `Krypt ${feePctLabel()} per side: ${toUsd(cost.krypt)}`,
-              `Priority fee (est.): ${toUsd(cost.priority)}`,
+              `Priority fee (est., ${settings.execution.feeLane === 'lean' ? 'lean' : 'fast'} mode): ${toUsd(cost.priority)}`,
               cost.tips > 0 ? `Landing tips (est.): ${toUsd(cost.tips)}` : null,
               `Network: ${toUsd(cost.network)}`,
               `Token account rent (refundable): ${toUsd(cost.rent)}`,

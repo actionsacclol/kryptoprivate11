@@ -370,6 +370,16 @@ export interface ExecutionSettings {
    *              exit is worse than being sandwiched on the way out.
    */
   mevMode: MevMode;
+  /**
+   * How a trade you place BY HAND is priced (2026-09-29). 'fast' pays the
+   * landing floors (0.001 SOL a buy, 0.002 a sell, or the estimate at your
+   * urgency when it is higher) plus the tips above. 'lean' pays the live
+   * median compute-unit price with no floor and no tips — about 0.00001 SOL
+   * a side — and lands in seconds rather than the first slot; a lean sell
+   * that fails is retried once on the fast lane. Orders, stops, copy trading
+   * and auto-exits always use 'fast'; scripts choose per trade.
+   */
+  feeLane?: 'fast' | 'lean';
   liveSlippagePct: number;
   /** Switch to Paper once REALISED losses this live session (sum of the
    *  losing sells' PnL, from the chain) reach this many SOL. 0 = off. Capital
@@ -1135,6 +1145,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     liveEnabled: true,
     maxLiveSol: 0.05,
     mevMode: 'fast',
+    feeLane: 'fast',
     liveSlippagePct: 12,
     maxLiveSessionLossSol: 0,
     maxLiveConsecutiveLosses: 0,

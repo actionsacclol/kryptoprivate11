@@ -94,8 +94,8 @@ export function open(p: { mint: string; symbol: string; tokens: number; costSol:
   return { ok: r.ok, message: r.message, position: r.position };
 }
 
-export function sell(mint: string, pct: number, priceSol: number | null, chain: ChainKind = 'solana'): PaperSellResult {
-  const r = sellPaper(book, mint, pct, priceSol, Date.now(), chain);
+export function sell(mint: string, pct: number, priceSol: number | null, chain: ChainKind = 'solana', fixedFeeSol = 0): PaperSellResult {
+  const r = sellPaper(book, mint, pct, priceSol, Date.now(), chain, fixedFeeSol);
   if (r.ok) {
     book = r.book;
     save();

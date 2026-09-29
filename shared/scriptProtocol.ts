@@ -382,17 +382,22 @@ export function sandboxPageHtml(): string {
   });
 
   const atHandlers = new Map();
+  const timerHandlers = new Map();
+  let nextTimerId = 1;
   const bot = Object.freeze({
     on(name, fn) {
       if (typeof name !== 'string' || typeof fn !== 'function') throw new Error('bot.on(name, fn)');
       if (!handlers.has(name)) handlers.set(name, []);
       handlers.get(name).push(fn);
     },
+    // Each call is its OWN timer (2026-09-29): main fires it with its id and
+    // only its handler runs. They used to share one list and one timer, so
+    // the last interval set won — a bot.every(3600) silenced a bot.every(30).
     every(seconds, fn) {
       if (typeof fn !== 'function') throw new Error('bot.every(seconds, fn)');
-      if (!handlers.has('interval')) handlers.set('interval', []);
-      handlers.get('interval').push(fn);
-      return call('every', [Number(seconds)]);
+      const id = nextTimerId++;
+      timerHandlers.set(id, fn);
+      return call('every', [Number(seconds), id]);
     },
     at(hhmm, fn) {
       if (typeof hhmm !== 'string' || typeof fn !== 'function') throw new Error("bot.at('HH:MM', fn)");
@@ -570,6 +575,12 @@ export function sandboxPageHtml(): string {
     if (m.t === 'event') {
       const list = [...(handlers.get(m.name) || [])];
       if (m.name === 'schedule' && m.payload && atHandlers.has(m.payload.at)) list.push(...atHandlers.get(m.payload.at));
+      // A timer's own handler; a tick with no id (an older main) runs them all.
+      if (m.name === 'interval') {
+        const tid = m.payload && m.payload.id;
+        if (tid && timerHandlers.has(tid)) list.push(timerHandlers.get(tid));
+        else if (!tid) list.push(...timerHandlers.values());
+      }
       try {
         for (const fn of list) await fn(m.payload);
         send({ t: 'done', id: m.id, ok: true });

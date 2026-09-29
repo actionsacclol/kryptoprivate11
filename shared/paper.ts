@@ -57,13 +57,15 @@ export interface PaperFill {
  */
 export const PAPER_SIDE_COST = 0.015;
 
-export function modelledPaperFill(solIn: number, priceSol: number): { tokens: number; costSol: number } | null {
+export function modelledPaperFill(solIn: number, priceSol: number, fixedFeeSol = 0): { tokens: number; costSol: number } | null {
   if (!Number.isFinite(solIn) || solIn <= 0) return null;
   if (!Number.isFinite(priceSol) || priceSol <= 0) return null;
   const spent = solIn * (1 - PAPER_SIDE_COST);
   const tokens = spent / priceSol;
   if (!Number.isFinite(tokens) || tokens <= 0) return null;
-  return { tokens, costSol: solIn };
+  // The fixed network cost of the buy (an unattended caller's lane, see
+  // shared/exitBudget.paperFixedFeeSol) is paid on top of the swap, as live.
+  return { tokens, costSol: solIn + (Number.isFinite(fixedFeeSol) && fixedFeeSol > 0 ? fixedFeeSol : 0) };
 }
 
 export interface PaperPosition {
@@ -181,6 +183,9 @@ export function sellPaper(
   priceSol: number | null,
   now = Date.now(),
   chain: ChainKind = 'solana',
+  /** The fixed network cost of this sell, taken from what it returns (never
+   *  below zero). 0 = the old model. */
+  fixedFeeSol = 0,
 ): PaperSellResult {
   const fail = (message: string): PaperSellResult => ({ ok: false, message, book, tokensSold: 0, proceedsSol: 0, realizedSol: 0, closed: false });
   const pos = book.open.find((x) => samePaperKey(x, { mint, chain }));
@@ -202,7 +207,8 @@ export function sellPaper(
     fillPrice = 0;
   } else {
     if (priceSol === null || !(priceSol > 0)) return fail('no price to fill a paper sell — try again in a moment');
-    proceeds = round(tokensSold * priceSol * (1 - PAPER_ROUND_TRIP_COST_PCT / 100));
+    const fixed = Number.isFinite(fixedFeeSol) && fixedFeeSol > 0 ? fixedFeeSol : 0;
+    proceeds = round(Math.max(0, tokensSold * priceSol * (1 - PAPER_ROUND_TRIP_COST_PCT / 100) - fixed));
     fillPrice = priceSol;
   }
   const realized = round(proceeds - costOut);

@@ -30,6 +30,7 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import GridLayout, { WidthProvider, type Layout } from 'react-grid-layout';
 import { ExternalLink, RotateCcw, X } from 'lucide-react';
+import { LiquidGlass } from './LiquidGlass';
 import { clearBoxes, deriveLayout, loadBoxes, mergeBoxes, saveBoxes, type Box } from '../panels/layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -153,9 +154,12 @@ export function PanelGrid({
           // Translucent so the app's own animated backdrop shows THROUGH the
           // panel rather than each panel running a field of its own — one
           // WebGL context for the window instead of one per widget, which a
-          // browser would refuse at about sixteen anyway. The blur keeps text
-          // crisp over a moving ground; lite mode strips it (index.css).
-          <div key={p.key} className="group/panel flex flex-col overflow-hidden rounded-xl border border-white/10 bg-krypt-panel/70 backdrop-blur-md shadow-krypt-card">
+          // browser would refuse at about sixteen anyway. The glass keeps text
+          // crisp over a moving ground; Lite mode renders it flat. The outer
+          // div stays plain because react-grid-layout writes its transform
+          // and size onto the element it is given.
+          <div key={p.key} className="group/panel flex">
+            <LiquidGlass surface="tile" display="flex" className="min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
             <div
               className="panel-head flex shrink-0 cursor-move items-center justify-between border-b border-white/10 px-3 select-none"
               style={{ height: HEAD_PX }}
@@ -197,6 +201,7 @@ export function PanelGrid({
             {/* min-h-0 is what lets this scroll inside a flex column instead of
                 pushing the panel taller than its grid box. */}
             <div className="min-h-0 flex-1 overflow-auto p-3">{p.body}</div>
+            </LiquidGlass>
           </div>
         ))}
       </Grid>

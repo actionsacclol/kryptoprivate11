@@ -118,7 +118,9 @@ function makeHost(over = {}) {
       calls.sellChains.push(chain ?? null);
       if (over.sellResult) return over.sellResult;
       if (pct >= 100) book[mode] = book[mode].filter((p) => p.mint !== mint);
-      return { ok: true, message: 'sold', realizedSol: over.realized ?? -0.01 };
+      // The engine knows a PAPER sell's result at once; a live one is known
+      // only when the fill settles on the chain (host.onFillSettled).
+      return { ok: true, message: 'sold', realizedSol: mode === 'live' ? null : (over.realized ?? -0.01) };
     },
     liveBlockedReason: () => over.liveBlocked ?? null,
     buyBlockedReason: () => over.buyBlocked ?? null,
@@ -154,6 +156,14 @@ function makeHost(over = {}) {
     runners: () => over.runners ?? [],
     leaders: () => [{ wallet: 'Lead', label: 'Sharky', enabled: true, mode: 'paper' }],
     notify: (_t, body) => calls.notifies.push(body),
+    // The chain's settled fills (2026-09-28): a test calls `h.settle(fill)`
+    // to model a stop-loss order's sell landing and reconciling.
+    onFillSettled: (fn) => {
+      host.settle = fn;
+      return () => {
+        host.settle = null;
+      };
+    },
     // The rest of what the app knows about a token (2026-09-20). `over`
     // supplies the answers; analyze counts its calls on `over` so a test can
     // see how many times the key would have been spent.
@@ -560,6 +570,165 @@ test('past the daily loss limit the script turns itself OFF', async () => {
   assert.ok(Math.abs(auto.snapshot().stats[c.id].realizedSolToday - -0.6) < 1e-9);
 });
 
+// ── 2026-09-28: the stop counts every exit; the wallet share; the cool-off; the floors ─
+//
+// A live script ran a wallet to dust overnight under a 0.5 SOL stop that read
+// −0.0088: it counted only the script's own sells, and 61 of 65 exits were
+// orders. Each rule that came out of that night is pinned here.
+
+const LIVE_OK = { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 10, maxLossPctOfWallet: 100, maxOpenPositions: 50, maxActionsPerMinute: 100 };
+const fill = (mint, realizedSol, requested = 100) => ({ mint, side: 'sell', at: Date.now(), wallet: null, requested, realizedSol });
+
+test('LIVE: a stop-loss ORDER selling the bag counts toward the loss stop, from the settled fill', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: { ...LIVE_OK, maxLossSolPerDay: 0.1 } }));
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
+  await tick();
+  assert.equal(h.calls.buys.length, 1, 'the live buy went out');
+  // Nothing the script did: the app's stop-loss order sold it and the ledger reconciled the fill.
+  h.settle(fill(MINT, -0.12));
+  await tick();
+  assert.ok(Math.abs(auto.snapshot().stats[c.id].realizedSolToday - -0.12) < 1e-9, 'the order’s exit is booked');
+  assert.equal(auto.all()[0].enabled, false, 'past the stop, the script is off');
+  assert.ok(h.calls.toasts.some((t) => t.level === 'error' && /disabled/.test(t.message)));
+  assert.equal(auto.snapshot().stats[c.id].openCount, 0, 'the bag is no longer counted as open');
+});
+
+test('LIVE: a settled fill of a mint the script never opened changes nothing', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: { ...LIVE_OK, maxLossSolPerDay: 0.1 } }));
+  auto.setEnabled(c.id, true);
+  h.settle(fill(MINT3, -5));
+  await tick();
+  assert.equal(auto.snapshot().stats[c.id].realizedSolToday, 0);
+  assert.equal(auto.all()[0].enabled, true);
+});
+
+test('LIVE: the script’s OWN sell books no estimate — the settled fill counts it, once', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: LIVE_OK }));
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100] });
+  await tick();
+  assert.equal(h.calls.sells.length, 1, 'the sell went out');
+  assert.equal(auto.snapshot().stats[c.id].realizedSolToday, 0, 'nothing booked from a PnL guess');
+  h.settle(fill(MINT, -0.026));
+  await tick();
+  assert.ok(Math.abs(auto.snapshot().stats[c.id].realizedSolToday - -0.026) < 1e-9, 'counted exactly once, from the chain');
+});
+
+test('the loss stop is the SOL figure or the wallet share, whichever is smaller', async () => {
+  // A 0.4 SOL wallet at 25 % is a 0.1 SOL stop — a 0.5 SOL figure could never bind.
+  const over = { realized: -0.06, walletSol: 0.4 };
+  const h = setup(over);
+  const c = saved(codeScript({ budget: { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 0.5, maxLossPctOfWallet: 25, maxOpenPositions: 50, maxActionsPerMinute: 100 } }));
+  auto.setEnabled(c.id, true);
+  assert.ok(Math.abs(auto.snapshot().stats[c.id].lossCapSol - 0.1) < 1e-6, `the stop in force is 0.1 SOL (${auto.snapshot().stats[c.id].lossCapSol})`);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'buy', args: [MINT2, 0.05] });
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'sell', args: [MINT, 100] });
+  await tick();
+  over.walletSol = 0.34; // the loss left the wallet
+  assert.equal(auto.all()[0].enabled, true, '−0.06 is inside the 0.1 share');
+  auto.onSandboxMessage(c.id, { t: 'call', id: 4, method: 'sell', args: [MINT2, 100] });
+  await tick();
+  assert.equal(auto.all()[0].enabled, false, '−0.12 is past the wallet share');
+  const line = auto.snapshot().logs[c.id].map((l) => l.line).find((l) => /DISABLED/.test(l));
+  assert.match(line, /25% of the/, 'the reason names the share, not the SOL figure');
+  assert.equal(h.calls.sells.length, 2);
+});
+
+test('a script saved without the wallet share reads as the default, and the field survives a save', () => {
+  setup();
+  const { maxLossPctOfWallet, ...old } = LIVE_OK;
+  const c = saved(codeScript({ budget: old }));
+  assert.equal(c.budget.maxLossPctOfWallet, undefined, 'absent stays absent');
+  assert.ok(auto.snapshot().stats[c.id].lossCapSol <= 1.5 * 0.25 + 1e-9, 'the default share of the 1.5 SOL wallet is in force');
+  const c2 = saved(codeScript({ name: 'C2', budget: { ...LIVE_OK, maxLossPctOfWallet: 40 } }));
+  assert.equal(auto.all().find((s) => s.id === c2.id).budget.maxLossPctOfWallet, 40);
+  assert.equal(auto.upsert(codeScript({ name: 'bad', budget: { ...LIVE_OK, maxLossPctOfWallet: 0 } })).ok, false, 'out of bounds is refused');
+});
+
+test('LIVE: three losing exits in a row pause buys for an hour — toast, notification, sells untouched', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: LIVE_OK }));
+  auto.setEnabled(c.id, true);
+  [MINT, MINT2, MINT3].forEach((m, i) => auto.onSandboxMessage(c.id, { t: 'call', id: 10 + i, method: 'buy', args: [m, 0.05] }));
+  await tick();
+  assert.equal(h.calls.buys.length, 3);
+  h.settle(fill(MINT, -0.01));
+  h.settle(fill(MINT2, -0.01));
+  await tick();
+  assert.equal(auto.snapshot().stats[c.id].lossStreak, 2);
+  assert.equal(auto.snapshot().stats[c.id].coolOffUntil, null, 'two is not a streak');
+  h.settle(fill(MINT3, -0.01));
+  await tick();
+  const st = auto.snapshot().stats[c.id];
+  assert.ok(typeof st.coolOffUntil === 'number' && st.coolOffUntil > Date.now() + 55 * 60_000, 'cooling off for about an hour');
+  assert.ok(h.calls.toasts.some((t) => t.level === 'warn' && /cooling off/.test(t.message)));
+  assert.ok(h.calls.notifies.some((b) => /losing exits in a row/.test(b)));
+  assert.equal(auto.all()[0].enabled, true, 'a cool-off is not a disable');
+  auto.onSandboxMessage(c.id, { t: 'call', id: 20, method: 'buy', args: [MINT, 0.05] });
+  await tick();
+  assert.equal(h.calls.buys.length, 3, 'the buy did not go out');
+  assert.match(h.calls.replies.find((r) => r.cid === 20).value.message, /cooling off after 3 losing exits in a row/);
+});
+
+test('LIVE: a winning exit resets the streak', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: LIVE_OK }));
+  auto.setEnabled(c.id, true);
+  [MINT, MINT2, MINT3].forEach((m, i) => auto.onSandboxMessage(c.id, { t: 'call', id: 10 + i, method: 'buy', args: [m, 0.05] }));
+  await tick();
+  h.settle(fill(MINT, -0.01));
+  h.settle(fill(MINT2, +0.02));
+  h.settle(fill(MINT3, -0.01));
+  await tick();
+  assert.equal(auto.snapshot().stats[c.id].lossStreak, 1);
+  assert.equal(auto.snapshot().stats[c.id].coolOffUntil, null);
+});
+
+test('LIVE: a buy under 0.03 SOL is refused — the fee floors would take more than a tenth of it; paper rehearses any size', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: LIVE_OK }));
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.016] });
+  await tick();
+  assert.equal(h.calls.buys.length, 0);
+  assert.match(h.calls.replies.find((r) => r.cid === 1).value.message, /19% of itself in priority fees .* smallest live buy is 0\.03 SOL/);
+  const p = saved(codeScript({ name: 'P', mode: 'paper', budget: LIVE_OK }));
+  auto.setEnabled(p.id, true);
+  auto.onSandboxMessage(p.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.016] });
+  await tick();
+  assert.equal(h.calls.buys.length, 1, 'paper pays no fee');
+});
+
+test('fee lane: {lane: \'lean\'} reaches the host on a buy and a sell, passes the lean fee guard at a farm size, and a bad lane is refused', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: LIVE_OK }));
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.016, { lane: 'lean' }] });
+  await tick();
+  assert.equal(h.calls.buys.length, 1, '0.016 SOL clears the lean guard (0.0025 SOL)');
+  assert.deepEqual(h.calls.buys[0].opts, { feeLane: 'lean' });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'sell', args: [MINT, { pct: 100, lane: 'lean' }] });
+  await tick();
+  assert.equal(h.calls.sells.length, 1);
+  assert.deepEqual(h.calls.sells[0].opts, { feeLane: 'lean' });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'buy', args: [MINT2, 0.016, { lane: 'turbo' }] });
+  await tick();
+  assert.equal(h.calls.buys.length, 1, 'an unknown lane never trades');
+  assert.match(String(h.calls.replies.find((r) => r.cid === 3)?.error ?? h.calls.replies.find((r) => r.cid === 3)?.value?.message), /lane must be one of fast, lean/);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 4, method: 'buy', args: [MINT3, 0.016] });
+  await tick();
+  assert.equal(h.calls.buys.length, 1, 'the fast lane keeps its 0.03 SOL floor');
+  assert.match(h.calls.replies.find((r) => r.cid === 4).value.message, /smallest live buy is 0\.03 SOL on the fast lane \(0\.0025 SOL with \{lane: 'lean'\}\)/);
+});
+
 test('LIVE: blocked = refused with the reason; the script’s OWN budget is the size cap', async () => {
   const h = setup({ liveBlocked: 'the engine is not armed', maxLiveSol: 0.05 });
   const c = saved(codeScript({ mode: 'live', budget: { maxSolPerTrade: 1, maxBuysPerDay: 100, maxLossSolPerDay: 10, maxOpenPositions: 50, maxActionsPerMinute: 100 } }));
@@ -826,6 +995,62 @@ test('a restarted script does not inherit the last run’s bot.every timer', asy
   auto.stopTimers();
 });
 
+test('bot.every: each call is its own timer — an hourly one no longer stops the others (user report 2026-09-29)', async () => {
+  const h = setup();
+  const c = saved(codeScript());
+  auto.setEnabled(c.id, true);
+  await tick();
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'every', args: [30, 1] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'every', args: [3600, 2] });
+  await tick();
+  const by = (id) => h.calls.replies.find((r) => r.cid === id);
+  assert.equal(by(1).value, 30);
+  assert.equal(by(2).value, 3600);
+  assert.equal(auto._diag().scripts[c.id].intervalTimers, 2, 'two timers, not one replaced by the other');
+  assert.equal(auto._diag().scripts[c.id].intervalSec, 30, 'the monitor shows the fastest');
+  // Re-arming the same id replaces that one timer only.
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'every', args: [60, 1] });
+  await tick();
+  assert.equal(auto._diag().scripts[c.id].intervalTimers, 2);
+  // An older harness (no id) still gets one timer, as before.
+  auto.onSandboxMessage(c.id, { t: 'call', id: 4, method: 'every', args: [45] });
+  await tick();
+  assert.equal(auto._diag().scripts[c.id].intervalTimers, 3);
+  for (let i = 0; i < 6; i++) auto.onSandboxMessage(c.id, { t: 'call', id: 10 + i, method: 'every', args: [30, 100 + i] });
+  await tick();
+  assert.equal(h.calls.replies.find((r) => r.cid === 15).ok, false, 'at most 8 timers per script');
+  auto.onSandboxGone(c.id, 'renderer crashed');
+  await tick();
+  assert.equal(auto._diag().scripts[c.id].intervalTimers, 0, 'a restart clears every timer');
+  auto.stopTimers();
+});
+
+test('a Robinhood / BNB script gets ITS chain’s runners: bot.runners() and the runner event (user report 2026-09-29)', async () => {
+  const h = setup();
+  const flag = { chain: 'robinhood', token: '0xrunner', symbol: 'RUN', name: 'Runner', flaggedAt: Date.now(), uniqueBuyers: 14, ratePct: 22, otherRatePct: 4, lowerPct: 12, samples: 90, detail: 'x' };
+  auto.setEvmRunnerSource((chain) => (chain === 'robinhood' ? [flag] : []));
+  const rh = saved(codeScript({ name: 'RH', chain: 'robinhood' }));
+  const sol = saved(codeScript({ name: 'SOL' }));
+  auto.setEnabled(rh.id, true);
+  auto.setEnabled(sol.id, true);
+  await tick();
+  auto.onSandboxMessage(rh.id, { t: 'call', id: 1, method: 'runners', args: [] });
+  await tick();
+  const list = h.calls.replies.find((r) => r.cid === 1).value;
+  assert.equal(list.length, 1);
+  assert.equal(list[0].mint, '0xrunner', 'the chain’s own token, not a base58 Solana mint');
+  assert.equal(list[0].uniqueBuyers, 14);
+  assert.equal(list[0].runnerOddsPct, 22);
+  const before = h.calls.dispatched.length;
+  auto.onEvmRunner('robinhood', flag, null);
+  await tick();
+  const ev = h.calls.dispatched.slice(before);
+  assert.deepEqual(ev.map((d) => d.name), ['runner'], 'one runner event…');
+  assert.equal(ev[0].payload.mint, '0xrunner', '…to the Robinhood script only');
+  auto.setEvmRunnerSource(null);
+  auto.stopTimers();
+});
+
 test('a running script writes an hourly health line: events, drops, handler times, restarts, memory, state', async () => {
   // Scripts run for days; app.log said nothing between a script's own lines,
   // so a slow degradation could not be seen after the fact (2026-09-27).
@@ -1041,7 +1266,7 @@ test('a live script starting up is told about paused orders on the coins it hold
   auto.setEnabled(c.id, true);
   await tick();
   auto.onSandboxMessage(c.id, { t: 'ready' });
-  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
   await tick(30);
   assert.deepEqual(auto._runtimeOf(c.id).opened, [MINT]);
   auto.setEnabled(c.id, false);
@@ -1069,7 +1294,7 @@ test('a live script starting up is told about paused orders on the coins it hold
   auto.setEnabled(p.id, true);
   await tick();
   auto.onSandboxMessage(p.id, { t: 'ready' });
-  auto.onSandboxMessage(p.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+  auto.onSandboxMessage(p.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
   await tick(30);
   auto.setEnabled(p.id, false);
   await tick();
@@ -1542,19 +1767,19 @@ test('a live script\'s share is priced from the chain, so "sell 100%" of its own
     auto.setEnabled(c.id, true);
     await tick();
     auto.onSandboxMessage(c.id, { t: 'ready' });
-    auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.0165] });
+    auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
     await tick(30);
     h.book.live.push(h.pos(MINT, walletCost));
     auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'sell', args: [MINT, 100] });
     await tick(30);
     return { pct: h.calls.sells[0]?.pct, seen };
   };
-  const own = await run(0.01711, 0.01711);
+  const own = await run(0.05185, 0.05185);
   assert.equal(own.pct, 100, 'all of a bag only the script bought');
   assert.deepEqual(own.seen, [['SIG1']], 'priced from the buy the script made');
-  const handAdded = await run(0.01711 + 1.0, 0.01711);
-  assert.equal(handAdded.pct, 2, 'a hand-added bag is still protected');
-  const unreconciled = await run(0.01711, null);
+  const handAdded = await run(0.05185 + 1.0, 0.05185);
+  assert.equal(handAdded.pct, 5, 'a hand-added bag is still protected');
+  const unreconciled = await run(0.05185, null);
   assert.equal(unreconciled.pct, 96, 'no chain price yet: the requested SOL stands in, as before');
 });
 
@@ -2100,21 +2325,21 @@ test('LIVE: a Krypto Trader claim refuses a script buy on that coin, active or n
   try {
     const s = saved(codeScript({ name: 'claims', mode: 'live', budget: LIVE_BUDGET }));
     auto.setEnabled(s.id, true);
-    auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+    auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
     await tick();
     assert.equal(h.calls.buys.length, 0, 'the active-wallet buy is refused');
     assert.match(h.calls.replies[0].value.message, /Krypto Trader session \(KT, kt_abc\)/, 'and the refusal names the session');
     assert.deepEqual(asked[0], { walletId: null }, 'bot.buy is checked against the ACTIVE wallet');
-    auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.02, OTHER] });
+    auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.05, OTHER] });
     await tick();
     assert.equal(walletCalls.length, 0, 'a named-wallet buy is refused too');
     assert.deepEqual(asked.at(-1), { address: OTHER }, 'checked against the NAMED wallet');
-    auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'buy', args: [MINT2, 0.02] });
+    auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'buy', args: [MINT2, 0.05] });
     await tick();
     assert.equal(h.calls.buys.length, 1, 'another coin buys');
     const p = saved(codeScript({ name: 'paperclaims', mode: 'paper', budget: LIVE_BUDGET }));
     auto.setEnabled(p.id, true);
-    auto.onSandboxMessage(p.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
+    auto.onSandboxMessage(p.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
     await tick();
     assert.equal(h.calls.buys.length, 2, 'a paper script touches no wallet, so no claim applies');
   } finally {
@@ -2129,8 +2354,8 @@ test('reset paper trades: paper scripts start over, live scripts are untouched',
   const live = saved(codeScript({ name: 'l', mode: 'live', budget: LIVE_BUDGET }));
   auto.setEnabled(paper.id, true);
   auto.setEnabled(live.id, true);
-  auto.onSandboxMessage(paper.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.02] });
-  auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.02] });
+  auto.onSandboxMessage(paper.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.05] });
   await tick(30);
   assert.equal(auto.forgetPaper(), 1, 'one paper script started over');
   const p = auto._runtimeOf(paper.id);
@@ -2160,8 +2385,8 @@ test('reset a script: its own saved totals go; a live script keeps its positions
   // What scorenow does: running totals in its saved state, painted into the widget.
   auto.onSandboxMessage(live.id, { t: 'call', id: 1, method: 'setState', args: [{ counts: { buys: 29, callouts: 23 } }] });
   auto.onSandboxMessage(live.id, { t: 'stats', values: { Buys: 29 } });
-  auto.onSandboxMessage(live.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.02] });
-  auto.onSandboxMessage(paper.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.02] });
+  auto.onSandboxMessage(live.id, { t: 'call', id: 2, method: 'buy', args: [MINT, 0.05] });
+  auto.onSandboxMessage(paper.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.05] });
   await tick(30);
   assert.deepEqual(auto._runtimeOf(live.id).kv, { counts: { buys: 29, callouts: 23 } }, 'setup: the totals are saved');
 
@@ -2278,21 +2503,51 @@ test('a shipped script is installed once, off and in paper; updates replace edit
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('the shipped script file itself passes the app’s own validation', async () => {
-  const code = fs.readFileSync(new URL('../bundled/scripts/krypto-script.js', import.meta.url), 'utf8');
-  const v = validateScript({ ...defaultScript('code'), name: 'Krypto Script', code });
-  assert.equal(v.ok, true, v.message);
+test('a shipped script update moves saved settings still at the old default, keeps the changed ones (2026-09-29)', async () => {
+  setup();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'krypt-mig-'));
+  await auto.shutdown();
+  auto._reset();
+  auto.init(dir);
+  const v1 = { key: 'farm-mig', name: 'Farm', code: '/* @inputs\n{ "links": { "type": "select", "options": ["none", "X and website"], "default": "none" }, "watch": { "type": "number", "default": 60, "min": 1, "max": 120 } }\n*/\nbot.log(1);' };
+  auto.seedBundled([v1]);
+  let s = auto.all().find((x) => x.bundled?.key === 'farm-mig');
+  auto.upsert({ ...s, inputs: { links: 'none', watch: 45 } });
+  const v2 = { ...v1, code: v1.code.replace('"default": "none"', '"default": "X and website"').replace('"default": 60', '"default": 30').replace('bot.log(1)', 'bot.log(2)') };
+  auto.seedBundled([v2]);
+  s = auto.all().find((x) => x.bundled?.key === 'farm-mig');
+  assert.ok(s.code.includes('bot.log(2)'), 'the code updated');
+  assert.equal(s.inputs.links, 'X and website', 'the untouched default followed the new one');
+  assert.equal(s.inputs.watch, 45, 'the answer the user changed stayed');
+  await auto.shutdown();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('the shipped script files themselves pass the app’s own validation', async () => {
   // 2026-09-28: 5.3.0 shipped a script whose @inputs block the app refused
   // (33 fields against a 32 cap), so it installed with NO settings — buySol
   // undefined and all. The block must read, and every field must carry a
-  // default, or the script has nothing to run on.
+  // default, or the script has nothing to run on. 2026-09-29: two ship.
   const { parseInputs } = await import('./.scriptinputs.mjs');
-  const parsed = parseInputs(code);
-  assert.equal(parsed.error, null, `the shipped @inputs block reads: ${parsed.error}`);
-  assert.ok(Object.keys(parsed.specs).length >= 30, 'the settings are all there');
-  for (const [k, spec] of Object.entries(parsed.specs)) assert.ok('default' in spec, `${k} has a default`);
   const src = fs.readFileSync(new URL('../electron/engine/bundledScripts.ts', import.meta.url), 'utf8');
-  assert.ok(src.includes("bundled/scripts/krypto-script.js?raw"), 'built into the app from that file');
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  for (const [file, name, minFields] of [
+    ['krypto-script.js', 'Krypto Script', 30],
+    ['graduation-scalper.js', 'Graduation Scalper', 10],
+  ]) {
+    const code = fs.readFileSync(new URL(`../bundled/scripts/${file}`, import.meta.url), 'utf8');
+    const v = validateScript({ ...defaultScript('code'), name, code });
+    assert.equal(v.ok, true, `${file}: ${v.message}`);
+    // The sandbox compiles the code exactly like this (scriptProtocol.ts);
+    // a syntax error would only surface at run time as "script failed to load".
+    assert.doesNotThrow(() => new AsyncFunction('bot', 'console', code), `${file} compiles`);
+    const parsed = parseInputs(code);
+    assert.equal(parsed.error, null, `${file}: the shipped @inputs block reads: ${parsed.error}`);
+    assert.ok(Object.keys(parsed.specs).length >= minFields, `${file}: the settings are all there`);
+    for (const [k, spec] of Object.entries(parsed.specs)) assert.ok('default' in spec, `${file}: ${k} has a default`);
+    for (const [k, spec] of Object.entries(parsed.specs)) assert.ok(!spec.help || spec.help.length <= 200, `${file}: ${k} help fits the form (${spec.help?.length})`);
+    assert.ok(src.includes(`bundled/scripts/${file}?raw`), `${file}: built into the app from that file`);
+  }
   const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   assert.ok(main.includes('automation.seedBundled(BUNDLED_SCRIPTS)'), 'seeded at startup');
 });

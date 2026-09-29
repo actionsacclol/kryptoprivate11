@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, AlertTriangle, XCircle, Info, X } from 'lucide-react';
+import { LiquidGlass } from '../components/LiquidGlass';
 import { isPanelWindow } from '../panels/windowId';
 import { cls } from '../utils/format';
 
@@ -26,11 +27,13 @@ export function useToast(): ToastApi {
   return ctx;
 }
 
-const COLORS: Record<Level, { ring: string; icon: typeof CheckCircle2; tint: string }> = {
-  info:    { ring: 'border-indigo-400/40 bg-indigo-500/10',  icon: Info,         tint: 'text-indigo-300' },
-  success: { ring: 'border-emerald-400/40 bg-emerald-500/10', icon: CheckCircle2, tint: 'text-emerald-300' },
-  warn:    { ring: 'border-amber-400/40 bg-amber-500/10',    icon: AlertTriangle,tint: 'text-amber-300' },
-  error:   { ring: 'border-rose-400/40 bg-rose-500/10',      icon: XCircle,      tint: 'text-rose-300' },
+// `wash` is the glass tint — the level's colour through frosted glass —
+// so a toast still says success or danger at a glance. Data colours, kept.
+const COLORS: Record<Level, { ring: string; wash: string; icon: typeof CheckCircle2; tint: string }> = {
+  info:    { ring: 'border-indigo-400/40',  wash: 'bg-indigo-500/25',  icon: Info,         tint: 'text-indigo-300' },
+  success: { ring: 'border-emerald-400/40', wash: 'bg-emerald-500/25', icon: CheckCircle2, tint: 'text-emerald-300' },
+  warn:    { ring: 'border-amber-400/40',   wash: 'bg-amber-500/25',   icon: AlertTriangle,tint: 'text-amber-300' },
+  error:   { ring: 'border-rose-400/40',    wash: 'bg-rose-500/25',    icon: XCircle,      tint: 'text-rose-300' },
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -84,9 +87,12 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           const c = COLORS[t.level];
           const Icon = c.icon;
           return (
-            <div
+            <LiquidGlass
               key={t.id}
-              className={`pointer-events-auto animate-pop-in flex items-start gap-3 rounded-xl border ${c.ring} px-3 py-2.5 backdrop-blur-md shadow-krypt-card`}
+              surface="sheet"
+              tint={c.wash}
+              display="flex"
+              className={`pointer-events-auto animate-pop-in items-start gap-3 rounded-xl border ${c.ring} px-3 py-2.5`}
             >
               <Icon className={`h-5 w-5 flex-shrink-0 mt-0.5 ${c.tint}`} />
               <div className="flex-1 text-sm text-white/95 leading-snug">{t.message}</div>
@@ -96,7 +102,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               >
                 <X className="h-4 w-4" />
               </button>
-            </div>
+            </LiquidGlass>
           );
         })}
       </div>

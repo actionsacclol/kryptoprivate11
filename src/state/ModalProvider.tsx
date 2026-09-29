@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { LiquidGlass } from '../components/LiquidGlass';
 
 // ──────────────────────────────────────────────────────────────────────
 // In-app modal system. Required because Electron disables window.prompt,
@@ -119,19 +120,22 @@ export function ModalProvider({ children }: { children: React.ReactNode }) {
     <Ctx.Provider value={api}>
       {children}
       {top && (
+        /* The scrim neither blurs nor fades. Either would make it the backdrop
+           root for the glass card inside it, which would then frost the scrim
+           — nothing — instead of the page. The card animates itself. */
         <div
-          className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/70 backdrop-blur-sm animate-fade-in"
+          className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/70"
           onClick={onConfirmNo}
           onKeyDown={(e) => {
             if (e.key === 'Escape') onConfirmNo();
           }}
         >
+          <LiquidGlass surface="sheet" className="w-full max-w-md rounded-2xl border border-white/10 animate-pop-in" onClick={(e) => e.stopPropagation()}>
           <div
             ref={boxRef}
             tabIndex={-1}
             data-modal=""
-            className="w-full max-w-md rounded-2xl border border-white/10 bg-krypt-panel p-6 shadow-krypt-card animate-pop-in outline-none"
-            onClick={(e) => e.stopPropagation()}
+            className="p-6 outline-none"
             onKeyDown={(e) => {
               if (top.kind !== 'confirm') return;
               if (e.key === 'Enter') { e.preventDefault(); onConfirmYes(); }
@@ -189,6 +193,7 @@ export function ModalProvider({ children }: { children: React.ReactNode }) {
               </button>
             </div>
           </div>
+          </LiquidGlass>
         </div>
       )}
     </Ctx.Provider>

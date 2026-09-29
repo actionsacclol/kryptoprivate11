@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, ExternalLink, Link2, Pencil, Plus, Trash2, Users } from 'lucide-react';
+import { LiquidGlass } from '../LiquidGlass';
 import { Card, GhostButton, PrimaryButton, Switch, TextInput } from '../common';
 import { useModal } from '../../state/ModalProvider';
 import { useToast } from '../../state/ToastProvider';
@@ -241,7 +242,7 @@ export function ProfileBadge({ onManage }: { onManage?: () => void }) {
         {view.current.name}
       </button>
       {open && (
-        <div className="absolute right-0 z-50 mt-1 w-60 rounded-lg border border-white/12 bg-krypt-void p-1 shadow-xl">
+        <LiquidGlass surface="sheet" className="absolute right-0 z-50 mt-1 w-60 rounded-lg border border-white/12 p-1">
           {view.profiles.map((p) => (
             <button
               key={p.id}
@@ -267,7 +268,7 @@ export function ProfileBadge({ onManage }: { onManage?: () => void }) {
               Manage profiles…
             </button>
           )}
-        </div>
+        </LiquidGlass>
       )}
     </div>
   );

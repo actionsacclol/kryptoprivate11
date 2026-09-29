@@ -7,6 +7,7 @@
 
 import { useEffect, useState } from 'react';
 import { Check, Coins, ExternalLink, RefreshCw } from 'lucide-react';
+import { LiquidGlass } from './LiquidGlass';
 import { KRYPTO_TOKEN, KRYPTO_HOLDER_TOKENS, kryptoDisclosure, kryptoPumpUrl, kryptoTokenLive } from '@shared/krypto';
 import type { TokenSummary } from '@shared/market';
 import { cls } from '../utils/format';
@@ -79,7 +80,7 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
   );
 
   return (
-    <section className="mt-10 rounded-xl border border-krypt-purple/30 bg-krypt-panel p-5 shadow-krypt-card">
+    <LiquidGlass surface="tile" className="mt-10 rounded-xl border border-krypt-purple/30 p-5">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <span className="rounded-lg border border-krypt-purple/30 bg-krypt-purple/10 p-2 text-krypt-pink">
@@ -184,6 +185,6 @@ export function KryptoCard({ onOpenToken }: { onOpenToken: (mint: string) => voi
           {scanning ? 'Scanning…' : 'Scan'}
         </button>
       </div>
-    </section>
+    </LiquidGlass>
   );
 }

@@ -3,6 +3,7 @@
 // maps to real engine data; nothing is decorative-only.
 
 import { AnimatePresence, motion } from 'framer-motion';
+import { LiquidGlass } from './LiquidGlass';
 import { Ban, X } from 'lucide-react';
 import type { LaunchRow } from '@shared/types';
 import { useAppState } from '../state/AppStateProvider';
@@ -76,7 +77,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.18 }}
-            className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]"
+            className="fixed inset-0 z-40 bg-black/50"
             onClick={onClose}
           />
           <motion.aside
@@ -85,10 +86,11 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
             animate={{ x: 0 }}
             exit={{ x: 420 }}
             transition={{ type: 'tween', duration: 0.22, ease: 'easeOut' }}
-            className="fixed right-0 top-0 bottom-0 z-50 w-[400px] border-l border-white/10 bg-krypt-panel/95 backdrop-blur-md shadow-krypt-card flex flex-col"
+            className="fixed right-0 top-0 bottom-0 z-50 flex w-[400px]"
             role="dialog"
             aria-label="Token divination"
           >
+            <LiquidGlass surface="sheet" display="flex" className="min-w-0 flex-1 flex-col border-l border-white/10">
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
               <div>
                 <div className="font-display text-label uppercase tracking-eyebrow text-arc-gold/80">Token Divination</div>
@@ -215,6 +217,7 @@ export function TokenDrawer({ launch, onClose }: { launch: LaunchRow | null; onC
                 </div>
               </div>
             </div>
+            </LiquidGlass>
           </motion.aside>
         </>
       )}

@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   Wallet as WalletIcon,
   Zap, PlayCircle } from 'lucide-react';
+import { LiquidGlass } from './LiquidGlass';
 import { feePctLabel, referralProblem, TREASURY_ADDRESS } from '@shared/fees';
 import { KRYPTO_HOLDER_TOKENS, KRYPTO_TOKEN } from '@shared/krypto';
 import { CLICKWRAP_SUMMARY, ALL_DOCUMENTS, type LegalDocument } from '@shared/legal/documents';
@@ -307,8 +308,12 @@ export function Onboarding({
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-sm p-6">
-      <div ref={boxRef} tabIndex={-1} className="w-full max-w-xl rounded-lg border border-white/10 bg-krypt-panel shadow-2xl outline-none">
+    // The scrim dims and nothing more: a scrim that blurs is a backdrop root,
+    // and the glass card above it would then frost the scrim instead of the
+    // page. The card does its own frosting.
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6">
+      <LiquidGlass surface="sheet" className="w-full max-w-xl rounded-lg border border-white/10">
+      <div ref={boxRef} tabIndex={-1} className="outline-none">
         <div className="px-6 pt-6 pb-4 border-b border-white/10 flex items-end gap-3">
           <div className="flex-1">
             <div className="font-display text-body tracking-eyebrow text-arc-gold/80">WELCOME TO</div>
@@ -656,6 +661,7 @@ export function Onboarding({
           </>
         )}
       </div>
+      </LiquidGlass>
     </div>
   );
 }

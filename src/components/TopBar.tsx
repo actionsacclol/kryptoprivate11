@@ -48,7 +48,7 @@ function ChainSwitch() {
 
   if (segments.length < 2) return null;
   return (
-    <div className="inline-flex rounded-lg border border-white/12 overflow-hidden text-label font-bold uppercase tracking-label">
+    <div className="glass-btn inline-flex rounded-lg border border-white/12 text-label font-bold uppercase tracking-label">
       {segments.map((c) => (
         <button
           key={c}
@@ -128,7 +128,7 @@ function ModeToggle() {
 
   return (
     <div
-      className="inline-flex rounded-lg border border-white/12 overflow-hidden text-label font-bold uppercase tracking-label"
+      className="glass-btn inline-flex rounded-lg border border-white/12 text-label font-bold uppercase tracking-label"
       title={evmLoading ? `Reading the ${CHAIN_LABEL[chain]} rail…` : `Paper / Live for ${CHAIN_LABEL[chain]} — each chain is armed on its own`}
     >
       <button
@@ -247,7 +247,10 @@ export function TopBar({ search, onOpenAutomation, onOpenRunners, onOpenProfiles
   const recentRunners = runners.filter((r) => Date.now() - r.flaggedAt < 3_600_000).length;
 
   return (
-    <div className="flex items-center justify-between gap-4 px-5 py-2.5 border-b border-white/10 bg-krypt-void/95">
+    // `.glass-chrome`: a lit top edge on the same dark fill, no filter. The
+    // frame is on screen for the life of the app, and a frosted bar over the
+    // backdrop looked worse than this one (user, 2026-09-28).
+    <div className="glass-chrome flex items-center justify-between gap-4 px-5 py-2.5 border-b border-white/10 bg-krypt-void/95">
       <div className="flex items-center gap-2.5">
         {/* The way back, on every page. The sidebar has one too; this is the
             one a user finds without looking for it. */}

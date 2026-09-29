@@ -12,6 +12,7 @@
 
 import { useEffect, useState } from 'react';
 import { BookOpen, Bot, Compass, Cpu, Gauge, LayoutGrid, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, ZapOff, type LucideIcon } from 'lucide-react';
+import { LiquidGlass } from '../components/LiquidGlass';
 import { WORKSPACES, type WorkspaceId, type WorkspaceSpec } from '../workspaces';
 import { useAppState } from '../state/AppStateProvider';
 import { useToast } from '../state/ToastProvider';
@@ -165,11 +166,19 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
           const Icon = ICONS[w.icon];
           const st = statusFor(w);
           return (
-            <button
+            // A lens over the full-strength backdrop — the one place the
+            // liquid-metal sheet is meant to be looked at, so the tile's tint
+            // is light and the field moves through it. The button fills the
+            // glass rather than being it: the library renders a div.
+            <LiquidGlass
               key={w.id}
+              surface="tile"
+              className="group rounded-xl border border-white/10 transition hover:border-krypt-purple/50 hover:shadow-krypt-glow"
+            >
+            <button
               onClick={() => w.ready && onOpen(w.id)}
               disabled={!w.ready}
-              className="group flex flex-col items-start gap-3 rounded-xl border border-white/10 bg-krypt-panel p-5 text-left shadow-krypt-card transition hover:border-krypt-purple/50 hover:shadow-krypt-glow disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex h-full w-full flex-col items-start gap-3 rounded-xl p-5 text-left disabled:cursor-not-allowed disabled:opacity-50"
             >
               <div className="flex w-full items-start justify-between">
                 <span className="rounded-lg border border-white/10 bg-white/5 p-2 text-krypt-pink">
@@ -198,6 +207,7 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
                 <div className="mt-1 text-note leading-relaxed text-krypt-muted">{w.blurb}</div>
               </div>
             </button>
+            </LiquidGlass>
           );
         })}
       </div>
@@ -207,6 +217,12 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
 
       {/* Bottom right, fixed: findable from the first screen without knowing
           Settings exists. It says what it will do, not just "performance". */}
+      <LiquidGlass
+        surface="tile"
+        className={`fixed bottom-4 right-4 z-20 rounded-full border transition ${
+          lite ? 'border-emerald-400/30 hover:border-emerald-400/60' : 'border-white/10 hover:border-krypt-purple/50'
+        }`}
+      >
       <button
         onClick={() => void toggleLite()}
         disabled={liteBusy}
@@ -215,15 +231,14 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
             ? 'Lite mode is on: no animations, blur or 3D scenes. Click to turn effects back on. Also in Settings › Display.'
             : 'Slow or stuttering? Lite mode turns off every animation, blur and the 3D scenes so the app is as light as it gets. Also in Settings › Display.'
         }
-        className={`fixed bottom-4 right-4 z-20 flex items-center gap-2 rounded-full border px-3 py-1.5 text-body transition disabled:opacity-50 ${
-          lite
-            ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200 hover:border-emerald-400/60'
-            : 'border-white/10 bg-krypt-panel text-krypt-muted hover:border-krypt-purple/50 hover:text-white'
+        className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-body transition disabled:opacity-50 ${
+          lite ? 'bg-emerald-400/10 text-emerald-200' : 'text-krypt-muted hover:text-white'
         }`}
       >
         {lite ? <ZapOff className="h-3.5 w-3.5" /> : <Gauge className="h-3.5 w-3.5" />}
         {lite ? 'Lite mode on' : 'Laggy? Lite mode'}
       </button>
+      </LiquidGlass>
 
       {/* The tutorial, opposite its sibling. Bottom LEFT so the two corners
           read as a pair without crowding each other, and on the first screen
@@ -232,14 +247,16 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
           `openExternal` through main, never a bare href: the renderer must not
           navigate — guardWebContents would refuse it anyway — and a link that
           silently does nothing is worse than no link. */}
+      <LiquidGlass surface="tile" className="fixed bottom-4 left-4 z-20 rounded-full border border-white/10 transition hover:border-krypt-purple/50">
       <button
         onClick={() => void window.krypt.app.openExternal(TUTORIAL_URL)}
         title="Watch the tutorial on YouTube — opens in your browser"
-        className="fixed bottom-4 left-4 z-20 flex items-center gap-2 rounded-full border border-white/10 bg-krypt-panel px-3 py-1.5 text-body text-krypt-muted transition hover:border-krypt-purple/50 hover:text-white"
+        className="flex items-center gap-2 rounded-full px-3 py-1.5 text-body text-krypt-muted transition hover:text-white"
       >
         <PlayCircle className="h-3.5 w-3.5" />
         Tutorial
       </button>
+      </LiquidGlass>
     </div>
   );
 }

@@ -277,6 +277,39 @@ export function Execution() {
 
       <Section title="Landing configuration" description="How the trades you place are priced and sent.">
         <div className="grid lg:grid-cols-2 gap-3">
+          {/* The fee mode (2026-09-29). Without it the priority fee could not
+              be lowered at all: every trade paid at least 0.001 SOL to buy and
+              0.002 to sell, whatever the urgency below said. */}
+          <div className="rounded-lg border border-white/10 bg-black/25 p-3 lg:col-span-2">
+            <div className="mb-2 flex items-baseline gap-2">
+              <span className="text-value font-semibold text-white">Fee mode</span>
+              <span className="text-body text-krypt-muted">trades you place by hand</span>
+            </div>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {(
+                [
+                  ['fast', 'Fast (default)', 'Pays to land first: at least 0.001 SOL priority on a buy and 0.002 on a sell (more if the urgency below prices higher), plus the tips above. For entries that race, and exits that must not wait.'],
+                  ['lean', 'Lean', 'Pays the live market rate with no floor and no tips — about 0.00001 SOL a side. Lands in seconds rather than the first slot. A sell that fails is retried once in Fast. Urgency and tips below do not apply.'],
+                ] as const
+              ).map(([lane, label, desc]) => (
+                <button
+                  key={lane}
+                  onClick={() => void updateSettings({ execution: { ...e, feeLane: lane } })}
+                  className={cls(
+                    'rounded-md border px-3 py-2 text-left transition',
+                    (e.feeLane ?? 'fast') === lane ? 'border-krypt-purple/60 bg-krypt-purple/15' : 'border-white/10 bg-white/[0.02] hover:border-white/20',
+                  )}
+                >
+                  <div className={cls('text-note font-semibold', (e.feeLane ?? 'fast') === lane ? 'text-white' : 'text-krypt-muted')}>{label}</div>
+                  <div className="mt-0.5 text-label leading-relaxed text-krypt-muted/80">{desc}</div>
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">
+              Stops, take-profits, copy trading and auto-exits always use Fast. Scripts choose per trade with{' '}
+              <span className="font-mono">{"{ lane: 'lean' }"}</span>.
+            </p>
+          </div>
           <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
             <div className="text-sm font-semibold text-white mb-2">Fee urgency</div>
             <div className="flex gap-1.5">

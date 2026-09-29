@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ExternalLink, Loader2, Search, X } from 'lucide-react';
+import { LiquidGlass } from '../LiquidGlass';
 import { ATTRIBUTION, GIF_LABEL, GIF_PROVIDERS, KEY_URL, type GifProvider } from '@shared/gifs';
 import { cls } from '../../utils/format';
 import { useToast } from '../../state/ToastProvider';
@@ -67,8 +68,8 @@ export function GifPicker({ onPick, onClose }: { onPick: (dataUrl: string) => vo
   const needsKey = problem?.includes('key is set');
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-6 backdrop-blur-sm" onClick={onClose}>
-      <div className="plate w-full max-w-2xl animate-pop-in rounded-xl p-4" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-6" onClick={onClose}>
+      <LiquidGlass surface="sheet" className="plate w-full max-w-2xl animate-pop-in rounded-xl p-4" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center gap-2">
           <h3 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted">
             Background GIF
@@ -166,7 +167,7 @@ export function GifPicker({ onPick, onClose }: { onPick: (dataUrl: string) => vo
             </div>
           </>
         )}
-      </div>
+      </LiquidGlass>
     </div>
   );
 }

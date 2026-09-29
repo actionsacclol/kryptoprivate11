@@ -376,5 +376,7 @@
  "node test/pricesource.test.mjs",
  "esbuild electron/engine/engine.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.engine.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.engine.test.mjs",
  "esbuild shared/types.ts --bundle --format=esm --platform=node --outfile=test/.sharedtypes.mjs",
- "node test/migratedprice.test.mjs"
+ "node test/migratedprice.test.mjs",
+ "esbuild src/state/glass.ts --bundle --format=esm --platform=node --alias:@shared=./shared --outfile=test/.glass.mjs",
+ "node test/glass.test.mjs"
 ]

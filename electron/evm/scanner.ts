@@ -198,6 +198,9 @@ export interface ScannerHost {
    * sees the call on the same launch the flag was made on.
    */
   onLaunchWindow?(chain: EvmChainKind, launch: EvmScanLaunch): void;
+  /** A runner call was just flagged on this chain — scripts on the chain hear
+   *  it as their `runner` event (2026-09-29). */
+  onRunner?(chain: EvmChainKind, flag: EvmRunnerFlag, launch: EvmScanLaunch): void;
   /** Desktop notification, through the engine's own switch and chat push.
    *  `target` says what it is ABOUT: the click opens that token, and a
    *  Discord webhook for the chain links to it. */
@@ -780,6 +783,13 @@ function closeWindows(chain: EvmChainKind): void {
             detail: call.detail,
           });
           if (st.flagged.length > EVM_RUNNER_FLAG_CAP) st.flagged.length = EVM_RUNNER_FLAG_CAP;
+          // Scripts on this chain hear the flag. Fenced like the window hook:
+          // a throwing consumer never stops the scanner.
+          try {
+            host?.onRunner?.(chain, st.flagged[0], tr.launch);
+          } catch (e) {
+            host?.log('warn', `${chain} runner hook failed: ${(e as Error).message}`);
+          }
         }
         // The FILTER is a second, separate question from the measurement
         // above: the call is recorded either way, and only the notification

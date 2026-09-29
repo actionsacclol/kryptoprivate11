@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { LayoutGrid, PanelLeft, X } from 'lucide-react';
+import { LiquidGlass } from '../components/LiquidGlass';
 import { PanelGrid } from '../components/PanelGrid';
 import { PANELS, DEFAULT_ENABLED, PanelActionsContext } from '../panels/registry';
 import { ChainFilter, PanelChainContext, loadChainFilter, storeChainFilter, type ChainFilterValue } from '../panels/chainFilter';
@@ -154,8 +155,9 @@ function Picker({
     <div
       ref={panelRef}
       style={{ position: 'fixed', top: pos.top, right: pos.right, maxHeight: pos.maxHeight }}
-      className="z-50 flex w-80 flex-col overflow-hidden rounded-xl border border-white/10 bg-krypt-panel shadow-krypt-card"
+      className="z-50 flex w-80"
     >
+    <LiquidGlass surface="sheet" display="flex" className="min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/10">
       <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-3 py-2">
         <span className="text-label uppercase tracking-label text-krypt-muted/70">{title}</span>
         <button onClick={onClose} className="text-krypt-muted transition hover:text-white" aria-label="Close">
@@ -163,6 +165,7 @@ function Picker({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2">{children}</div>
+    </LiquidGlass>
     </div>,
     document.body,
   );

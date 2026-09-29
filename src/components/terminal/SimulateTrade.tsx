@@ -12,6 +12,7 @@
 
 import { useMemo, useState } from 'react';
 import { Clapperboard, Image as ImageIcon, Wand2, X } from 'lucide-react';
+import { LiquidGlass } from '../LiquidGlass';
 import type { Candle } from '@shared/market';
 import type { ClosedTrade } from '@shared/portfolio';
 import { DEFAULT_SIM, simulateTrade, type SimShape } from '@shared/simTrade';
@@ -75,8 +76,8 @@ export function SimulateTrade({
   const up = trade.pnlSol >= 0;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm" onClick={onClose}>
-      <div className="plate w-full max-w-lg animate-pop-in rounded-xl p-4" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={onClose}>
+      <LiquidGlass surface="sheet" className="plate w-full max-w-lg animate-pop-in rounded-xl p-4" onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center gap-2">
           <h3 className="font-display text-body font-semibold uppercase tracking-heading text-krypt-muted">
             Simulate a trade
@@ -186,7 +187,7 @@ export function SimulateTrade({
           </button>
           <span className="font-mono text-body text-krypt-muted">{candles.length} candles</span>
         </div>
-      </div>
+      </LiquidGlass>
     </div>
   );
 }

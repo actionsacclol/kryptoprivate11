@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { accent } from '../../state/theme';
 import { Image as ImageIcon, Loader2, Play, RotateCcw, Sparkles, Video, Volume2, VolumeX, X } from 'lucide-react';
+import { LiquidGlass } from '../LiquidGlass';
 import type { Candle, CandleInterval, CandleSeries } from '@shared/market';
 import type { IpcResult } from '@shared/types';
 import type { ClosedTrade } from '@shared/portfolio';
@@ -572,8 +573,9 @@ export function TradeReplay({
   const ready = !!candles && candles.length >= 3;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-6 backdrop-blur-sm" onClick={onClose}>
-      <div
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-6" onClick={onClose}>
+      <LiquidGlass
+        surface="sheet"
         className={cls('plate relative w-full animate-pop-in rounded-xl p-4', shape === 'tall' ? 'max-w-md' : 'max-w-4xl')}
         onClick={(e) => e.stopPropagation()}
       >
@@ -755,7 +757,7 @@ export function TradeReplay({
             </span>
           </div>
         )}
-      </div>
+      </LiquidGlass>
     </div>
   );
 }
