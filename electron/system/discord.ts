@@ -37,6 +37,21 @@ let retry: NodeJS.Timeout | null = null;
  */
 const RETRY_MS = 30_000;
 
+/**
+ * discord-rpc's destroy() is async: with Discord not running its pipe is
+ * null, and close() rejects "Cannot read properties of null (reading
+ * 'write')". A try/catch around the call never saw it, so every 30 s retry
+ * raised an unhandledRejection (user report 09-30; crash file 09-25).
+ */
+function destroyQuietly(c: RPC.Client | null): void {
+  if (!c) return;
+  try {
+    void Promise.resolve(c.destroy()).catch(() => undefined);
+  } catch {
+    /* a synchronous throw: already gone */
+  }
+}
+
 function scheduleRetry(): void {
   if (retry || !desired) return;
   retry = setTimeout(() => {
@@ -56,11 +71,7 @@ export async function startDiscordRpc(): Promise<void> {
     return;
   }
   // A previous attempt may have left a client behind; never stack them.
-  try {
-    client?.destroy();
-  } catch {
-    /* ignore */
-  }
+  destroyQuietly(client);
   client = null;
   try {
     const c = new RPC.Client({ transport: 'ipc' });
@@ -87,11 +98,7 @@ export async function startDiscordRpc(): Promise<void> {
     // the fact from the app log.
     logger.info(`discord presence: not connected (${(err as Error)?.message ?? 'no reason given'}) — retrying in 30s`);
     connected = false;
-    try {
-      client?.destroy();
-    } catch {
-      /* ignore */
-    }
+    destroyQuietly(client);
     client = null;
     scheduleRetry();
   }
@@ -103,11 +110,7 @@ export function stopDiscordRpc(): void {
     clearTimeout(retry);
     retry = null;
   }
-  try {
-    client?.destroy();
-  } catch {
-    /* ignore */
-  }
+  destroyQuietly(client);
   client = null;
   connected = false;
   last = null;

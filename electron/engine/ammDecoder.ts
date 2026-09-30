@@ -283,6 +283,39 @@ export function executedPriceSol(e: AmmSwapEvent, baseDecimals = 6): number {
   return (Number(e.userQuoteAmount) / Number(e.baseAmount)) * scale;
 }
 
+/** A swap as the COIN sees it: price in SOL per whole token, the side from
+ *  the coin's point of view, SOL and tokens moved. */
+export interface CoinSwapView {
+  priceSol: number;
+  isBuy: boolean;
+  sol: number;
+  tokens: number;
+}
+
+/** A coin/WSOL pool (every graduation pool): base = the coin. */
+export function coinSwapView(e: AmmSwapEvent, baseDecimals = 6): CoinSwapView {
+  return {
+    priceSol: executedPriceSol(e, baseDecimals),
+    isBuy: e.isBuy,
+    sol: Number(e.quoteAmount) / 1e9,
+    tokens: Number(e.baseAmount) / 10 ** baseDecimals,
+  };
+}
+
+/**
+ * A WSOL/coin pool (base = WSOL, quote = the coin), which anyone can create on
+ * PumpSwap. Its event is upside down for a coin: `baseAmount` is lamports,
+ * the quote amounts are tokens, and "buy" buys SOL — a SELL of the coin.
+ * Priced from what the user actually moved (net tokens, the SOL leg), the
+ * same basis as executedPriceSol. User report 09-30: read the right way up,
+ * DiR577… showed $1,223.62 a token.
+ */
+export function invertedSwapView(e: AmmSwapEvent, tokenDecimals = 6): CoinSwapView {
+  const sol = Number(e.baseAmount) / 1e9;
+  const tokens = Number(e.userQuoteAmount) / 10 ** tokenDecimals;
+  return { priceSol: tokens > 0 ? sol / tokens : 0, isBuy: !e.isBuy, sol, tokens };
+}
+
 const PROGRAM_DATA_PREFIX = 'Program data: ';
 
 export interface DecodedAmmLogs {

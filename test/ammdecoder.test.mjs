@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { decodeAmmEvent, decodeAmmLogs, decodeAmmEventEx, poolPriceSol, executedPriceSol } from './.ammdecoder.mjs';
+import { decodeAmmEvent, decodeAmmLogs, decodeAmmEventEx, poolPriceSol, executedPriceSol, coinSwapView, invertedSwapView } from './.ammdecoder.mjs';
 
 function disc(name) {
   return createHash('sha256').update(`event:${name}`).digest().subarray(0, 8);
@@ -257,6 +257,26 @@ const sell = decodeAmmEvent(REAL_SELL);
   });
   assert.equal(decodeCpiAmmEventData(Buffer.alloc(20)), null, 'not a wrapper → null');
   console.log(`ok  emit_cpi twin decodes ${swaps.length} pAMM swap(s) equal to the log copy (real fixture; ${nonWrapper} non-event inner ix ignored)`);
+}
+
+{
+  // A WSOL/coin pool (09-30, DiR577… on 3Wjc3cFv…): base = WSOL, quote = the
+  // coin. Numbers from a real swap there: 0.0104 SOL for 87,180 tokens at a
+  // true 1.193e-7 SOL each. Read as coin/WSOL it priced 8.38 SOL a token —
+  // the "$1,223.62, $1,223.62B cap" the user saw.
+  const e = { kind: 'amm_swap', isBuy: false, baseAmount: 10_400_000n, quoteAmount: 87_180_000_000n, userQuoteAmount: 87_180_000_000n };
+  const wrong = executedPriceSol(e);
+  assert.ok(wrong > 8 && wrong < 9, 'the old reading is the upside-down one');
+  const v = invertedSwapView(e, 6);
+  assert.ok(Math.abs(v.priceSol / 1.193e-7 - 1) < 0.01, `right way up: ${v.priceSol}`);
+  assert.equal(v.isBuy, true, 'selling base (SOL) for quote (the coin) is a BUY of the coin');
+  assert.equal(v.sol, 0.0104);
+  assert.equal(v.tokens, 87_180);
+  // A normal coin/WSOL pool is unchanged by the view.
+  const n = { kind: 'amm_swap', isBuy: true, baseAmount: 1_000_000_000n, quoteAmount: 400_000n, userQuoteAmount: 410_000n };
+  assert.equal(coinSwapView(n).priceSol, executedPriceSol(n));
+  assert.equal(coinSwapView(n).isBuy, true);
+  console.log('ok  a WSOL/coin pool is read the right way up (inverted view)');
 }
 
 console.log('\nall amm decoder tests passed');

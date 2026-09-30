@@ -1707,10 +1707,15 @@ async function buildSummary(mint: string, build: BuildOptions = { identity: true
   // The chain overrides everything it can answer. (For a pump coin this is
   // a cache hit: the reader above seeded the mint's facts from the batch.)
   const facts = await onchain.mintFacts(c.httpUrl(), mint);
-  if (facts.checked && facts.uiSupply !== null) {
-    s.totalSupply = facts.uiSupply;
+  const chainSupply = facts.checked && facts.uiSupply !== null && facts.uiSupply > 0 ? facts.uiSupply : null;
+  if (chainSupply !== null) {
+    s.totalSupply = chainSupply;
     s.decimals = facts.decimals ?? s.decimals;
-    if (s.circSupply === null) s.circSupply = facts.uiSupply;
+    // Circulating can never exceed what exists on chain (09-30): a coin that
+    // was not a pump launch, or one whose supply was burned, used to keep the
+    // pump default of 1,000,000,000 (or a provider's figure) — DiR577… has
+    // 30.8M tokens and showed a cap ~32x too high.
+    if (s.circSupply === null || s.circSupply > chainSupply * 1.001) s.circSupply = chainSupply;
   }
 
   if (s.priceSol === null && s.priceUsd !== null && solUsd) s.priceSol = s.priceUsd / solUsd;
@@ -1718,6 +1723,17 @@ async function buildSummary(mint: string, build: BuildOptions = { identity: true
   if (s.marketCapUsd === null && s.priceUsd !== null && s.circSupply !== null) {
     s.marketCapUsd = s.priceUsd * s.circSupply;
     s.sources.marketCap = 'derived';
+  }
+  // A provider's cap above price × every token that exists is impossible —
+  // it was computed on a supply the chain does not have (DexScreener and
+  // Jupiter assume 1B for pump-pool coins). Recomputed from the chain.
+  if (chainSupply !== null && s.priceUsd !== null && s.priceUsd > 0) {
+    const ceiling = s.priceUsd * chainSupply * 1.05;
+    if (s.marketCapUsd !== null && s.marketCapUsd > ceiling && s.circSupply !== null) {
+      s.marketCapUsd = s.priceUsd * s.circSupply;
+      s.sources.marketCap = 'derived';
+    }
+    if (s.fdvUsd !== null && s.fdvUsd > ceiling) s.fdvUsd = s.priceUsd * chainSupply;
   }
   s.kryptScore = quickScore(s);
   return localise(s);
@@ -2541,7 +2557,7 @@ const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
  * still hold. Costs 1-2 pump.fun calls plus one RPC batch, memoised for 45s,
  * and shares that cache with the security report.
  */
-export async function launchIntel(mint: string): Promise<LaunchIntelReport> {
+export async function launchIntel(mint: string, hint?: { createdAt: number | null; creator: string | null }): Promise<LaunchIntelReport> {
   const c = need();
   if (!usable('pumpswap')) {
     return {
@@ -2556,7 +2572,7 @@ export async function launchIntel(mint: string): Promise<LaunchIntelReport> {
       generatedAt: Date.now(),
     };
   }
-  return li.launchIntel(mint, c.httpUrl());
+  return li.launchIntel(mint, c.httpUrl(), hint);
 }
 
 /** A creator's pump.fun track record. Null when unknown or switched off. */

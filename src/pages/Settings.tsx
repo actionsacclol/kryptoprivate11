@@ -18,6 +18,7 @@ import { ThemePicker } from '../components/ThemePicker';
 import { useLocale } from '../state/useLocale';
 import { useKryptoWaiver } from '../state/useKryptoWaiver';
 import type { RecorderStats } from '../../electron/engine/recorder';
+import { HeliusOnlyFeedSwitch } from '../components/HeliusOnlyFeedSwitch';
 
 // Measured 2026-08-30 by replaying E:/data/2026-07-25.jsonl (a 10 GB, 18.6 h
 // firehose day) through the launch filter: 9.3 % of the bytes kept, 1.2 GB/day
@@ -260,6 +261,9 @@ export function SettingsPage({ onNavigate }: { onNavigate?: (r: RouteId) => void
                 label="Helius feed socket"
                 description="Adds the Helius websocket to the racing pool. MEASURED over 45s on the pump firehose: Helius delivered 92% of events FIRST, with the free sockets a median 150ms (mainnet-beta) and 578ms (publicnode) behind — decisive for sniping. It also costs ~800k credits/day at firehose rates, so it is a paid-plan switch, not a free-tier one."
               />
+              <div className="mt-2">
+                <HeliusOnlyFeedSwitch />
+              </div>
             </div>
           </div>
           <div>

@@ -1001,7 +1001,9 @@ async function bootstrap(): Promise<void> {
   };
   getEngine().disableHeliusFeed = () => {
     const cur = store.load();
-    store.update({ rpc: { ...cur.rpc, heliusFeedSocket: false } });
+    // Helius-only goes back to the public sockets too: with the budget spent
+    // it would otherwise keep billing the key it was cut off for.
+    store.update({ rpc: { ...cur.rpc, heliusFeedSocket: false, heliusOnlyFeed: false } });
   };
   // Reuse any pump account-layout template learned by a previous run — see
   // txBuilder.ts. Learning it costs ~200 RPC reads a free endpoint will not serve.

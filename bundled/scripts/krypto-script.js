@@ -78,6 +78,21 @@
 // rides the price: expect ~$0.30 of a $1.50 bag to go, the cost of 10 more
 // minutes on the feed. 0 turns it off. A creator sell still sells it all.
 //
+// v2.9.1 (09-29): pump.fun's creator list is rate-limited for minutes at a
+// time; a flag whose creator record could not be read was skipped for good
+// (34 of 225 flags in 3 h on 09-29). Now it is watched like any other and the
+// record is asked for again at the confirm, every 30 s; the buy still needs a
+// readable record under "Max creator launches". Unknown never buys.
+//
+// v2.9.2 (09-30): take-profits and the stop sell through the SCRIPT on the
+// lean lane by default ("Take-profits and stop sell through"). App orders sell
+// on the fast lane at 0.002 SOL each — ~18 % of a 0.011 SOL bag per exit on the
+// 09-29 night, and one stop sold for less than its own fee. Defaults moved to
+// the old run's volume: links none, rising minutes 0, ladder 1.5x/50 % then
+// 3x/50 % (at least 12 of 43 calls reached 1.5x within 15 min; only 2 reached
+// 2x within 5). Measured 09-28: a stop does not help (none −22.8 % vs −40 %
+// stop −23.9 %) and a 5 min hold beats 15 (−21.6 % vs −24.7 %).
+//
 /* @inputs
 {
   "curve": {
@@ -186,7 +201,7 @@
     "type": "select",
     "label": "Links required",
     "options": ["X and website", "X only", "X or website", "none"],
-    "default": "X and website",
+    "default": "none",
     "help": "A website counts only as a homepage on a host that is not a social, chart, launchpad or search site. Picks WHICH coins get called, not whether they pay (09-29: both links -25% a trade, no rule -21%)."
   },
 
@@ -217,8 +232,16 @@
   "takeProfitLadder": {
     "type": "lines",
     "label": "Take-profit ladder",
-    "default": ["2x sell 50%", "4x sell 50%"],
+    "default": ["1.5x sell 50%", "3x sell 50%"],
     "help": "One rung per line: '<multiple>x sell <percent>%'. The multiple is of your fill price; the percent is of what is STILL held when it fires, so rungs compound (2x 50% then 4x 50% banks ~75% of the bag and leaves ~25% riding). Up to 6 rungs, lowest first. Measured 09-24: 2x/50% banks about the whole cost, so the call is free from there. A line that does not read is skipped; no readable rung = this default."
+  },
+
+  "exitLane": {
+    "type": "select",
+    "label": "Take-profits and stop sell through",
+    "options": ["the script, lean lane (cheap)", "app orders (fast lane)"],
+    "default": "the script, lean lane (cheap)",
+    "help": "App orders pay the fast lane: 0.002 SOL a sell, ~18% of a 0.011 SOL bag (09-29 fills). The script watches the price and sells each rung itself for ~0.00002 SOL."
   },
 
   "stopLossPct": {
@@ -309,7 +332,7 @@
   "confirmRisingMins": {
     "type": "number",
     "label": "Confirm only after this many rising minutes in a row",
-    "default": 2,
+    "default": 0,
     "min": 0,
     "max": 5,
     "help": "Each of the last N minute closes above the one before. 0 = off."
@@ -1483,11 +1506,15 @@ function passesDevLocal(t, max) {
   const prior = typeof t.creatorPriorLaunches === 'number' ? t.creatorPriorLaunches : null;
   const rugs = typeof t.creatorPriorRugs === 'number' ? t.creatorPriorRugs : null;
   const flags = (Array.isArray(t.riskFlags) ? t.riskFlags : []).filter((f) => /creator/i.test(String(f)));
-  if (prior === null) return skip(t, 'dev', 'creator record unknown (pump.fun parked, and this app has no record of the creator)');
+  // v2.9.1 (09-29): an unreadable record is no longer a verdict at the flag.
+  // pump's creator list parks for minutes; the watch lasts 30. 'later' =
+  // watch it, ask pump again at the confirm, and buy only on a readable
+  // record (devRecheck). 34 flags in 3 h were thrown away here on 09-29.
+  if (prior === null) return 'later';
   // v2.6: "0 prior launches seen" is what a factory the app has never
   // watched looks like too. On 09-28 nearly every buy passed on this line
   // while pump's record was parked; unknown does not pass.
-  if (prior === 0) return skip(t, 'dev', 'creator record unknown (pump.fun parked, and this app has never seen the creator before)');
+  if (prior === 0) return 'later';
   if (rugs !== null && rugs > 0) return skip(t, 'dev', `creator rugged ${rugs} coin${rugs === 1 ? '' : 's'} this app saw (pump.fun record unavailable)`);
   if (flags.length) return skip(t, 'dev', `creator risk flag ${flags.join(', ')} (pump.fun record unavailable)`);
   if (prior + 1 > max) return skip(t, 'dev', `creator has ${prior + 1}+ launches this app saw > ${max} (pump.fun record unavailable)`);
@@ -1964,7 +1991,7 @@ function watchDrop(w, why, counted) {
 }
 
 /** Start watching a flag. False when it cannot be watched (no price). */
-function watchStart(t) {
+function watchStart(t, devLater = false) {
   if (watchers.has(t.mint)) return false;
   const px0 = t.priceSol;
   if (!(typeof px0 === 'number' && px0 > 0)) {
@@ -1993,6 +2020,8 @@ function watchStart(t) {
     mcPerPx: typeof mc === 'number' && mc > 0 ? mc / px0 : null,
     // v2.5: false = the flag had no cap, so the ceiling is applied at confirm.
     capAtFlag: typeof mc === 'number' && mc > 0,
+    // v2.9.1: the creator record was unreadable at the flag (devRecheck).
+    devLater,
     fresh: false
   });
   bot.subscribe(t.mint).catch(() => null);
@@ -2049,7 +2078,41 @@ function watchVerdict(w) {
  * Confirmed: last checks, then the same buy + queued call as scorenow.v2.
  * The watcher is removed first — one shot per coin, whatever happens.
  */
+/**
+ * v2.9.1: the flag could not read the creator's record. Ask pump again now
+ * (at most every 30 s). Unknown still never buys: the coin stays watched and
+ * is judged again, and expires as usual if the record never comes back.
+ */
+async function devRecheck(w, v) {
+  const max = bot.input.maxDevLaunches ?? 0;
+  if (max <= 0 || typeof bot.creator !== 'function') {
+    w.devLater = false;
+    return true;
+  }
+  const now = bot.now();
+  if (now < (w.devNext ?? 0)) return false;
+  w.devNext = now + 30_000;
+  const d = await devLookup(w.mint, w.at);
+  if (!watchers.has(w.mint)) return false; // expired or confirmed meanwhile
+  if (!d) {
+    if (!w.devWarned) {
+      w.devWarned = true;
+      bot.log(`not calling ${NAME(w.sym, w.mint)} yet: confirmed at +${v.i}m, but pump.fun's creator record is still unreadable — asking again every 30 s`);
+    }
+    w.fresh = true; // the rule is judged again on the next tick or pass
+    return false;
+  }
+  w.devLater = false;
+  if (d.n > max) {
+    scoreVerdict(w.mint, 'dev');
+    watchDrop(w, `confirmed at +${v.i}m, but the creator has ${d.n}${d.truncated ? '+' : ''} launches > ${max}`, true);
+    return false;
+  }
+  return true;
+}
+
 async function watchConfirm(w, v, src) {
+  if (w.devLater && !(await devRecheck(w, v))) return;
   watchers.delete(w.mint);
   const t = await WITHIN(bot.token(w.mint), 5000);
   // v2.3: the curve finished while we watched. What the watch measured was
@@ -2123,7 +2186,9 @@ function packWatch() {
     w.mint, w.at, P4(w.px0), P4(w.hi), w.m, P4(w.last),
     w.mcPerPx ? Math.round(w.mcPerPx) : null, w.sym ? String(w.sym).slice(0, 10) : null,
     // v2.5: 0 = the flag had no cap (the ceiling applies at confirm).
-    w.capAtFlag === false ? 0 : 1
+    w.capAtFlag === false ? 0 : 1,
+    // v2.9.1: 1 = the creator record still has to be read before a buy.
+    w.devLater ? 1 : 0
   ]);
 }
 
@@ -2132,10 +2197,10 @@ function unpackWatch(st) {
   restoredWatch = true;
   for (const a of st.wat ?? []) {
     if (!Array.isArray(a) || watchers.has(a[0]) || !(a[2] > 0)) continue;
-    const [mint, at, px0, hi, m, last, mcPerPx, sym, capAtFlag] = a;
+    const [mint, at, px0, hi, m, last, mcPerPx, sym, capAtFlag, devLater] = a;
     // A row saved before v2.5 has no 9th field: read it as "cap known", so
     // no ceiling is applied at confirm that the flag never asked for.
-    watchers.set(mint, { mint, sym, name: null, at, px0, hi: hi ?? px0, last: last ?? px0, m: m ?? 0, cl: [], mcPerPx, capAtFlag: capAtFlag !== 0, fresh: false });
+    watchers.set(mint, { mint, sym, name: null, at, px0, hi: hi ?? px0, last: last ?? px0, m: m ?? 0, cl: [], mcPerPx, capAtFlag: capAtFlag !== 0, devLater: devLater === 1, fresh: false });
     bot.subscribe(mint).catch(() => null);
   }
 }
@@ -2143,7 +2208,11 @@ function unpackWatch(st) {
 /** Ticks of watched coins (held coins tick too — ignored here). */
 bot.on('tick', async (t) => {
   const w = watchers.get(t.mint);
-  if (!w) return;
+  if (!w) {
+    // A held bag (or a released moonbag): the lean exits (v2.9.2).
+    if (t.held === true || t.entryPriceSol > 0) await leanCheck(t.mint, t.priceSol, t.entryPriceSol);
+    return;
+  }
   watchNote(w, t.priceSol, bot.now());
   if (!w.fresh) return;
   w.fresh = false;
@@ -2342,7 +2411,8 @@ bot.on(
         }
       }
 
-      if (!(await passesDev(t))) {
+      const dev = await passesDev(t);
+      if (!dev) {
         return;
       }
 
@@ -2358,9 +2428,9 @@ bot.on(
 
       // scorenow.runner: no buy at the flag. The coin is WATCHED; the call and
       // the buy happen when the confirmation rule holds (watchCheck).
-      if (watchStart(t)) {
+      if (watchStart(t, dev === 'later')) {
         scoreVerdict(t.mint, 'watching');
-        bot.log(`watching ${NAME(t.symbol, t.mint)} for up to ${bot.input.watchMins} min`);
+        bot.log(`watching ${NAME(t.symbol, t.mint)} for up to ${bot.input.watchMins} min${dev === 'later' ? ' (pump.fun creator record unreadable — asked again before any buy)' : ''}`);
       }
 
     } finally {
@@ -2384,7 +2454,11 @@ bot.on(
  */
 bot.on('order', async (o) => {
   if (o.orderKind !== 'take_profit' || o.orderState !== 'filled') return;
+  await tookProfit(o);
+});
 
+/** A rung sold — by an app order, or by the script on the lean lane (v2.9.2). */
+async function tookProfit(o) {
   const st = await bot.getState();
   const hold = (st.holds ?? []).find((h) => h.mint === o.mint);
   // A released moonbag's rung still counts and still posts (09-27): its
@@ -2429,7 +2503,70 @@ bot.on('order', async (o) => {
       thumbnail: facts.image ? { url: facts.image } : undefined,
     });
   }, 'take-profit');
-});
+}
+
+// ─────────────────────────────────────────
+// v2.9.2 LEAN EXITS (09-30). App orders (stops, take-profits) always sell on
+// the FAST lane: 0.002 SOL a sell. On the 09-29 night that was ~18 % of a
+// 0.011 SOL bag per exit, and one stop sold for less than its own fee. With
+// "the script, lean lane" the script watches each bag's price itself (every
+// tick, and each pass as a fallback) and sells the rungs and the stop with
+// bot.sell({lane:'lean'}) — ~0.00002 SOL; a failed lean sell is retried on
+// the fast lane by the app. The multiple is price over hold.px0 (the price
+// read right after the fill), else the position's entry price.
+// ─────────────────────────────────────────
+const LEAN_EXITS = () => bot.input.exitLane !== 'app orders (fast lane)';
+const leanBusy = new Set();
+
+async function leanCheck(mint, px, entryPx) {
+  if (!LEAN_EXITS() || !(px > 0) || leanBusy.has(mint)) return;
+  leanBusy.add(mint);
+  try {
+    const st = await bot.getState();
+    const h = (st.holds ?? []).find((x) => x.mint === mint && !x.pending);
+    const rideInfo = !h ? st.ridLean?.[mint] ?? null : null;
+    if (!h && !rideInfo) return;
+    if (h && h.devSold) return; // the creator-sell exit owns it
+    const basis = (h ? h.px0 : rideInfo.px0) ?? (entryPx > 0 ? entryPx : null);
+    if (!(basis > 0)) return;
+    const mult = px / basis;
+
+    // The stop: main bags only, never a released moonbag (its stop was
+    // cancelled on purpose). Sells everything; the pass sees it gone.
+    const stopPct = bot.input.stopLossPct ?? 0;
+    if (h && stopPct > 0 && !h.leanStopped && mult <= 1 - stopPct / 100) {
+      const r = await WITHIN(bot.sell(mint, { pct: 100, lane: 'lean' }), 15_000);
+      if (r?.ok) {
+        const st2 = await bot.getState();
+        const h2 = (st2.holds ?? []).find((x) => x.mint === mint);
+        if (h2) h2.leanStopped = true;
+        await SAVE(st2);
+        bot.log(`stop −${stopPct}% sold ${NAME(h.symbol, mint)} at ${mult.toFixed(2)}x the fill (lean lane)`);
+      } else {
+        bot.warn(`lean stop on ${NAME(h.symbol, mint)} did not sell: ${r?.message ?? 'no answer'} — next tick tries again`);
+      }
+      return;
+    }
+
+    if (!bot.input.takeProfits) return;
+    const done = new Set(h ? h.leanTpDone ?? [] : rideInfo.done ?? []);
+    const rung = tpLadder().find((r) => !done.has(r.x) && mult >= r.x);
+    if (!rung) return;
+    const r = await WITHIN(bot.sell(mint, { pct: rung.sell, lane: 'lean' }), 15_000);
+    if (!r?.ok) {
+      bot.warn(`lean take-profit ${rung.x}x on ${NAME(h?.symbol ?? rideInfo.sym, mint)} did not sell: ${r?.message ?? 'no answer'}`);
+      return;
+    }
+    const st2 = await bot.getState();
+    const h2 = (st2.holds ?? []).find((x) => x.mint === mint);
+    if (h2) h2.leanTpDone = [...new Set([...(h2.leanTpDone ?? []), rung.x])];
+    else if (st2.ridLean?.[mint]) st2.ridLean[mint].done = [...new Set([...(st2.ridLean[mint].done ?? []), rung.x])];
+    await SAVE(st2);
+    await tookProfit({ mint, orderAmount: rung.sell, symbol: h?.symbol ?? rideInfo?.sym ?? null, name: h?.name ?? null });
+  } finally {
+    leanBusy.delete(mint);
+  }
+}
 
 
 /**
@@ -2741,7 +2878,17 @@ bot.every(
     const stopPct =
       bot.input.stopLossPct ?? 0;
 
-    if (stopPct > 0 && posOk && !late()) {
+    // v2.9.2: the lean lane checks the stop itself (leanCheck), every pass too.
+    if (LEAN_EXITS() && posOk && !late()) {
+      for (const h of st.holds ?? []) {
+        if (late()) break;
+        const p = heldMap.get(h.mint);
+        if (p && p.currentPriceSol > 0) await leanCheck(h.mint, p.currentPriceSol, p.entryPriceSol);
+      }
+      st = await bot.getState();
+    }
+
+    if (stopPct > 0 && posOk && !late() && !LEAN_EXITS()) {
       let touched = false;
 
       for (const h of st.holds ?? []) {
@@ -2780,7 +2927,7 @@ bot.every(
     // 0c. TAKE-PROFIT LADDER — same wait as the stop; up to 10 passes.
     // ─────────────────────────────────────────
 
-    if (bot.input.takeProfits && posOk && !late()) {
+    if (bot.input.takeProfits && posOk && !late() && !LEAN_EXITS()) {
       let touchedTp = false;
 
       for (const h of st.holds ?? []) {
@@ -2902,6 +3049,13 @@ bot.every(
           // the position is known to be up. Unknown or never-trimmed closes.
           // Never a moonbag once the creator sold (v2.2).
           if (tp && !h.devSold && h.tpFilled && p && typeof p.pnlPct === 'number' && p.pnlPct >= 0) {
+            // v2.9.2: on the lean lane the moonbag's remaining rungs are the
+            // script's to sell, so it keeps the fill price and the done rungs.
+            if (LEAN_EXITS()) {
+              st.ridLean = { ...(st.ridLean ?? {}), [h.mint]: { px0: h.px0 ?? p.entryPriceSol ?? null, done: h.leanTpDone ?? [], sym: h.symbol ?? null } };
+              const keys = Object.keys(st.ridLean);
+              if (keys.length > 30) delete st.ridLean[keys[0]];
+            }
             // Only the stop goes (09-27): the take-profit rungs stay armed on
             // the moonbag. REGULARS: the 2x rung filled at 12:52, this line
             // cancelled the 4x rung at 12:54, and the coin went on to a $1M

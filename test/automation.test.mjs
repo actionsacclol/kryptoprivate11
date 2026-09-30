@@ -3173,6 +3173,20 @@ test('new events: migration to every Solana script, devSell to holders and subsc
   assert.equal(named('migration').length, 1);
   assert.equal(named('migration')[0].payload.mint, MINT);
   assert.equal(named('migration')[0].payload.migrated, true);
+  // curveHigh (2026-09-30): each of 90/93/95/97 once per coin, held or not; under 90 silent.
+  auto.onCurveTrade(MINT2, 89.9, 3.9e-7);
+  auto.onCurveTrade(MINT2, 91.2, 3.95e-7);
+  auto.onCurveTrade(MINT2, 92, 3.96e-7);
+  await tick(30);
+  assert.equal(named('curveHigh').length, 1, 'under 90 is silent and a level fires once');
+  assert.equal(named('curveHigh')[0].payload.curveLevel, 90);
+  assert.equal(named('curveHigh')[0].payload.priceSol, 3.95e-7, 'the trade price, not a stale one');
+  auto.onCurveTrade(MINT2, 96.5, 4.05e-7); // jumps 93 and 95: the highest, once
+  auto.onCurveTrade(MINT2, 91, 3.9e-7);    // falling back never re-fires
+  await tick(30);
+  assert.equal(named('curveHigh').length, 2);
+  assert.equal(named('curveHigh')[1].payload.curveLevel, 95);
+  assert.equal(named('curveHigh')[1].payload.curvePct, 96.5);
   // Dev sell: not held, not subscribed → silence. Subscribed → heard, with what was sold.
   auto.onDevSell(MINT2, { sol: 1.5, tokens: 20_000_000, priceSol: 0.00000008 });
   await tick(30);
@@ -3239,7 +3253,7 @@ test('new events: migration to every Solana script, devSell to holders and subsc
   for (const e of SCRIPT_EVENTS) assert.ok(SCRIPT_EVENTS_DOC.some((d) => d.event === e), `${e} is documented`);
   for (const d of SCRIPT_EVENTS_DOC) assert.ok(SCRIPT_EVENTS.includes(d.event), `${d.event} exists`);
   const on = SCRIPT_API.find((a) => a.method === 'on');
-  for (const e of ['migration', 'devSell', 'holdings', 'copyFill', 'runnerExpired']) assert.ok(on.notes.includes(e), `bot.on lists ${e}`);
+  for (const e of ['migration', 'curveHigh', 'devSell', 'holdings', 'copyFill', 'runnerExpired']) assert.ok(on.notes.includes(e), `bot.on lists ${e}`);
 });
 
 await run();

@@ -14,6 +14,7 @@ import { motion } from 'framer-motion';
 import { Flame, Fuel, ShieldCheck, Zap } from 'lucide-react';
 import { Badge, Card, NumberInput, Page, Section, Switch } from '../components/common';
 import { useAppState } from '../state/AppStateProvider';
+import { HeliusOnlyFeedSwitch } from '../components/HeliusOnlyFeedSwitch';
 import type { ExecutionSnapshot, FeeUrgency } from '@shared/types';
 import { DEFAULT_RUNNER_ALERTS, RUNNER_BUCKET_LABEL, RUNNER_WINDOWS_LABEL, describeRunnerFilters } from '@shared/runners';
 import type { RunnerAlertSettings, RunnerBucketFloor, RunnerWindows } from '@shared/runners';
@@ -309,6 +310,12 @@ export function Execution() {
               Stops, take-profits, copy trading and auto-exits always use Fast. Scripts choose per trade with{' '}
               <span className="font-mono">{"{ lane: 'lean' }"}</span>.
             </p>
+          </div>
+          {/* The launch feed's sockets (2026-09-30) — the same switch as
+              Settings → Solana RPC, here because a dropping public socket
+              reads as a trading problem. */}
+          <div className="lg:col-span-2">
+            <HeliusOnlyFeedSwitch />
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
             <div className="text-sm font-semibold text-white mb-2">Fee urgency</div>

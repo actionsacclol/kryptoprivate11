@@ -132,6 +132,8 @@ export const SCRIPT_EVENTS = [
   // 2026-09-27: the engine's other moments, which scripts could only infer.
   /** A coin's curve completed and it migrated to a pool. */
   'migration',
+  /** A pump curve crossed 90 / 93 / 95 / 97 % on its way to completing (2026-09-30). */
+  'curveHigh',
   /** The creator wallet sold, on a coin the script holds or subscribed to. */
   'devSell',
   /** The trading wallet's token accounts changed. */

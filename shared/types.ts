@@ -122,6 +122,11 @@ export interface RpcSettings {
    *  hour at firehose rates (780k pushes/h measured), so the free tier's
    *  month lasts about two days of runtime; leave off unless on a paid plan. */
   heliusFeedSocket: boolean;
+  /** 2026-09-30: run every feed socket on the key's Helius socket ALONE — no
+   *  public WebSockets, no publicnode block standby (resolveRpc swaps them).
+   *  For a VPN / shared IP the free endpoints refuse. Ignored without a key.
+   *  Optional so settings written before it read as off. */
+  heliusOnlyFeed?: boolean;
   /**
    * Monthly Helius credit ceiling. The app meters websocket bytes (2 credits
    * per 0.1 MB) plus HTTP calls and turns the feed socket OFF by itself when
@@ -205,6 +210,13 @@ export function resolveRpc(rpc: RpcSettings): RpcSettings {
   // lie. Either way `execHttpUrl` is the one name the engine reads.
   const fast = (rpc.fastHttpUrl ?? '').trim();
   if (!key) return fast ? { ...rpc, execHttpUrl: fast } : rpc;
+  const heliusWss = `wss://mainnet.helius-rpc.com/?api-key=${key}`;
+  if (rpc.heliusOnlyFeed) {
+    // Every consumer reads [wssUrl, ...extraWssUrls] (the launch feed, the
+    // amm tape, the DBC / Raydium / LaunchLab / Boop watchers), and the block
+    // standby is its own switch — so these three fields are the whole of it.
+    return { ...rpc, wssUrl: heliusWss, extraWssUrls: [], blockFeed: false, blockFeedAmm: false, execHttpUrl: fast || `https://mainnet.helius-rpc.com/?api-key=${key}` };
+  }
   return {
     ...rpc,
     // Feed socket is opt-in: every WS push bills a credit, and the firehose
@@ -212,7 +224,7 @@ export function resolveRpc(rpc: RpcSettings): RpcSettings {
     // whole month evaporates in ~30h of runtime for a feed that public
     // sockets mostly cover anyway (racing pool dedupes across them).
     extraWssUrls: rpc.heliusFeedSocket
-      ? [...(rpc.extraWssUrls ?? []), `wss://mainnet.helius-rpc.com/?api-key=${key}`]
+      ? [...(rpc.extraWssUrls ?? []), heliusWss]
       : rpc.extraWssUrls,
     execHttpUrl: fast || `https://mainnet.helius-rpc.com/?api-key=${key}`,
   };
@@ -1072,6 +1084,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     heliusApiKey: '',
     fastHttpUrl: '',
     heliusFeedSocket: false,
+    heliusOnlyFeed: false,
     httpUrl: 'https://api.mainnet-beta.solana.com',
     commitment: 'processed',
     heliusMonthlyCredits: 1_000_000,

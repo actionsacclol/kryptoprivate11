@@ -25,7 +25,8 @@ import { canonicalPoolFor } from './pumpSwapBuilder';
 import { DipShadow } from './dipShadow';
 import { StratLab } from './stratLab';
 import { MigShadow } from './migShadow';
-import { decodeAmmEventEx, decodeCpiAmmEventData, executedPriceSol, PUMP_AMM_GLOBAL_CONFIG, type AmmEvent } from './ammDecoder';
+import { coinSwapView, decodeAmmEventEx, decodeCpiAmmEventData, executedPriceSol, invertedSwapView, PUMP_AMM_GLOBAL_CONFIG, type AmmEvent } from './ammDecoder';
+import { base58Encode } from '../chain/base58';
 import { fetchSocials, metadataLinksIfCached, type TokenSocials } from './metadata';
 import { decodeCpiEventData, decodeLogsEx, logsMentionPumpTrade, PUMP_PROGRAM_ID, type PumpCreateEvent, type PumpEvent, type PumpTradeEvent } from './pumpDecoder';
 import { staticChecks, checkMint, hasHardReject } from './risk';
@@ -577,7 +578,7 @@ export class SniperEngine {
         return out;
       },
       liveLaunch: (mint) => this.tokens.get(mint)?.row ?? null,
-      registerPool: (pool, mint) => this.rememberAmmPool(pool, mint),
+      registerPool: (pool, mint) => this.registerExternalPool(pool, mint),
       watchPumpMint: (mint) => this.watchPumpMint(mint),
       unwatchPumpMint: (mint) => this.unwatchPumpMint(mint),
       watchDbcPool: (mint, decimals, poolHint) => {
@@ -1068,7 +1069,11 @@ export class SniperEngine {
       launchIntel: async (mint, chain) => {
         if (chain && chain !== 'solana') return null;
         try {
-          return scriptLaunchIntelFromReport(await market.launchIntel(mint));
+          // The app's own record of the launch: the fallback's creation time
+          // when pump.fun is parked (09-30).
+          const row = this.tokens.get(mint)?.row;
+          const hint = row ? { createdAt: row.detectedAt ?? null, creator: row.creator ?? null } : undefined;
+          return scriptLaunchIntelFromReport(await market.launchIntel(mint, hint));
         } catch {
           return null;
         }
@@ -1262,7 +1267,7 @@ export class SniperEngine {
         this.scriptAiCache.set(mint, r.analysis);
         return r.analysis;
       },
-      positions: (mode, chain) => this.scriptPositions(mode, chain),
+      positions: (mode, chain, opts) => this.scriptPositions(mode, chain, opts),
       spentSolFor: (signatures) => {
         const d = ledger.cashDeltaFor(signatures);
         // Unknown is not zero: one unreconciled buy and the script's share
@@ -3404,7 +3409,7 @@ export class SniperEngine {
     return new Set(h.data.filter((x) => x.uiAmount > 0).map((x) => x.mint));
   }
 
-  private async scriptPositions(mode: 'paper' | 'live', chain: ChainKind = 'solana'): Promise<ScriptPosition[]> {
+  private async scriptPositions(mode: 'paper' | 'live', chain: ChainKind = 'solana', opts: { maxWaitMs?: number } = {}): Promise<ScriptPosition[]> {
     // A script sees ONLY its own chain's positions. Without this an EVM
     // script's "sell everything" enumerates Solana bags, and a Solana script
     // would count EVM ones against its open-position budget.
@@ -3458,7 +3463,7 @@ export class SniperEngine {
         return { mint: p.mint, symbol: p.symbol, name: '', openedAt: p.openedAt, costSol: p.costSol, tokens, entryPriceSol: entry, currentPriceSol: cur, peakPriceSol: null, pnlSol, pnlPct };
       });
     }
-    const h = await this.holdings();
+    const h = await this.holdingsWithin(opts.maxWaitMs);
     if (!h.ok || !h.data) return [];
     const basis = ledger.basisByMint(wallet.publicKey());
     const out: ScriptPosition[] = [];
@@ -4549,6 +4554,25 @@ export class SniperEngine {
     const p = this.readHoldings(owner);
     this.holdingsShared = { at: now, owner, p };
     return p;
+  }
+
+  /** A fresh holdings read, or — when one takes longer than maxWaitMs and a
+   *  read for this wallet is at most 60 s old — that last read. No wait given
+   *  = always the fresh read. */
+  private async holdingsWithin(maxWaitMs?: number): Promise<{ ok: boolean; message: string; data?: WalletHolding[] }> {
+    const fresh = this.holdings();
+    const owner = wallet.publicKey();
+    const lh = this.lastHoldings;
+    if (!maxWaitMs || !owner || !lh || lh.owner !== owner || Date.now() - lh.at > 60_000) return fresh;
+    let t: NodeJS.Timeout | undefined;
+    const cached = new Promise<{ ok: boolean; message: string; data?: WalletHolding[] }>((r) => {
+      t = setTimeout(() => r({ ok: true, message: 'cached', data: lh.data }), maxWaitMs);
+    });
+    try {
+      return await Promise.race([fresh, cached]);
+    } finally {
+      clearTimeout(t);
+    }
   }
 
   private async readHoldings(owner: string): Promise<{ ok: boolean; message: string; data?: WalletHolding[] }> {
@@ -5724,6 +5748,10 @@ export class SniperEngine {
       if (sAmm.shadowMigration) this.emitMigEvents(this.mig.onAmmSwap(event, n.receivedAt));
       const mint = this.ammPoolToMint.get(event.pool);
       if (mint === undefined) continue;
+      // The swap as seen from the COIN (09-30): a pool holding the coin on
+      // the quote side reports it upside down.
+      const inv = this.ammInvertedDecimals.get(event.pool);
+      const sw = inv === undefined ? coinSwapView(event) : invertedSwapView(event, inv);
       // The launch row follows the coin onto its pool (2026-09-27). Its
       // price used to stop at the last CURVE trade — the graduation price —
       // so every cheap read of a migrated coin (a script's bot.price and
@@ -5731,7 +5759,7 @@ export class SniperEngine {
       // the row lived.
       const tracked = this.tokens.get(mint);
       if (tracked) {
-        const px = executedPriceSol(event);
+        const px = sw.priceSol;
         if (Number.isFinite(px) && px > 0) {
           if (!tracked.curveComplete) this.markCurveComplete(tracked);
           tracked.row.priceSol = px;
@@ -5748,12 +5776,12 @@ export class SniperEngine {
         tape.record(mint, {
           at: n.receivedAt,
           wallet: event.user,
-          isBuy: event.isBuy,
-          sol: Number(event.quoteAmount) / 1e9,
-          tokens: Number(event.baseAmount) / 1e6,
-          priceSol: executedPriceSol(event),
+          isBuy: sw.isBuy,
+          sol: sw.sol,
+          tokens: sw.tokens,
+          priceSol: sw.priceSol,
         });
-        this.chartTicks.push(mint, n.receivedAt, executedPriceSol(event), Number(event.quoteAmount) / 1e9, event.isBuy);
+        this.chartTicks.push(mint, n.receivedAt, sw.priceSol, sw.sol, sw.isBuy);
       }
       // Orders on a graduated token evaluate at feed rate here, the way
       // curve trades do in onTrade. The 12 s poller is the floor that always
@@ -5761,7 +5789,7 @@ export class SniperEngine {
       // the session that watched the token migrate, and it is what keeps a
       // trailing stop's peak honest across the seam. Fenced like onTrade's.
       try {
-        const priceSol = executedPriceSol(event);
+        const priceSol = sw.priceSol;
         if (Number.isFinite(priceSol) && priceSol > 0) {
           this.rememberPrice(mint, priceSol);
           advOrders.onTick({ mint, priceSol, mcapUsd: null });
@@ -5772,7 +5800,7 @@ export class SniperEngine {
         this.noteEvalError('orders/alerts/copy', mint, err);
       }
       if (!sAmm.shadowStratLab) continue;
-      this.emitLabEvents(this.lab.onAmmTrade(mint, executedPriceSol(event), n.receivedAt));
+      this.emitLabEvents(this.lab.onAmmTrade(mint, sw.priceSol, n.receivedAt));
     }
   }
 
@@ -5781,6 +5809,53 @@ export class SniperEngine {
    *  only hold a mint it watched through the curve. */
   private ammPoolToMint = new Map<string, string>();
   private ammLayoutErrors = 0;
+
+  /**
+   * PumpSwap pools that hold the coin on the QUOTE side (base = WSOL): pool →
+   * the coin's decimals. A graduation pool is always coin/WSOL, but anyone can
+   * create a PumpSwap pool the other way round, and DexScreener lists those
+   * too. Reading such a pool's swaps as coin/WSOL inverts every price — user
+   * report 09-30: DiR577… showed $1,223.62 a token and a $1,223.62B cap.
+   */
+  private ammInvertedDecimals = new Map<string, number>();
+  private ammPoolChecks = new Set<string>();
+
+  /**
+   * A pool the market layer found (DexScreener, the token page). The
+   * canonical graduation pool is known to be coin/WSOL; any other is read
+   * once to learn which side the coin is on, and a pool that is not a SOL
+   * pair for this coin is never mapped (its swaps would price nothing).
+   */
+  private registerExternalPool(pool: string, mint: string): void {
+    if (this.ammPoolToMint.has(pool) || this.ammPoolChecks.has(pool)) return;
+    if (pool === canonicalPoolFor(mint)) {
+      this.rememberAmmPool(pool, mint);
+      return;
+    }
+    this.ammPoolChecks.add(pool);
+    const s = this.getSettings();
+    void getMultipleAccountInfo(s.rpc.httpUrl, [pool, mint], 'confirmed')
+      .then((r) => {
+        const p = r.ok && r.data ? r.data[0] : null;
+        const m = r.ok && r.data ? r.data[1] : null;
+        // pump-amm pool: 8 discriminator, bump u8, index u16, creator, base_mint, quote_mint.
+        if (!p || p.data.length < 107) return;
+        const base = base58Encode(p.data.subarray(43, 75));
+        const quote = base58Encode(p.data.subarray(75, 107));
+        if (base === mint && quote === SniperEngine.WSOL_MINT) {
+          this.rememberAmmPool(pool, mint);
+        } else if (quote === mint && base === SniperEngine.WSOL_MINT) {
+          // SPL / Token-2022 mint: decimals is the byte at offset 44.
+          const decimals = m && m.data.length > 44 ? m.data[44] : 6;
+          this.ammInvertedDecimals.set(pool, decimals);
+          if (this.ammInvertedDecimals.size > AMM_POOL_MAP_CAP) this.ammInvertedDecimals.delete(this.ammInvertedDecimals.keys().next().value as string);
+          this.rememberAmmPool(pool, mint);
+          this.log('info', `amm tape: pool ${pool.slice(0, 8)}… holds ${mint.slice(0, 8)}… on the quote side (WSOL/coin) — its swaps are read inverted`);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => this.ammPoolChecks.delete(pool));
+  }
 
   private rememberAmmPool(pool: string, mint: string): void {
     if (this.ammPoolToMint.has(pool)) return;
@@ -5879,6 +5954,12 @@ export class SniperEngine {
     // 30 minutes of each launch (launch mode) — see launchRecorder.ts. Gating
     // on recordFirehose here starved launch mode of every tape_* row.
     if (recorder.wantsTape()) this.recordTape(events, n);
+    // Scripts hear a curve crossing 90/93/95/97 % (curveHigh, 2026-09-30):
+    // every pump trade, tracked or not. automation returns at once when no
+    // script is enabled or the curve is under 90 %.
+    for (const ev of events) {
+      if (ev.kind === 'trade') automation.onCurveTrade(ev.mint, curveProgressPct(ev.virtualSolReserves), spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves));
+    }
 
     const s = this.getSettings();
     const dipOn = s.shadowDipBuy;

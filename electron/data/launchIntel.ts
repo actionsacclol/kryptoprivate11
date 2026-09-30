@@ -142,8 +142,8 @@ async function priceWallets(
  * a launch slot picked from the middle of a busy launch would produce
  * confident, wrong, unfalsifiable numbers.
  */
-export async function launchIntel(mint: string, httpUrl: string): Promise<LaunchIntelReport> {
-  const hit = await memo<LaunchIntelReport>(`li:${mint}`, TTL_MS, () => build(mint, httpUrl));
+export async function launchIntel(mint: string, httpUrl: string, hint?: { createdAt: number | null; creator: string | null }): Promise<LaunchIntelReport> {
+  const hit = await memo<LaunchIntelReport>(`li:${mint}`, TTL_MS, () => build(mint, httpUrl, hint));
   return hit ?? empty(mint, 'analysis failed');
 }
 
@@ -199,6 +199,9 @@ const coinForIntel = pf.coinForIntel;
 interface LocateOpts {
   buy?: boolean;
   hint?: { createdAt: number | null; creator: string | null };
+  /** When pump.fun's coin record cannot be bought (parked, rate-limited),
+   *  read the bonding curve from this RPC instead (2026-09-30). */
+  chainFallback?: string;
 }
 
 const CHAIN_COIN_TTL_MS = 30_000;
@@ -226,7 +229,20 @@ function coinFromChain(c: pumpChain.PumpChainCoin, hint: LocateOpts['hint']): pf
 async function coinFor(mint: string, opts: LocateOpts): Promise<pf.PumpCoin | null> {
   const known = pf.coinIdentityIfCached(mint) ?? cached<pf.PumpCoin>(`li:chaincoin:${mint}`);
   if (known) return known;
-  if (opts.buy !== false) return coinForIntel(mint);
+  if (opts.buy !== false) {
+    const c = await coinForIntel(mint);
+    if (c || !opts.chainFallback) return c;
+    // pump.fun did not answer — on a shared VPN IP it is parked for minutes
+    // at a time, and every script's launch intel read "not launched there"
+    // (user report 09-30). The curve account says the same thing from the
+    // chain: a pump launch, its creator, whether it completed. The creation
+    // time comes from the hint (the app's own feed saw the create event).
+    const chain = await pumpChain.read(opts.chainFallback, mint).catch(() => null);
+    if (!chain) return null;
+    const coin = coinFromChain(chain, opts.hint);
+    putCache(`li:chaincoin:${mint}`, coin, CHAIN_COIN_TTL_MS);
+    return coin;
+  }
   const chain = pumpChain.readIfCached(mint);
   if (!chain) return null;
   const coin = coinFromChain(chain, opts.hint);
@@ -239,7 +255,9 @@ async function locate(mint: string, opts: LocateOpts = {}): Promise<{ located: L
   if (!coin) {
     return {
       located: null,
-      note: 'Launch analysis covers pump.fun mints. This token was not launched there, or pump.fun does not index it.',
+      note: opts.chainFallback
+        ? 'Launch analysis covers pump.fun mints. pump.fun did not return this coin and the chain shows no pump.fun bonding curve for it (or the RPC read failed).'
+        : 'Launch analysis covers pump.fun mints. This token was not launched there, or pump.fun does not index it.',
     };
   }
   // pump.fun indexes mints it did NOT launch — USDC comes back as
@@ -254,7 +272,14 @@ async function locate(mint: string, opts: LocateOpts = {}): Promise<{ located: L
     };
   }
   const createdAt = typeof coin.created_timestamp === 'number' ? coin.created_timestamp : null;
-  if (createdAt === null) return { located: null, note: 'pump.fun did not report a creation time for this mint.' };
+  if (createdAt === null) {
+    return {
+      located: null,
+      note: opts.chainFallback
+        ? 'pump.fun did not answer (it may be rate-limiting this connection) and this app did not see the launch itself, so the launch time is unknown. Try again in a few minutes.'
+        : 'pump.fun did not report a creation time for this mint.',
+    };
+  }
   const creator = typeof coin.creator === 'string' && coin.creator ? coin.creator : null;
   return { located: { coin, creator, createdAt }, note: '' };
 }
@@ -266,8 +291,8 @@ function launchScan(mint: string, createdAt: number): Promise<ps.LaunchScan> {
   );
 }
 
-async function build(mint: string, httpUrl: string): Promise<LaunchIntelReport> {
-  const { located, note } = await locate(mint);
+async function build(mint: string, httpUrl: string, hint?: { createdAt: number | null; creator: string | null }): Promise<LaunchIntelReport> {
+  const { located, note } = await locate(mint, { hint, chainFallback: httpUrl });
   if (!located) return empty(mint, note);
   const { coin, creator, createdAt } = located;
 

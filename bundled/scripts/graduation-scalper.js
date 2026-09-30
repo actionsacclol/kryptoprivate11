@@ -1,4 +1,27 @@
-// Graduation Scalper — buy a pump.fun coin the moment its pool starts printing, sell into the first minutes.
+// Graduation Scalper — hold a pump.fun coin through its graduation and sell into the pool's first seconds.
+//
+// v2.0 (09-30) FINISHER MODE, the default. Why it changed:
+//   • The v1 entry (buy the pool's first print, sell later) was re-tested on
+//     156 fresh graduations (09-26..29): −3 % to −5 % a trade at every delay
+//     and hold tried, CI below zero; runner-flagged only −4 % to −6 % (n 54).
+//   • Three quarters of graduations are completed by one bundle and open
+//     ~10x above the seed. The rest sit at 95 %+ for a while (median 14 s)
+//     and their pool opens AT the seed, then rises: 1.07x at 8–12 s after the
+//     curve completes (118 held-out pools; 1.070x on the day it was found).
+//     Only a bag already held when the curve completes gets that.
+//   • So: buy on the curve when it first reaches the entry % (95), hold
+//     through graduation, sell ~8 s after the completion so the sell lands
+//     ~9–10 s in. A 20 % curve stop and a 60 min timer end coins that never
+//     finish. Held out at 0.5 SOL (owner, lean fees): +0.3 % [−6, +6] with no
+//     stop, +3 % with the stop (picked from ~1,000 cells: not proven).
+//     Selling at 1–6 s instead turned every cell negative. Paper fills have
+//     no latency — the GRAD row logs compMs (completion → sell sent) so the
+//     paper record can be checked against the window.
+//   • Needs an app with the curveHigh event (5.5.2+). On an older app the
+//     Finisher never hears a coin and buys nothing.
+// The v1 mode is still here ("the pool's first print").
+//
+// v1 notes follow.
 //
 // PAPER FIRST. This ships switched off and in paper mode, and it should stay
 // on paper until its own record says otherwise. What is known (09-28 tick
@@ -50,6 +73,59 @@
     "options": ["any classic pump coin", "runner-flagged coins only"],
     "default": "any classic pump coin",
     "help": "Every classic pump.fun graduation the app hears (10-15 an hour when busy), or only coins the scanner flagged as runners in the last two hours (a few a day; +1% on 20 held-out coins, too few to call)."
+  },
+
+  "entry": {
+    "type": "select",
+    "label": "When to buy",
+    "options": ["on the curve at the entry % (Finisher)", "the pool's first print (v1)"],
+    "default": "on the curve at the entry % (Finisher)",
+    "help": "Finisher: buy near the end of the curve, sell ~8 s after it completes (the only held-out cell at or above 0). v1: buy the pool's first print (−3..−5 % on 156 fresh graduations)."
+  },
+
+  "curveEntryPct": {
+    "type": "number",
+    "label": "Finisher: buy when the curve first reaches (%)",
+    "default": 95,
+    "min": 90,
+    "max": 97,
+    "step": 1,
+    "help": "The app announces 90 / 93 / 95 / 97. 95 was chosen on 09-16; 97 looked better held out but was picked after looking. A coin sits at 95 %+ a median 14 s before it completes."
+  },
+
+  "sellAfterGradSecs": {
+    "type": "number",
+    "label": "Finisher: sell this long after the curve completes (seconds)",
+    "default": 8,
+    "min": 3,
+    "max": 60,
+    "help": "The pop peaks 8–12 s after completion and is flat before ~6 s; a sell landing at 1–6 s lost in every cell. The sell takes ~1.5 s to land, so 8 lands ~9.5 s in."
+  },
+
+  "curveStopPct": {
+    "type": "number",
+    "label": "Finisher: stop on the curve (% under the fill)",
+    "default": 20,
+    "min": 0,
+    "max": 60,
+    "help": "Coins that reach 95 % and then fall back are the loss side. 20 % turned −0.7 % into +3 % held out (selection-exposed). 0 = off."
+  },
+
+  "curveMaxMins": {
+    "type": "number",
+    "label": "Finisher: give up on the curve after (minutes)",
+    "default": 60,
+    "min": 1,
+    "max": 240,
+    "help": "Sold at this age if the curve never completes."
+  },
+
+  "lane": {
+    "type": "select",
+    "label": "Fee lane (buy and timed sell)",
+    "options": ["lean", "fast"],
+    "default": "lean",
+    "help": "lean ~0.00001 SOL a side, landing speed unmeasured; fast pays the 0.001/0.002 floors + tips (2-4 % of a 0.1 SOL trade). Stops and creator-sell exits always go fast."
   },
 
   "buySol": {
@@ -121,10 +197,10 @@
   "maxOpen": {
     "type": "number",
     "label": "Most coins held or awaited at once",
-    "default": 1,
+    "default": 2,
     "min": 1,
     "max": 5,
-    "help": "A coin counts from its migration until it is sold or skipped. The script budget's open-positions cap applies on top."
+    "help": "A coin counts from its buy (Finisher) or migration (v1) until it is sold or skipped. The script budget's open-positions cap applies on top."
   },
 
   "maxBuysPerHour": {
@@ -238,6 +314,8 @@ const FLAG_TTL_MS = 2 * 3600_000;
 const LOG_MAX = 380;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+const FINISHER = () => bot.input.entry !== "the pool's first print (v1)";
+const LANE = () => (bot.input.lane === 'fast' ? 'fast' : 'lean');
 const NAME = (sym, mint) => (sym ? `${sym} (${mint})` : mint);
 const R3 = (v) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 1000) / 1000 : null);
 const R4 = (v) => (typeof v === 'number' && Number.isFinite(v) ? Number(v.toPrecision(4)) : null);
@@ -365,6 +443,8 @@ const deciding = new Set();
 bot.on('migration', async (t) => {
   if (!t || typeof t.mint !== 'string' || t.migrated !== true) return;
   const mint = t.mint;
+  if (await graduated(mint)) return;
+  if (FINISHER()) return;
   if (deciding.has(mint)) return;
   deciding.add(mint);
   try {
@@ -417,6 +497,84 @@ async function decide(t, mint) {
   bot.log(`migration: ${NAME(sym, mint)} completed at ${R4(seedPx)} SOL — awaiting the pool's first print`);
 }
 
+// ── Finisher: buy on the curve, sell into the pool's first seconds ──────
+bot.on('curveHigh', async (t) => {
+  if (!FINISHER() || !t || typeof t.mint !== 'string') return;
+  if (!(NUM(t.curvePct, 0) >= NUM(bot.input.curveEntryPct, 95))) return;
+  const mint = t.mint;
+  if (deciding.has(mint)) return;
+  deciding.add(mint);
+  try {
+    await decideCurve(t, mint);
+  } finally {
+    deciding.delete(mint);
+  }
+});
+
+async function decideCurve(t, mint) {
+  const sym = t.symbol || null;
+  const now = bot.now();
+  const st = await STATE();
+  if (st.seen.includes(mint) || st.holds.some((h) => h.mint === mint)) return;
+  st.seen.push(mint);
+  const decline = async (why, detail) => {
+    skip(mint, sym, why, detail);
+    st.tally.skipped += 1;
+    await SAVE(st);
+  };
+  if (!/pump$/.test(mint)) return decline('not-pump', 'not a pump.fun coin');
+  // A mayhem curve's percentage is not a completion measure; unknown never buys.
+  if (t.isMayhem !== false) return decline(t.isMayhem ? 'mayhem' : 'unknown-curve', t.isMayhem ? 'a mayhem-mode curve' : 'cannot tell a classic curve from a mayhem one');
+  if (bot.input.which === 'runner-flagged coins only') {
+    let hit = isFlagged(mint);
+    if (!hit) {
+      const list = (await WITHIN(bot.runners(), 3000)) ?? null;
+      if (Array.isArray(list)) for (const r of list) { noteFlag(r?.mint); if (r?.mint === mint) hit = true; }
+    }
+    if (!hit) return decline('not-flagged', 'the scanner never flagged it as a runner');
+  }
+  if (bot.input.skipIfDevSold !== false && t.creatorSold === true) return decline('dev-sold', 'the creator has already sold');
+  const maxOpen = NUM(bot.input.maxOpen, 2);
+  if (st.holds.length + st.watching.length >= maxOpen) return decline('slots-full', `${maxOpen} coin(s) already held`);
+  const cutoff = now - 3600_000;
+  st.hourBuys = st.hourBuys.filter((x) => x > cutoff);
+  if (st.hourBuys.length >= NUM(bot.input.maxBuysPerHour, 12)) return decline('hourly-cap', `${st.hourBuys.length} buys in the last hour`);
+  const px = NUM(t.priceSol, 0);
+  if (!(px > 0)) return decline('no-price', 'no curve price on the event');
+  await WITHIN(bot.subscribe(mint), 3000).catch(() => undefined);
+  bot.log(`curve ${R3(t.curvePct)}%: ${NAME(sym, mint)} at ${R4(px)} SOL — buying before it completes`);
+  await enter(st, { mint, sym, seedPx: CLASSIC_GRAD_PX, firstPx: null, firstAt: null }, px, { fin: true, entryPct: NUM(t.curvePct, null) });
+}
+
+/**
+ * A Finisher bag's curve completed (the migration event arrives at the
+ * completion). The sell is timed from here, on its own timer — the 5 s pass
+ * is too coarse for a 4 s window; the pass is the fallback. True when the
+ * mint was a held Finisher bag.
+ */
+async function graduated(mint) {
+  const st = await STATE();
+  const h = st.holds.find((x) => x.mint === mint && x.phase === 'curve');
+  if (!h) return false;
+  const now = bot.now();
+  const wait = NUM(bot.input.sellAfterGradSecs, 8) * 1000;
+  h.phase = 'pool';
+  h.compAt = now;
+  h.sellAt = now + wait;
+  await SAVE(st);
+  bot.log(`${NAME(h.sym, h.mint)} completed its curve — selling into the pool in ${wait / 1000} s`);
+  setTimeout(() => { timedGradSell(mint).catch((e) => bot.warn(`timed sell: ${e?.message ?? e}`)); }, wait);
+  return true;
+}
+
+async function timedGradSell(mint) {
+  const st = await STATE();
+  const h = st.holds.find((x) => x.mint === mint && x.phase === 'pool');
+  if (!h || h.pending || h.keepPhase) return; // pending: the 5 s pass sells it once the buy is adopted
+  const px = NUM(await WITHIN(bot.price(mint), 1500).catch(() => null), h.fillPx);
+  await exit(st, h, 'grad', px);
+}
+
 // ── 3-4. Ticks: the first pool print buys; a held bag checks its exits ───
 bot.on('tick', async (t) => {
   if (!t || typeof t.mint !== 'string') return;
@@ -451,6 +609,13 @@ bot.on('tick', async (t) => {
   const h = st.holds.find((x) => x.mint === t.mint);
   if (!h || h.pending) return;
   if (px > NUM(h.hiPx, 0)) h.hiPx = px;
+  if (h.phase === 'curve') {
+    const cs = NUM(bot.input.curveStopPct, 20);
+    if (cs > 0 && h.fillPx > 0 && px <= h.fillPx * (1 - cs / 100)) return exit(st, h, 'curve-stop', px);
+    await bot.setState(st);
+    return;
+  }
+  if (h.phase === 'pool') { await bot.setState(st); return; } // the graduation timer sells
   const tp = NUM(bot.input.takeProfitX, 1.2);
   const stop = NUM(bot.input.stopLossPct, 0);
   if (!h.keepPhase && h.fillPx > 0 && px >= h.fillPx * tp) return exit(st, h, 'tp', px);
@@ -459,7 +624,7 @@ bot.on('tick', async (t) => {
 });
 
 // ── The buy ─────────────────────────────────────────────────────────────
-async function enter(st, w, px) {
+async function enter(st, w, px, opt = {}) {
   const sol = NUM(bot.input.buySol, 0.1);
   const now = bot.now();
   const w0 = await WITHIN(bot.wallet(), 3000).catch(() => null);
@@ -473,8 +638,9 @@ async function enter(st, w, px) {
   }
   const h = {
     mint: w.mint, sym: w.sym, seedPx: w.seedPx, firstPx: w.firstPx, firstAt: w.firstAt,
-    fillPx: px, fillKnown: false, cost: sol, boughtAt: now, sellAt: now + NUM(bot.input.holdSecs, 180) * 1000,
+    fillPx: px, fillKnown: false, cost: sol, boughtAt: now, sellAt: now + holdMs(opt.fin),
     hiPx: px, tries: 0, pending: true, sellingAt: 0,
+    ...(opt.fin ? { phase: 'curve', entryPct: opt.entryPct ?? null } : {}),
   };
   st.watching = st.watching.filter((y) => y.mint !== w.mint);
   st.holds.push(h);
@@ -483,7 +649,7 @@ async function enter(st, w, px) {
 
   let r;
   try {
-    r = (await WITHIN(bot.buy(w.mint, sol), 15_000)) ?? { ok: false, landing: true, message: 'buy still landing after 15 s — adopted if it lands' };
+    r = (await WITHIN(bot.buy(w.mint, sol, { lane: LANE() }), 15_000)) ?? { ok: false, landing: true, message: 'buy still landing after 15 s — adopted if it lands' };
   } catch (e) {
     r = { ok: false, message: e?.message ?? String(e) };
   }
@@ -506,11 +672,17 @@ async function enter(st, w, px) {
   if (h2) {
     h2.pending = false;
     h2.boughtAt = bot.now();
-    h2.sellAt = h2.boughtAt + NUM(bot.input.holdSecs, 180) * 1000;
+    // A Finisher bag that graduated while the buy was landing keeps its graduation timer.
+    if (h2.phase !== 'pool') h2.sellAt = h2.boughtAt + holdMs(h2.phase === 'curve');
     if (bot.input.callouts !== false) h2.callAt = h2.boughtAt + BETWEEN(bot.input.callDelaySecs, [30, 45]) * 1000;
   }
   await SAVE(st2);
   bot.log(`bought ${sol} SOL of ${NAME(w.sym, w.mint)} at ~${R4(px)} SOL (${R3(w.seedPx ? px / w.seedPx : null)}x the seed, ${w.firstAt ? bot.now() - w.firstAt : '—'} ms after the first print): ${r.message}`);
+}
+
+/** The timed exit from the buy: v1's hold, or the Finisher's give-up age on the curve. */
+function holdMs(fin) {
+  return fin ? NUM(bot.input.curveMaxMins, 60) * 60_000 : NUM(bot.input.holdSecs, 180) * 1000;
 }
 
 // ── Callouts ────────────────────────────────────────────────────────────
@@ -631,7 +803,8 @@ async function exit(st, h, how, px) {
   if (!h.calledAt) h.callAt = null;
   let r;
   try {
-    r = (await WITHIN(bot.sell(h.mint, 100), 15_000)) ?? { ok: false, message: 'sell still landing after 15 s' };
+    const lane = how === 'grad' || how === 'time' || how === 'curve-time' ? LANE() : 'fast';
+    r = (await WITHIN(bot.sell(h.mint, { pct: 100, lane }), 15_000)) ?? { ok: false, message: 'sell still landing after 15 s' };
   } catch (e) {
     r = { ok: false, message: e?.message ?? String(e) };
   }
@@ -666,6 +839,9 @@ async function exit(st, h, how, px) {
   await WITHIN(bot.unsubscribe(h.mint), 2000).catch(() => undefined);
   logRow('GRAD ', {
     mint: h.mint, sym: h2.sym, how, secs,
+    mode: h2.phase ? 'fin' : 'v1', entryPct: h2.entryPct ?? null,
+    compMs: h2.compAt ? now - h2.compAt : null,
+    curveMs: h2.compAt && h2.boughtAt ? h2.compAt - h2.boughtAt : null,
     seed: R4(h2.seedPx), first: R4(h2.firstPx), fill: R4(h2.fillPx), exit: R4(px),
     xFirst: h2.seedPx && h2.firstPx ? R3(h2.firstPx / h2.seedPx) : null,
     xFill: h2.seedPx && h2.fillPx ? R3(h2.fillPx / h2.seedPx) : null,
@@ -741,7 +917,7 @@ bot.every(5, async () => {
       if (pos) {
         h.pending = false;
         h.boughtAt = h.boughtAt ?? started;
-        h.sellAt = h.boughtAt + NUM(bot.input.holdSecs, 180) * 1000;
+        if (h.phase !== 'pool') h.sellAt = h.boughtAt + holdMs(h.phase === 'curve');
         touched = true;
         bot.log(`${NAME(h.sym, h.mint)}: the buy landed (adopted)`);
       } else if (Array.isArray(positions) && started - h.boughtAt > PENDING_GRACE_MS) {
@@ -765,7 +941,7 @@ bot.every(5, async () => {
     }
     if (started >= h.sellAt) {
       const px = NUM(await WITHIN(bot.price(h.mint), 2000).catch(() => null), h.fillPx);
-      await exit(st, h, h.keepPhase ? 'keep-end' : 'time', px);
+      await exit(st, h, h.keepPhase ? 'keep-end' : h.phase === 'pool' ? 'grad' : h.phase === 'curve' ? 'curve-time' : 'time', px);
       return; // exit() saved
     }
   }
@@ -783,5 +959,5 @@ bot.every(5, async () => {
     if (Array.isArray(list)) for (const r of list) noteFlag(r?.mint);
   } catch { /* the list is optional */ }
   paint(st);
-  bot.log(`Graduation Scalper up: ${bot.input.which}, ${NUM(bot.input.buySol, 0.1)} SOL a trade, take ${NUM(bot.input.takeProfitX, 1.2)}x or sell at ${NUM(bot.input.holdSecs, 180)} s${NUM(bot.input.stopLossPct, 0) > 0 ? `, stop -${bot.input.stopLossPct}%` : ', no stop'}; ${st.holds.length} held, ${st.watching.length} awaited`);
+  bot.log(`Graduation Scalper up (${FINISHER() ? `Finisher: buy at ${NUM(bot.input.curveEntryPct, 95)}% curve, sell ${NUM(bot.input.sellAfterGradSecs, 8)} s after it completes, stop -${NUM(bot.input.curveStopPct, 20)}%` : 'v1: pool first print'}, ${LANE()} lane): ${bot.input.which}, ${NUM(bot.input.buySol, 0.1)} SOL a trade, take ${NUM(bot.input.takeProfitX, 1.2)}x or sell at ${NUM(bot.input.holdSecs, 180)} s${NUM(bot.input.stopLossPct, 0) > 0 ? `, stop -${bot.input.stopLossPct}%` : ', no stop'}; ${st.holds.length} held, ${st.watching.length} awaited`);
 }

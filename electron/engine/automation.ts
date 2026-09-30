@@ -259,7 +259,8 @@ export interface AutomationHost {
    *  throws with the reason when AI is off. Solana only. */
   analyze(mint: string, chain?: ChainKind): Promise<AiAnalysis>;
   /** Open positions in a mode. */
-  positions(mode: ScriptMode, chain?: ChainKind): Promise<ScriptPosition[]>;
+  /** maxWaitMs: answer from the last wallet read (≤ 60 s old) when a fresh one is slower than this — context reads only. */
+  positions(mode: ScriptMode, chain?: ChainKind, opts?: { maxWaitMs?: number }): Promise<ScriptPosition[]>;
   /** All-in SOL the chain says these buy signatures spent (fees and rent
    *  included, the same measure as a live position's `costSol`), or null
    *  when any of them is not reconciled yet. */
@@ -1165,12 +1166,17 @@ export function snapshot(withCode = true): ScriptSnapshot {
 
 /** The full honest view of a token for a script: launch feed, cached
  *  market facts, its position (if held in the script's mode), globals. */
+const CTX_POSITIONS_WAIT_MS = 1_500;
+
 async function ctxFor(s: UserScript, mint: string, base?: RuleContext): Promise<RuleContext> {
   const h = host;
   const now = Date.now();
   if (!h) return base ?? emptyContext(mint);
   const row = h.launch(mint);
-  const pos = (await h.positions(s.mode, scriptChain(s))).find((p) => p.mint === mint) ?? null;
+  // Context only, so a slow wallet read (a VPN, a 429ing endpoint) does not
+  // hold bot.token for 15 s: after 1.5 s the last read (≤ 60 s old) answers.
+  // Budget checks and sells still wait for a fresh read (user report 09-30).
+  const pos = (await h.positions(s.mode, scriptChain(s), { maxWaitMs: CTX_POSITIONS_WAIT_MS })).find((p) => p.mint === mint) ?? null;
   // A bag the user opened by hand still lends its name to the context — the
   // script can watch it and log about it — but it is not this script's
   // POSITION. `held` means "held by this script": that is what the field guide
@@ -3230,6 +3236,38 @@ export function onMigration(mint: string): void {
   // the launch context only carries the flag on runner events.
   const isMayhem = host.launchMayhem?.(mint) ?? null;
   toCodeScripts('migration', 'solana', async (s) => ({ ...(await ctxFor(s, mint)), migrated: true, isMayhem }));
+}
+
+/** The curve levels a script hears (curveHigh). Each fires once per coin. */
+export const CURVE_HIGH_LEVELS = [90, 93, 95, 97] as const;
+/** mint -> the highest level already announced. Bounded: oldest dropped. */
+const curveFired = new Map<string, number>();
+const CURVE_FIRED_CAP = 5_000;
+
+/**
+ * A pump trade moved a curve (every trade on the feed, tracked or not). The
+ * first time a coin reaches each of 90/93/95/97 %, every enabled Solana code
+ * script hears `curveHigh` — the coins that are about to complete, which a
+ * script could not see before (launchUpdate stops ~15 s after launch unless
+ * something holds the coin). A jump over several levels announces the
+ * highest once. Cheap on the hot path: two comparisons when nothing listens.
+ */
+export function onCurveTrade(mint: string, curvePct: number, priceSol: number): void {
+  if (!(curvePct >= CURVE_HIGH_LEVELS[0]) || !host) return;
+  if (!scripts.some((s) => s.enabled && s.kind === 'code')) return;
+  let level = 0;
+  for (const l of CURVE_HIGH_LEVELS) if (curvePct >= l) level = l;
+  const prev = curveFired.get(mint) ?? 0;
+  if (level <= prev) return;
+  curveFired.delete(mint);
+  curveFired.set(mint, level);
+  if (curveFired.size > CURVE_FIRED_CAP) curveFired.delete(curveFired.keys().next().value as string);
+  const isMayhem = host.launchMayhem?.(mint) ?? null;
+  const pct = Math.round(curvePct * 100) / 100;
+  toCodeScripts('curveHigh', 'solana', async (s) => {
+    const c = await ctxFor(s, mint);
+    return { ...c, curvePct: pct, curveLevel: level, priceSol: priceSol > 0 ? priceSol : c.priceSol, isMayhem };
+  });
 }
 
 /**

@@ -133,6 +133,8 @@ let churnBase = 0;
 /** Accounts the stubbed RPC serves for `getMultipleAccounts` (the chain
  *  reads behind the feed-sourced Discover rows). address → { owner, data }. */
 const liveAccounts = new Map();
+/** Per-mint raw supply for the `getAccountInfo` mint read (default 1e9 at 6 dp). */
+const mintSupplyRaw = new Map();
 /** Per-mint overrides for pump.fun's `/coins/{mint}` record (a record
  *  minutes young has no socials yet — the shape a runner flag meets). */
 const coinExtra = new Map();
@@ -158,7 +160,7 @@ function install() {
           const buf = Buffer.alloc(82);
           buf.writeUInt32LE(0, 0);
           buf.writeUInt8(6, 44);
-          buf.writeBigUInt64LE(1_000_000_000_000_000n, 36);
+          buf.writeBigUInt64LE(mintSupplyRaw.get(params?.[0]) ?? 1_000_000_000_000_000n, 36);
           buf.writeUInt32LE(0, 46);
           return {
             context: { slot: 1 },
@@ -953,6 +955,37 @@ test('a mint the app has never priced gets no invented bar (honest null)', async
   market.attach(liveCtx(seedLiveBooks(0))); // clears the chain accounts
   const blank = await market.candlesFast(liveMintFor(9_999), '1s', 500);
   assert.equal(blank.candles.length, 0, 'no price anywhere → no bar, just the loading placeholder');
+});
+
+// ── A coin whose chain supply is not pump's 1B (user report 09-30) ────
+//
+// DiR577… (not a pump launch, 30.8M tokens) showed a cap computed on 1B: the
+// providers assume pump's supply for anything on a pump pool, and the chain's
+// own supply only filled a MISSING figure. Circulating can never exceed what
+// exists, and a cap above price × every token is recomputed from the chain.
+test('the chain supply caps circulating supply and the market cap', async () => {
+  http.clearCache();
+  const mint = 'SupplyCap1111111111111111111111111111111111';
+  mintSupplyRaw.set(mint, 30_785_362_118_616n); // 30,785,362.118616 at 6 dp
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+    if (url.host === 'api.dexscreener.com' && url.pathname.includes(mint)) {
+      // What DexScreener reports for such a coin: a cap on 1B tokens.
+      return json({ pairs: [{ ...dsPair(mint, 0), priceUsd: '0.0000142', marketCap: 14200, fdv: 14200 }] });
+    }
+    return prev(input, init);
+  };
+  try {
+    const s = await market.summary(mint);
+    assert.ok(Math.abs(s.circSupply - 30_785_362.118616) < 1, `circulating from the chain, got ${s.circSupply}`);
+    assert.ok(s.marketCapUsd !== null && s.marketCapUsd < s.priceUsd * 1e8, `cap recomputed on 30.8M tokens, not 1B — got ${s.marketCapUsd} at ${s.priceUsd}`);
+    assert.ok(Math.abs(s.marketCapUsd - s.priceUsd * s.circSupply) < 1e-6, 'cap = price × circulating supply');
+    assert.equal(s.sources.marketCap, 'derived');
+  } finally {
+    globalThis.fetch = prev;
+    mintSupplyRaw.delete(mint);
+  }
 });
 
 // ── Go ────────────────────────────────────────────────────────────────

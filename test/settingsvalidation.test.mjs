@@ -477,6 +477,26 @@ console.log('settingsvalidation: all tests passed');
 }
 
 {
+  // Helius only (2026-09-30): every feed socket is the key's, nothing public.
+  const base = { ...DEFAULT_SETTINGS.rpc, heliusApiKey: 'KEY123456' };
+  const off = resolveRpc(base);
+  assert.equal(off.wssUrl, DEFAULT_SETTINGS.rpc.wssUrl, 'off = the public primary as before');
+  const only = resolveRpc({ ...base, heliusOnlyFeed: true, heliusFeedSocket: true, extraWssUrls: ['wss://solana-rpc.publicnode.com'] });
+  assert.equal(only.wssUrl, 'wss://mainnet.helius-rpc.com/?api-key=KEY123456');
+  assert.deepEqual(only.extraWssUrls, [], 'no public extras, and the Helius socket is not doubled');
+  assert.equal(only.blockFeed, false, 'the publicnode block standby is not opened');
+  assert.equal(only.blockFeedAmm, false);
+  assert.match(only.execHttpUrl, /helius-rpc.com/);
+  // No key: the switch does nothing (the UI disables it).
+  const nokey = resolveRpc({ ...DEFAULT_SETTINGS.rpc, heliusOnlyFeed: true });
+  assert.equal(nokey.wssUrl, DEFAULT_SETTINGS.rpc.wssUrl);
+  // The UI's payload validates, on and off.
+  assert.equal(v({ rpc: { ...DEFAULT_SETTINGS.rpc, heliusOnlyFeed: true } }).ok, true);
+  assert.equal(v({ rpc: { ...DEFAULT_SETTINGS.rpc, heliusOnlyFeed: false } }).ok, true);
+  console.log('ok  resolveRpc: Helius only swaps every feed socket for the key and drops the block standby');
+}
+
+{
   // The round-trip trap (2026-09-08): a RESOLVED rpc block must never be
   // persisted, so the derived field is not something the validator accepts.
   const resolved = resolveRpc({ ...DEFAULT_SETTINGS.rpc, heliusApiKey: 'KEY123456' });
