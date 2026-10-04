@@ -18,11 +18,15 @@
 //     coin grants no approval at all, so that vector does not exist here.
 //     Token bridging is a separate decision for another day.
 //
-//  2. NO PLATFORM FEE. Not generosity: a percentage cut on a cross-chain
-//     TRANSFER sits closer to "transfer services on behalf of clients" than a
-//     swap fee does, and this project's own earlier research already concluded
-//     a per-trade cut is the fact pattern a regulator points at. The user is
-//     also already paying LI.FI 0.25 % plus the bridge's own ~0.9 %.
+//  2. KRYPT'S FEE, SINCE 2026-10-01 (the owner's call). Until then there was
+//     none: a percentage cut on a cross-chain TRANSFER was judged closer to
+//     "transfer services on behalf of clients" than a swap fee. Every route
+//     converts one coin into another (SOL to ETH, BNB to SOL), which is a
+//     swap, and the owner chose to charge the ordinary rate: 0.5 %, halved for
+//     $KRYPTO holders, a fifth to the referrer, disclosed in Terms §8 and in
+//     every quote. On Solana it rides the deposit transaction; on BNB and
+//     Robinhood it is the ordinary follow-up transfer to the treasury and the
+//     referrer, as on a curve buy (bridge.ts quoteRelay / sendFromEvmRelay).
 //
 //  3. THE SAFETY STORY IS NOT UNIFORM, AND THE UI SAYS SO. On an EVM source
 //     chain the recipient, the destination chain id and the minimum output all
@@ -79,9 +83,30 @@ export const isEvmBridgeChain = (c: BridgeChain): c is EvmChainKind => c !== 'so
  */
 export type DestinationAssurance = 'verified' | 'trusted';
 
-export function assuranceOf(from: BridgeChain): DestinationAssurance {
+export function assuranceOf(from: BridgeChain, rail: BridgeRail = 'lifi'): DestinationAssurance {
+  // Relay's deposit carries a 32-byte commitment, and since 2026-10-03 that
+  // commitment is CHECKED: it must equal the EIP-712 id, recomputed here, of
+  // an order paying our own address on the chosen chain, in its native coin,
+  // at no less than the floor shown (shared/relayOrder.ts, on every quote).
+  // The far side is bound in the bytes we sign; that Relay FILLS it is still
+  // Relay's promise — the same as on any bridge.
+  if (rail === 'relay') return 'verified';
   return from === 'solana' ? 'trusted' : 'verified';
 }
+
+/** Who carries the transfer. Relay since 2026-10-01; LI.FI before that
+ *  (its in-flight records are still followed through LI.FI). */
+export type BridgeRail = 'relay' | 'lifi';
+
+/**
+ * How long a quote may be sent, from the moment it was QUOTED — one number
+ * that main enforces and every page counts down, so a button never offers a
+ * send that main will refuse as expired. Relay's request carries a deadline
+ * of its own; half a minute keeps well inside it. Pages stop two seconds
+ * early for the round trip.
+ */
+export const QUOTE_LIFE_MS: Record<BridgeRail, number> = { relay: 30_000, lifi: 60_000 };
+export const QUOTE_UI_MARGIN_MS = 2_000;
 
 // ─── Route readiness ─────────────────────────────────────────────────────
 
@@ -206,6 +231,18 @@ export interface BridgeQuote {
   assurance: DestinationAssurance;
   /** Everything the route takes, already deducted from `toAmount`. */
   feeUsd: number | null;
+  /** Who carries it. Absent on a LI.FI quote from before 2026-10-01. */
+  rail?: BridgeRail;
+  /**
+   * This quote's identity. A send must name it: the Bridge page and the
+   * All-in-One move share one cache keyed by route and amount, so without it
+   * one page could send a quote the other made, with amounts nobody saw.
+   */
+  quoteId?: string;
+  /** Krypt's own fee on this transfer, in dollars (part of `feeUsd`), and a
+   *  plain line for the page. Null/absent when fees are off. */
+  kryptFeeUsd?: number | null;
+  kryptFeeNote?: string | null;
 }
 
 /** What the user loses on this transfer, as a percentage. Null = unpriceable. */
@@ -267,6 +304,10 @@ export interface InFlight {
    * being polled forever as 'unknown'.
    */
   blockhash?: string;
+  /** Who carries it — decides which status API is asked. Absent = LI.FI. */
+  rail?: BridgeRail;
+  /** Relay's request id: the key its status is asked by. */
+  requestId?: string;
 }
 
 /**

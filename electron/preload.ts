@@ -5,6 +5,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { LaunchDraft } from '@shared/launch';
 import type { SwapDraft } from '@shared/swap';
 import type { BridgeDraft } from '@shared/bridge';
+import type { SendRequest } from '@shared/send';
 import type { AppSettings, EngineEvent } from '@shared/types';
 import type { CandleInterval, DiscoverColumn, StatsWindow } from '@shared/market';
 import type { NewOrderRequest } from '@shared/orders';
@@ -129,12 +130,43 @@ const api = {
     setHome: (addr: string) => ipcRenderer.invoke('wallet:setHome', addr),
     setMaxBalance: (sol: number) => ipcRenderer.invoke('wallet:setMaxBalance', sol),
     withdraw: (args: { walletId?: string; lamports: number | 'max' }) => ipcRenderer.invoke('wallet:withdraw', args),
+    /** Send to ANY address (2026-10-03): review reads only; execute shows the
+     *  native confirmation in main before anything is signed. */
+    sendReview: (req: SendRequest) => ipcRenderer.invoke('send:review', req),
+    sendExecute: (req: SendRequest) => ipcRenderer.invoke('send:execute', req),
+    sendBook: () => ipcRenderer.invoke('send:book'),
+    saveContact: (label: string, chain: string, address: string) => ipcRenderer.invoke('send:saveContact', label, chain, address),
+    removeContact: (id: string) => ipcRenderer.invoke('send:removeContact', id),
     refreshBalance: () => ipcRenderer.invoke('wallet:refreshBalance'),
     refreshAll: () => ipcRenderer.invoke('wallet:refreshAll'),
     holdings: () => ipcRenderer.invoke('wallet:holdings'),
     backup: () => ipcRenderer.invoke('wallet:backup'),
     exportAll: () => ipcRenderer.invoke('wallet:export'),
     remove: (id?: string) => ipcRenderer.invoke('wallet:remove', id),
+  },
+  // The All-in-One wallet (2026-10-01): one recovery phrase, every chain.
+  aio: {
+    info: () => ipcRenderer.invoke('aio:info'),
+    create: (label?: string) => ipcRenderer.invoke('aio:create', label ?? ''),
+    import: (phrase: string, label?: string, choice?: { solana: string; evm: string } | null) => ipcRenderer.invoke('aio:import', phrase, label ?? '', choice ?? null),
+    /** Read-only: every derivation path the phrase could mean, with balances. */
+    scanPhrase: (phrase: string) => ipcRenderer.invoke('aio:scanPhrase', phrase),
+    reveal: () => ipcRenderer.invoke('aio:reveal'),
+    backedUp: () => ipcRenderer.invoke('aio:backedUp'),
+    repair: () => ipcRenderer.invoke('aio:repair'),
+    activate: () => ipcRenderer.invoke('aio:activate'),
+    remove: () => ipcRenderer.invoke('aio:remove'),
+    balances: (refresh?: boolean) => ipcRenderer.invoke('aio:balances', refresh === true),
+    moveQuote: (draft: { from: string; to: string; amount: number }) => ipcRenderer.invoke('aio:moveQuote', draft),
+    moveSend: (draft: { from: string; to: string; amount: number }, simulateOnly: boolean, quoteId?: string) => ipcRenderer.invoke('aio:moveSend', draft, simulateOnly, quoteId),
+    buyPlan: (req: { chain: string; amount: number }) => ipcRenderer.invoke('aio:buyPlan', req),
+    buy: (req: { chain: string; token: string; amount: number; quoteId?: string | null; acceptAsk?: boolean }) => ipcRenderer.invoke('aio:buy', req),
+    /** ~$5 of gas from the richest other chain, for a sell that cannot pay its own. */
+    refuel: (chain: string) => ipcRenderer.invoke('aio:refuel', chain),
+    /** Compress: what would be sold and moved (read-only), then the real run
+     *  — main shows the native confirmation before anything is signed. */
+    compressPlan: (target: string) => ipcRenderer.invoke('aio:compressPlan', target),
+    compress: (target: string) => ipcRenderer.invoke('aio:compress', target),
   },
   live: {
     state: () => ipcRenderer.invoke('live:state'),
@@ -146,6 +178,9 @@ const api = {
     sellAll: () => ipcRenderer.invoke('live:sellAll'),
     setLive: (on: boolean) => ipcRenderer.invoke('live:setLive', on),
     sweepRent: () => ipcRenderer.invoke('live:sweepRent'),
+    /** Every token under $0.50, sold on the lean lane — never $KRYPTO. */
+    dustPlan: () => ipcRenderer.invoke('live:dustPlan'),
+    sellDust: () => ipcRenderer.invoke('live:sellDust'),
   },
   // Wallet Lab (shared/lab.ts): creating and funding groups of the user's
   // OWN wallets. Ids only — never a URL, never a key.
@@ -277,7 +312,7 @@ const api = {
   bridge: {
     state: () => ipcRenderer.invoke('bridge:state'),
     quote: (draft: BridgeDraft) => ipcRenderer.invoke('bridge:quote', draft),
-    send: (draft: BridgeDraft, simulateOnly: boolean) => ipcRenderer.invoke('bridge:send', draft, simulateOnly),
+    send: (draft: BridgeDraft, simulateOnly: boolean, quoteId?: string) => ipcRenderer.invoke('bridge:send', draft, simulateOnly, quoteId),
     refresh: () => ipcRenderer.invoke('bridge:refresh'),
   },
 

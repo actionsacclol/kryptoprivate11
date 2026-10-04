@@ -189,6 +189,14 @@ declare global {
         setMaxBalance: (sol: number) => Promise<IpcResult<WalletInfo>>;
         /** SOL only, to that wallet's confirmed withdrawal address; 'max' leaves rent + fee behind. */
         withdraw: (args: { walletId?: string; lamports: number | 'max' }) => Promise<IpcResult<WalletWithdrawResult>>;
+        /** Check a send to any address — reads only, signs nothing. */
+        sendReview: (req: import('@shared/send').SendRequest) => Promise<IpcResult<import('@shared/send').SendReview>>;
+        /** Send it: main shows a native confirmation first. ok:false with data = failed after a txid existed. */
+        sendExecute: (req: import('@shared/send').SendRequest) => Promise<IpcResult<import('@shared/send').SendResult>>;
+        /** Saved addresses + recent sends; `failure` = the file could not be read (nothing is written over it). */
+        sendBook: () => Promise<IpcResult<{ contacts: import('@shared/sendBook').SendContact[]; history: import('@shared/sendBook').SendHistoryRow[]; failure: string | null }>>;
+        saveContact: (label: string, chain: string, address: string) => Promise<IpcResult<import('@shared/sendBook').SendContact[]>>;
+        removeContact: (id: string) => Promise<IpcResult<import('@shared/sendBook').SendContact[]>>;
         refreshBalance: () => Promise<IpcResult<WalletInfo>>;
         /** Every wallet's SOL balance, read in parallel and noted in the store. */
         refreshAll: () => Promise<IpcResult<WalletSummary[]>>;
@@ -196,6 +204,30 @@ declare global {
         backup: () => Promise<IpcResult>;
         exportAll: () => Promise<IpcResult<{ count: number }>>;
         remove: (id?: string) => Promise<IpcResult<WalletInfo>>;
+      };
+      /** The All-in-One wallet: one recovery phrase, every chain (shared/aio.ts). */
+      aio: {
+        info: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
+        /** The phrase comes back ONCE, for the backup screen. */
+        create: (label?: string) => Promise<IpcResult<{ info: import('@shared/aio').AioWalletInfo; phrase?: string }>>;
+        import: (phrase: string, label?: string, choice?: { solana: string; evm: string } | null) => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
+        scanPhrase: (phrase: string) => Promise<IpcResult<{ solana: import('@shared/aio').AioScanRow[]; evm: import('@shared/aio').AioScanRow[] }>>;
+        reveal: () => Promise<IpcResult<string>>;
+        backedUp: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
+        repair: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
+        activate: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
+        remove: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
+        balances: (refresh?: boolean) => Promise<IpcResult<import('@shared/aio').AioBalances>>;
+        /** Move between the wallet's own chains — the Bridge engine, Relay rail. */
+        moveQuote: (draft: import('@shared/bridge').BridgeDraft) => Promise<IpcResult<import('@shared/bridge').BridgeQuote>>;
+        moveSend: (draft: import('@shared/bridge').BridgeDraft, simulateOnly: boolean, quoteId?: string) => Promise<IpcResult<{ ok: boolean; message: string; txHash?: string }>>;
+        /** Buy anywhere: what a buy on this chain needs (nothing, a top-up, a question, or a refusal). */
+        buyPlan: (req: { chain: import('@shared/aio').AioChain; amount: number }) => Promise<IpcResult<import('@shared/aioConvert').AioBuyPlan>>;
+        /** Top up (if planned) and buy. `quoteId` is the plan's; `acceptAsk` the user's yes to a costly one. */
+        buy: (req: { chain: import('@shared/aio').AioChain; token: string; amount: number; quoteId?: string | null; acceptAsk?: boolean }) => Promise<IpcResult<{ ok: boolean; message: string; needsConfirm?: import('@shared/aioConvert').AioBuyPlan; timings?: { topUpSendMs?: number; arrivalMs?: number; buyMs?: number } }>>;
+        refuel: (chain: import('@shared/aio').AioChain) => Promise<IpcResult<{ arrived: boolean }>>;
+        compressPlan: (target: import('@shared/aio').AioChain) => Promise<IpcResult<import('@shared/aioCompress').CompressPlan>>;
+        compress: (target: import('@shared/aio').AioChain) => Promise<IpcResult<{ steps: Array<{ step: string; ok: boolean; message: string }> }>>;
       };
       live: {
         state: () => Promise<IpcResult<LiveState>>;
@@ -206,6 +238,8 @@ declare global {
         sellAll: () => Promise<IpcResult>;
         setLive: (on: boolean) => Promise<IpcResult<{ live: LiveState; liveEnabled: boolean }>>;
         sweepRent: () => Promise<IpcResult<{ closed: number; recoveredSolEst: number }>>;
+        dustPlan: () => Promise<IpcResult<import('@shared/dustSell').DustPlan>>;
+        sellDust: () => Promise<IpcResult<{ ok: boolean; message: string; sold: number; failed: Array<{ symbol: string; message: string }> }>>;
         /** Every listed wallet sells 100 % of the mint. */
       };
       lab: {
@@ -464,7 +498,7 @@ declare global {
           }>
         >;
         quote: (draft: BridgeDraft) => Promise<IpcResult<BridgeQuote>>;
-        send: (draft: BridgeDraft, simulateOnly: boolean) => Promise<IpcResult<{ ok: boolean; message: string; txHash?: string }>>;
+        send: (draft: BridgeDraft, simulateOnly: boolean, quoteId?: string) => Promise<IpcResult<{ ok: boolean; message: string; txHash?: string }>>;
         refresh: () => Promise<IpcResult<InFlight[]>>;
       };
       swap: {

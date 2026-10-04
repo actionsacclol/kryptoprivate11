@@ -18,6 +18,7 @@ export const ptBR: Catalogue = {
   'nav.solWallet': 'Carteira Sol',
   'nav.robinhoodWallet': 'Carteira Robinhood',
   'nav.bnbWallet': 'Carteira BNB',
+  'nav.aioWallet': 'Carteira Tudo-em-Um',
   'nav.swap': 'Swap',
   'nav.bridge': 'Bridge',
   'nav.observatory': 'Observatório',

@@ -10,12 +10,14 @@ import { useModal } from '../state/ModalProvider';
 import { useAppState } from '../state/AppStateProvider';
 import { SwitchToPaper } from '../components/SwitchToPaper';
 import { EvmWalletPanel } from '../components/terminal/EvmWalletPanel';
+import { SendCard } from '../components/terminal/SendCard';
 import { WalletRewards } from '../components/terminal/WalletRewards';
 import { PumpAccountsSection } from '../components/terminal/PumpAccountsSection';
 import { HoldingsSection } from './Positions';
+import { approxUsd, useSolUsd } from '../state/useSolUsd';
 import { EVM_CHAIN_META, type EvmChainKind } from '@shared/evm';
 import type { LiveState, WalletInfo, WalletSummary } from '@shared/types';
-import { cls, fmtClock } from '../utils/format';
+import { cls, fmtClock, fmtUsd } from '../utils/format';
 
 // three.js rides with the tome alone: the page's text and buttons paint
 // first and the scene follows from its own chunk.
@@ -195,10 +197,15 @@ function WithdrawPanel({
   info,
   onDone,
   onChangeAddress,
+  unsavedHome,
 }: {
   info: WalletInfo;
   onDone: () => void;
   onChangeAddress: () => void;
+  /** The withdrawal-address field holds an edit that was never saved. The
+   *  withdraw would still go to the SAVED address, so it is refused until the
+   *  edit is saved or undone (user report 2026-10-03). */
+  unsavedHome: boolean;
 }) {
   const toast = useToast();
   const modal = useModal();
@@ -212,7 +219,9 @@ function WithdrawPanel({
   const max = maxWithdrawableSol(info.balanceSol);
   const effective = useMax ? (max ?? 0) : amount;
 
-  const reason = !home
+  const reason = unsavedHome
+    ? `The withdrawal address above is not saved — press Save, or this would still go to ${home ? `${home.slice(0, 6)}…${home.slice(-4)}` : 'nowhere'}`
+    : !home
     ? 'Set a withdrawal address first'
     : !balanceKnown
       ? 'Balance unknown — refresh and try again'
@@ -337,6 +346,7 @@ function WithdrawPanel({
 
 
 export function WalletPage() {
+  const solUsd = useSolUsd();
   // Which wallets have a pump.fun account signed in (2026-09-23): the list
   // below said nothing about it, and scripts and callouts depend on it.
   const pump = usePumpStatus();
@@ -380,6 +390,16 @@ export function WalletPage() {
       return () => clearInterval(t);
     }
   }, [info?.exists]);
+  // Another wallet picked: ITS withdrawal address and cap, not the last
+  // one's. Keyed on the wallet alone, so a balance refresh never clobbers
+  // what is being typed (v6 audit 2026-10-03: the stale field blocked
+  // Withdraw as "not saved", and Save would have stored the wrong address).
+  useEffect(() => {
+    if (!info?.exists) return;
+    setHomeInput(info.homeAddress ?? '');
+    setCapInput(String(info.maxBalanceSol));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info?.publicKey]);
 
   const doGenerate = async (): Promise<void> => {
     setBusy(true);
@@ -471,6 +491,7 @@ export function WalletPage() {
   };
 
   const overCap = info?.balanceSol != null && info.balanceSol > info.maxBalanceSol;
+  const homeUnsaved = !!info?.exists && homeInput.trim() !== (info.homeAddress ?? '');
 
   return (
     <Page title="Sol Wallet" subtitle="A dedicated hot Solana wallet for sniping — generated here, encrypted by your OS, funded with lunch money.">
@@ -491,6 +512,7 @@ export function WalletPage() {
               <div className={cls('mt-1.5 text-3xl font-bold font-mono tabular-nums glow-text', overCap ? 'text-amber-300' : 'text-white')}>
                 {info.balanceSol != null ? info.balanceSol.toFixed(4) : '—'}
                 <span className="ml-2 text-sm font-normal text-krypt-muted">SOL</span>
+                {approxUsd(info.balanceSol, solUsd, fmtUsd) && <span className="ml-2 text-sm font-normal text-krypt-muted">{approxUsd(info.balanceSol, solUsd, fmtUsd)}</span>}
               </div>
               <div className="mt-0.5 font-mono text-body text-krypt-muted">
                 {info.publicKey ? `${info.publicKey.slice(0, 6)}…${info.publicKey.slice(-6)}` : ''}
@@ -629,6 +651,7 @@ export function WalletPage() {
                     <div className="text-right">
                       <div className="font-mono text-note text-white/85">
                         {wal.balanceSol != null ? `${wal.balanceSol.toFixed(3)} SOL` : '—'}
+                        {approxUsd(wal.balanceSol, solUsd, fmtUsd) && <span className="ml-1.5 text-krypt-muted">{approxUsd(wal.balanceSol, solUsd, fmtUsd)}</span>}
                       </div>
                       <div className="text-micro text-krypt-muted">cap {wal.maxBalanceSol} SOL</div>
                     </div>
@@ -680,6 +703,7 @@ export function WalletPage() {
                     <div className="text-label uppercase tracking-label text-krypt-muted">Trading wallet</div>
                     <div className={cls('mt-1 text-3xl font-bold font-mono', overCap ? 'text-amber-300' : 'text-white')}>
                       {info.balanceSol != null ? info.balanceSol.toFixed(4) : '—'} <span className="text-sm text-krypt-muted">SOL</span>
+                      {approxUsd(info.balanceSol, solUsd, fmtUsd) && <span className="ml-2 text-sm font-normal text-krypt-muted">{approxUsd(info.balanceSol, solUsd, fmtUsd)}</span>}
                     </div>
                   </div>
                   <GhostButton onClick={() => void window.krypt.wallet.refreshBalance().then((r) => { if (r.ok && r.data) setInfo(r.data); })} className="!py-1.5 !px-3 text-xs">
@@ -718,6 +742,11 @@ export function WalletPage() {
               <Card className="space-y-2">
                 <div className="text-sm font-semibold text-white">Withdrawal address</div>
                 <div className="text-xs text-krypt-muted">Where a sweep sends funds (your safe wallet).</div>
+                {homeUnsaved && (
+                  <div className="text-xs text-amber-300/90">
+                    Not saved — withdrawals still go to {info.homeAddress ? `${info.homeAddress.slice(0, 6)}…${info.homeAddress.slice(-4)}` : 'no address'} until you press Save and confirm.
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <input ref={homeInputRef} value={homeInput} onChange={(e) => setHomeInput(e.target.value)} placeholder="Your main wallet address" spellCheck={false}
                     className="flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm font-mono text-white placeholder-krypt-muted/40 outline-none focus:border-krypt-purple/60" />
@@ -725,11 +754,13 @@ export function WalletPage() {
                 </div>
               </Card>
             </div>
-            <div className="mt-3">
+            <div className="mt-3 space-y-3">
+              <SendCard chain="solana" onSent={() => void refresh()} />
               <WithdrawPanel
                 info={info}
                 onDone={() => { void refresh(); void window.krypt.wallet.refreshBalance().then((r) => { if (r.ok && r.data) setInfo(r.data); }); }}
                 onChangeAddress={() => homeInputRef.current?.focus()}
+                unsavedHome={homeUnsaved}
               />
             </div>
           </Section>

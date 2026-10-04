@@ -555,14 +555,29 @@ export interface AppSettings {
    */
   launch: import('./launch').LaunchConfig;
   /**
-   * Cross-chain transfers. OFF by default and deliberately separate from
+   * The Bridge PAGE. OFF by default and deliberately separate from
    * everything else: a bridge puts the user's funds in a third party's hands
    * for the seconds between two chains, which is a trust model nothing else in
-   * this app asks of them. While it is off, the `bridge` signing intent is
-   * never constructed, so the signer refuses a bridge exactly as it did before
-   * the feature existed.
+   * this app asks of them. While it is off the Bridge page builds nothing.
+   * The All-in-One wallet's "Move between chains" (2026-10-01) is its own
+   * consent and does not read this switch — it builds the `bridge` intent
+   * only from that page, on the user's click, between the wallet's own
+   * addresses.
    */
   bridge: { enabled: boolean };
+  /**
+   * The All-in-One wallet (2026-10-03).
+   *
+   * `speed`: Cheapest / Normal / Fast for moves, top-ups and the wait for a
+   * top-up before a buy — see shared/aioSpeed.ts for exactly what each
+   * changes (fees buy little time on these chains, and it says so).
+   *
+   * `floatEnabled` / `floatUsd`: keep about this many dollars ready on each
+   * chain, refilled in the background from the chain holding the most, so a
+   * buy there needs no conversion. Off by default; every refill is an
+   * ordinary move (Relay's cost + Krypt's 0.5 %) — see shared/aioFloat.ts.
+   */
+  aio: { speed: import('./aioSpeed').AioSpeed; floatEnabled: boolean; floatUsd: number };
   /**
    * Lite mode. Replaces the WebGL scenes (the Dashboard observatory, the
    * Wallet tome) with a still — they are decoration that renders every frame
@@ -1022,6 +1037,8 @@ export type EngineEvent =
   | { kind: 'holdings'; data: WalletHolding[]; at: number }
   /** The active signer changed — every renderer cache keyed by wallet is void. */
   | { kind: 'walletSwitched'; publicKey: string | null }
+  /** The All-in-One wallet was created, imported, switched to or removed. */
+  | { kind: 'aioChanged' }
   /**
    * A live trade on a mint the terminal has open (tape-subscribed). Priced
    * in SOL per token — the renderer converts to the chart's unit, and drops
@@ -1056,6 +1073,10 @@ export type EngineEvent =
   | { kind: 'evmFill'; fill: import('./evm').EvmFill; state: 'landed' | 'reconciled' | 'failed' }
   /** Arm state or active wallet changed on one EVM chain (`state.chain`). */
   | { kind: 'evmState'; state: import('./evm').EvmState }
+  /** One step of an All-in-One Compress: started, or how it ended. */
+  | { kind: 'aioCompress'; step: string; state: 'running' | 'done' | 'failed'; message: string }
+  /** A wallet's token list on an EVM chain grew (a transfer in was found). */
+  | { kind: 'evmHoldings'; chain: import('./evm').EvmChainKind; owner: string }
   /**
    * One EVM chain's Observatory moved. `status.chain` says which, and a
    * renderer showing another chain must ignore it — the scanners are
@@ -1194,6 +1215,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   scannersAutoStart: false,
   launch: { enabled: false, walletId: '', evmWalletId: '' },
   bridge: { enabled: false },
+  aio: { speed: 'normal', floatEnabled: false, floatUsd: 25 },
   theme: 'purple',
   skin: 'classic',
   reduceEffects: false,

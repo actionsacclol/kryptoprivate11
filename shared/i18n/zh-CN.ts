@@ -19,6 +19,7 @@ export const zhCN: Catalogue = {
   'nav.solWallet': 'Sol 钱包',
   'nav.robinhoodWallet': 'Robinhood 钱包',
   'nav.bnbWallet': 'BNB 钱包',
+  'nav.aioWallet': '一体化钱包',
   'nav.swap': '兑换',
   'nav.bridge': '跨链',
   'nav.observatory': '观测台',

@@ -21,7 +21,7 @@ import {
   summariseCreator,
   SNIPER_WINDOW_SLOTS,
 } from './.launchintel.mjs';
-import { normaliseTrade, parseSlot } from './.pumpswap.mjs';
+import { normaliseTrade, parseSlot, parseCandles, rebucket, candlesSupported } from './.pumpswap.mjs';
 
 let passed = 0;
 const cases = [];
@@ -364,6 +364,40 @@ test('odds create slot: earliest slot only when the scan reached the launch', ()
   assert.equal(oddsCreateSlot(trades, true), 1000);
   assert.equal(oddsCreateSlot(trades, false), null);
   assert.equal(oddsCreateSlot([], true), null);
+});
+
+// pump.fun's candle route (2026-10-01): rows as captured from
+// swap-api.pump.fun/v1/coins/{mint}/candles — ms timestamps, string numbers.
+test('pump candles: ms timestamps become seconds, strings become numbers, oldest first', () => {
+  const rows = parseCandles([
+    { timestamp: 1790896320000, open: '0.0000036617', high: '0.0000040', low: '0.0000030', close: '0.0000035', volume: '12.5' },
+    { timestamp: 1790896260000, open: '0.000003303073718443616029822926374650512581547', high: '0.0000036617360528928628322894', low: '0.000003303073718443616029822926374650512581547', close: '0.0000036617360528928628322894', volume: '99.007547360544583156' },
+  ]);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].time, 1790896260, 'seconds, oldest first');
+  assert.ok(Math.abs(rows[0].open - 3.303073718443616e-6) < 1e-18, 'the long decimal string parses');
+  assert.equal(rows[1].volume, 12.5);
+});
+
+test('pump candles: a row missing a price is dropped, never drawn as zero', () => {
+  const rows = parseCandles([
+    { timestamp: 1790896260000, open: '0.1', high: '0.2', low: null, close: '0.1', volume: '1' },
+    { timestamp: 1790896320000, open: '0', high: '0.2', low: '0.1', close: '0.1', volume: '1' },
+    { timestamp: 'x', open: '0.1', high: '0.2', low: '0.1', close: '0.1' },
+    null,
+    { timestamp: 1790896380000, open: '0.1', high: '0.2', low: '0.1', close: '0.15' },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].volume, 0, 'unknown volume is no bar height, not a price');
+});
+
+test('pump candles: 5s is built from 1s — open first, close last, extremes, summed volume', () => {
+  const one = (time, o, h, l, c, v) => ({ time, open: o, high: h, low: l, close: c, volume: v });
+  const five = rebucket([one(100, 1, 2, 1, 2, 1), one(101, 2, 5, 2, 3, 2), one(104, 3, 3, 0.5, 1, 3), one(105, 1, 1, 1, 1, 4)], 5);
+  assert.deepEqual(five, [one(100, 1, 5, 0.5, 1, 6), one(105, 1, 1, 1, 1, 4)]);
+  assert.equal(candlesSupported('5s'), true);
+  assert.equal(candlesSupported('1s'), true);
+  assert.equal(candlesSupported('4h'), true);
 });
 
 async function run() {

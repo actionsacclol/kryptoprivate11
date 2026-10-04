@@ -718,6 +718,27 @@ export async function inFlight(): Promise<void> {
   await Promise.allSettled([...chains.values()]);
 }
 
+/**
+ * The last nonce this app BROADCAST per chain + wallet, kept for a minute.
+ *
+ * `getTransactionCount('pending')` is the node's view, and a node behind a
+ * load balancer can answer it before it has seen the transaction we sent a
+ * moment ago — so the next send (a fee leg right after a deposit) reused the
+ * nonce and was refused (live test 2026-10-03, Robinhood). Sends are already
+ * serialised per chain, so "one more than the last one we sent" is exact;
+ * the 60 s window keeps a dropped transaction from wedging the wallet for long.
+ */
+const NONCE_FLOOR_MS = 60_000;
+const lastNonce = new Map<string, { nonce: number; at: number }>();
+function nonceFloor(chain: EvmChainKind, owner: Address): number {
+  const k = `${chain}:${owner.toLowerCase()}`;
+  const v = lastNonce.get(k);
+  return v && Date.now() - v.at < NONCE_FLOOR_MS ? v.nonce + 1 : 0;
+}
+function noteNonce(chain: EvmChainKind, owner: Address, nonce: number): void {
+  lastNonce.set(`${chain}:${owner.toLowerCase()}`, { nonce, at: Date.now() });
+}
+
 export interface SendOutcome {
   ok: boolean;
   message: string;
@@ -732,26 +753,45 @@ async function sendCall(
   owner: Address,
   call: BuiltCall,
   policy: EvmPolicy,
-  opts: { simulateOnly: boolean; overrideBalance?: bigint; wait: boolean; onSent?: (hash: Hex) => void; walletId?: string },
+  opts: { simulateOnly: boolean; overrideBalance?: bigint; wait: boolean; onSent?: (hash: Hex) => void; walletId?: string; feeMultiplier?: number },
 ): Promise<SendOutcome> {
   const c = client(chain);
   const stateOverride = opts.overrideBalance !== undefined ? [{ address: owner, balance: opts.overrideBalance }] : undefined;
+  // The estimate doubles as the simulation. A real send also needs the fee
+  // fields, the balance and the nonce: four independent reads, asked TOGETHER
+  // (they used to be four round trips in a row). A failed estimate still
+  // refuses before anything is signed; the others' answers are then unused.
+  const estP = c.estimateGas({ account: owner, to: call.to, data: call.data, value: call.value, stateOverride });
+  const restP = opts.simulateOnly
+    ? null
+    : Promise.all([feeFields(chain), c.getBalance({ address: owner }), c.getTransactionCount({ address: owner, blockTag: 'pending' })]);
+  restP?.catch(() => undefined); // read below; never an unhandled rejection
   let est: bigint;
   try {
-    est = await c.estimateGas({ account: owner, to: call.to, data: call.data, value: call.value, stateOverride });
+    est = await estP;
   } catch (e) {
     return { ok: false, message: `Simulation failed: ${shortError(e)}`, hash: null, receipt: null, gas: null, simulatedGas: null };
   }
-  if (opts.simulateOnly) return { ok: true, message: 'simulated', hash: null, receipt: null, gas: null, simulatedGas: est };
+  if (opts.simulateOnly || !restP) return { ok: true, message: 'simulated', hash: null, receipt: null, gas: null, simulatedGas: est };
   const gas = (est * 125n) / 100n + 10_000n;
-  const fees = await feeFields(chain);
+  let fees: Awaited<ReturnType<typeof feeFields>>;
+  let bal: bigint;
+  let pendingNonce: number;
+  try {
+    [fees, bal, pendingNonce] = await restP;
+  } catch (e) {
+    return { ok: false, message: `Could not read the chain before signing: ${shortError(e)}. Nothing was signed.`, hash: null, receipt: null, gas, simulatedGas: est };
+  }
+  // A speed tier's multiplier (All-in-One "Fast": double gas on BNB). The
+  // policy's own ceilings still bound the result.
+  const m = opts.feeMultiplier && opts.feeMultiplier > 1 ? BigInt(Math.round(opts.feeMultiplier * 100)) : 100n;
+  if (m !== 100n) fees = { ...fees, maxFeePerGas: (fees.maxFeePerGas * m) / 100n, maxPriorityFeePerGas: (fees.maxPriorityFeePerGas * m) / 100n };
   // Can this wallet pay for it — value AND gas? Asked before signing rather
   // than learned from the node's txpool afterwards. `estimateGas` refuses a
   // value the wallet lacks, but a json-rpc account sends it no fee fields,
   // so "value + gas" was only ever checked by the node, after the signature
   // existed. Found by audit 2026-09-11 on a whole-balance BNB buy.
   {
-    const bal = await c.getBalance({ address: owner });
     const need = call.value + gas * fees.maxFeePerGas;
     if (need > bal) {
       const sym = EVM_CHAIN_META[chain].nativeSymbol;
@@ -765,7 +805,7 @@ async function sendCall(
       };
     }
   }
-  const nonce = await c.getTransactionCount({ address: owner, blockTag: 'pending' });
+  const nonce = Math.max(pendingNonce, nonceFloor(chain, owner));
   // `from` is part of the request: the active wallet can be swapped while a
   // trade is in flight, and an EVM raw transaction has no sender inside it,
   // so the signer must refuse a key that is not the one this plan was made
@@ -793,12 +833,26 @@ async function sendCall(
     // broadcast endpoint is MEV-protected by default; that tradeoff is
     // written down beside the map.
     await broadcastClient(chain).sendRawTransaction({ serializedTransaction: signed.signed });
+    noteNonce(chain, owner, nonce);
   } catch (e) {
     const msg = shortError(e);
-    // "already known" / "nonce too low" mean the node HAS the transaction —
-    // the reply was lost, not the send.
-    const landed = /already known|nonce too low|already exists/i.test(msg);
+    // "already known" means the node HAS this very transaction — the reply
+    // was lost, not the send. "nonce too low" only means SOME transaction
+    // used the nonce: it is ours only if the node knows our hash. Reading it
+    // as landed logged a fee as paid that never existed (2026-10-03).
+    let landed = /already known|already exists/i.test(msg);
+    if (!landed && /nonce too low/i.test(msg)) {
+      landed = await c.getTransaction({ hash }).then((t) => !!t, () => false);
+      if (!landed) return { ok: false, message: `Send failed: that nonce was already used by another transaction — nothing new was sent (${msg})`, hash: null, receipt: null, gas, simulatedGas: est };
+    }
+    // A timeout or a dropped connection is not a "no": the node may well have
+    // taken it (live test 2026-10-03 — BNB answered "request timed out" for a
+    // transfer that was mined 1 s before the reply gave up, and Send said
+    // "failed"; a retry would have paid twice). Only a node's own refusal
+    // means nothing was sent — anything ambiguous is followed by hash.
+    if (!landed && /timed? ?out|fetch failed|network|socket|ECONN|EPIPE|aborted|\b50[234]\b|HTTP request failed/i.test(msg)) landed = true;
     if (!landed) return { ok: false, message: `Send failed: ${msg}`, hash, receipt: null, gas, simulatedGas: est };
+    noteNonce(chain, owner, nonce);
     logger.warn(`evm ${chain}: send reply lost (${msg}) — following the transaction by hash ${hash}`);
   }
   if (!opts.wait) return { ok: true, message: 'sent', hash, receipt: null, gas, simulatedGas: est };
@@ -874,7 +928,7 @@ export function sendBuilt(
   owner: Address,
   call: BuiltCall,
   policy: EvmPolicy,
-  opts: { simulateOnly: boolean; wait: boolean; walletId?: string; onSent?: (hash: Hex) => void },
+  opts: { simulateOnly: boolean; wait: boolean; walletId?: string; onSent?: (hash: Hex) => void; feeMultiplier?: number },
 ): Promise<SendOutcome> {
   return serialised(chain, () => sendCall(chain, owner, call, policy, opts));
 }
@@ -1063,7 +1117,25 @@ export async function chargeLaunchFee(
   referrer: string,
 ): Promise<Hex | null> {
   if (spentWei <= 0n) return null;
-  const plan = feePlanFor(spentWei, referrer, owner);
+  return sendFeeLegs(chain, walletId, owner, feePlanFor(spentWei, referrer, owner), 'launch');
+}
+
+/**
+ * Krypt's fee on `basisWei` — the same rate, holder discount and referrer
+ * rules as every EVM trade. Exported for moves between chains (bridge.ts),
+ * which pay it exactly the way a curve buy does: native transfers straight
+ * to the treasury and the referrer, right after the deposit.
+ */
+export function evmFeePlan(basisWei: bigint, referrer: string, owner: Address): FeePlan {
+  return feePlanFor(basisWei, referrer, owner);
+}
+
+/**
+ * Send a fee plan's legs as plain native transfers. Logged, never raised: the
+ * thing it bills has already happened, and failing it over a 0.5 % transfer
+ * would be the worst way to be right about a fee.
+ */
+export async function sendFeeLegs(chain: EvmChainKind, walletId: string | undefined, owner: Address, plan: FeePlan, what: string): Promise<Hex | null> {
   if (plan.totalWei <= 0n || !plan.treasury) return null;
   const legs: Array<{ to: Address; wei: bigint }> = [];
   if (plan.treasury && plan.treasuryWei > 0n) legs.push({ to: plan.treasury, wei: plan.treasuryWei });
@@ -1072,11 +1144,11 @@ export async function chargeLaunchFee(
   for (const leg of legs) {
     const policy = policyFor(chain, [{ to: leg.to, selectors: 'transfer', maxValueWei: leg.wei }], { intent: 'fee', maxGas: 60_000n });
     try {
-      const r = await sendBuilt(chain, owner, { to: leg.to, data: '0x', value: leg.wei }, policy, { simulateOnly: false, wait: false, walletId });
+      const r = await sendBuilt(chain, owner, { to: leg.to, data: '0x', value: leg.wei }, policy, { simulateOnly: false, wait: false, ...(walletId ? { walletId } : {}) });
       if (r.ok && r.hash) last = r.hash;
-      else logger.warn(`evm ${chain}: launch fee transfer skipped — ${r.message}`);
+      else logger.warn(`evm ${chain}: ${what} fee transfer skipped — ${r.message}`);
     } catch (e) {
-      logger.warn(`evm ${chain}: launch fee transfer failed — ${shortError(e)}`);
+      logger.warn(`evm ${chain}: ${what} fee transfer failed — ${shortError(e)}`);
     }
   }
   return last;

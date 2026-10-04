@@ -5,9 +5,11 @@ import { Card, Copyable, GhostButton, PrimaryButton, Section } from '../common';
 import { useToast } from '../../state/ToastProvider';
 import { useModal } from '../../state/ModalProvider';
 import { useEvmState } from '../../state/useEvmState';
+import { approxUsd } from '../../state/useSolUsd';
 import { useAppState } from '../../state/AppStateProvider';
-import { cls, fmtClock, shortAddr } from '../../utils/format';
+import { cls, fmtClock, shortAddr, fmtUsd } from '../../utils/format';
 import { fmtNative, fmtTokens, isPendingResult, PENDING_TOAST, weiToNumber } from '../../utils/evm';
+import { SendCard } from './SendCard';
 
 // The EVM wallet, on the Wallet page beside the Solana one. ONE list of keys
 // serves Robinhood Chain and BNB Smart Chain — the same key is the same
@@ -83,6 +85,7 @@ function ChainStrip({ chain, evm, refresh }: { chain: EvmChainKind; evm: EvmStat
         <div className="text-label uppercase tracking-label text-krypt-muted">{meta.name}</div>
         <div className="mt-1 text-2xl font-bold font-mono text-white">
           {evm === null ? '…' : fmtNative(info?.balanceNative ?? null, meta.nativeSymbol, 5)}
+          {approxUsd(info?.balanceNative, evm?.nativeUsd, fmtUsd) && <span className="ml-2 text-sm font-normal text-krypt-muted">{approxUsd(info?.balanceNative, evm?.nativeUsd, fmtUsd)}</span>}
         </div>
         {info?.balanceCheckedAt ? <div className="text-body text-krypt-muted/60">checked {fmtClock(info.balanceCheckedAt)}</div> : null}
         {disarmNote && <div className="text-body text-krypt-muted/70 mt-0.5">{disarmNote}</div>}
@@ -148,6 +151,19 @@ export function EvmWalletPanel({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameText, setRenameText] = useState('');
   const [selling, setSelling] = useState<string | null>(null);
+  // The All-in-One wallet's EVM key signs on BOTH chains by design. It is
+  // listed like any key, but never offered "X only" and never called a
+  // pre-split leftover (2026-10-01).
+  const [aioEvmId, setAioEvmId] = useState<string | null>(null);
+  useEffect(() => {
+    const load = (): void => {
+      void window.krypt.aio.info().then((r) => setAioEvmId(r.ok && r.data ? r.data.evmWalletId : null));
+    };
+    load();
+    return window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'aioChanged') load();
+    });
+  }, []);
 
   // The top bar's chain is the tab's default; the tab can look at the other
   // enabled one. Under `only` there is nothing to choose — shownChains is at
@@ -175,7 +191,7 @@ export function EvmWalletPanel({
   // The pre-split state this panel exists to end: one key signing on both.
   const hoodId = hood.evm?.wallet?.id ?? null;
   const bscId = bsc.evm?.wallet?.id ?? null;
-  const sharedSigner = hoodId !== null && hoodId === bscId && settings.evm.robinhood.enabled && settings.evm.bnb.enabled;
+  const sharedSigner = hoodId !== null && hoodId === bscId && hoodId !== aioEvmId && settings.evm.robinhood.enabled && settings.evm.bnb.enabled;
   // What this page lists, and what it deliberately does not.
   const visible = wallets.filter((w) => walletVisibleOn(w, tab));
   const hiddenFunded = wallets.filter((w) => !walletVisibleOn(w, tab) && (w.balanceNative ?? 0) > 0);
@@ -200,19 +216,30 @@ export function EvmWalletPanel({
     setHoldings(null);
     setFills([]);
     void reload();
+    // The list's balances come from the same cache the strip's refresh fills,
+    // so it re-reads after each refresh — it used to say "—" beside a strip
+    // that knew the balance (2026-10-03).
+    const balanceRead = (c: EvmChainKind): void => {
+      void window.krypt.evm.wallet.refreshBalance(c).then(() => {
+        void byChain[c].refresh();
+        if (c === tab) void window.krypt.evm.wallet.list(tab).then((l) => l.ok && l.data && setWallets(l.data));
+      });
+    };
     if (exists) {
       void loadHoldings();
-      for (const c of shownChains) void window.krypt.evm.wallet.refreshBalance(c).then(() => void byChain[c].refresh());
+      for (const c of shownChains) balanceRead(c);
     }
     const off = window.krypt.engine.onEvent((ev) => {
       if (ev.kind === 'evmFill' && ev.fill.chain === tab) {
         void reload();
         void loadHoldings();
       }
+      // A token sent to this wallet was found on the chain (2026-10-03).
+      if (ev.kind === 'evmHoldings' && ev.chain === tab) void loadHoldings();
     });
     const t = setInterval(() => {
       if (document.hidden || !exists) return;
-      for (const c of shownChains) void window.krypt.evm.wallet.refreshBalance(c).then(() => void byChain[c].refresh());
+      for (const c of shownChains) balanceRead(c);
     }, 20_000);
     return () => {
       off();
@@ -443,8 +470,8 @@ export function EvmWalletPanel({
                 </div>
               )}
               <div className="text-body text-krypt-muted/60 mt-1">
-                Each EVM chain starts in Paper and is armed by hand; there are no per-trade or balance caps here yet. To move {meta.nativeSymbol} out,
-                export the key and use MetaMask or Rabby — this page has no withdraw.
+                Each EVM chain starts in Paper and is armed by hand; there are no per-trade or balance caps here yet. To move {meta.nativeSymbol} or a
+                token out, use Send below — any address, confirmed in a system dialog.
               </div>
             </div>
 
@@ -514,7 +541,15 @@ export function EvmWalletPanel({
                       </button>
                     )}
                     <div className="font-mono text-label text-krypt-muted truncate">{w.address}</div>
-                    {w.createdFor === null && (
+                    {w.id === aioEvmId && (
+                      <span
+                        className="mt-0.5 inline-block rounded-full border border-amber-300/30 bg-gradient-to-r from-violet-500/15 to-emerald-400/15 px-1.5 text-micro text-white/90"
+                        title="The All-in-One wallet's key: one address on every EVM chain, backed up by its recovery phrase"
+                      >
+                        All-in-One · every chain
+                      </span>
+                    )}
+                    {w.createdFor === null && w.id !== aioEvmId && (
                       <span
                         className="mt-0.5 inline-block rounded-full border border-white/10 bg-white/5 px-1.5 text-micro text-krypt-muted"
                         title="Made before the chains were split — the same address on both, listed on both until you say where it belongs"
@@ -528,8 +563,11 @@ export function EvmWalletPanel({
                       </span>
                     )}
                   </div>
-                  <div className="text-right font-mono text-note text-white/85">{fmtNative(w.balanceNative, meta.nativeSymbol)}</div>
-                  {w.createdFor === null && !w.active && (
+                  <div className="text-right font-mono text-note text-white/85">
+                    {fmtNative(w.balanceNative, meta.nativeSymbol)}
+                    {approxUsd(w.balanceNative, byChain[tab].evm?.nativeUsd, fmtUsd) && <span className="ml-1.5 text-krypt-muted">{approxUsd(w.balanceNative, byChain[tab].evm?.nativeUsd, fmtUsd)}</span>}
+                  </div>
+                  {w.createdFor === null && !w.active && w.id !== aioEvmId && (
                     <span title={`Keep this wallet under ${otherMeta.shortName} Wallet only — it leaves this page; the key and its balances are unchanged`}>
                       <GhostButton onClick={() => void doAssignAway(w)} className="!py-1 !px-2 text-label">
                         {otherMeta.shortName} only
@@ -588,6 +626,8 @@ export function EvmWalletPanel({
           </div>
         )}
 
+        {exists && shownChains.includes(tab) && <SendCard chain={tab} bare />}
+
         {exists && (
           <div className="pt-3 border-t border-white/10">
             <div className="flex items-center justify-between mb-2">
@@ -636,7 +676,7 @@ export function EvmWalletPanel({
             {holdings === null ? (
               <p className="text-body text-krypt-muted">Reading…</p>
             ) : holdings.length === 0 ? (
-              <p className="text-body text-krypt-muted">No tokens held on {meta.name} that this app knows about. Tokens bought here appear automatically.</p>
+              <p className="text-body text-krypt-muted">No tokens held on {meta.name} that this app knows about. Tokens bought here, the major coins, and tokens sent to this wallet appear automatically.</p>
             ) : (
               <div className="space-y-1">
                 {holdings.map((h) => (
@@ -644,6 +684,9 @@ export function EvmWalletPanel({
                     <span className="font-semibold text-white/90 w-20 truncate">{h.symbol || shortAddr(h.token, 4)}</span>
                     <span className="font-mono text-krypt-muted w-24 text-right">{fmtTokens(h.amount)}</span>
                     <span className="font-mono text-white/80 w-28 text-right">{fmtNative(h.valueNative, meta.nativeSymbol)}</span>
+                    <span className="font-mono text-krypt-muted w-20 text-right" title={h.valueNative === null ? 'No price for this token right now' : 'What it is worth in dollars'}>
+                      {h.valueNative === null || !(byChain[tab].evm?.nativeUsd ?? 0) ? '—' : fmtUsd(h.valueNative * (byChain[tab].evm?.nativeUsd as number))}
+                    </span>
                     <span className="text-micro uppercase tracking-wider text-krypt-muted/60 flex-1 truncate">{VENUE_LABEL[h.venue]}</span>
                     <GhostButton onClick={() => void sellOne(h)} destructive disabled={selling !== null} className="!py-1 !px-2 text-label">
                       {selling === h.token ? '…' : armed ? 'Sell 100%' : 'Sim sell'}

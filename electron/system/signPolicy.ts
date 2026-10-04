@@ -172,7 +172,29 @@ const SYS_IX_TRANSFER_WITH_SEED = 11;
 /** What the caller says the transaction is for. The policy enforces a
  *  different rule per intent — it does not take the caller's word for the
  *  contents. */
-export type SignIntent = 'trade' | 'sweep' | 'rent-reclaim' | 'fund' | 'launch' | 'collect-fees' | 'bridge' | 'withdraw-token';
+export type SignIntent = 'trade' | 'sweep' | 'rent-reclaim' | 'fund' | 'launch' | 'collect-fees' | 'bridge' | 'withdraw-token' | 'send' | 'send-token';
+
+/**
+ * A send the user confirmed in the app's own NATIVE dialog (2026-10-03).
+ *
+ * Intents 'send' and 'send-token' pay an address the user typed, not the
+ * stored withdrawal address. That is only safe because the destination does
+ * not come from the caller: the signer (wallet.ts) looks this up in its own
+ * single-use approval store, which only the IPC handler fills, and only after
+ * the dialog — which page content cannot press — showed exactly this
+ * address and amount. No approval, an expired one, or bytes that differ from
+ * it in any way: nothing is signed.
+ */
+export interface ApprovedSend {
+  /** The wallet (owner) address the SOL or tokens go to. */
+  to: string;
+  /** null = SOL; else the mint being sent. */
+  mint: string | null;
+  /** The mint's token program (classic or Token-2022); null for SOL. */
+  tokenProgram: string | null;
+  /** Ceiling in base units (lamports for SOL). */
+  maxAmount: bigint;
+}
 
 /**
  * Tokens that may be WITHDRAWN (intent 'withdraw-token') — USDC only.
@@ -500,6 +522,12 @@ export interface SignPolicy {
    * STORED withdrawal address, the same one a SOL sweep may pay.
    */
   withdrawMint?: string;
+  /**
+   * Intents 'send' / 'send-token' ONLY: the id of the native-confirmed
+   * approval to spend. The signer resolves it from its own store (one use,
+   * short life); what the approval says, not this policy, is checked.
+   */
+  sendApprovalId?: string;
 }
 
 export interface OutflowCheck {
@@ -633,11 +661,114 @@ function checkTokenWithdraw(
   return null;
 }
 
+/**
+ * A SOL send (intent 'send'): exactly ONE instruction, a SystemProgram
+ * transfer from this wallet to the approved address, for no more than the
+ * approved amount. Nothing else — no compute budget, no second transfer.
+ */
+function checkSolSend(
+  msg: VersionedTransaction['message'],
+  staticKeys: string[],
+  walletPublicKey: string,
+  approved: ApprovedSend,
+  policy: SignPolicy,
+): string | null {
+  if (approved.mint !== null) return 'This approval is for a token, not SOL — refusing to sign';
+  const ixs = msg.compiledInstructions;
+  if (ixs.length !== 1) return `A send is a single transfer — got ${ixs.length} instructions, refusing to sign`;
+  const ix = ixs[0]!;
+  if (ix.programIdIndex >= staticKeys.length || staticKeys[ix.programIdIndex] !== SYSTEM_PROGRAM_ID) {
+    return 'A send must be a SystemProgram transfer — refusing to sign';
+  }
+  const data = ix.data;
+  if (data.length !== 12) return 'Malformed SystemProgram transfer — refusing to sign';
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (view.getUint32(0, true) !== SYS_IX_TRANSFER) return 'A send must be a plain transfer — refusing to sign';
+  const at = (i: number): string | undefined => {
+    const k = ix.accountKeyIndexes[i];
+    return k !== undefined && k < staticKeys.length ? staticKeys[k] : undefined;
+  };
+  if (ix.accountKeyIndexes.length !== 2 || at(0) !== walletPublicKey) return 'This transfer is not from your wallet — refusing to sign';
+  if (at(1) !== approved.to) return 'This transfer does not go to the address you confirmed — refusing to sign';
+  const lamports = view.getBigUint64(4, true);
+  if (lamports > approved.maxAmount || lamports > BigInt(policy.maxTransferLamports)) {
+    return 'This transfer is for more than you confirmed — refusing to sign';
+  }
+  return null;
+}
+
+/**
+ * A token send (intent 'send-token'): the USDC-withdrawal shape, for any
+ * mint, to the approved owner — compute-budget price instructions, at most
+ * one IDEMPOTENT create of the recipient's associated account (paid by us),
+ * and exactly one TransferChecked from our associated account of the
+ * approved mint, under the approved token program, for no more than the
+ * approved amount. Any other program, any second transfer: refused.
+ */
+function checkTokenSend(
+  msg: VersionedTransaction['message'],
+  staticKeys: string[],
+  walletPublicKey: string,
+  approved: ApprovedSend,
+): string | null {
+  const mint = approved.mint;
+  const program = approved.tokenProgram;
+  if (!mint) return 'This approval is for SOL, not a token — refusing to sign';
+  if (program !== TOKEN_PROGRAM && program !== TOKEN_2022_PROGRAM) return 'Unknown token program — refusing to sign';
+  const source = ataFor(walletPublicKey, mint, program);
+  const dest = ataFor(approved.to, mint, program);
+  let transfers = 0;
+  let creates = 0;
+  for (const ix of msg.compiledInstructions) {
+    if (ix.programIdIndex >= staticKeys.length) return 'Instruction program is hidden in an address lookup table — refusing to sign';
+    const p = staticKeys[ix.programIdIndex];
+    const at = (i: number): string | undefined => {
+      const k = ix.accountKeyIndexes[i];
+      return k !== undefined && k < staticKeys.length ? staticKeys[k] : undefined;
+    };
+    if (p === COMPUTE_BUDGET_PROGRAM) continue;
+    if (p === ATA_PROGRAM) {
+      creates += 1;
+      if (creates > 1) return 'A send creates at most one account — refusing to sign';
+      if (ix.data.length !== 1 || ix.data[0] !== 1) return 'A send may only create an account idempotently — refusing to sign';
+      if (
+        ix.accountKeyIndexes.length !== 6 ||
+        at(0) !== walletPublicKey ||
+        at(1) !== dest ||
+        at(2) !== approved.to ||
+        at(3) !== mint ||
+        at(4) !== SYSTEM_PROGRAM_ID ||
+        at(5) !== program
+      ) {
+        return 'The account being created is not the token account of the address you confirmed — refusing to sign';
+      }
+      continue;
+    }
+    if (p === program) {
+      transfers += 1;
+      if (transfers > 1) return 'A send is exactly one transfer — refusing to sign';
+      if (ix.data.length !== 10 || ix.data[0] !== 12) return 'A send must be a checked transfer — refusing to sign';
+      if (ix.accountKeyIndexes.length !== 4 || at(0) !== source || at(1) !== mint || at(2) !== dest || at(3) !== walletPublicKey) {
+        return 'This transfer does not go from your wallet to the address you confirmed — refusing to sign';
+      }
+      const amount = Buffer.from(ix.data).readBigUInt64LE(1);
+      if (amount > approved.maxAmount) return 'This transfer is for more than you confirmed — refusing to sign';
+      continue;
+    }
+    return `A send may not call ${short(p)} — refusing to sign`;
+  }
+  if (transfers !== 1) return 'A send is exactly one transfer — refusing to sign';
+  return null;
+}
+
 export function checkOutflow(
   tx: VersionedTransaction,
   walletPublicKey: string,
   homeAddress: string | null,
   policy: SignPolicy,
+  /** Intents 'send' / 'send-token' only — resolved by the signer from its
+   *  own approval store, never taken from the caller. */
+  approved: ApprovedSend | null = null,
 ): OutflowCheck {
   const msg = tx.message;
   const staticKeys = msg.staticAccountKeys.map((k) => k.toBase58());
@@ -676,6 +807,16 @@ export function checkOutflow(
   // SOL loop, the token rule) is consulted for it.
   if (policy.intent === 'withdraw-token') {
     const bad = checkTokenWithdraw(msg, staticKeys, walletPublicKey, homeAddress, policy);
+    return bad ? { ok: false, message: bad } : { ok: true, message: 'ok' };
+  }
+
+  // A send is likewise decided entirely here, and only against an approval
+  // the signer found itself.
+  if (policy.intent === 'send' || policy.intent === 'send-token') {
+    if (!approved) return { ok: false, message: 'This send was not confirmed in the app’s own dialog — refusing to sign' };
+    const bad = policy.intent === 'send'
+      ? checkSolSend(msg, staticKeys, walletPublicKey, approved, policy)
+      : checkTokenSend(msg, staticKeys, walletPublicKey, approved);
     return bad ? { ok: false, message: bad } : { ok: true, message: 'ok' };
   }
 
@@ -1119,6 +1260,7 @@ export function checkOutflowForTest(
   walletPublicKey: string,
   homeAddress: string | null,
   policy: SignPolicy,
+  approved: ApprovedSend | null = null,
 ): OutflowCheck {
-  return checkOutflow(VersionedTransaction.deserialize(txBytes), walletPublicKey, homeAddress, policy);
+  return checkOutflow(VersionedTransaction.deserialize(txBytes), walletPublicKey, homeAddress, policy, approved);
 }

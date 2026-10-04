@@ -6,9 +6,10 @@ import { useTerminal } from '../state/TerminalProvider';
 import { useEvmState } from '../state/useEvmState';
 import { useModal } from '../state/ModalProvider';
 import { useToast } from '../state/ToastProvider';
-import { cls, shortAddr } from '../utils/format';
+import { cls, fmtAgo, fmtUsd, shortAddr } from '../utils/format';
 import { useLocale } from '../state/useLocale';
 import { fmtNative } from '../utils/evm';
+import { AIO_CHAIN_LABEL, type AioBalances } from '@shared/aio';
 import { ProfileBadge } from './terminal/ProfilesPanel';
 
 // The command rail. Left: search and the app-wide CHAIN SWITCH — Solana |
@@ -34,7 +35,7 @@ const CHAIN_TITLE: Record<ChainKind, string> = {
 };
 
 function ChainSwitch() {
-  const { chain, setChain } = useTerminal();
+  const { chain, setChain, allChains, setAllChains } = useTerminal();
   const { settings } = useAppState();
   const enabled = (c: ChainKind): boolean => (c === 'solana' ? true : settings.evm[c].enabled);
   const segments = (['solana', 'robinhood', 'bnb'] as ChainKind[]).filter(enabled);
@@ -52,13 +53,26 @@ function ChainSwitch() {
       {segments.map((c) => (
         <button
           key={c}
-          onClick={() => setChain(c)}
+          onClick={() => {
+            setAllChains(false);
+            setChain(c);
+          }}
           title={CHAIN_TITLE[c]}
-          className={cls('px-3 py-1.5 transition', chain === c ? CHAIN_ON[c] : 'text-krypt-muted hover:text-white')}
+          className={cls('px-3 py-1.5 transition', !allChains && chain === c ? CHAIN_ON[c] : 'text-krypt-muted hover:text-white')}
         >
           {CHAIN_LABEL[c]}
         </button>
       ))}
+      <button
+        onClick={() => setAllChains(true)}
+        title="Every chain at once — the All-in-One wallet's total in dollars, and one Paper/Live for all of them"
+        className={cls(
+          'px-3 py-1.5 transition',
+          allChains ? 'bg-gradient-to-r from-violet-500/25 via-amber-400/20 to-emerald-400/25 text-white' : 'text-krypt-muted hover:text-white',
+        )}
+      >
+        All
+      </button>
     </div>
   );
 }
@@ -69,6 +83,128 @@ function ChainSwitch() {
  * rail and nothing else. Switching the chain never arms or disarms anything.
  */
 function ModeToggle() {
+  const { allChains } = useTerminal();
+  return allChains ? <AllModeToggle /> : <ChainModeToggle />;
+}
+
+/**
+ * Paper/Live for EVERY chain at once — what "ALL" means for the one control
+ * that moves money. Each chain still arms on its own rail with its own rules
+ * (and its own wallet check); this only presses all of them, and the label
+ * says plainly when they disagree ("Live 2/3").
+ */
+function AllModeToggle() {
+  const { t } = useLocale();
+  const { status, settings } = useAppState();
+  const modal = useModal();
+  const toast = useToast();
+  const hood = useEvmState('robinhood');
+  const bsc = useEvmState('bnb');
+  const evmOf = { robinhood: hood, bnb: bsc } as const;
+  const enabledEvm = (['robinhood', 'bnb'] as EvmChainKind[]).filter((c) => settings.evm[c].enabled);
+  const states = [
+    { name: 'Solana', live: status.liveActive },
+    ...enabledEvm.map((c) => ({ name: EVM_CHAIN_META[c].shortName, live: evmOf[c].evm?.live.armed === true })),
+  ];
+  const liveCount = states.filter((s) => s.live).length;
+  const allLive = liveCount === states.length;
+  const loading = enabledEvm.some((c) => evmOf[c].evm === null);
+  // Whether the All-in-One wallet is the one signing everywhere: "All" shows
+  // its total, so going Live must say when another wallet would trade.
+  const [aioEverywhere, setAioEverywhere] = useState<boolean | null>(null);
+  useEffect(() => {
+    const load = (): void => {
+      void window.krypt.aio.info().then((r) => setAioEverywhere(r.ok && r.data?.exists ? r.data.activeEverywhere : null));
+    };
+    load();
+    return window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'aioChanged' || ev.kind === 'walletSwitched') load();
+    });
+  }, []);
+
+  const setMode = async (wantLive: boolean): Promise<void> => {
+    if (wantLive && allLive) return;
+    if (wantLive) {
+      // A chain whose state has not been read yet cannot be judged, so Live
+      // waits for it rather than reporting a success it did not check.
+      const unread = enabledEvm.filter((c) => evmOf[c].evm === null).map((c) => EVM_CHAIN_META[c].shortName);
+      if (unread.length) {
+        toast.warn(`Still reading ${unread.join(' and ')} — try again in a moment.`);
+        return;
+      }
+      const yes = await modal.confirm({
+        title: 'Go Live on every chain',
+        message:
+          `Live signs and broadcasts REAL transactions on ${states.map((s) => s.name).join(', ')}. Every trade is still simulated and checked before it sends — but real money moves on all of them.` +
+          (aioEverywhere === false
+            ? ' Note: the All-in-One wallet is NOT the signer on every chain — each chain trades with the wallet that signs there (All-in-One Wallet → Use it on every chain).'
+            : '') +
+          ' Switch every chain to Live?',
+        confirmLabel: 'Go Live everywhere',
+        destructive: true,
+      });
+      if (!yes) return;
+    }
+    const failed: string[] = [];
+    // Paper is pressed on EVERY chain, unconditionally — both calls are
+    // idempotent, and a chain whose state was unread or stale used to be
+    // skipped and left live under a "Paper on every chain" toast (review
+    // 2026-10-02). Live presses only what is not live yet.
+    if (!wantLive || status.liveActive !== wantLive) {
+      const r = await window.krypt.live.setLive(wantLive);
+      if (!r.ok) failed.push(`Solana: ${r.message}`);
+    }
+    for (const c of enabledEvm) {
+      const st = evmOf[c].evm;
+      if (!wantLive) {
+        const r = await window.krypt.evm.disarm(c);
+        if (!r.ok) failed.push(`${EVM_CHAIN_META[c].shortName}: ${r.message}`);
+        continue;
+      }
+      if (!st) {
+        failed.push(`${EVM_CHAIN_META[c].shortName}: not read yet`);
+        continue;
+      }
+      if (st.live.armed) continue;
+      if (st.wallet.exists !== true) {
+        failed.push(`${EVM_CHAIN_META[c].shortName}: no wallet yet`);
+        continue;
+      }
+      const r = await window.krypt.evm.arm(c);
+      if (!r.ok) failed.push(`${EVM_CHAIN_META[c].shortName}: ${r.message}`);
+    }
+    void hood.refresh();
+    void bsc.refresh();
+    if (failed.length) toast.error(`Not every chain switched — ${failed.join(' · ')}`);
+    else toast[wantLive ? 'warn' : 'success'](wantLive ? 'Live on every chain' : 'Paper on every chain');
+  };
+
+  return (
+    <div
+      className="glass-btn inline-flex rounded-lg border border-white/12 text-label font-bold uppercase tracking-label"
+      title={states.map((s) => `${s.name}: ${s.live ? 'Live' : 'Paper'}`).join(' · ')}
+    >
+      <button
+        onClick={() => void setMode(false)}
+        className={cls('px-3 py-1.5 transition', liveCount === 0 && !loading ? 'bg-emerald-500/20 text-emerald-200' : 'text-krypt-muted hover:text-white')}
+      >
+        {loading ? '…' : t('mode.paper')}
+      </button>
+      <button
+        onClick={() => void setMode(true)}
+        className={cls(
+          'px-3 py-1.5 transition',
+          allLive ? 'bg-rose-500/25 text-rose-200 shadow-crimson-glow' : liveCount > 0 ? 'bg-amber-500/20 text-amber-200' : 'text-krypt-muted hover:text-white',
+        )}
+      >
+        {t('mode.live')}
+        {liveCount > 0 && !allLive ? ` ${liveCount}/${states.length}` : ''}
+      </button>
+    </div>
+  );
+}
+
+function ChainModeToggle() {
   const { t } = useLocale();
   const { chain } = useTerminal();
   const { status } = useAppState();
@@ -163,8 +299,189 @@ function Readout({ label, value, tone }: { label: string; value: string; tone?: 
   );
 }
 
-/** Balance + address of the selected chain's wallet. */
-function WalletReadout() {
+/** "12.34 USD", a floor marked "+" when a chain was unread or a holding is
+ *  unpriced; an em dash when nothing was measured. */
+function aioTotalText(bal: AioBalances | null): string {
+  if (!bal) return '…';
+  if (bal.totalUsd === null) return '—';
+  return `${bal.totalUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${bal.partial || bal.unpriced ? '+' : ''} USD`;
+}
+
+/** A coin amount people can read: 0.0227, 0.00838, 43,379. */
+function aioAmountText(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  if (v === 0) return '0';
+  const abs = Math.abs(v);
+  if (abs >= 1_000) return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (abs >= 1) return v.toLocaleString('en-US', { maximumFractionDigits: 4 });
+  return Number(v.toPrecision(3)).toString();
+}
+
+/**
+ * ALL: the All-in-One wallet's total in dollars, every chain. Clicking it
+ * opens what that total IS — each chain, each token, the amount and its USD —
+ * read fresh, not from the 20 s cache (2026-10-03: the user saw "0.11 USD"
+ * with no way to see what it held).
+ */
+function AllWalletReadout({ onOpenWallet }: { onOpenWallet?: () => void }) {
+  const [exists, setExists] = useState<boolean | null>(null);
+  const [bal, setBal] = useState<AioBalances | null>(null);
+  const [open, setOpen] = useState(false);
+  const [reading, setReading] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const aliveRef = useRef(true);
+
+  const load = (force: boolean): void => {
+    if (!force && document.hidden) return;
+    void window.krypt.aio.info().then((r) => {
+      if (!aliveRef.current) return;
+      const has = r.ok && r.data ? r.data.exists : false;
+      setExists(has);
+      if (!has) {
+        setBal(null);
+        return;
+      }
+      if (force) setReading(true);
+      void window.krypt.aio
+        .balances(force)
+        .then((b) => {
+          if (aliveRef.current && b.ok && b.data) setBal(b.data);
+        })
+        .finally(() => {
+          if (aliveRef.current && force) setReading(false);
+        });
+    });
+  };
+
+  useEffect(() => {
+    aliveRef.current = true;
+    load(false);
+    const t = setInterval(() => load(false), 30_000);
+    const off = window.krypt.engine.onEvent((ev) => {
+      if (ev.kind === 'aioChanged') load(false);
+    });
+    return () => {
+      aliveRef.current = false;
+      clearInterval(t);
+      off();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Open: read fresh, and close on a click outside or Escape.
+  useEffect(() => {
+    if (!open) return;
+    load(true);
+    const onDown = (e: MouseEvent): void => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  if (exists === false) return <Readout label="All chains" value="No All-in-One wallet" />;
+
+  // Chains in the order the balances list them; a chain that was read and
+  // holds nothing is one quiet line, an unread one says why.
+  const groups = (bal?.chains ?? []).map((c) => ({
+    read: c,
+    assets: (bal?.assets ?? []).filter((a) => a.chain === c.chain && !a.dust && (a.amount > 0 || a.kind !== 'native')),
+  }));
+  const holding = groups.filter((g) => !g.read.ok || g.assets.length > 0);
+  const empty = groups.filter((g) => g.read.ok && g.assets.length === 0).map((g) => AIO_CHAIN_LABEL[g.read.chain]);
+
+  return (
+    <div ref={boxRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        title="What the All-in-One wallet holds"
+        className="-mx-1.5 rounded-md px-1.5 py-0.5 transition hover:bg-white/5 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/30"
+      >
+        <Readout label="All-in-One" value={aioTotalText(bal)} />
+      </button>
+      {open && (
+        <div role="dialog" aria-label="All-in-One wallet holdings" className="absolute right-0 top-full z-50 mt-2 w-80 max-w-[calc(100vw-2rem)]">
+          {/* Solid .glass, never the lens: the top bar is on screen for the life
+              of the app and carries no filter (test/glass.test.mjs). */}
+          <div className="glass rounded-xl border border-white/10">
+            <div className="flex items-baseline justify-between gap-3 border-b border-white/10 px-4 py-3">
+              <div>
+                <div className="text-micro font-display uppercase tracking-label text-krypt-muted/70">All-in-One total</div>
+                <div className="font-mono text-base tabular-nums text-white">{aioTotalText(bal)}</div>
+              </div>
+              <div className="text-right text-micro text-krypt-muted">
+                {reading ? 'reading…' : bal ? (Date.now() - bal.at < 5_000 ? 'updated just now' : `updated ${fmtAgo(bal.at)} ago`) : ''}
+              </div>
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto px-4 py-2">
+              {!bal && <div className="py-3 text-xs text-krypt-muted">Reading every chain…</div>}
+              {holding.map((g) => (
+                <div key={g.read.chain} className="py-2">
+                  <div className="flex items-baseline justify-between text-micro uppercase tracking-label text-krypt-muted/80">
+                    <span>{AIO_CHAIN_LABEL[g.read.chain]}</span>
+                    {/* A subtotal only adds something when the chain holds two or more coins. */}
+                    <span className="font-mono normal-case">{!g.read.ok ? 'not read' : g.assets.length > 1 ? fmtUsd(g.read.usd) : ''}</span>
+                  </div>
+                  {!g.read.ok && <div className="mt-1 text-xs text-amber-200/80">{g.read.message ?? 'This chain did not answer — its holdings are missing, not zero.'}</div>}
+                  {g.assets.map((a) => (
+                    <div key={`${a.chain}:${a.token ?? 'native'}`} className="mt-1 flex items-baseline justify-between gap-3 text-xs">
+                      <span className="min-w-0 truncate text-white/90" title={a.name ?? a.symbol}>
+                        <span className="font-mono tabular-nums">{aioAmountText(a.amount)}</span> {a.symbol}
+                      </span>
+                      <span className="flex-shrink-0 font-mono tabular-nums text-white/80" title={a.usd === null ? 'No price for this token — shown, not counted in the total' : undefined}>
+                        {a.usd === null ? '—' : fmtUsd(a.usd)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {bal && holding.length === 0 && <div className="py-3 text-xs text-krypt-muted">Nothing on any chain yet.</div>}
+              {bal && empty.length > 0 && <div className="pb-2 pt-1 text-micro text-krypt-muted/70">Nothing on {empty.join(', ')}.</div>}
+              {bal && bal.unpriced > 0 && <div className="pb-2 text-micro text-krypt-muted/70">{bal.unpriced} holding{bal.unpriced === 1 ? '' : 's'} with no price — listed, not counted.</div>}
+            </div>
+            <div className="flex items-center justify-between gap-2 border-t border-white/10 px-4 py-2.5">
+              <button type="button" onClick={() => load(true)} disabled={reading} className="text-xs text-krypt-muted transition hover:text-white disabled:opacity-50">
+                Refresh
+              </button>
+              {onOpenWallet && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    onOpenWallet();
+                  }}
+                  className="glass-btn rounded-lg border border-white/12 px-3 py-1 text-xs text-white/90 transition hover:text-white"
+                >
+                  Open wallet
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Balance + address of the selected chain's wallet — or, under ALL, the
+ *  All-in-One total. */
+function WalletReadout({ onOpenAioWallet }: { onOpenAioWallet?: () => void }) {
+  const { allChains } = useTerminal();
+  return allChains ? <AllWalletReadout onOpenWallet={onOpenAioWallet} /> : <ChainWalletReadout />;
+}
+
+function ChainWalletReadout() {
   const { chain } = useTerminal();
   const { status } = useAppState();
   const evmChain: EvmChainKind | null = isEvmChain(chain) ? chain : null;
@@ -242,7 +559,7 @@ function WalletReadout() {
   );
 }
 
-export function TopBar({ search, onOpenAutomation, onOpenRunners, onOpenProfiles, onHub }: { search?: ReactNode; onOpenAutomation: () => void; onOpenRunners?: () => void; onOpenProfiles?: () => void; onHub?: () => void }) {
+export function TopBar({ search, onOpenAutomation, onOpenRunners, onOpenProfiles, onOpenAioWallet, onHub }: { search?: ReactNode; onOpenAutomation: () => void; onOpenRunners?: () => void; onOpenProfiles?: () => void; onOpenAioWallet?: () => void; onHub?: () => void }) {
   const { status, runners } = useAppState();
   const recentRunners = runners.filter((r) => Date.now() - r.flaggedAt < 3_600_000).length;
 
@@ -315,7 +632,7 @@ export function TopBar({ search, onOpenAutomation, onOpenRunners, onOpenProfiles
         <ProfileBadge onManage={onOpenProfiles} />
         <ModeToggle />
         <Divider />
-        <WalletReadout />
+        <WalletReadout onOpenAioWallet={onOpenAioWallet} />
       </div>
     </div>
   );

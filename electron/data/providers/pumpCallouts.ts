@@ -8,6 +8,9 @@
 //                           each with the CALLER'S OWN POSITION in the coin.
 //   GET /callout/top/{mint} the calls on one coin. GONE since 2026-09-26
 //                           (404 "Cannot GET"); see calloutsForMint.
+//   GET /mint-positions/{mint}?withThesis=true
+//                           a coin's callers with their calls (2026-09-30);
+//                           read by scripts through mintCallouts.
 //
 // What is NOT available keyless, checked 2026-09-18 so nobody spends an
 // afternoon rediscovering it: `/callout/leaderboard`, `/callout/leaderboard-
@@ -21,7 +24,7 @@
 // chronological; `newestFirst` is applied by the caller that wants time order.
 
 import { getJson, memo } from '../http';
-import { calloutsFor, parseCoinCallouts, parseHomeFeed, type Callout } from '@shared/callouts';
+import { calloutsFor, newestFirst, parseCoinCallouts, parseHomeFeed, parseMintPositions, type Callout } from '@shared/callouts';
 import type { ChainKind } from '@shared/evm';
 
 /**
@@ -72,6 +75,46 @@ export async function calloutFeed(): Promise<Callout[] | null> {
     }
     lastError = null;
     return parseHomeFeed(r.data);
+  });
+}
+
+/** A script asks at its buy decision, so this answer is kept briefly. */
+const POSITIONS_TTL_MS = 30_000;
+/** Pages of open callers read (50 each); closed callers get one page. */
+const OPEN_PAGES = 2;
+
+/**
+ * Every callout on a Solana coin, from `/mint-positions/{mint}` (keyless,
+ * found 2026-09-30): callers still holding (`withThesis=true`, up to
+ * OPEN_PAGES × 50) plus callers who fully exited (`sortBy=CLOSED_PNL`, up to
+ * 50), newest first, one row per call. Up to three requests on the callout
+ * lane. Null = could not be answered (any page failed); [] = pump answered
+ * and nobody has called it. A busy coin past those caps reads as at least
+ * that many, which is all a "fewer than N calls" check needs.
+ */
+export async function mintCallouts(mint: string): Promise<Callout[] | null> {
+  return memo<Callout[]>(`callouts:positions:${mint}`, POSITIONS_TTL_MS, async () => {
+    const byId = new Map<string, Callout>();
+    const base = `/mint-positions/${encodeURIComponent(mint)}?withThesis=true&pageSize=50&updatesLimit=0`;
+    // One page into byId; its raw row count, or null when it failed.
+    const read = async (path: string): Promise<number | null> => {
+      const r = await getJson<unknown>('pumpfun', path, { lane: 'callout' });
+      if (!r.ok || r.data === undefined) {
+        lastError = r.message || null;
+        return null;
+      }
+      for (const c of parseMintPositions(r.data, mint, 'solana')) byId.set(c.id, c);
+      const raw = (r.data as { positions?: unknown } | null)?.positions;
+      return Array.isArray(raw) ? raw.length : 0;
+    };
+    for (let page = 0; page < OPEN_PAGES; page++) {
+      const n = await read(`${base}&page=${page}`);
+      if (n === null) return null;
+      if (n < 50) break; // a short page is the last one
+    }
+    if ((await read(`${base}&sortBy=CLOSED_PNL&page=0`)) === null) return null;
+    lastError = null;
+    return newestFirst([...byId.values()]);
   });
 }
 

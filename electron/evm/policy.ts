@@ -55,7 +55,12 @@ export interface EvmPolicy {
    * unchanged. It exists so a refusal message and an audit can tell a
    * cross-chain transfer apart from a trade.
    */
-  intent: 'trade' | 'approve' | 'fee' | 'launch' | 'bridge';
+  /**
+   * 'send' (2026-10-03) pays an address the user typed and confirmed in the
+   * native dialog — a plain value transfer to exactly that address, or an
+   * ERC-20 `transfer` pinned by `tokenTransfer` below.
+   */
+  intent: 'trade' | 'approve' | 'fee' | 'launch' | 'bridge' | 'send';
   allow: AllowEntry[];
   maxGas: bigint;
   maxFeePerGasWei: bigint;
@@ -96,9 +101,19 @@ export interface EvmPolicy {
      */
     via?: 'router-transfer' | 'curve-router';
   };
+  /**
+   * The ONLY way an ERC-20 `transfer(to, amount)` gets signed: the calldata
+   * must name exactly this recipient, on exactly this token, for no more than
+   * `maxAmount` base units, carrying no native value. Without it the
+   * selector is refused whatever the allowlist says — a token transfer is a
+   * send, and a send is something the user confirmed.
+   */
+  tokenTransfer?: { token: string; to: string; maxAmount: bigint };
 }
 
 export const EXECUTE_SELECTOR: Hex = '0x3593564c';
+/** ERC-20 transfer(address,uint256). */
+export const ERC20_TRANSFER_SELECTOR: Hex = '0xa9059cbb';
 /** KryptCurveRouter.buy(address,uint256,uint256,uint256,address,uint256). */
 export const KRYPT_ROUTER_BUY_SELECTOR: Hex = '0xf26c91bb';
 
@@ -327,6 +342,22 @@ export function checkEvmTx(tx: EvmTxLike, policy: EvmPolicy): PolicyVerdict {
   if (!sel) return { ok: false, message: 'Call has no function selector' };
   if (!entry.selectors.some((s) => eq(s, sel))) {
     return { ok: false, message: `Function ${sel} is not allowed on ${tx.to} for this trade` };
+  }
+
+  if (sel === ERC20_TRANSFER_SELECTOR) {
+    const t = policy.tokenTransfer;
+    if (!t) return { ok: false, message: 'A token transfer was not confirmed as a send — refusing to sign' };
+    if (!eq(tx.to, t.token)) return { ok: false, message: 'This transfer is on a different token than the one you confirmed — refusing to sign' };
+    // Exactly selector + two words: nothing appended that a token could read.
+    if (data.length !== 2 + 8 + 64 * 2) return { ok: false, message: 'Malformed token transfer — refusing to sign' };
+    const body = data.slice(10);
+    const toWord = body.slice(0, 64);
+    if (!/^0{24}/.test(toWord)) return { ok: false, message: 'Malformed token transfer recipient — refusing to sign' };
+    const to = `0x${toWord.slice(24)}`;
+    if (!eq(to, t.to)) return { ok: false, message: 'This transfer does not go to the address you confirmed — refusing to sign' };
+    const amount = readWord(body, 32);
+    if (amount === null || amount > t.maxAmount) return { ok: false, message: 'This transfer is for more than you confirmed — refusing to sign' };
+    if (tx.value !== 0n) return { ok: false, message: 'A token transfer must not carry native value — refusing to sign' };
   }
 
   // Setting an allowance to ZERO is a surrender, not a grant: it names a

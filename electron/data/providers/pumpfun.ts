@@ -343,6 +343,19 @@ export async function coin(mint: string): Promise<PumpCoin | null> {
  * count stops mattering; `truncated` says so rather than implying the number
  * is complete.
  */
+/**
+ * How long a creator's list is believed. A creator's record only changes when
+ * they launch again (or an old coin graduates), and a launch the engine hears
+ * expires it early (launchIntel.noteCreatorLaunch). 60 s used to re-buy the
+ * same creator's pages every minute, on the one pump.fun route that is
+ * refused 25-45 % of the time (measured 2026-10-01).
+ */
+export const CREATOR_TTL_MS = 10 * 60_000;
+
+export function creatorPageKey(creator: string, page: number): string {
+  return `pf:creator:${creator}:${page}`;
+}
+
 export async function byCreator(creator: string, maxPages = 2): Promise<{ coins: PumpCoin[]; truncated: boolean }> {
   const out: PumpCoin[] = [];
   const seen = new Set<string>();
@@ -357,7 +370,7 @@ export async function byCreator(creator: string, maxPages = 2): Promise<{ coins:
       order: 'DESC',
       includeNsfw: 'true', // a track record must not hide the nsfw launches
     });
-    const hit = await memo<PumpCoin[]>(`pf:creator:${creator}:${p}`, 60_000, async () => {
+    const hit = await memo<PumpCoin[]>(creatorPageKey(creator, p), CREATOR_TTL_MS, async () => {
       const r = await getJson<PumpCoin[]>('pumpfun', `/coins?${q.toString()}`, { lane: 'list' });
       if (!r.ok || !Array.isArray(r.data)) return null;
       const rows = r.data.filter((c) => c && typeof c.mint === 'string');

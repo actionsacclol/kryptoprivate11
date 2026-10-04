@@ -18,6 +18,7 @@ import {
   newestFirst,
   parseCoinCallouts,
   parseHomeFeed,
+  parseMintPositions,
   skinInTheGame,
   derivedMultiple,
 } from './.callouts.mjs';
@@ -197,6 +198,29 @@ const rows = parseHomeFeed(feed);
   assert.equal(coinCallsLabel([{ ...sol, coinCallouts: null }, { ...sol, id: 'y', coinCallouts: null }]), '2 calls');
   assert.equal(coinCallsLabel([{ ...sol, coinCallouts: 1 }]), '1 call', 'a count that is not larger is not repeated');
   ok('position.totalCallouts is the coin’s count (coinCallouts), never the caller’s');
+}
+
+{
+  // test/fixtures/pump-mint-positions.json is a REAL `GET /mint-positions/{mint}`
+  // payload (withThesis=false) captured 2026-09-30: two holders of HalloCate,
+  // one with a callout and one without. Only the call becomes a row, with the
+  // caller's own position, and no multiple — this route serves no current cap.
+  const raw = JSON.parse(fs.readFileSync('test/fixtures/pump-mint-positions.json', 'utf8'));
+  const mint = raw.positions[0].coinMint;
+  const rows = parseMintPositions(raw, mint, 'solana');
+  const withCall = raw.positions.filter((x) => x.callout);
+  assert.equal(rows.length, withCall.length, 'a holder without a callout is not a row');
+  const [r] = rows;
+  assert.equal(r.id, withCall[0].callout.calloutId);
+  assert.equal(r.at, Date.parse(withCall[0].callout.calloutTimestamp), 'at = when they called');
+  assert.equal(r.caller.wallet, withCall[0].walletAddress);
+  assert.equal(r.caller.holds, withCall[0].amountHeld);
+  assert.equal(r.calledAtMcapUsd, withCall[0].callout.calledOutAtMcap);
+  assert.equal(r.multiple, null, 'pump’s own multiple is not repeated');
+  assert.equal(skinInTheGame(r), 'holding');
+  assert.deepEqual(parseMintPositions(null, mint, 'solana'), []);
+  assert.deepEqual(parseMintPositions({ positions: [{ callout: { calloutId: 'x' } }] }, mint, 'solana'), [], 'a call with no timestamp is dropped');
+  ok('/mint-positions parses one row per CALL, with the caller’s position');
 }
 
 console.log(`\ncallouts: ${passed}/${passed} passed`);

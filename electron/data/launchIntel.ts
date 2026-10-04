@@ -21,7 +21,7 @@ import { ataFor, TOKEN_2022_PROGRAM, TOKEN_PROGRAM } from '../chain/addresses';
 import { getMultipleAccountsRaw } from '../chain/rpcClient';
 import * as pf from './providers/pumpfun';
 import * as ps from './providers/pumpswap';
-import { cached, memo, putCache } from './http';
+import { cached, expireCache, memo, putCache } from './http';
 import * as onchain from './onchain';
 import * as pumpChain from './pumpChain';
 import {
@@ -366,7 +366,7 @@ async function build(mint: string, httpUrl: string, hint?: { createdAt: number |
  * there is no free cross-launchpad index to fix that with.
  */
 export async function creatorHistory(creator: string): Promise<CreatorHistory | null> {
-  return memo<CreatorHistory>(`ch:${creator}`, 120_000, async () => {
+  return memo<CreatorHistory>(`ch:${creator}`, pf.CREATOR_TTL_MS, async () => {
     const { coins, truncated } = await pf.byCreator(creator);
     if (!coins.length) return null;
     const launches: CreatorLaunch[] = coins.map((c) => ({
@@ -380,6 +380,22 @@ export async function creatorHistory(creator: string): Promise<CreatorHistory | 
     }));
     return summariseCreator(creator, launches, truncated);
   });
+}
+
+/**
+ * The engine heard this creator launch a coin. A record that does not list
+ * it is now short by at least one launch, so it is expired — the next lookup
+ * asks pump.fun again — but not deleted: if pump refuses that lookup, the
+ * old record is still served inside its grace, which is a truer floor than
+ * "unknown". Called for every launch on the feed, so it is one cache read
+ * when there is nothing to do.
+ */
+export function noteCreatorLaunch(creator: string, mint: string): void {
+  const h = cached<CreatorHistory>(`ch:${creator}`);
+  if (!h || h.recent.some((l) => l.mint === mint)) return;
+  expireCache(`ch:${creator}`);
+  expireCache(pf.creatorPageKey(creator, 0));
+  expireCache(pf.creatorPageKey(creator, 1));
 }
 
 // ── Measured rug rules (shared/rugrules.ts) ───────────────────────────

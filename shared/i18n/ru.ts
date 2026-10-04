@@ -18,6 +18,7 @@ export const ru: Catalogue = {
   'nav.solWallet': 'Кошелёк Sol',
   'nav.robinhoodWallet': 'Кошелёк Robinhood',
   'nav.bnbWallet': 'Кошелёк BNB',
+  'nav.aioWallet': 'Кошелёк «Всё в одном»',
   'nav.swap': 'Своп',
   'nav.bridge': 'Бридж',
   'nav.observatory': 'Обсерватория',

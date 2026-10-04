@@ -18,17 +18,16 @@ import {
   HARD_FLOOR_USD,
   STATUS_LABEL,
   chainLabel,
-  costPct,
   emptyDraft,
   nativeSymbolOf,
   routeId,
-  sizeWarning,
   type BridgeChain,
   type BridgeDraft,
   type BridgeQuote,
   type InFlight,
 } from '@shared/bridge';
 import { Card, Empty, Page, Section } from '../components/common';
+import { TransferQuote, useQuoteClock } from '../components/terminal/TransferQuote';
 import { useAppState } from '../state/AppStateProvider';
 import { useToast } from '../state/ToastProvider';
 import { cls, fmtClock } from '../utils/format';
@@ -61,14 +60,15 @@ export function Bridge() {
   const [busy, setBusy] = useState<'' | 'quote' | 'check' | 'send' | 'refresh'>('');
   const [checked, setChecked] = useState(false);
   const [amountText, setAmountText] = useState('');
-  // A check is good for as long as the quote behind it (main keeps a quote
-  // for 60 s and refuses a real send on an older one), so the button goes
-  // back to "check it first" on its own rather than sending into a refusal.
+  // A check is good for as long as the QUOTE behind it, counted from when it
+  // was quoted — main refuses a send on an older one (QUOTE_LIFE_MS: 30 s on
+  // Relay). It used to run 55 s from the Check press, which outlived a Relay
+  // quote and sent into a refusal.
+  const [quotedAt, setQuotedAt] = useState<number | null>(null);
+  const clock = useQuoteClock(quote, quotedAt);
   useEffect(() => {
-    if (!checked) return;
-    const t = setTimeout(() => setChecked(false), 55_000);
-    return () => clearTimeout(t);
-  }, [checked]);
+    if (clock.expired) setChecked(false);
+  }, [clock.expired]);
 
   const load = useCallback(() => {
     void window.krypt.bridge
@@ -117,6 +117,7 @@ export function Bridge() {
         return;
       }
       setQuote(r.data);
+      setQuotedAt(Date.now());
     } finally {
       setBusy('');
     }
@@ -125,14 +126,20 @@ export function Bridge() {
   const run = useCallback(
     async (simulateOnly: boolean) => {
       setBusy(simulateOnly ? 'check' : 'send');
-      // The aggregator paces quotes about 90 s apart; a check that needs a
-      // fresh one waits for it. Said after a few seconds, so a wait is not
+      // A slow bridge answer is said after a few seconds, so a wait is not
       // mistaken for a hang.
-      const slow = setTimeout(() => toast.info('Still waiting on the aggregator — it paces quotes about 90 seconds apart. Nothing has been sent.'), 5_000);
+      const slow = setTimeout(() => toast.info('Still waiting on the bridge — nothing has been sent.'), 5_000);
       try {
-        const r = await window.krypt.bridge.send(draft, simulateOnly);
+        const r = await window.krypt.bridge.send(draft, simulateOnly, quote?.quoteId);
         if (!r.ok) {
           toast.error(r.message);
+          // A real send spent its quote in main whatever happened; the page
+          // drops it too, so a retry is a new quote, never the same one twice.
+          if (!simulateOnly) {
+            setChecked(false);
+            setQuote(null);
+            load();
+          }
           return;
         }
         if (simulateOnly) {
@@ -151,7 +158,7 @@ export function Bridge() {
         setBusy('');
       }
     },
-    [draft, toast, load],
+    [draft, quote, toast, load],
   );
 
   const refresh = useCallback(async () => {
@@ -164,11 +171,6 @@ export function Bridge() {
       setBusy('');
     }
   }, [toast, load]);
-
-  const warning = quote ? sizeWarning(quote) : null;
-  const pct = quote ? costPct(quote) : null;
-  const out = quote ? fromRaw(quote.toAmountRaw, quote.toDecimals) : null;
-  const outMin = quote ? fromRaw(quote.toAmountMinRaw, quote.toDecimals) : null;
 
   const disabledRoutes = useMemo(
     () =>
@@ -220,7 +222,9 @@ export function Bridge() {
               <div className="text-value font-semibold text-white">Allow this install to bridge</div>
               <div className="mt-0.5 text-body leading-relaxed text-krypt-muted">
                 Off: the signer refuses any transaction that sends funds to a contract this app did not build, which is every
-                bridge. On: it accepts only the bridges this build has measured, and nothing else.
+                bridge started from this page. On: it accepts only the bridges this build has measured, and nothing else.
+                The All-in-One wallet's moves, top-ups, float and Compress are separate features with their own switches on
+                the All-in-One page; this switch does not govern them.
               </div>
             </div>
             <button
@@ -298,37 +302,13 @@ export function Bridge() {
             Get a quote
           </button>
 
-          {quote && (
-            <div className="space-y-1.5 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-body leading-relaxed">
-              <div className="text-white/90">
-                You receive about{' '}
-                <span className="font-mono">{out === null ? '—' : out.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>{' '}
-                {nativeSymbolOf(quote.to)}
-                {outMin !== null && (
-                  <span className="text-krypt-muted"> · at least {outMin.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>
-                )}
-              </div>
-              <div className="text-krypt-muted">
-                via <span className="text-white/70">{quote.tool}</span>
-                {quote.durationSec !== null && <> · usually about {quote.durationSec}s</>}
-                {pct !== null && <> · costs {pct.toFixed(2)}%</>}
-              </div>
-              {/* The asymmetry, said plainly. Never a tick that means less on
-                  one rail than the other. */}
-              <div className={quote.assurance === 'verified' ? 'text-emerald-300/90' : 'text-amber-200/80'}>
-                {quote.assurance === 'verified'
-                  ? 'Checked: this transaction names your own address on the far side.'
-                  : 'Not checkable: a Solana transfer carries no record of where it ends up. The destination is this bridge’s promise, not something we can prove.'}
-              </div>
-              {warning && <div className="text-amber-200/80">{warning}</div>}
-            </div>
-          )}
+          {quote && <TransferQuote quote={quote} />}
 
           {quote && (
             <div className="flex items-center gap-2">
               <button
                 onClick={() => void run(true)}
-                disabled={busy !== ''}
+                disabled={busy !== '' || clock.expired}
                 className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-note text-white/90 transition hover:bg-white/10 disabled:opacity-40"
               >
                 {busy === 'check' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -336,7 +316,7 @@ export function Bridge() {
               </button>
               <button
                 onClick={() => void run(false)}
-                disabled={busy !== '' || !checked || recordFailure !== null}
+                disabled={busy !== '' || !checked || recordFailure !== null || clock.expired}
                 title={
                   recordFailure
                     ? 'The in-flight record cannot be written this session — nothing will be sent'
@@ -349,10 +329,17 @@ export function Bridge() {
                 {busy === 'send' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shuffle className="h-3.5 w-3.5" />}
                 Send it
               </button>
-              {checked && (
-                <span className="flex items-center gap-1 text-body text-emerald-300">
-                  <Check className="h-3 w-3" /> checked
-                </span>
+              {clock.expired ? (
+                <span className="text-body text-amber-300/90">Quote expired — get a new one.</span>
+              ) : (
+                <>
+                  {checked && (
+                    <span className="flex items-center gap-1 text-body text-emerald-300">
+                      <Check className="h-3 w-3" /> checked
+                    </span>
+                  )}
+                  <span className="text-body text-krypt-muted">good for {clock.secondsLeft}s</span>
+                </>
               )}
             </div>
           )}

@@ -263,4 +263,19 @@ const good = (over = {}) => ({ ...emptyDraft(), amount: 1, ...over });
   ok('the priority ceiling converts micro-lamports per CU without an exponent slip');
 }
 
+// ── the swap follows its OWN signature (live test 2026-10-03) ─────────────
+{
+  // bs58Signature used new PublicKey(sig), which throws on 64 bytes: every
+  // Solana swap polled '' and was reported "expired, nothing moved" after it
+  // had landed — a retry swapped twice.
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('../electron/engine/swap.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const at = src.indexOf('export function bs58Signature(');
+  const fn = src.slice(at, at + 400);
+  assert.ok(at > 0 && fn.includes('base58Encode(sig)'), 'the signature is base58-encoded as 64 bytes');
+  assert.ok(!fn.includes('new PublicKey('), 'never through PublicKey, which only takes 32 bytes');
+  assert.ok(src.includes("if (!sig) return { ok: false, message: 'Could not read the signed swap’s signature — nothing was sent.' }"), 'no signature, no broadcast');
+  ok('a swap is confirmed by its real signature, never an empty one');
+}
+
 console.log(`\nswap: ${passed}/${passed} passed`);

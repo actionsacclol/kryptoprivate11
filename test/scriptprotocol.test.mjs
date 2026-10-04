@@ -60,7 +60,19 @@ test('the sandbox page locks itself down and exposes only bot', () => {
 test('every allowed method is on the sandbox bot', () => {
   const html = sandboxPageHtml();
   const body = html.slice(html.indexOf('const bot = Object.freeze({'));
-  const missing = SCRIPT_METHODS.filter((m) => !new RegExp(`\\n\\s+(get )?${m}\\s*[:(]`).test(body));
+  // A namespaced method (2026-10-03: bot.aio.*) is sent as `aioMove` and sits
+  // at bot.aio.move — inside that namespace's own frozen object.
+  const NAMESPACES = ['aio'];
+  const inNamespace = (m) => {
+    const ns = NAMESPACES.find((n) => m.startsWith(n) && m.length > n.length && /[A-Z]/.test(m[n.length]));
+    if (!ns) return false;
+    const start = body.indexOf(`${ns}: Object.freeze({`);
+    if (start < 0) return false;
+    const inner = body.slice(start, body.indexOf('})', start));
+    const leaf = m[ns.length].toLowerCase() + m.slice(ns.length + 1);
+    return new RegExp(`\\n\\s+${leaf}\\s*[:(]`).test(inner);
+  };
+  const missing = SCRIPT_METHODS.filter((m) => !new RegExp(`\\n\\s+(get )?${m}\\s*[:(]`).test(body) && !inNamespace(m));
   assert.deepEqual(missing, [], `bot is missing: ${missing.join(', ')}`);
 });
 

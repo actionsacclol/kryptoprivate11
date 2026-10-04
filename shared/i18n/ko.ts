@@ -19,6 +19,7 @@ export const ko: Catalogue = {
   'nav.solWallet': 'Sol 지갑',
   'nav.robinhoodWallet': 'Robinhood 지갑',
   'nav.bnbWallet': 'BNB 지갑',
+  'nav.aioWallet': '올인원 지갑',
   'nav.swap': '스왑',
   'nav.bridge': '브릿지',
   'nav.observatory': '관측소',

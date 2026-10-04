@@ -22,8 +22,9 @@
 //
 // There is no holders route and no top-traders route here (both 404).
 
-import { getJson } from '../http';
+import { getJson, memo } from '../http';
 import type { LaunchTrade } from '@shared/launchintel';
+import type { Candle, CandleInterval } from '@shared/market';
 
 interface SwapTrade {
   slotIndexId?: string;
@@ -253,4 +254,104 @@ export async function launchTrades(mint: string, createdAtMs: number): Promise<L
     calls,
     message: hasMore ? `over ${all.length} trades in the launch window` : 'ok',
   };
+}
+
+// ── Candles ───────────────────────────────────────────────────────────
+//
+// MEASURED 2026-10-01: `GET /v1/coins/{mint}/candles?interval=&limit=&currency=`
+// serves OHLC for a coin still on its bonding curve, from its first trade — a
+// coin two minutes old already had its 1m bars. No chart provider indexes a
+// curve, so before this a curve coin's chart was only ever our own tape, and
+// the tape records a coin only while its page is open: a script's buy, or an
+// AI asking for the chart, got no bars at all (user report 2026-10-01, three
+// of five trades). A graduated coin's series runs across the migration.
+//
+// Shape: an array, oldest first; `timestamp` in ms; every number a string;
+// `volume` in the quote currency; `limit` at most 1000 (a 400 above it).
+// Intervals: 1s, 15s, 30s, 1m, 5m, 15m, 30m, 1h, 4h, 6h, 12h, 24h — no 5s,
+// which is built here from 1s. `/v2/…` answers the same but demands
+// `createdTs`.
+
+const CANDLE_INTERVAL: Partial<Record<CandleInterval, string>> = {
+  '1s': '1s',
+  '5s': '1s',
+  '15s': '15s',
+  '1m': '1m',
+  '5m': '5m',
+  '15m': '15m',
+  '1h': '1h',
+  '4h': '4h',
+};
+
+const CANDLE_LIMIT_MAX = 1000;
+
+export function candlesSupported(interval: CandleInterval): boolean {
+  return CANDLE_INTERVAL[interval] !== undefined;
+}
+
+/** The route's rows as chart candles: seconds, numbers, oldest first, one
+ *  per bucket. A row with any price missing or non-positive is dropped —
+ *  never drawn as a zero. */
+export function parseCandles(rows: unknown[]): Candle[] {
+  const byTime = new Map<number, Candle>();
+  for (const x of rows) {
+    if (!x || typeof x !== 'object') continue;
+    const r = x as Record<string, unknown>;
+    const ts = Number(r.timestamp);
+    if (!Number.isFinite(ts) || ts <= 0) continue;
+    const [open, high, low, close] = [r.open, r.high, r.low, r.close].map(Number);
+    if (![open, high, low, close].every((n) => Number.isFinite(n) && n > 0)) continue;
+    const volume = Number(r.volume);
+    const time = Math.floor(ts > 1e12 ? ts / 1000 : ts);
+    byTime.set(time, { time, open, high, low, close, volume: Number.isFinite(volume) && volume >= 0 ? volume : 0 });
+  }
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
+
+/** Wider buckets from narrower ones (5s from the route's 1s). Input oldest
+ *  first; open from the first row in a bucket, close from the last. */
+export function rebucket(rows: Candle[], seconds: number): Candle[] {
+  const out: Candle[] = [];
+  for (const r of rows) {
+    const time = Math.floor(r.time / seconds) * seconds;
+    const last = out[out.length - 1];
+    if (last && last.time === time) {
+      last.high = Math.max(last.high, r.high);
+      last.low = Math.min(last.low, r.low);
+      last.close = r.close;
+      last.volume += r.volume;
+    } else {
+      out.push({ ...r, time });
+    }
+  }
+  return out;
+}
+
+/**
+ * pump.fun's candles for a mint, in USD (the unit every other chart provider
+ * answers in, so the merge with the tape converts exactly as it does for
+ * them). Null when the route refused; an EMPTY array when it answered with
+ * nothing (a coin seconds old is not indexed yet) — kept for the same TTL,
+ * so a chart polling every second does not re-ask for nothing every second.
+ *
+ * Never `priority`: this host's Cloudflare rule EXTENDS its block for every
+ * request made during it (swap-api burst limit, 2026-09-21), and a chart is
+ * not the trade path. The memo is what keeps a chart's 1-5 s poll from
+ * re-asking: one request per few seconds at most, whatever polls.
+ */
+export async function candles(mint: string, interval: CandleInterval, limit = 500): Promise<Candle[] | null> {
+  const iv = CANDLE_INTERVAL[interval];
+  if (!iv) return null;
+  const five = interval === '5s';
+  const want = Math.max(1, Math.min(CANDLE_LIMIT_MAX, five ? limit * 5 : limit));
+  const subMinute = interval === '1s' || interval === '5s' || interval === '15s';
+  const ttl = subMinute ? 5_000 : interval === '1m' ? 15_000 : 60_000;
+  return memo<Candle[]>(`ps:candles:${mint}:${interval}:${want}`, ttl, async () => {
+    const q = new URLSearchParams({ interval: iv, limit: String(want), currency: 'USD' });
+    const r = await getJson<unknown>('pumpswap', `/v1/coins/${encodeURIComponent(mint)}/candles?${q}`);
+    if (!r.ok || !Array.isArray(r.data)) return null;
+    const rows = parseCandles(r.data);
+    const out = five ? rebucket(rows, 5) : rows;
+    return out.slice(-limit);
+  });
 }

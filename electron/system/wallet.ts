@@ -34,7 +34,7 @@ import { Keypair, VersionedTransaction } from '@solana/web3.js';
 import { base58Encode, base58Decode } from '../chain/base58';
 import { logger } from './logger';
 import { getBalance } from '../chain/rpcClient';
-import { checkOutflow, type SignPolicy } from './signPolicy';
+import { checkOutflow, type ApprovedSend, type SignPolicy } from './signPolicy';
 import {
   activeWallet,
   addWallet,
@@ -307,6 +307,36 @@ export function importSecret(input: string, label = ''): { ok: boolean; message:
   return { ok: true, message: 'Wallet imported', publicKey };
 }
 
+/**
+ * The All-in-One wallet's Solana key: add it, or find it when it is already
+ * held (someone importing the phrase of a wallet they imported before by
+ * its key). Never changes who signs — `addWallet`'s first-wallet rule aside.
+ * The seed is the caller's to scrub.
+ */
+export function ensureFromSeed(seed: Uint8Array, label: string): { ok: boolean; message: string; id?: string; publicKey?: string; existed?: boolean } {
+  const blocked = blockedByFailure();
+  if (blocked) return blocked;
+  if (!encAvailable()) return { ok: false, message: 'OS secure storage is unavailable — refusing to store a key unencrypted.' };
+  if (seed.length !== 32) return { ok: false, message: 'internal: a Solana seed is 32 bytes' };
+  const publicKey = base58Encode(ed25519.getPublicKey(seed));
+  const f = loadFile();
+  const held = f.wallets.find((w) => w.publicKey === publicKey);
+  if (held) return { ok: true, message: `${held.label} is already in your wallet list`, id: held.id, publicKey, existed: true };
+  const id = newId();
+  const res = addWallet(f, {
+    id,
+    label: cleanLabel(label, f.wallets.length + 1),
+    publicKey,
+    secretEnc: encryptSecret(seed),
+    homeAddress: null,
+    maxBalanceSol: DEFAULT_MAX_BALANCE_SOL,
+    createdAt: Date.now(),
+  });
+  if (!res.ok) return { ok: false, message: res.message };
+  persist(res.file);
+  return { ok: true, message: 'Wallet added', id, publicKey, existed: false };
+}
+
 /** Make a held wallet the signer. */
 export function select(id: string): { ok: boolean; message: string } {
   return commit(selectWallet(loadFile(), id));
@@ -469,6 +499,37 @@ export function backupToFile(destPath: string): { ok: boolean; message: string }
  * checked: this function is the last gate before a signature exists.
  */
 /** Sign with the ACTIVE wallet — the single-trade path, unchanged. */
+// ── Sends the user confirmed (2026-10-03) ──────────────────────────────
+//
+// A send pays an address the user TYPED, so the signer cannot check it
+// against anything it stores. Instead the IPC handler, after the native
+// dialog showed the exact address and amount, files an approval here; the
+// signer looks it up by id, checks the bytes against it, and spends it. One
+// approval signs one transaction, for one wallet, within SEND_APPROVAL_TTL_MS.
+// Nothing outside the main process can reach this map.
+
+const SEND_APPROVAL_TTL_MS = 120_000;
+const sendApprovals = new Map<string, ApprovedSend & { wallet: string; expiresAt: number }>();
+
+/** File an approval for one send from `walletPublicKey`. Main process only,
+ *  and only after the native confirmation. Returns the id a policy names. */
+export function approveSend(walletPublicKey: string, approved: ApprovedSend): string {
+  const now = Date.now();
+  for (const [k, v] of sendApprovals) if (v.expiresAt <= now) sendApprovals.delete(k);
+  const id = `send_${now.toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  sendApprovals.set(id, { ...approved, wallet: walletPublicKey, expiresAt: now + SEND_APPROVAL_TTL_MS });
+  return id;
+}
+
+/** Spend an approval: gone after this call whatever the outcome. */
+function takeSendApproval(id: string | undefined, walletPublicKey: string): ApprovedSend | null {
+  if (!id) return null;
+  const a = sendApprovals.get(id);
+  sendApprovals.delete(id);
+  if (!a || a.expiresAt <= Date.now() || a.wallet !== walletPublicKey) return null;
+  return { to: a.to, mint: a.mint, tokenProgram: a.tokenProgram, maxAmount: a.maxAmount };
+}
+
 export function signVersionedTransaction(
   unsignedTx: Uint8Array,
   policy: SignPolicy,
@@ -600,7 +661,9 @@ function signWith(
       return { ok: false, message: `Transaction needs ${tx.message.header.numRequiredSignatures} signers — refusing (expect 1)` };
     }
     // Decode-and-revalidate BEFORE the key is ever decrypted.
-    const outflow = checkOutflow(tx, w.publicKey, w.homeAddress, policy);
+    // A send's destination comes from the approval store, never the caller.
+    const approved = policy.intent === 'send' || policy.intent === 'send-token' ? takeSendApproval(policy.sendApprovalId, w.publicKey) : null;
+    const outflow = checkOutflow(tx, w.publicKey, w.homeAddress, policy, approved);
     if (!outflow.ok) return { ok: false, message: outflow.message };
 
     secret = decryptSecret(w);

@@ -1553,7 +1553,8 @@ test('the AI prompt pack and the variable guide name every field, event and meth
   for (const m of ['on', 'log', 'now', 'chain', 'nativeSymbol']) assert.ok(SCRIPT_API.find((a) => a.method === m)?.local, `${m} is marked local`);
   assert.ok(pack.includes('as **unknown, never as zero**'), 'the null rule is stated');
   assert.match(pack, /Output only the script/);
-  assert.ok(pack.length > 8_000 && pack.length < 60_000, `a pasteable size (${pack.length} chars)`);
+  // 64k since 2026-10-03: the All-in-One calls and example, and EVM parity notes.
+  assert.ok(pack.length > 8_000 && pack.length < 64_000, `a pasteable size (${pack.length} chars)`);
   // 09-22: the prose that is NOT generated from a table drifted — the pack
   // said handlers die at 3 s (a 30 s ceiling since 09-21), called the app
   // Solana-only, and never showed how to write an @inputs form.
@@ -1674,14 +1675,16 @@ test('a rule its chain could never answer is refused at save, not left to fail q
 
 test('a trigger its chain never fires is refused too', () => {
   setup();
-  for (const t of ['tick', 'runner', 'order', 'alert']) {
+  // 2026-10-03: the EVM scanners raise runners and price ticks, so only the
+  // Solana-only systems (advanced orders, alerts) stay refused.
+  for (const t of ['order', 'alert']) {
     assert.equal(triggerAvailableOn(t, 'bnb'), false, `${t} cannot fire on BNB`);
     const r = auto.upsert(rulesScript({ chain: 'bnb' }, { trigger: t, conditions: [], actions: [{ type: 'buy', sol: 0.005 }] }));
     assert.equal(r.ok, false, `${t} should be refused on BNB`);
     assert.match(r.message, /never happens on BNB Smart Chain/);
   }
   // The ones both rails really do fire.
-  for (const t of ['launch', 'launch_update', 'position', 'leader_trade', 'schedule']) {
+  for (const t of ['launch', 'launch_update', 'position', 'leader_trade', 'schedule', 'tick', 'runner']) {
     assert.equal(triggerAvailableOn(t, 'bnb'), true, `${t} should be available on BNB`);
   }
   assert.equal(triggerAvailableOn('tick', 'solana'), true, 'Solana keeps every trigger');
@@ -2004,10 +2007,21 @@ test('a fresh runner gets its links from the launch metadata when no provider ha
   assert.equal(withUrls.twitter, 'https://x.com/someone');
   assert.equal(withUrls.xLinkKind, 'profile');
   assert.equal(withUrls.telegram, null);
-  // A provider that answered wins.
+  // A provider's link stands where the file has none; the file's link beats a
+  // provider's "none" (2026-09-30: pump's young record said none, the file had it).
   const answered = withLaunchLinks(withMarket(emptyContext(MINT), marketFactsFromSummary(fakeSummary())), { twitter: false, website: false, telegram: true });
-  assert.equal(answered.hasTwitter, true);
-  assert.equal(answered.hasTelegram, false);
+  assert.equal(answered.hasTwitter, true, 'the provider’s X stands');
+  assert.equal(answered.hasTelegram, true, 'the file’s Telegram beats the provider’s none');
+  // A summary nobody answered socials for is unknown, not "none" — the bug
+  // that skipped SRI / HANDLE / SIVSAI as "no X linked".
+  const untouched = marketFactsFromSummary(fakeSummary({ socials: { twitter: null, website: null, telegram: null, dexPaid: false }, sources: {} }));
+  assert.equal(untouched.socials, null, 'no source answered: no socials claim');
+  const blank = withMarket(emptyContext(MINT), untouched);
+  assert.equal(blank.hasTwitter, null);
+  assert.equal(blank.hasWebsite, null);
+  assert.equal(withLaunchLinks(blank, { twitter: true, website: true, telegram: false }).hasTwitter, true);
+  const said = marketFactsFromSummary(fakeSummary({ socials: { twitter: null, website: null, telegram: null, dexPaid: false }, sources: { socials: 'dexscreener' } }));
+  assert.equal(withMarket(emptyContext(MINT), said).hasTwitter, false, 'a source that answered "none" is a real none');
   // Metadata not resolved: still unknown, never false.
   const unread = withLaunchLinks(emptyContext(MINT), null);
   assert.equal(unread.hasTwitter, null);
@@ -2899,10 +2913,10 @@ test('bot.order refuses a market-cap stop instead of arming a percent one, and p
 });
 
 test('the 2026-09-27 reads are sandbox methods, documented, and say what they cost', () => {
-  // holdings answers on every chain (the EVM bridge's holdings); history is
-  // Solana's ledger and says so (empty off Solana) — audit 2026-09-27.
-  const solanaOnly = ['launchIntel', 'holders', 'trades', 'candles', 'search', 'callouts', 'history', 'alerts'];
-  const anyChain = ['discover', 'holdings', 'solUsd', 'walletScores', 'walletRecord', 'copyConfigs'];
+  // holdings answers on every chain (the EVM bridge's holdings); since 6.0
+  // history does too (an EVM script reads its chain's fills) — v6 audit.
+  const solanaOnly = ['launchIntel', 'holders', 'trades', 'candles', 'search', 'callouts', 'alerts'];
+  const anyChain = ['discover', 'holdings', 'history', 'solUsd', 'walletScores', 'walletRecord', 'copyConfigs'];
   for (const m of [...solanaOnly, ...anyChain]) {
     assert.ok(SCRIPT_METHODS.includes(m), `${m} is callable`);
     const a = SCRIPT_API.find((x) => x.method === m);
@@ -3254,6 +3268,176 @@ test('new events: migration to every Solana script, devSell to holders and subsc
   for (const d of SCRIPT_EVENTS_DOC) assert.ok(SCRIPT_EVENTS.includes(d.event), `${d.event} exists`);
   const on = SCRIPT_API.find((a) => a.method === 'on');
   for (const e of ['migration', 'curveHigh', 'devSell', 'holdings', 'copyFill', 'runnerExpired']) assert.ok(on.notes.includes(e), `bot.on lists ${e}`);
+});
+
+
+// ── Robinhood / BNB code scripts at parity (2026-10-03) ──────────────────
+const EVM_T = '0xAbCdEf0123456789aBcDeF0123456789AbCdEf01';
+const evmBudget = { ...defaultScript('code').budget, maxActionsPerMinute: 100, maxSolPerTrade: 1, maxBuysPerDay: 20, maxOpenPositions: 10 };
+
+test('a Robinhood code script trades its 0x tokens; Solana-only calls refuse; its own wallet', async () => {
+  const h = setup();
+  h.wallet = (chain) => (chain === 'robinhood' ? { sol: 0.5, address: '0xme' } : { sol: 9, address: 'Sol1111' });
+  const s = saved(codeScript({ chain: 'robinhood', budget: evmBudget }));
+  auto.setEnabled(s.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [EVM_T, 0.01] });
+  await tick(40);
+  assert.equal(by(1).ok, true, by(1).error);
+  assert.equal(by(1).value.ok, true, by(1).value?.message);
+  assert.equal(h.calls.buys[0].mint, EVM_T.toLowerCase(), 'the 0x address, lower-cased like the scanner and ledger store it');
+  assert.equal(h.calls.buyChains[0], 'robinhood');
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'order', args: [{ mint: EVM_T, kind: 'sell_on_migration', triggerBasis: 'mcap', triggerValue: 1, amount: 100 }] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'wallet', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 4, method: 'buy', args: ['So11111111111111111111111111111111111111112', 0.01] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 5, method: 'buy', args: [EVM_T, 0.01, { lane: 'lean' }] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 6, method: 'orders', args: [] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 7, method: 'templates', args: [] });
+  await tick(40);
+  assert.equal(by(2).ok, false);
+  assert.match(by(2).error, /Solana-only/, 'no Solana advanced order on an EVM address');
+  assert.equal(h.calls.orders.length, 0);
+  assert.equal(by(3).value.address, '0xme', "the script's OWN chain wallet");
+  assert.match(by(4).error, /bad mint/, 'a Solana mint is not a Robinhood token');
+  assert.match(by(5).error, /lane is Solana-only/);
+  assert.deepEqual(by(6).value, [], "no Solana orders handed to an EVM script");
+  assert.deepEqual(by(7).value, []);
+});
+
+test('a live EVM buy keeps the gas to sell — unless it is topped up', async () => {
+  const h = setup();
+  h.wallet = (chain) => (chain === 'robinhood' ? { sol: 0.005, address: '0xme' } : { sol: 9, address: 'Sol1111' });
+  const s = saved(codeScript({ chain: 'robinhood', mode: 'live', budget: evmBudget }));
+  auto.setEnabled(s.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [EVM_T, 0.0049] });
+  await tick(40);
+  assert.equal(by(1).value.ok, false);
+  assert.match(by(1).value.message, /gas to sell/);
+  assert.equal(h.calls.buys.length, 0);
+  // With the All-in-One wallet: funded first, then the script's own buy.
+  const log = [];
+  auto.setAioScriptHooks({
+    active: () => true,
+    info: () => ({}),
+    balances: async () => null,
+    move: async (from, to, amount) => (log.push(['move', from, to, amount]), { ok: true, message: 'moved' }),
+    fund: async (chain, amount) => (log.push(['fund', chain, amount, h.calls.buys.length]), { ok: true, message: 'topped up from Solana', funded: { f: 1 } }),
+    bill: async (f) => (log.push(['bill', f]), ' billed'),
+  });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'buy', args: [EVM_T, 0.0049, { topUp: true }] });
+  await tick(40);
+  assert.equal(by(2).value.ok, true, by(2).value?.message);
+  assert.deepEqual(log[0], ['fund', 'robinhood', 0.0049, 0], 'funded BEFORE the buy');
+  assert.equal(h.calls.buys.length, 1, 'then the script bought, through its own guards');
+  assert.ok(!log.some((l) => l[0] === 'bill'), 'a buy that went through bills nothing');
+  auto.setAioScriptHooks(null);
+});
+
+test('a topped-up buy that fails bills the top-up; a script moves money between chains', async () => {
+  const h = setup({ buyResult: { ok: false, message: 'slippage' } });
+  h.wallet = () => ({ sol: 0, address: '0xme' });
+  const log = [];
+  auto.setAioScriptHooks({
+    active: () => true,
+    info: () => ({ exists: true }),
+    balances: async () => ({ totalUsd: 12 }),
+    move: async (from, to, amount) => (log.push(['move', from, to, amount]), { ok: true, message: 'On its way.' }),
+    fund: async () => ({ ok: true, message: 'topped up', funded: { f: 2 } }),
+    bill: async (f) => (log.push(['bill', f]), ' billed'),
+  });
+  auto.setEvmScriptHooks({ launch: () => null, ownsWholeBag: () => null, history: () => [], nativeUsd: async (c) => (c === 'solana' ? 150 : 600), wallets: () => [] });
+  const s = saved(codeScript({ chain: 'bnb', mode: 'live', budget: evmBudget }));
+  auto.setEnabled(s.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [EVM_T, 0.01, { topUp: true }] });
+  await tick(40);
+  assert.equal(by(1).value.ok, false);
+  assert.deepEqual(log.find((l) => l[0] === 'bill'), ['bill', { f: 2 }], "the owner's rule: an unspent top-up is billed as a move");
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'aioMove', args: ['solana', 'bnb', 0.05] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'aioMove', args: ['bnb', 'bnb', 0.05] });
+  auto.onSandboxMessage(s.id, { t: 'call', id: 4, method: 'aioBalances', args: [] });
+  await tick(40);
+  assert.equal(by(2).value.ok, true);
+  assert.deepEqual(log.find((l) => l[0] === 'move'), ['move', 'solana', 'bnb', 0.05]);
+  assert.match(by(3).error, /two different chains/);
+  assert.equal(by(4).value.totalUsd, 12);
+  // Paper moves nothing.
+  const p2 = saved(codeScript({ chain: 'bnb', mode: 'paper', budget: evmBudget, name: 'P' }));
+  auto.setEnabled(p2.id, true);
+  auto.onSandboxMessage(p2.id, { t: 'call', id: 5, method: 'aioMove', args: ['solana', 'bnb', 0.05] });
+  await tick(40);
+  assert.match(h.calls.replies.find((r) => r.cid === 5).value.message, /paper/);
+  assert.equal(log.filter((l) => l[0] === 'move').length, 1, 'paper did not move');
+  // v6 audit: bounded by the script's max per trade (1 BNB ≈ $600 here)…
+  auto.onSandboxMessage(s.id, { t: 'call', id: 6, method: 'aioMove', args: ['solana', 'bnb', 10] });
+  await tick(40);
+  assert.match(by(6).value.message, /over this script's max per trade/, '10 SOL ≈ $1,500 > $600');
+  // …and by the master switch: Paper everywhere, nothing moves.
+  const h2 = setup({ liveBlocked: 'Live is off' });
+  auto.setAioScriptHooks({ active: () => true, info: () => ({}), balances: async () => null, move: async () => (log.push(['move2']), { ok: true, message: 'moved' }), fund: async () => ({ ok: false, message: '', funded: null }), bill: async () => '' });
+  const s3 = saved(codeScript({ chain: 'bnb', mode: 'live', budget: evmBudget, name: 'Off' }));
+  auto.setEnabled(s3.id, true);
+  auto.onSandboxMessage(s3.id, { t: 'call', id: 7, method: 'aioMove', args: ['solana', 'bnb', 0.01] });
+  await tick(40);
+  assert.match(h2.calls.replies.find((r) => r.cid === 7).value.message, /not moved — Live is off/);
+  assert.ok(!log.some((l) => l[0] === 'move2'), 'the master switch held');
+  auto.setAioScriptHooks(null);
+  auto.setEvmScriptHooks(null);
+});
+
+test('a BNB script trades with another of the user\'s wallets by address, gas read from THAT wallet', async () => {
+  const h = setup();
+  h.wallet = () => ({ sol: 5, address: '0xactive' }); // the active wallet is rich…
+  const OTHER = '0x1111111111111111111111111111111111111AbC';
+  const trades = [];
+  auto.setEvmScriptHooks({
+    launch: () => null,
+    ownsWholeBag: () => null,
+    history: () => [],
+    nativeUsd: async () => 600,
+    // …the named one is nearly empty.
+    wallets: () => [{ address: '0xactive', label: 'Main', active: true, native: 5 }, { address: OTHER, label: 'Two', active: false, native: 0.002 }],
+    walletTrade: async (chain, side, address, token, amount) => (trades.push({ chain, side, address, token, amount }), { ok: true, message: 'done' }),
+  });
+  const s = saved(codeScript({ chain: 'bnb', mode: 'live', budget: evmBudget }));
+  auto.setEnabled(s.id, true);
+  const by = (cid) => h.calls.replies.find((r) => r.cid === cid);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [EVM_T, 0.01, { wallet: OTHER }] });
+  await tick(40);
+  assert.equal(by(1).value.ok, false);
+  assert.match(by(1).value.message, /gas to sell/, "the NAMED wallet's balance, not the active one's");
+  auto.onSandboxMessage(s.id, { t: 'call', id: 2, method: 'buy', args: [EVM_T, 0.001, { wallet: OTHER }] });
+  await tick(40);
+  assert.equal(by(2).value.ok, true, by(2).value?.message);
+  assert.deepEqual(trades[0], { chain: 'bnb', side: 'buy', address: OTHER.toLowerCase(), token: EVM_T.toLowerCase(), amount: 0.001 });
+  assert.equal(h.calls.buys.length, 0, 'never the active wallet instead');
+  auto.onSandboxMessage(s.id, { t: 'call', id: 3, method: 'sell', args: [EVM_T, 100, OTHER] });
+  await tick(40);
+  assert.equal(by(3).value.ok, true, by(3).value?.message);
+  assert.equal(trades[1].side, 'sell');
+  // The bag is closed: a second sell is refused as not held.
+  auto.onSandboxMessage(s.id, { t: 'call', id: 4, method: 'sell', args: [EVM_T, 100, OTHER] });
+  await tick(40);
+  assert.match(by(4).value.message, /does not hold it/);
+  auto.setEvmScriptHooks(null);
+});
+
+test('a live EVM loss counts toward the script loss stop (it never did)', async () => {
+  const h = setup();
+  h.wallet = (chain) => (chain === 'robinhood' ? { sol: 1, address: '0xme' } : { sol: 9, address: 'Sol1111' });
+  const s = saved(codeScript({ chain: 'robinhood', mode: 'live', budget: { ...evmBudget, maxLossSolPerDay: 0.1, maxLossPctOfWallet: 100 } }));
+  auto.setEnabled(s.id, true);
+  auto.onSandboxMessage(s.id, { t: 'call', id: 1, method: 'buy', args: [EVM_T, 0.01] });
+  await tick(40);
+  assert.equal(auto.all().find((x) => x.id === s.id).enabled, true);
+  // A Solana fill of the same token never counts here, and vice versa.
+  auto.onEvmFillSettled({ chain: 'bnb', mint: EVM_T.toLowerCase(), side: 'sell', at: Date.now(), wallet: null, requested: 100, realizedSol: -5 });
+  await tick(20);
+  assert.equal(auto.all().find((x) => x.id === s.id).enabled, true, 'another chain is not this script');
+  auto.onEvmFillSettled({ chain: 'robinhood', mint: EVM_T.toLowerCase(), side: 'sell', at: Date.now(), wallet: null, requested: 100, realizedSol: -0.2 });
+  await tick(20);
+  assert.equal(auto.all().find((x) => x.id === s.id).enabled, false, 'past the stop on its own chain, the script is off');
 });
 
 await run();

@@ -45,6 +45,7 @@ export const ROUTE_LOADERS = {
   farming: () => import('./pages/Farming'),
   mcp: () => import('./pages/AiConnection'),
   wallet: () => import('./pages/Wallet'),
+  walletaio: () => import('./pages/AioWallet'),
   // Both EVM wallet pages live in the same chunk as the Solana one — they
   // share EvmWalletPanel and the page shell, so splitting them would fetch
   // the same code twice.

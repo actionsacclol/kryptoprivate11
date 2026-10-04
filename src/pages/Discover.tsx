@@ -222,6 +222,11 @@ export function Discover({
         <div>
           <h1 className="font-display text-2xl font-semibold tracking-display text-white">Discover</h1>
           <p className="mt-1 text-sm text-krypt-muted">{SUBTITLE[chain]}</p>
+          {term.allChains && (
+            <p className="mt-1 text-label text-amber-300/80">
+              "All" is selected in the top bar. Discover still shows one chain at a time ({chain === 'solana' ? 'Solana' : chain === 'bnb' ? 'BNB' : 'Robinhood'}) — the every-chain feed is coming. Pick a chain in the top bar to switch.
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* The chain switch lives in the top bar: it is app-wide, not a

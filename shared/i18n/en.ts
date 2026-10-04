@@ -41,6 +41,7 @@ export const en = {
   'nav.solWallet': 'Sol Wallet',
   'nav.robinhoodWallet': 'Robinhood Wallet',
   'nav.bnbWallet': 'BNB Wallet',
+  'nav.aioWallet': 'All-in-One Wallet',
   'nav.swap': 'Swap',
   'nav.bridge': 'Bridge',
   'nav.observatory': 'Observatory',

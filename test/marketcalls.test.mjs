@@ -896,7 +896,9 @@ test('a parked pump.fun is stamped only on a column that actually asked it', asy
     http.clearCache();
     await market.discover('graduating', 40, '5m');
     assert.equal(market.discoverParkNote('graduating'), '', 'the feed-filled column says nothing about a provider it never asked');
-    assert.ok(http.cooldownRemainingMs('pumpfun') > 0, '(the park itself is still on — the banner moved, the state did not)');
+    // 2026-10-01: a /coins 429 parks that route, not the host (http.parkScope).
+    assert.ok(http.routeCooldownMs('pumpfun', '/coins') > 0, '(the park itself is still on — the banner moved, the state did not)');
+    assert.equal(http.cooldownRemainingMs('pumpfun'), 0, "(and it is the list route's park: coin records are not held)");
   } finally {
     pumpDown = false;
   }

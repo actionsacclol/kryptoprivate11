@@ -67,6 +67,7 @@ const GuidesPage = lazy(() => ROUTE_LOADERS.guides().then((m) => ({ default: m.G
 const FarmingPage = lazy(() => ROUTE_LOADERS.farming().then((m) => ({ default: m.FarmingPage })));
 const AiConnectionPage = lazy(() => ROUTE_LOADERS.mcp().then((m) => ({ default: m.AiConnectionPage })));
 const WalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.WalletPage })));
+const AioWalletPage = lazy(() => ROUTE_LOADERS.walletaio().then((m) => ({ default: m.AioWalletPage })));
 const EvmWalletPage = lazy(() => ROUTE_LOADERS.wallet().then((m) => ({ default: m.EvmWalletPage })));
 const Strategy = lazy(() => ROUTE_LOADERS.strategy().then((m) => ({ default: m.Strategy })));
 const Console = lazy(() => ROUTE_LOADERS.console().then((m) => ({ default: m.Console })));
@@ -336,7 +337,7 @@ export default function App() {
       <div className="flex flex-1 min-w-0 min-h-0">
       <div className="flex flex-col flex-1 min-w-0 relative">
         <IntegrityBanner />
-        <TopBar search={<TokenSearch onOpen={openToken} />} onOpenAutomation={() => navigate('dashboard')} onOpenRunners={() => navigate('runners')} onOpenProfiles={() => navigate('profiles')} onHub={onHub ? undefined : toHub} />
+        <TopBar search={<TokenSearch onOpen={openToken} />} onOpenAutomation={() => navigate('dashboard')} onOpenRunners={() => navigate('runners')} onOpenProfiles={() => navigate('profiles')} onOpenAioWallet={() => navigate('walletaio')} onHub={onHub ? undefined : toHub} />
         {isPending && (
           <div
             className="pointer-events-none absolute left-0 right-0 top-0 z-30 h-0.5 bg-krypt-purple/80 animate-pulse"
@@ -429,6 +430,7 @@ export default function App() {
                   {route === 'launch' && <LaunchPage />}
                   {route === 'swap' && <SwapPage />}
                   {route === 'bridge' && <BridgePage />}
+                  {route === 'walletaio' && <AioWalletPage />}
                   {route === 'wallet' && <WalletPage />}
                   {route === 'walletrobinhood' && <EvmWalletPage chain="robinhood" />}
                   {route === 'walletbnb' && <EvmWalletPage chain="bnb" />}

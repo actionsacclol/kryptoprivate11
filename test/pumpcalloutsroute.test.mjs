@@ -5,7 +5,7 @@
 // have no calls. A throttle is not a gone route. No network: fetch is stubbed.
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { calloutsForMint, resetCoinRouteForTests, lastCalloutError } from './.pumpcallouts.mjs';
+import { calloutsForMint, mintCallouts, resetCoinRouteForTests, lastCalloutError } from './.pumpcallouts.mjs';
 
 let passed = 0;
 const ok = (label) => {
@@ -60,6 +60,33 @@ const routeGone = (u) =>
   assert.deepEqual(rows, [], 'the real route’s [] IS "no calls"');
   assert.deepEqual(hits, [`/callout/top/${NOT_IN_FEED}`]);
   ok('a working /callout/top is still read first and its [] is an answer');
+}
+
+{
+  // mintCallouts (2026-09-30): open callers page by page until a short page,
+  // then the closed callers; one row per call across both; any failed page
+  // is null, never a partial count a "fewer than N calls" check would trust.
+  const positions = JSON.parse(fs.readFileSync('test/fixtures/pump-mint-positions.json', 'utf8'));
+  const mint = positions.positions[0].coinMint;
+  const call = positions.positions.find((p) => p.callout);
+  const row = (id, at) => ({ ...call, callout: { ...call.callout, calloutId: id, calloutTimestamp: at } });
+  const full = Array.from({ length: 50 }, (_, i) => row(`open${i}`, `2026-09-30T20:${String(i % 60).padStart(2, '0')}:00.000Z`));
+  stub((u) => {
+    if (!u.pathname.startsWith('/mint-positions/')) return json({}, 404);
+    if (u.searchParams.get('sortBy') === 'CLOSED_PNL') return json({ positions: [row('closed1', '2026-09-30T19:00:00.000Z'), row('open0', '2026-09-30T20:00:00.000Z')] });
+    return json({ positions: u.searchParams.get('page') === '0' ? full : [row('open50', '2026-09-30T21:00:00.000Z')] });
+  });
+  const rows = await mintCallouts(mint);
+  assert.equal(rows.length, 52, '50 + 1 open, 1 closed, the duplicate counted once');
+  assert.equal(rows[0].id, 'open50', 'newest first');
+  assert.equal(hits.length, 3, 'two open pages (the second was short), then the closed callers');
+
+  stub((u) => (u.searchParams.get('sortBy') === 'CLOSED_PNL' ? json({ statusCode: 500 }, 500) : json({ positions: [row('a', '2026-09-30T20:00:00.000Z')] })));
+  assert.equal(await mintCallouts('So11111111111111111111111111111111111111112'), null, 'a failed page is unanswered');
+
+  stub(() => json({ positions: [] }));
+  assert.deepEqual(await mintCallouts('7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU'), [], 'pump answering "nobody" is []');
+  ok('mintCallouts pages, merges open + closed callers, and is null on any failure');
 }
 
 {

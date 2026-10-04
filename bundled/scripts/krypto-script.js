@@ -11,6 +11,20 @@
 //
 // This will on average breakeven or lose slightly, where we win is callout rewards
 //
+// v2.12 (10-03): from a research swarm over 68 live coins (10-01..03) and
+// 155 the week before, run on this same code:
+//   · Take-profit default "1.5x sell 100%" (was 1.5x 50% + 3x 100%): the half
+//     kept after the first rung did worse than selling it there on 17 of 22
+//     recent coins and 21 of 24 earlier ones. A saved ladder still wins.
+//   · A call waits until the bag is worth $1.10 ("Only call while the bag is
+//     worth at least"): 13 of 61 calls went out on a bag already under pump's
+//     $1, so nobody saw them.
+//   · On the lean exit lane every leftover is sold: a 100% sell refunds the
+//     ~0.0015 SOL account rent for ~0.00003 SOL (7 bags were stranded).
+//   · A call pump deleted is marked gone: no more keeping the bag or posting
+//     updates for it. The "bought" scorecard counts from the BUY price, not
+//     the flag (33 of 40 "2x" coins had doubled before the buy).
+//
 // The cycle per coin:
 //   1. scanner flags a runner
 //   2. flag-time filters (classic curve, creator <= 10 launches, creator not sold)
@@ -92,6 +106,26 @@
 // 3x/50 % (at least 12 of 43 calls reached 1.5x within 15 min; only 2 reached
 // 2x within 5). Measured 09-28: a stop does not help (none −22.8 % vs −40 %
 // stop −23.9 %) and a 5 min hold beats 15 (−21.6 % vs −24.7 %).
+//
+// v2.11 (10-01): a confirm waiting on pump's unreadable creator record goes
+// ahead on the app's own record after 60 s (devRecheck): any rug, creator
+// risk flag or more launches than the cap still drops it. Flags the app
+// raised while the script was off (a loss stop, a Reset, a restart) are
+// judged on its first pass back (catchUp).
+//
+// v2.10 (09-30): "Confirm only once this many other people have called it"
+// (default 2) — a coin at $25k that nobody else has called was the rug shape;
+// see callsCheck. Needs the app with bot.coinCallouts; older apps skip it.
+//
+// v2.9.3 (09-30): an 11-hour live run (20 coins, 6 up, −18 %). Three
+// leaks. (1) "Keep $1.50" was at least the whole 0.011 SOL bag, so every bag
+// was held WHOLE to 15 min; ZYROX dropped 90 % at +5.5 min. The keep now
+// sells down to "Keep this much" (default $1.20, never under pump's $1
+// floor), sells a bag already under $1 at once, and sells a kept bag the
+// moment it falls under $1 (its call is gone). (2) Leftovers after a rung
+// rode for hours to dust (CLAY, 30MIN, Pochita) and held an open-position
+// slot: "Sell what the take-profits leave at" (default 15 min) sells them.
+// (3) Default ladder 1.5x/50 % then 3x/100 %, so nothing is left riding.
 //
 /* @inputs
 {
@@ -226,14 +260,23 @@
     "type": "toggle",
     "label": "Take profits on the way up",
     "default": true,
-    "help": "Real take-profit orders from the ladder below, armed ~30-60 s after the buy. What the rungs leave is a moonbag: at the timed exit it keeps riding with its remaining rungs armed and its stop cancelled — ONLY after a rung really filled (v2 fix). Off = the timed exit sells everything."
+    "help": "Real take-profit orders from the ladder below, armed ~30-60 s after the buy. What the rungs leave is a moonbag: at the timed exit it keeps riding with its remaining rungs armed and its stop cancelled — ONLY after a rung really filled (v2 fix) — until 'Sell what the take-profits leave at'. Off = the timed exit sells everything."
   },
 
   "takeProfitLadder": {
     "type": "lines",
     "label": "Take-profit ladder",
-    "default": ["1.5x sell 50%", "3x sell 50%"],
-    "help": "One rung per line: '<multiple>x sell <percent>%'. The multiple is of your fill price; the percent is of what is STILL held when it fires, so rungs compound (2x 50% then 4x 50% banks ~75% of the bag and leaves ~25% riding). Up to 6 rungs, lowest first. Measured 09-24: 2x/50% banks about the whole cost, so the call is free from there. A line that does not read is skipped; no readable rung = this default."
+    "default": ["1.5x sell 100%"],
+    "help": "One rung per line: '<multiple>x sell <percent>%'. The multiple is of your fill price; the percent is of what is STILL held when it fires, so rungs compound (2x 50% then 4x 50% banks ~75% of the bag and leaves ~25% riding). A last rung of 100% leaves nothing riding. Up to 6 rungs, lowest first. A line that does not read is skipped; no readable rung = this default."
+  },
+
+  "moonbagMins": {
+    "type": "number",
+    "label": "Sell what the take-profits leave at (minutes after the buy)",
+    "default": 15,
+    "min": 0,
+    "max": 10080,
+    "help": "After a rung fills, the rest rides with its later rungs armed until this, then sells. 09-30: CLAY, 30MIN and Pochita's leftovers rode for hours to dust, and an unsold leftover keeps an open-position slot. 0 = ride until sold by hand (the old way)."
   },
 
   "exitLane": {
@@ -256,11 +299,11 @@
   "keepForCallUsd": {
     "type": "number",
     "label": "Keep this much (USD) after the timed exit, so the call stays up",
-    "default": 1.5,
+    "default": 1.2,
     "min": 0,
     "max": 100,
-    "step": 0.5,
-    "help": "pump's feed only shows callers who still hold the coin (09-29: 0 of 1,702 feed calls had a caller at 0, 3 under $5). The exit sells down to this, not to zero. 0 = sell everything, as before."
+    "step": 0.1,
+    "help": "pump drops a call whose caller holds under $1. The exit sells down to this, not to zero; anything under $1 counts as $1, and the little over $1 is room for the price to dip. A kept bag that falls under $1 has lost its call and sells at once. 0 = sell everything, as before."
   },
 
   "keepForCallMins": {
@@ -336,6 +379,15 @@
     "min": 0,
     "max": 5,
     "help": "Each of the last N minute closes above the one before. 0 = off."
+  },
+
+  "minOtherCallouts": {
+    "type": "number",
+    "label": "Confirm only once this many other people have called it on pump.fun",
+    "default": 2,
+    "min": 0,
+    "max": 50,
+    "help": "Callouts by anyone but you, counted at the confirm (pump's coin page list). Too few = keep watching, asked again every 30 s until the watch ends. 09-30: the 10 confirms with under 2 other calls lost 35% on average, the 19 with 2+ lost 12% (one day's sample). 0 = off. Needs the app with bot.coinCallouts; an older app ignores it."
   },
 
   "maxWatching": {
@@ -560,6 +612,16 @@
     "help": "Measured from the position's own fill (its pnl), not the flag price. Also blocks the call 30% off the high, or once the creator sold. Would have blocked 7 of 10 past updates."
   },
 
+  "minCallUsd": {
+    "type": "number",
+    "label": "Only call while the bag is worth at least (USD)",
+    "default": 1.1,
+    "min": 0,
+    "max": 100,
+    "step": 0.1,
+    "help": "pump hides a call whose caller holds under $1; 13 of 61 calls went out under it. The call waits, checked every 30 s, until the bag is worth this; dropped once sold. 0 = off."
+  },
+
   "callHook": {
     "type": "webhook",
     "label": "Discord webhook: new callouts",
@@ -594,6 +656,14 @@ const MAX_SELL_TRIES = 6;
 /** Below this many SOL of value a leftover is not worth a sell (fix 10):
  *  ten leftovers on 09-24/25 returned less than their own fee. */
 const DUST_SOL = 0.002;
+/** v2.12: on the lean lane every leftover is sold — a 100% sell closes the
+ *  token account and refunds ~0.0015 SOL of rent for ~0.00003 SOL. */
+const DUST_APPLIES = () => !LEAN_EXITS();
+/** v2.11: how long a confirm waits on pump's unreadable creator record
+ *  before the app's own record decides (devRecheck). */
+const DEV_FALLBACK_MS = 60_000;
+/** v2.9.3: pump drops a callout whose caller holds less than this (USD). */
+const CALL_FLOOR_USD = 1;
 /**
  * v2.6 (09-28): what an unattended night taught.
  *
@@ -807,6 +877,7 @@ async function SAVE(st0) {
 //     leaves it riding (see the EXITS section) so a coin that goes to a
 //     million-dollar cap overnight is still held. Sell it by hand if it moons.
 //     It also keeps the callout alive as long as it is worth pump's $1 floor.
+//     v2.9.3: now sold at moonbagMins (default 15) unless that is set to 0.
 /** The ladder when the "Take-profit ladder" setting has no readable rung. */
 const TP_LADDER_DEFAULT = [
   { x: 2, sell: 50 },
@@ -1011,6 +1082,9 @@ const SPAM_PAUSE_MS = 20 * 60_000;
  * they survive a restart; the widget itself does not.
  */
 /** "3 / 10 / 25": peaked 2x within 30 min / under half at 30 min / scored. */
+/* v2.12: for BOUGHT coins the 2x and the dead count are measured from the
+ * buy price, not the flag — 33 of 40 "2x" coins had doubled before the buy.
+ * A coin whose buy price is unknown (a restart) counts in n only. */
 const SCORE_LINE = (g) =>
   g ? `${g.p2} / ${g.d} / ${g.n}` : '0 / 0 / 0';
 
@@ -1858,6 +1932,11 @@ async function scoreTick(st) {
     // The price ~30 s after the flag: what a buy placed on the flag really
     // pays (measured ~1.19x the flag price on 18 live buys).
     if (e.px0Late === null && px && now - e.at >= 25_000) e.px0Late = px;
+    if (px && e.buyPx) {
+      const xb = px / e.buyPx;
+      e.peakB = e.peakB === undefined || e.peakB === null ? xb : Math.max(e.peakB, xb);
+      if (due === 30) e.x30B = R3(xb);
+    }
     if (px && e.px0) {
       const x = px / e.px0;
       e.peak = e.peak === null ? x : Math.max(e.peak, x);
@@ -1912,6 +1991,7 @@ async function scoreTick(st) {
       x30: e.x[30] ?? null,
       peak: R3(e.peak),
       low: R3(e.low),
+      pkB: e.buyPx ? R3(e.peakB ?? null) : null,
       rst: e.restored ? 1 : undefined
     };
     logRow('SCORE ', row, ['site', 'xOwn', 'odds', 'ks', 'ageS', 't0']);
@@ -1920,8 +2000,14 @@ async function scoreTick(st) {
     const g = e.verdict === 'bought' ? 'b' : 's';
     const cur = { ...(sc[g] ?? { n: 0, p2: 0, d: 0 }) };
     cur.n += 1;
-    if (row.peak !== null && row.peak >= 2) cur.p2 += 1;
-    if (row.x30 !== null && row.x30 < 0.5) cur.d += 1;
+    if (g === 'b') {
+      // From the buy (v2.12): unknown never counts as a 2x or as dead.
+      if (typeof e.peakB === 'number' && e.buyPx && e.peakB >= 2) cur.p2 += 1;
+      if (typeof e.x30B === 'number' && e.x30B < 0.5) cur.d += 1;
+    } else {
+      if (row.peak !== null && row.peak >= 2) cur.p2 += 1;
+      if (row.x30 !== null && row.x30 < 0.5) cur.d += 1;
+    }
     sc[g] = cur;
   }
   return { ...st, sc, trk: packTracking() };
@@ -2090,11 +2176,42 @@ async function devRecheck(w, v) {
     return true;
   }
   const now = bot.now();
-  if (now < (w.devNext ?? 0)) return false;
+  if (now < (w.devNext ?? 0)) {
+    w.fresh = true; // still due a re-ask: judged again next pass
+    return false;
+  }
   w.devNext = now + 30_000;
   const d = await devLookup(w.mint, w.at);
   if (!watchers.has(w.mint)) return false; // expired or confirmed meanwhile
   if (!d) {
+    // v2.11 (10-01): a deferral that never resolved. pump's creator list
+    // parked 57 times in 4 h; five coins sat confirm-ready waiting on it until
+    // they graduated or expired (Fuel, copyfomo, INU, QWENSTAR, microdog).
+    // After DEV_FALLBACK_MS at the confirm, the app's own record decides:
+    // any rug or creator risk flag drops it, more launches than the cap
+    // drops it, else it goes ahead. "skip" in that setting keeps waiting.
+    w.devLaterSince = w.devLaterSince ?? now;
+    if (bot.input.devUnknown !== 'skip' && now - w.devLaterSince >= DEV_FALLBACK_MS) {
+      const t = await WITHIN(bot.token(w.mint), 5000);
+      if (!watchers.has(w.mint)) return false;
+      const prior = typeof t?.creatorPriorLaunches === 'number' ? t.creatorPriorLaunches : null;
+      const rugs = typeof t?.creatorPriorRugs === 'number' ? t.creatorPriorRugs : null;
+      const flags = (Array.isArray(t?.riskFlags) ? t.riskFlags : []).filter((f) => /creator/i.test(String(f)));
+      const why =
+        rugs !== null && rugs > 0 ? `the creator rugged ${rugs} coin${rugs === 1 ? '' : 's'} this app saw`
+        : flags.length ? `creator risk flag ${flags.join(', ')}`
+        : prior !== null && prior + 1 > max ? `the creator has ${prior + 1}+ launches this app saw > ${max}`
+        : null;
+      if (why) {
+        scoreVerdict(w.mint, 'dev');
+        watchDrop(w, `confirmed at +${v.i}m; pump.fun's creator record still unreadable and ${why}`, true);
+        return false;
+      }
+      w.devLater = false;
+      scoreNote(w.mint, { devSrc: 'local' });
+      bot.log(`${NAME(w.sym, w.mint)}: pump.fun's creator record unreadable for ${Math.round((now - w.devLaterSince) / 1000)} s at the confirm — going ahead on the app's own record (${prior === null ? 'creator not seen before' : `${prior} prior launch${prior === 1 ? '' : 'es'} seen`}, no rugs)`);
+      return true;
+    }
     if (!w.devWarned) {
       w.devWarned = true;
       bot.log(`not calling ${NAME(w.sym, w.mint)} yet: confirmed at +${v.i}m, but pump.fun's creator record is still unreadable — asking again every 30 s`);
@@ -2111,8 +2228,53 @@ async function devRecheck(w, v) {
   return true;
 }
 
+/**
+ * v2.10 (09-30): other people's callouts on the coin before ours. A coin
+ * at $25k with dozens of buyers and NOBODY calling it was the rug shape on
+ * 09-30: of 29 bought confirms, the 10 with fewer than 2 other calls lost
+ * 35 % on average (2 winners), the 19 with 2+ lost 12 % (7 winners) — one
+ * day's sample, flipped on the night before (4 vs 6 coins). pump's
+ * /mint-positions through bot.coinCallouts, asked at most every 30 s while
+ * the confirm holds: too few = keep watching (calls can still come), pump
+ * not answering = keep watching. Unknown never buys. Our own wallet's calls
+ * do not count.
+ */
+async function callsCheck(w, v) {
+  const min = Math.round(Number(bot.input.minOtherCallouts ?? 0));
+  if (!(min > 0) || typeof bot.coinCallouts !== 'function') return true;
+  const now = bot.now();
+  if (now < (w.callsNext ?? 0)) {
+    w.fresh = true; // still due a re-ask: judged again next pass
+    return false;
+  }
+  w.callsNext = now + 30_000;
+  const [rows, me] = await Promise.all([WITHIN(bot.coinCallouts(w.mint), 10_000), bot.wallet().catch(() => null)]);
+  if (!watchers.has(w.mint)) return false; // expired or confirmed meanwhile
+  if (!Array.isArray(rows)) {
+    if (!w.callsWarned) {
+      w.callsWarned = true;
+      bot.log(`not calling ${NAME(w.sym, w.mint)} yet: confirmed at +${v.i}m, but pump.fun's callout list is not answering — asking again every 30 s`);
+    }
+    w.fresh = true;
+    return false;
+  }
+  const n = rows.filter((c) => !me?.address || c.caller?.wallet !== me.address).length;
+  if (n < min) {
+    if (w.callsSeen !== n) {
+      w.callsSeen = n;
+      bot.log(`not calling ${NAME(w.sym, w.mint)} yet: confirmed at +${v.i}m, but ${n} other callout${n === 1 ? '' : 's'} on pump.fun (need ${min}) — checking again every 30 s`);
+    }
+    w.fresh = true;
+    return false;
+  }
+  w.calls = n;
+  return true;
+}
+
 async function watchConfirm(w, v, src) {
-  if (w.devLater && !(await devRecheck(w, v))) return;
+  // false = deferred, judged again later; anything else = handled.
+  if (w.devLater && !(await devRecheck(w, v))) return false;
+  if (!(await callsCheck(w, v))) return false;
   watchers.delete(w.mint);
   const t = await WITHIN(bot.token(w.mint), 5000);
   // v2.3: the curve finished while we watched. What the watch measured was
@@ -2145,7 +2307,7 @@ async function watchConfirm(w, v, src) {
     bot.unsubscribe(w.mint).catch(() => null);
     return;
   }
-  if (bot.input.skipIfDevSold !== false && t?.creatorSold === true) {
+  if (bot.input.skipIfDevSold !== false && (t?.creatorSold === true || devSoldSeen.has(w.mint))) {
     bot.log(`not calling ${NAME(w.sym, w.mint)}: confirmed at +${v.i}m but the creator sold`);
     bot.unsubscribe(w.mint).catch(() => null);
     return;
@@ -2167,13 +2329,19 @@ async function watchConfirm(w, v, src) {
     x: R3(v.x),
     dd: Math.round(v.dd),
     mc: v.mc === null ? null : Math.round(v.mc),
+    calls: w.calls ?? null,
     src
-  }, ['src']);
+  }, ['src', 'calls']);
   const after = await enter(facts);
   const ok = (after.holds ?? []).some((h) => h.mint === w.mint && !h.pending);
   after.counts = { ...(after.counts ?? {}), confirmed: (after.counts?.confirmed ?? 0) + 1 };
   after.wat = packWatch();
   scoreVerdict(w.mint, ok ? 'bought' : 'buy failed');
+  if (ok) {
+    const bh = (after.holds ?? []).find((h) => h.mint === w.mint);
+    const te = tracking.get(w.mint);
+    if (te && bh && bh.px0 > 0 && !te.buyPx) te.buyPx = bh.px0;
+  }
   await SAVE(after);
   // A held position streams its own ticks; the watch subscription can go.
   bot.unsubscribe(w.mint).catch(() => null);
@@ -2206,6 +2374,37 @@ function unpackWatch(st) {
 }
 
 /** Ticks of watched coins (held coins tick too — ignored here). */
+// v2.9.3 (09-30): the app sends a watched or held coin's creator sell as a
+// `devSell` event, the moment it happens. bot.token() alone missed it: the
+// app drops a flag's launch record 15 min after the flag on a busy hour, and
+// a dropped record reads creatorSold null. SC's creator sold at +84 s; it
+// confirmed at +26 min on a blank read and was bought. Remembered for the
+// session (bounded); a held bag is marked for the pass to sell first.
+const devSoldSeen = new Set();
+bot.on('devSell', async (t) => {
+  devSoldSeen.add(t.mint);
+  if (devSoldSeen.size > 500) devSoldSeen.delete(devSoldSeen.values().next().value);
+  const w = watchers.get(t.mint);
+  if (w && bot.input.skipIfDevSold !== false) {
+    scoreNote(t.mint, { devSold: true });
+    watchDrop(w, 'the creator sold');
+    return;
+  }
+  if (bot.input.sellOnDevSell === false) return;
+  const st = await bot.getState();
+  const h = (st.holds ?? []).find((x) => x.mint === t.mint && !x.pending && !x.devSold);
+  if (!h) return;
+  h.devSold = true;
+  h.devSoldAt = bot.now();
+  h.nextBumpAt = 0;
+  bot.warn(`the creator of ${NAME(h.symbol, h.mint)} sold while we hold it — selling everything, no call`);
+  await SAVE({
+    ...st,
+    callq: (st.callq ?? []).filter((j) => j.mint !== t.mint),
+    likeq: (st.likeq ?? []).filter((l) => l.mint !== t.mint)
+  });
+});
+
 bot.on('tick', async (t) => {
   const w = watchers.get(t.mint);
   if (!w) {
@@ -2271,8 +2470,9 @@ async function watchPass(st, late) {
       w.fresh = true; // judged again next pass (its close is kept)
       continue;
     }
-    confirmed++;
-    await watchConfirm(w, v, 'pass');
+    // A confirm that is only deferred (creator record, callouts) does not
+    // use up the pass's one confirm.
+    if ((await watchConfirm(w, v, 'pass')) !== false) confirmed++;
   }
   if (confirmed > 0) st = await bot.getState(); // enter() saved its own copy
   st = {
@@ -2300,10 +2500,36 @@ const looking =
  * they are not, ask the provider once and re-check every 2 s for a few
  * SECONDS — never minutes; a runner moves too fast for that.
  */
-bot.on(
-  'runner',
+bot.on('runner', (t) => onRunner(t));
 
-  async (t) => {
+/**
+ * v2.11 (10-01): flags the app raised while this script was off — a loss
+ * stop, a Reset, an app restart — were never looked at (94 in 25 min on
+ * 10-01). The first pass after a start asks bot.runners() for the app's
+ * current flags (its last 15 min) and judges each one this script has not,
+ * through the same handler. Each is watched from now: its confirm clock
+ * starts at the catch-up, later than the flag, never earlier.
+ */
+let caughtUp = false;
+const CATCH_UP_MAX = 20;
+async function catchUp(st) {
+  if (caughtUp || typeof bot.runners !== 'function') return;
+  caughtUp = true;
+  const flags = await WITHIN(bot.runners(), 5000);
+  if (!Array.isArray(flags)) return;
+  const seen = new Set(st.seen ?? []);
+  const fresh = flags.filter((f) => f?.mint && !seen.has(f.mint) && !watchers.has(f.mint) && !tracking.has(f.mint) && !looking.has(f.mint)).slice(0, CATCH_UP_MAX);
+  if (!fresh.length) return;
+  bot.log(`catching up on ${fresh.length} runner flag${fresh.length === 1 ? '' : 's'} the app raised while this script was off`);
+  // Not awaited: one at a time, outside the pass budget (a look can wait
+  // seconds on links).
+  void (async () => {
+    for (const f of fresh) await onRunner(f).catch(() => null);
+  })();
+}
+
+async function onRunner(t) {
+  {
 
     if (looking.has(t.mint)) {
       return;
@@ -2390,7 +2616,9 @@ bot.on(
 
       if (links === false) {
         skip(t, 'links',
-          facts.hasTwitter === false
+          bot.input.links === 'X or website'
+            ? 'no X and no website linked'
+            : facts.hasTwitter === false
             ? 'no X linked'
             : facts.hasWebsite === true && facts.website
               ? `"website" is not a project homepage: ${facts.website.slice(0, 80)}`
@@ -2419,7 +2647,7 @@ bot.on(
       // Last look before money moves: has the creator sold since the flag?
       if (bot.input.skipIfDevSold !== false) {
         const last = await bot.token(t.mint).catch(() => null);
-        if (last?.creatorSold === true) {
+        if (last?.creatorSold === true || devSoldSeen.has(t.mint)) {
           scoreNote(t.mint, { devSold: true });
           skip(t, 'devSold', 'creator sold while we were checking');
           return;
@@ -2440,7 +2668,7 @@ bot.on(
       lastSkip.delete(t.mint);
     }
   }
-);
+}
 
 
 /**
@@ -2534,7 +2762,7 @@ async function leanCheck(mint, px, entryPx) {
     // The stop: main bags only, never a released moonbag (its stop was
     // cancelled on purpose). Sells everything; the pass sees it gone.
     const stopPct = bot.input.stopLossPct ?? 0;
-    if (h && stopPct > 0 && !h.leanStopped && mult <= 1 - stopPct / 100) {
+    if (h && !h.moonbagAt && stopPct > 0 && !h.leanStopped && mult <= 1 - stopPct / 100) {
       const r = await WITHIN(bot.sell(mint, { pct: 100, lane: 'lean' }), 15_000);
       if (r?.ok) {
         const st2 = await bot.getState();
@@ -2606,6 +2834,9 @@ bot.every(
     // any buy (enter() saves its own copy).
     st = await watchPass(st, late);
 
+    // v2.11: flags raised while this script was off, once per start.
+    if (!late()) await catchUp(st);
+
     reportStats(st);
 
     // Prune finished orders every pass (the 200-order cap). Costs no action.
@@ -2670,7 +2901,7 @@ bot.every(
         // purpose (its mint may have aged out of `rid`).
         if (typeof p.holdMinutes !== 'number' || p.holdMinutes > 120) continue;
         const v = valueOf(p);
-        if (v !== null && v < DUST_SOL) {
+        if (v !== null && v < DUST_SOL && DUST_APPLIES()) {
           rid.push(p.mint);
           touched = true;
           bot.log(`leftover ${NAME(p.symbol, p.mint)} worth ~${v.toFixed(4)} SOL — under the fee a sell costs, left alone`);
@@ -2782,7 +3013,7 @@ bot.every(
         const pick = [...cands.slice(start), ...cands.slice(0, start)].slice(0, DEV_CHECKS_PER_PASS);
         devCheckCursor = start + pick.length;
         const ts = await Promise.all(pick.map((h) => WITHIN(bot.token(h.mint), 2000)));
-        const hit = pick.filter((h, i) => ts[i]?.creatorSold === true);
+        const hit = pick.filter((h, i) => ts[i]?.creatorSold === true || devSoldSeen.has(h.mint));
         if (hit.length > 0) {
           const hitMints = hit.map((h) => h.mint);
           for (const h of hit) {
@@ -3010,6 +3241,22 @@ bot.every(
 
       // v2.2: a creator-sold bag is due now and goes first; one loop sells
       // both kinds, so a coin is never sold twice in a pass.
+      // v2.9.3: a kept bag that fell under pump's $1 floor has lost its
+      // call — nothing left to hold it for, so it is due now.
+      const keptEarly = holds.filter((h) => h.keepPhase && !h.pending && !h.devSold && now < h.sellAt && heldMap.has(h.mint));
+      if (keptEarly.length > 0) {
+        const usd = typeof bot.solUsd === 'function' ? await WITHIN(bot.solUsd(), 3000) : null;
+        if (typeof usd === 'number' && usd > 0) {
+          for (const h of keptEarly) {
+            const v = valueOf(heldMap.get(h.mint));
+            if (v !== null && v * usd < CALL_FLOOR_USD) {
+              h.sellAt = now;
+              bot.log(`kept bag of ${NAME(h.symbol, h.mint)} fell to ~$${(v * usd).toFixed(2)}, under pump's $${CALL_FLOOR_USD} floor — the call is gone, selling it now`);
+            }
+          }
+        }
+      }
+
       const due =
         [
           ...holds.filter((h) => !h.pending && h.devSold),
@@ -3048,7 +3295,24 @@ bot.every(
           // MOONBAG (fix 4): only when a take-profit rung REALLY filled and
           // the position is known to be up. Unknown or never-trimmed closes.
           // Never a moonbag once the creator sold (v2.2).
-          if (tp && !h.devSold && h.tpFilled && p && typeof p.pnlPct === 'number' && p.pnlPct >= 0) {
+          if (tp && !h.devSold && h.tpFilled && !h.moonbagAt && p && typeof p.pnlPct === 'number' && p.pnlPct >= 0) {
+            // v2.9.3: a TIMED moonbag stays a hold — its later rungs still
+            // sell it, and at moonbagMins the pass sells what is left. Past
+            // that time already, it falls through and sells now.
+            const ridMins = Number(bot.input.moonbagMins ?? 0);
+            if (ridMins > 0) {
+              const until = (h.boughtAt ?? now) + ridMins * 60_000;
+              if (now < until) {
+                await WITHIN(bot.cancelOrders(h.mint, MOONBAG_CANCEL), 4000);
+                h.moonbagAt = now;
+                h.sellAt = until;
+                h.sellTries = 0;
+                bot.log(`moonbag riding on ${NAME(h.symbol, h.mint)} (${Math.round(p.pnlPct)}% up, a take-profit filled) until +${ridMins} min, then the rest sells`);
+                continue;
+              }
+            }
+          }
+          if (tp && !h.devSold && h.tpFilled && !h.moonbagAt && !(Number(bot.input.moonbagMins ?? 0) > 0) && p && typeof p.pnlPct === 'number' && p.pnlPct >= 0) {
             // v2.9.2: on the lean lane the moonbag's remaining rungs are the
             // script's to sell, so it keeps the fill price and the done rungs.
             if (LEAN_EXITS()) {
@@ -3075,7 +3339,7 @@ bot.every(
           // main bag is always sold, however low: the sell also frees the
           // script's open-position slot.
           const v = valueOf(p);
-          if ((h.tpFilled || h.adopted) && v !== null && v < DUST_SOL) {
+          if ((h.tpFilled || h.adopted) && v !== null && v < DUST_SOL && DUST_APPLIES()) {
             await WITHIN(bot.cancelOrders(h.mint), 4000);
             out.push(h.mint);
             rid.push(h.mint);
@@ -3088,14 +3352,19 @@ bot.every(
           // caller still holds the coin, so the timed exit sells DOWN to a
           // small bag (keepForCallUsd) and sells the rest at keepForCallMins.
           // Only when the call really went out; never once the creator sold.
+          // v2.9.3: never keep less than pump's $1 floor (a smaller bag loses
+          // the call anyway), and a bag already under it sells at once.
           {
-            const keepUsd = Number(bot.input.keepForCallUsd ?? 0);
+            const keepIn = Number(bot.input.keepForCallUsd ?? 0);
+            const keepUsd = keepIn > 0 ? Math.max(keepIn, CALL_FLOOR_USD) : 0;
             const keepMins = Number(bot.input.keepForCallMins ?? 0);
             const keepUntil = (h.boughtAt ?? now) + keepMins * 60_000;
-            if (!h.devSold && !h.keepPhase && h.calledAt && keepUsd > 0 && keepMins > 0 && now < keepUntil) {
+            if (!h.devSold && !h.keepPhase && !h.callGone && h.calledAt && keepUsd > 0 && keepMins > 0 && now < keepUntil) {
               const vSol = valueOf(p);
               const usd = typeof bot.solUsd === 'function' ? await WITHIN(bot.solUsd(), 3000) : null;
-              if (vSol !== null && typeof usd === 'number' && usd > 0) {
+              if (vSol !== null && typeof usd === 'number' && usd > 0 && vSol * usd < CALL_FLOOR_USD) {
+                bot.log(`not keeping ${NAME(h.symbol, h.mint)} for the call: worth ~$${(vSol * usd).toFixed(2)}, under pump's $${CALL_FLOOR_USD} floor — selling it all`);
+              } else if (vSol !== null && typeof usd === 'number' && usd > 0) {
                 const vUsd = vSol * usd;
                 const pct = Math.floor(100 * (1 - keepUsd / vUsd));
                 if (pct >= 10) {
@@ -3264,6 +3533,32 @@ async function socialStep(st, now, pos) {
       return newSt;
     }
 
+    // v2.12: pump hides a call whose caller holds under $1 — 13 of 61 calls
+    // (10-01..03) went out on a bag already under it and were never seen.
+    // Wait for the bag to be worth minCallUsd; the job ends with the hold
+    // (the timed exit sells an uncalled bag). Unknown value: call as before.
+    const minCall = Number(bot.input.minCallUsd ?? 0);
+    if (!bad && minCall > 0) {
+      const p = Array.isArray(pos) ? pos.find((x) => x.mint === job.mint) : null;
+      const vSol = p && typeof p.costSol === 'number' && typeof p.pnlSol === 'number' ? p.costSol + p.pnlSol : null;
+      const usd = vSol !== null && typeof bot.solUsd === 'function' ? await WITHIN(bot.solUsd(), 3000) : null;
+      if (vSol !== null && typeof usd === 'number' && usd > 0 && vSol * usd < minCall) {
+        const worth = `~$${(vSol * usd).toFixed(2)}, under $${minCall.toFixed(2)} — pump would hide the call`;
+        job.lowTries = (job.lowTries ?? 0) + 1;
+        if (job.lowTries >= 20) {
+          giveUp(`the bag stayed ${worth}`, false);
+          st.counts = { ...(st.counts ?? {}), noCall: (st.counts?.noCall ?? 0) + 1 };
+        } else {
+          job.notBefore = now + 30_000;
+          bot.log(`not calling ${NAME(job.f?.sym, job.mint)} yet: the bag is ${worth}`);
+        }
+        const newSt = { ...st, callq };
+        await SAVE(newSt);
+        reportStats(newSt);
+        return newSt;
+      }
+    }
+
     const line =
       bad ? null : await pickLine(job.mint, bot.input.comments);
 
@@ -3425,6 +3720,7 @@ async function socialStep(st, now, pos) {
     holds.find(
       (h) =>
         h.nextBumpAt > 0 &&
+        !h.callGone &&
         (h.calledAt || h.callMc) &&
         now >= h.nextBumpAt &&
         (h.bumps ?? 0) < cap &&
@@ -3504,6 +3800,9 @@ async function socialStep(st, now, pos) {
   } else if (CALL_GONE(r.message)) {
     bot.log(`no update on ${ready.mint}: ${r.message}`);
     ready.nextBumpAt = 0;
+    // v2.12: the call is gone — stop keeping the bag for it.
+    ready.callGone = true;
+    if (ready.keepPhase) ready.sellAt = now;
     st.counts = { ...(st.counts ?? {}), dropped: (st.counts?.dropped ?? 0) + 1 };
   } else if (SPAM_RESTRICTED(r.message)) {
     st.calloutsPausedUntil = now + SPAM_PAUSE_MS;

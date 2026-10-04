@@ -83,4 +83,16 @@ const cards = ['start', 'memecoins', 'api-setup', ...sectionIds, ...extraIds];
   ok('every video is in one row at the top of Guides, and the memecoin guide is there');
 }
 
+{
+  const videos = read('../src/guideVideos.ts');
+  assert.ok(/AIO_WALLET_VIDEO_URL = 'https:\/\/www\.youtube\.com\/watch\?v=MJuEgklC-Lo'/.test(videos), 'the All-in-One video link is https');
+  const aio = read('../src/pages/AioWallet.tsx');
+  assert.ok(/openExternal\(AIO_WALLET_VIDEO_URL\)/.test(aio), 'the All-in-One page opens it');
+  assert.ok(!/youtube\.com|youtu\.be/.test(aio), 'and carries no URL of its own');
+  assert.ok(/video: \{ url: AIO_WALLET_VIDEO_URL/.test(page) && /\{ id: 'aio-wallet', title: 'All-in-One wallet'/.test(page), 'the All-in-One card is on Guides with its video');
+  const adv = JSON.stringify(ADVANCED_GUIDES.wallets);
+  assert.ok(!/Krypt takes no fee on a bridge/.test(adv) && !/Solana→BNB is off/.test(adv), 'the Bridge lines describe Relay and its fee, not LI.FI');
+  ok('the All-in-One video is on its page and in Guides, with a written guide');
+}
+
 console.log(`\nguides: ${passed}/${passed} passed`);

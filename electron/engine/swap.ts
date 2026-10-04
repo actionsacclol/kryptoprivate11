@@ -59,6 +59,7 @@ import { injectTransfersFit, injectTokenTransfersFit, broadcastAndConfirm, type 
 import { getAccountInfo, getBalance, getTokenBalanceRawForMint, simulateTransaction } from '../chain/rpcClient';
 import { anchorReason, rentSafeTransfers, tokenAmount } from './liveSigner';
 import { ataFor, TOKEN_PROGRAM, TOKEN_2022_PROGRAM } from '../chain/addresses';
+import { base58Encode } from '../chain/base58';
 import { KNOWN_TRADE_PROGRAMS, unknownTopLevelPrograms } from '../system/signPolicy';
 import * as evmRail from '../evm/rail';
 import * as evmWallet from '../evm/evmWallet';
@@ -857,6 +858,9 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
   if (simulateOnly) return { ok: true, message: 'The chain accepts this swap.', outAmountRaw: built.outAmount };
 
   const sig = bs58Signature(signed);
+  // Without the signature the swap cannot be followed, and "not seen" would
+  // be reported as "nothing moved". Refuse before anything is broadcast.
+  if (!sig) return { ok: false, message: 'Could not read the signed swap’s signature — nothing was sent.' };
   const sent = await broadcastAndConfirm({
     httpUrl: deps.httpUrl,
     base64,
@@ -881,12 +885,20 @@ export async function execute(draft: SwapDraft, deps: SwapDeps, simulateOnly: bo
   return { ok: true, message: 'Swapped.', signature: sig, outAmountRaw: built.outAmount };
 }
 
-/** The signature of a signed transaction, base58 — what an explorer wants. */
-function bs58Signature(signedTx: Uint8Array): string {
+/**
+ * The signature of a signed transaction, base58 — what an explorer wants.
+ *
+ * It used `new PublicKey(sig)`, which THROWS on 64 bytes (a key is 32), so
+ * this returned '' for every swap since the swapper shipped: the confirm loop
+ * polled an empty signature until the blockhash expired and told the user
+ * "Nothing moved; try again" about a swap that had landed — a retry swapped
+ * twice (live test 2026-10-03, two landed swaps, both reported expired).
+ */
+export function bs58Signature(signedTx: Uint8Array): string {
   try {
     const tx = VersionedTransaction.deserialize(signedTx);
     const sig = tx.signatures[0];
-    return sig ? new PublicKey(sig).toBase58() : '';
+    return sig ? base58Encode(sig) : '';
   } catch {
     return '';
   }

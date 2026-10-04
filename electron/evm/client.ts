@@ -146,6 +146,14 @@ export function endpointFor(chain: EvmChainKind, cap: EvmRpcCapability): string 
   return cfg.endpoints[cap] || cfg.meta.publicRpc;
 }
 
+/** True when the user set their OWN endpoint for this chain (Settings → EVM
+ *  chains) and it is currently usable — the one place a wide log query is
+ *  ours to make on BNB (tokenDiscovery). */
+export function hasOwnEndpoint(chain: EvmChainKind): boolean {
+  const wanted = resolveEvmRpcUrl(chain, getChainSettings(chain));
+  return wanted !== CHAINS[chain].meta.publicRpc && !isRejected(wanted) && !isUnreachable(wanted);
+}
+
 /** The chain's WSS endpoint, or '' when no endpoint on it offers one. */
 export function wsEndpoint(chain: EvmChainKind): string {
   return endpointFor(chain, 'ws');

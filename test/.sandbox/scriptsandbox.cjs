@@ -81,6 +81,42 @@ var SCRIPT_METHODS = [
   "security",
   "creator",
   "analyze",
+  // Every other read the app has (2026-09-27): the Launch tab's cohorts,
+  // holders, the trade tape, candles, search and Discover, the callouts
+  // feed, this install's fills, the wallet's bags, SOL/USD, Wallet Scout,
+  // the copy configs and the alerts. Reads, all of them.
+  "launchIntel",
+  "holders",
+  "trades",
+  "candles",
+  "search",
+  "discover",
+  "callouts",
+  "coinCallouts",
+  "history",
+  "holdings",
+  "solUsd",
+  // The chain's own coin in USD (2026-10-03), and the All-in-One wallet.
+  "nativeUsd",
+  "aioInfo",
+  "aioBalances",
+  "aioMove",
+  "walletScores",
+  "walletRecord",
+  "copyConfigs",
+  "alerts",
+  // Housekeeping the pages have and scripts did not (2026-09-27): one order
+  // by id, the paused orders, one alert, the fired alerts, the templates.
+  "cancelOrder",
+  "resumeOrders",
+  "removeAlert",
+  "muteAlert",
+  "clearFiredAlerts",
+  "saveTemplate",
+  "deleteTemplate",
+  "setActiveTemplate",
+  /** The app's settings, read-only and without a single key or URL. */
+  "settings",
   "positions",
   "orders",
   "runners",
@@ -244,17 +280,22 @@ function sandboxPageHtml() {
   });
 
   const atHandlers = new Map();
+  const timerHandlers = new Map();
+  let nextTimerId = 1;
   const bot = Object.freeze({
     on(name, fn) {
       if (typeof name !== 'string' || typeof fn !== 'function') throw new Error('bot.on(name, fn)');
       if (!handlers.has(name)) handlers.set(name, []);
       handlers.get(name).push(fn);
     },
+    // Each call is its OWN timer (2026-09-29): main fires it with its id and
+    // only its handler runs. They used to share one list and one timer, so
+    // the last interval set won \u2014 a bot.every(3600) silenced a bot.every(30).
     every(seconds, fn) {
       if (typeof fn !== 'function') throw new Error('bot.every(seconds, fn)');
-      if (!handlers.has('interval')) handlers.set('interval', []);
-      handlers.get('interval').push(fn);
-      return call('every', [Number(seconds)]);
+      const id = nextTimerId++;
+      timerHandlers.set(id, fn);
+      return call('every', [Number(seconds), id]);
     },
     at(hhmm, fn) {
       if (typeof hhmm !== 'string' || typeof fn !== 'function') throw new Error("bot.at('HH:MM', fn)");
@@ -266,13 +307,17 @@ function sandboxPageHtml() {
      * Buy with this chain's trading wallet, or with another of your own \u2014
      * pass its ADDRESS as the third argument (see bot.wallets).
      */
-    buy: (mint, sol, wallet) => call('buy', wallet === undefined ? [mint, sol] : [mint, sol, str(wallet)]),
-    sell: (mint, pct, wallet) => call('sell', wallet === undefined ? [mint, pct] : [mint, pct, str(wallet)]),
+    // The third argument is an ADDRESS (a string) or an options object
+    // {wallet, slippagePct}; a sell's second may be a percent or
+    // {pct | tokens, slippagePct, wallet}. Objects pass through as they are:
+    // main reads and bounds every field.
+    buy: (mint, sol, wallet) => call('buy', wallet === undefined ? [mint, sol] : [mint, sol, wallet !== null && typeof wallet === 'object' ? wallet : str(wallet)]),
+    sell: (mint, pct, wallet) => call('sell', wallet === undefined ? [mint, pct] : [mint, pct, wallet !== null && typeof wallet === 'object' ? wallet : str(wallet)]),
     /** Your own wallets: [{address, label, active}]. No keys, ever. */
     wallets: () => call('wallets', []),
     sellAll: () => call('sellAll', []),
     order: (req) => call('order', [req]),
-    cancelOrders: (mint) => call('cancelOrders', [mint]),
+    cancelOrders: (mint, kinds) => call('cancelOrders', kinds === undefined ? [mint] : [mint, kinds]),
     clearCompletedOrders: () => call('clearCompletedOrders', []),
     templates: () => call('templates', []),
     applyTemplate: (mint, templateId) => call('applyTemplate', [mint, templateId]),
@@ -342,6 +387,38 @@ function sandboxPageHtml() {
     security: (mint) => call('security', [mint]),
     creator: (mint) => call('creator', [mint]),
     analyze: (mint) => call('analyze', [mint]),
+    /** The Launch tab's cohorts: who bought the first blocks and what they hold now. */
+    launchIntel: (mint) => call('launchIntel', [mint]),
+    holders: (mint, limit) => call('holders', limit === undefined ? [mint] : [mint, Number(limit)]),
+    trades: (mint, limit) => call('trades', limit === undefined ? [mint] : [mint, Number(limit)]),
+    candles: (mint, interval, limit) => call('candles', [mint, interval === undefined ? '1m' : str(interval), limit === undefined ? 120 : Number(limit)]),
+    search: (query) => call('search', [str(query === undefined ? '' : query)]),
+    discover: (list, limit) => call('discover', [str(list === undefined ? 'new' : list), limit === undefined ? 20 : Number(limit)]),
+    callouts: (limit) => call('callouts', limit === undefined ? [] : [Number(limit)]),
+    coinCallouts: (mint) => call('coinCallouts', [mint]),
+    history: (limit) => call('history', limit === undefined ? [] : [Number(limit)]),
+    holdings: () => call('holdings', []),
+    solUsd: () => call('solUsd', []),
+    nativeUsd: () => call('nativeUsd', []),
+    /** The All-in-One wallet: one wallet on every chain (2026-10-03). */
+    aio: Object.freeze({
+      info: () => call('aioInfo', []),
+      balances: () => call('aioBalances', []),
+      move: (from, to, amount) => call('aioMove', [str(from), str(to), Number(amount)]),
+    }),
+    walletScores: (opts) => call('walletScores', [opts && typeof opts === 'object' ? opts : {}]),
+    walletRecord: (address) => call('walletRecord', [str(address === undefined ? '' : address)]),
+    copyConfigs: () => call('copyConfigs', []),
+    alerts: () => call('alerts', []),
+    cancelOrder: (id) => call('cancelOrder', [str(id === undefined ? '' : id)]),
+    resumeOrders: () => call('resumeOrders', []),
+    removeAlert: (id) => call('removeAlert', [str(id === undefined ? '' : id)]),
+    muteAlert: (id, muted) => call('muteAlert', [str(id === undefined ? '' : id), muted !== false]),
+    clearFiredAlerts: () => call('clearFiredAlerts', []),
+    saveTemplate: (tpl) => call('saveTemplate', [tpl && typeof tpl === 'object' ? tpl : {}]),
+    deleteTemplate: (id) => call('deleteTemplate', [str(id === undefined ? '' : id)]),
+    setActiveTemplate: (id) => call('setActiveTemplate', [id === null || id === undefined ? null : str(id)]),
+    settings: () => call('settings', []),
     positions: () => call('positions', []),
     orders: (mint) => call('orders', mint === undefined ? [] : [mint]),
     runners: () => call('runners', []),
@@ -404,6 +481,12 @@ function sandboxPageHtml() {
     if (m.t === 'event') {
       const list = [...(handlers.get(m.name) || [])];
       if (m.name === 'schedule' && m.payload && atHandlers.has(m.payload.at)) list.push(...atHandlers.get(m.payload.at));
+      // A timer's own handler; a tick with no id (an older main) runs them all.
+      if (m.name === 'interval') {
+        const tid = m.payload && m.payload.id;
+        if (tid && timerHandlers.has(tid)) list.push(timerHandlers.get(tid));
+        else if (!tid) list.push(...timerHandlers.values());
+      }
       try {
         for (const fn of list) await fn(m.payload);
         send({ t: 'done', id: m.id, ok: true });

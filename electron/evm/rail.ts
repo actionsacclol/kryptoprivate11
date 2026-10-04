@@ -33,11 +33,14 @@ import type { CandleInterval, CandleSeries, DiscoverColumn, TokenSummary } from 
 import { configure, head, rpcHost, rpcStatus, usingKeyedRpc } from './client';
 import * as evmWallet from './evmWallet';
 import * as ledger from './ledger';
+import * as tokenDiscovery from './tokenDiscovery';
+import { CHAINS } from './chains';
 import * as trade from './trade';
 import * as market from './market';
 import * as discoverMod from './discover';
 import { balanceOf, holdingsOf, tokenMeta } from './erc20';
 import { nativeUsd } from './prices';
+import { KNOWN_MINTS } from '@shared/swap';
 import { resolveVenue } from './venue';
 import { logger } from '../system/logger';
 
@@ -165,6 +168,11 @@ export async function drain(maxMs: number): Promise<void> {
 // ── Wallet (with the arm interlock) ───────────────────────────────────
 
 export const wallet = {
+  /** Tell both EVM pages the wallet list changed (a key added from outside
+   *  the rail — the All-in-One wallet). */
+  announce: (): void => {
+    void announceAll();
+  },
   info: evmWallet.info,
   list: evmWallet.list,
   failure: evmWallet.failure,
@@ -588,10 +596,17 @@ export async function sellAll(chain: EvmChainKind): Promise<{
     return { ok: false, message: `${EVM_CHAIN_META[chain].name} is in Paper. Arm it to actually sell — nothing was sold.`, results: [] };
   }
   const held = await holdings(chain);
+  // Positions only: tokens this wallet bought here or the user tracked —
+  // never the stablecoins, majors and wrapped coin that holdings now list,
+  // nor a token that was merely sent in (v6 audit 2026-10-03: the panic
+  // button would have sold USDT first, biggest first).
+  const owner = evmWallet.address(chain);
+  const traded = new Set(owner ? ledger.knownTokens(chain, owner).map((t) => t.toLowerCase()) : []);
+  const notPositions = new Set([...tokenDiscovery.MAJOR_TOKENS[chain], ...KNOWN_MINTS[chain].map((k) => k.mint.toLowerCase()), CHAINS[chain].addr.wrapped.toLowerCase()]);
   // A holding with a zero balance is not a position: the ledger remembers
   // tokens that were sold to nothing, and trying to sell those would produce
   // a screen of failures that mean nothing.
-  const positions = held.filter((h) => h.raw !== '0' && h.amount > 0);
+  const positions = held.filter((h) => h.raw !== '0' && h.amount > 0 && traded.has(h.token.toLowerCase()) && !notPositions.has(h.token.toLowerCase()));
   if (!positions.length) return { ok: true, message: `Nothing held on ${EVM_CHAIN_META[chain].name}.`, results: [] };
 
   // Biggest first. If something goes wrong partway — a chain that stops
@@ -661,7 +676,11 @@ export function track(chain: EvmChainKind, token: string, on: boolean): string[]
 }
 
 async function readHoldings(chain: EvmChainKind, owner: Address): Promise<EvmHolding[]> {
-  const tokens = ledger.knownTokens(chain, owner).slice(-60) as Address[];
+  // Traded here, plus anything the chain says was SENT to this wallet and the
+  // chain's major tokens (tokenDiscovery). Until 2026-10-03 only the first:
+  // a token received by transfer showed on no page at all.
+  tokenDiscovery.kick(chain, owner);
+  const tokens = [...new Set([...ledger.knownTokens(chain, owner).slice(-60), ...tokenDiscovery.candidates(chain, owner)].map((t) => t.toLowerCase()))] as Address[];
   if (!tokens.length) return [];
   const held = await holdingsOf(chain, owner, tokens);
   const out: EvmHolding[] = [];
@@ -672,9 +691,20 @@ async function readHoldings(chain: EvmChainKind, owner: Address): Promise<EvmHol
 }
 
 async function priceHoldings(chain: EvmChainKind, holdings: EvmHolding[]): Promise<void> {
+  const usd = await nativeUsd(chain).catch(() => null);
   await Promise.all(
     holdings.slice(0, 30).map(async (h) => {
       try {
+        // A dollar stablecoin is a dollar (v6 audit 2026-10-03: a pool where
+        // it is the quote side once priced USDT as WBNB).
+        const stable = KNOWN_MINTS[chain].find((k) => k.mint.toLowerCase() === h.token.toLowerCase() && /^USD/.test(k.symbol));
+        if (stable && usd) {
+          h.priceNative = 1 / usd;
+          h.valueNative = h.amount / usd;
+          h.valueSource = 'spot';
+          if (!h.symbol) h.symbol = stable.symbol;
+          return;
+        }
         const [v, s] = await Promise.all([resolveVenue(chain, h.token as Address), market.summary(chain, h.token)]);
         h.venue = v.venue;
         h.priceNative = s.priceSol;

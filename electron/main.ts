@@ -29,6 +29,7 @@ import * as evmScanner from './evm/scanner';
 import * as walletScout from './engine/walletScout';
 import * as paperBook from './engine/paperBook';
 import * as bridgeStore from './engine/bridgeStore';
+import * as sendBook from './system/sendBook';
 import * as alertStore from './engine/alerts';
 import * as copyTrade from './engine/copyTrade';
 import * as automation from './engine/automation';
@@ -735,6 +736,7 @@ async function bootstrap(): Promise<void> {
   // in-flight list reads "none" when it really means "could not read" would
   // stop looking for a transfer that is still owed to them.
   bridgeStore.init(app.getPath('userData'));
+  sendBook.init(app.getPath('userData'));
   paperBook.init(app.getPath('userData'));
   alertStore.init(app.getPath('userData'));
   copyTrade.init(app.getPath('userData'));

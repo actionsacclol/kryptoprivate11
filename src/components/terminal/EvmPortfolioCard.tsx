@@ -32,7 +32,7 @@ export function EvmPortfolioCard({ chain, onOpenToken }: { chain: EvmChainKind; 
       if (!document.hidden) void load();
     }, 30_000);
     const off = window.krypt.engine.onEvent((ev) => {
-      if ((ev.kind === 'evmFill' && ev.fill.chain === chain) || (ev.kind === 'evmState' && ev.state.chain === chain)) void load();
+      if ((ev.kind === 'evmFill' && ev.fill.chain === chain) || (ev.kind === 'evmState' && ev.state.chain === chain) || (ev.kind === 'evmHoldings' && ev.chain === chain)) void load();
     });
     return () => {
       clearInterval(id);

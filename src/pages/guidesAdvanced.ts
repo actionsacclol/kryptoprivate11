@@ -547,12 +547,12 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
         ],
       },
       {
-        heading: 'Bridge (LI.FI)',
+        heading: 'Bridge (Relay)',
         lines: [
-          'Chain coins only, so no token approvals are ever granted. Routes: Solana→Robinhood, Robinhood→Solana, Robinhood→BNB, BNB→Solana, BNB→Robinhood. Solana→BNB is off in this build.',
-          'Krypt takes no fee on a bridge. LI.FI takes 0.25% and the bridge adds its own cost (about 0.9% when measured), both taken out of what arrives.',
-          'Transfers under $5 are refused, because a failed transfer that small is not refunded. Transfers under $25–$100, depending on the route, get a warning.',
-          'From an EVM chain, the recipient, destination chain and minimum output are checked in the transaction before signing. A transaction from Solana does not contain them, so that side is trusted, not checked.',
+          'Chain coins only, so no token approvals are ever granted. All six routes between Solana, BNB and Robinhood run through Relay (api.relay.link). Older LI.FI transfers are still followed until they finish.',
+          'Krypt takes 0.5% of a bridge, halved for $KRYPTO holders, a fifth of it to your referrer: inside the deposit transaction from Solana, or as a separate transfer right after the deposit from an EVM chain. Relay’s own cost is shown on the quote.',
+          'Transfers under $5 are refused: Relay sends no refund worth less than its gas, so a failed transfer that small is lost.',
+          'Before signing, the quote’s recipient, destination chain, coin, minimum out, refund address and deadline are checked, and the order id recomputed from them must match the deposit. A quote lasts 30 seconds.',
           'A transfer is saved as soon as it is sent and survives a restart. Could not check means the status is unknown, not that the money is lost. A refund comes back on the chain it left, usually as a stablecoin.',
         ],
       },
@@ -900,6 +900,64 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       'Reverse has never been measured. It is a bet that the coin keeps going after the leader leaves.',
       'A live config or script keeps spending on its own while you are away. The daily limits are the only thing that stops it.',
       'Switching a copy config from live to paper does not close a live position it already opened. The leader’s later sells are recorded as not executed, and the tokens stay in your wallet.',
+    ],
+  },
+  'aio-wallet': {
+    what: 'One BIP-39 phrase derives a Solana key at m/44’/501’/0’/0’ and an EVM key at m/44’/60’/0’/0/0 — Phantom’s and MetaMask’s defaults; an import also scans the other common paths and lets you pick. The keys go into the ordinary wallet stores, so every signer policy, fee, loss guard and PnL rule applies unchanged. Money between chains moves through Relay (api.relay.link), and every quote is checked before anything is signed.',
+    steps: [
+      'Create or import on Wallet Utilities → All-in-One Wallet. The phrase is shown once; Remove is refused until you mark it backed up. Create and import ask in a system dialog, and a Linux machine whose keyring is plain text refuses both.',
+      'Switch to Paper, then Use it on every chain. It is refused while any chain is Live. The wallets that signed before keep their coins and positions; their orders pause until you switch back.',
+      'Top bar → ALL: one Paper/Live switch arms or disarms every enabled chain (each can still be turned off alone). Going Live refuses while any chain’s balance is unread.',
+      'Speed: Cheapest, Normal or Fast, and the optional float with its dollar amount per chain.',
+      'Scripts: bot.buy(mint, amount, { topUp: true }) tops up in Live, for the trading wallet only. bot.aio.info(), bot.aio.balances() and bot.aio.move(from, to, amount) read and move; a move is capped at the script’s max per trade, in dollars, and obeys the master switch.',
+      'Cash out with Compress to SOL, ETH or BNB, then Send.',
+    ],
+    details: [
+      {
+        heading: 'Top up + buy',
+        lines: [
+          'Target: the shortfall plus the buy’s own fee and the chain’s reserve (0.015 SOL, 0.0005 BNB, 0.0001 ETH), raised to $25 when a source can spare it.',
+          'Sources: SOL, BNB and Robinhood ETH on the other chains, each keeping its own reserve. Relay quotes them in parallel and the cheapest that fits wins; an unpriced quote ranks last.',
+          'Cost ceiling: 3% of the value moved. Above it a manual buy asks first; automation refuses.',
+          'Arrival is read from the chain itself — every 1 s on Cheapest, 0.3 s on Normal, 0.2 s on Fast. The buy waits 120, 90 or 45 s; after that the money still lands, but no buy is placed on a price that may have moved.',
+          'One top-up at a time, per chain and across the app. A refunded top-up stops the buy.',
+          'The move feeding a buy pays no Krypt fee; the buy pays 0.5%. If the buy fails after the money landed, the move is billed as an ordinary move.',
+          'Measured live 2026-10-03, BNB: top-up sent in 0.2 s, landed in 1.3 s, bought in 3.2 s — 7.4 s in all.',
+        ],
+      },
+      {
+        heading: 'Moves, float and refuel',
+        lines: [
+          'Relay refuses under $5: a failed transfer that small is not refunded. The $5 is judged by the app’s own price.',
+          'Moves nobody watches (float, refuel, Compress, scripts) go only if Relay’s guaranteed minimum, at the app’s own prices, is at least 97% of what goes in minus $0.25. An unknown price refuses.',
+          'Float: a chain is refilled when it falls under half its target, from the chain holding the most, by just enough to restore it; at least $5 a move, 10 minutes apart per chain, 8 a day, and it stops after 3 failures. It pauses under the kill switch, when no chain is Live, and for 30 minutes after a Compress. Every refill is an ordinary move and pays 0.5%.',
+          'Refuel, on the sell side, brings a chain enough gas to sell what it holds.',
+          'Measured moves: SOL→BNB about 2 s, BNB→Robinhood about 1 s, Robinhood→SOL about 7 s.',
+        ],
+      },
+      {
+        heading: 'Compress',
+        lines: [
+          'Sells every token, stablecoins included, for its own chain’s coin; waits 4 s; then moves each other chain’s coin to the target.',
+          'Left alone, and named in the confirmation: $KRYPTO, coins a running script or Krypto Trader session holds, leftovers under a cent, chains in Paper or not signed by this wallet, and chains that could not be read.',
+          'A chain with under $5.50 to move keeps its coin. A chain it empties keeps 0.003 SOL, 0.0002 BNB or 0.00003 ETH for a later send or sell.',
+          'Planned again in the main process from a fresh read, then one system dialog. Each sell pays 0.5%; each move pays Relay plus 0.5%.',
+        ],
+      },
+      {
+        heading: 'What the total counts',
+        lines: [
+          'Solana, BNB and Robinhood, plus Ethereum, Base and Arbitrum (their coin, USDC and USDT). Those three are counted only: the app does not trade or move from them.',
+          'EVM tokens: each chain’s majors, anything traded here, and tokens sent to you, found by scanning your transfer logs — on Robinhood with the free RPC, on BNB only with your own BNB RPC set.',
+          'Leftovers under a cent are listed behind a toggle and left out of the total. Unread is shown as a dash, never zero.',
+        ],
+      },
+    ],
+    careful: [
+      'Only the coin-page Buy and bot.buy({ topUp: true }) top up. Quick buys, hotkeys, copy trading, Krypto Trader and the AI connection need money already on the chain — or the float.',
+      'Relay delivers the far side. The app checks the order before signing — recipient, chain, coin, minimum out, refund address, deadline, and the order id recomputed from them — but the delivery itself is Relay’s.',
+      'USDC arriving on Solana is turned into SOL by the USDC auto-swap (0.5% fee). Switch it off on the Sol Wallet page to keep USDC.',
+      'Compress does not exclude coins held by copy trading.',
     ],
   },
   'copy-trading': {

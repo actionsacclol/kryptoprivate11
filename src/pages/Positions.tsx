@@ -8,7 +8,9 @@ import { Sparkline } from '../components/viz/Sparkline';
 import { NumberTicker } from '../components/viz/NumberTicker';
 import type { PaperPosition, WalletHolding } from '@shared/types';
 import { cachedHoldings, rememberHoldings } from '../state/routeCache';
-import { cls, fmtAgo, fmtClock, fmtPct, fmtPrice, fmtSol, shortAddr } from '../utils/format';
+import { cls, fmtAgo, fmtClock, fmtPct, fmtPrice, fmtSol, fmtUsd, shortAddr } from '../utils/format';
+import type { PortfolioSummary } from '@shared/portfolio';
+import { DUST_SELL_USD } from '@shared/dustSell';
 
 /** On-chain truth: every SPL token the trading wallet holds right now —
  *  including leftovers from previous runs or crashes that no session
@@ -24,7 +26,18 @@ export function HoldingsSection() {
   const [busyMint, setBusyMint] = useState<string | null>(null);
   const liveEnabled = settings.execution.liveEnabled;
 
+  // Each holding's dollar value, from the portfolio build that already
+  // prices these same tokens (liquidation quote first, spot otherwise) —
+  // one valuation for both pages (2026-10-03). Unknown stays a dash.
+  const [usdByMint, setUsdByMint] = useState<Map<string, number | null>>(new Map());
+  const takeSummary = useCallback((s: PortfolioSummary | null | undefined) => {
+    if (!s) return;
+    setUsdByMint(new Map(s.positions.map((p) => [p.mint, p.valueUsd])));
+  }, []);
   const refresh = useCallback(async () => {
+    void window.krypt.portfolio.summary({ stale: true }).then((p) => {
+      if (p.ok) takeSummary(p.data);
+    });
     const r = await window.krypt.wallet.holdings();
     if (r.ok && r.data) {
       setHoldings(r.data);
@@ -43,6 +56,7 @@ export function HoldingsSection() {
         setHoldings(ev.data);
         rememberHoldings(ev.data, ev.at);
       }
+      if (ev.kind === 'portfolio') takeSummary(ev.summary);
       // A different signer now: the old wallet's bags — and their Sell
       // buttons — must not sit here until the 30 s poll.
       if (ev.kind === 'walletSwitched') {
@@ -55,7 +69,7 @@ export function HoldingsSection() {
       clearInterval(t);
       off();
     };
-  }, [refresh]);
+  }, [refresh, takeSummary]);
 
   const sellOne = async (h: WalletHolding): Promise<void> => {
     const label = h.symbol ?? shortAddr(h.mint, 6);
@@ -91,6 +105,40 @@ export function HoldingsSection() {
     else toast.error(r.message);
   };
 
+  // Sell dust (2026-10-03): every token under $0.50 on the lean lane —
+  // shown first, exactly, with what is left alone and why.
+  const [dusting, setDusting] = useState(false);
+  const sellDust = async (): Promise<void> => {
+    setDusting(true);
+    try {
+      const p = await window.krypt.live.dustPlan();
+      if (!p.ok || !p.data) {
+        toast.error(p.message);
+        return;
+      }
+      const plan = p.data;
+      if (plan.sell.length === 0) {
+        toast.info(`Nothing under $${DUST_SELL_USD.toFixed(2)} to sell${plan.skip.length ? ` (${plan.skip.length} left alone: ${plan.skip.map((x) => x.symbol ?? x.mint.slice(0, 6)).join(', ')})` : ''}.`);
+        return;
+      }
+      const names = plan.sell.map((x) => `${x.symbol ?? x.mint.slice(0, 6)} ($${x.valueUsd.toFixed(2)})`).join(', ');
+      const left = plan.skip.length ? ` Left alone: ${plan.skip.map((x) => `${x.symbol ?? x.mint.slice(0, 6)} — ${x.why}`).join('; ')}.` : '';
+      const yes = await modal.confirm({
+        title: 'Sell dust',
+        message: `Sell ${plan.sell.length} token${plan.sell.length === 1 ? '' : 's'} worth under $${DUST_SELL_USD.toFixed(2)} each (about $${plan.totalUsd.toFixed(2)} in all) on the low-fee lane: ${names}. Each sale closes its token account and refunds the rent (about 0.002 SOL each). $KRYPTO is never sold.${left}`,
+        confirmLabel: `Sell ${plan.sell.length}`,
+        destructive: true,
+      });
+      if (!yes) return;
+      const r = await window.krypt.live.sellDust();
+      if (r.ok) toast.success(r.message);
+      else toast.warn(r.message);
+      void refresh();
+    } finally {
+      setDusting(false);
+    }
+  };
+
   const sweepRent = async (): Promise<void> => {
     toast.info('Sweeping rent from empty token accounts…');
     const r = await window.krypt.live.sweepRent();
@@ -112,6 +160,13 @@ export function HoldingsSection() {
             <GhostButton destructive onClick={() => void sellAll()} disabled={!liveEnabled} className="!py-1.5 !px-3 text-xs">
               Sell all
             </GhostButton>
+          )}
+          {holdings != null && holdings.length > 0 && (
+            <span title={`Sell every token worth under $${DUST_SELL_USD.toFixed(2)} on the low-fee lane and get each account's rent back. Never sells $KRYPTO.`}>
+            <GhostButton onClick={() => void sellDust()} disabled={!liveEnabled || dusting} className="!py-1.5 !px-3 text-xs">
+              {dusting ? 'Checking…' : `Sell dust (< $${DUST_SELL_USD.toFixed(2)})`}
+            </GhostButton>
+            </span>
           )}
           <GhostButton onClick={() => void sweepRent()} disabled={!liveEnabled} className="!py-1.5 !px-3 text-xs">
             Reclaim rent
@@ -149,8 +204,13 @@ export function HoldingsSection() {
                 {h.warning && <div className="text-body text-amber-300/90 mt-1">{h.warning}</div>}
               </div>
               <div className="flex items-center gap-4 flex-shrink-0">
-                <span className="text-sm font-mono tabular-nums text-white/90">
-                  {h.uiAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                <span className="text-right leading-tight">
+                  <span className="block text-sm font-mono tabular-nums text-white/90">
+                    {h.uiAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </span>
+                  <span className="block text-body font-mono tabular-nums text-krypt-muted" title={usdByMint.get(h.mint) == null ? 'No price for this token right now' : 'What it is worth in dollars'}>
+                    {fmtUsd(usdByMint.get(h.mint) ?? null)}
+                  </span>
                 </span>
                 <GhostButton
                   destructive

@@ -19,6 +19,7 @@ export const es: Catalogue = {
   'nav.solWallet': 'Billetera Sol',
   'nav.robinhoodWallet': 'Billetera Robinhood',
   'nav.bnbWallet': 'Billetera BNB',
+  'nav.aioWallet': 'Billetera Todo en Uno',
   'nav.swap': 'Swap',
   'nav.bridge': 'Bridge',
   'nav.observatory': 'Observatorio',

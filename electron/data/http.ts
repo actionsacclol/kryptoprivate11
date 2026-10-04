@@ -44,7 +44,7 @@ export type { BodyVerdict } from './refusals';
  * the escalating backoff, the redirect refusal, the streaming cap — is
  * identical, because it is literally the same code path.
  */
-export type HttpProviderId = ProviderId | 'merkl' | 'lifi' | 'lifi-status';
+export type HttpProviderId = ProviderId | 'merkl' | 'lifi' | 'lifi-status' | 'relay' | 'relay-status';
 
 /** The complete set of hosts this application will ever contact for market
  *  data. Adding a provider means adding a line here, deliberately. */
@@ -69,6 +69,11 @@ const HOSTS: Record<HttpProviderId, string> = {
   // Same host, its own lane: following a transfer must never wait behind
   // (or be parked with) the quote budget. See the gap table.
   'lifi-status': 'li.quest',
+  // Relay, called directly (2026-10-01): the All-in-One wallet's conversions
+  // and the Bridge. Quotes and status on separate lanes, like LI.FI, so
+  // following a transfer never waits behind (or parks with) a quote.
+  relay: 'api.relay.link',
+  'relay-status': 'api.relay.link',
 };
 
 /**
@@ -325,6 +330,18 @@ const MIN_GAP_MS: Record<HttpProviderId, number> = {
   // until 2026-09-11 it shared the quote's 96 s gap, so a poll of N transfers
   // took 96 s × N and a quote 429 silenced status for two hours. Found by audit.
   'lifi-status': 1_000,
+  //
+  // Relay: keyless quotes, MEASURED 2026-10-01 — twelve back to back all
+  // answered (150-990 ms) with no rate-limit headers. The documented keyed
+  // ceiling is 50 quotes a minute; the gap and the window below stay under
+  // it, so a keyless install is never the one that teaches Relay to refuse.
+  // A quote is asked for on a click (or right before a buy that needs one),
+  // never on a timer.
+  // Since 2026-10-03 the gap spaces quote STARTS (see PARALLEL_HOSTS); the
+  // 40-a-minute window below is still the ceiling.
+  relay: 150,
+  // /intents/status/v3 — keyless, documented at 200/min with a key.
+  'relay-status': 500,
 };
 
 /**
@@ -361,6 +378,8 @@ const WINDOW_LIMIT: Record<string, { n: number; ms: number }> = {
   // is a trade that does not happen.
   'pumpfun:poll': { n: 40, ms: 60_000 },
   geckoterminal: { n: 28, ms: 60_000 },
+  relay: { n: 40, ms: 60_000 },
+  'relay-status': { n: 100, ms: 60_000 },
   rugcheck: { n: 50, ms: 60_000 },
   // LI.FI's real ceiling is a TWO-HOUR window, not a minute — 75 quotes per
   // 7200 s, measured. The window machinery below is per-minute by design, and
@@ -505,15 +524,51 @@ const MAX_QUEUE_WAIT_MS = 20_000;
  * decaying five minutes after the last 429. A park is only ever extended,
  * never shortened, and a success clears it.
  */
-const blockedUntil = new Map<HttpProviderId, number>();
-const parkStrikes = new Map<HttpProviderId, { count: number; lastAt: number }>();
+// Keyed by provider id, or by a route scope (`parkScope`) for the few routes
+// whose limiter is their own.
+const blockedUntil = new Map<string, number>();
+const parkStrikes = new Map<string, { count: number; lastAt: number }>();
 const RATE_LIMIT_COOLDOWN_MS = 20_000;
 const RATE_LIMIT_COOLDOWN_MAX_MS = 120_000;
 const STRIKE_DECAY_MS = 5 * 60_000;
 
-/** Milliseconds until this provider is usable again, or 0. */
+/**
+ * Routes that are refused on their OWN, so a 429 on one parks that route and
+ * not the whole host.
+ *
+ * MEASURED 2026-10-01 against frontend-api-v3.pump.fun: right after every
+ * 429 on `/coins?creator=…`, `/coins-v3/{mint}` answered 200 — 12 of 12 —
+ * while the plain `/coins` list was refused about as often as the creator
+ * query. The list route has its own limiter, and it refuses 25-45 % of calls
+ * whatever the pace (one call a second, one every three, one every five all
+ * looked alike), each time with `Retry-After: 1`. Parking the host for it
+ * meant one creator lookup could stop the coin records, identity and
+ * callouts for two minutes, and with a park every three minutes the strikes
+ * never decayed: pump.fun sat parked about two thirds of the time (user
+ * report 2026-10-01, 1,240 parks in four days, 650 of them this route; this
+ * machine's log showed the same 20 an hour).
+ *
+ * Only measured routes belong here. Everything else still parks its host —
+ * the safe reading when nothing says the limiters are separate.
+ */
+function parkScope(id: HttpProviderId, path: string | undefined): string | null {
+  if (id === 'pumpfun' && path && /^\/coins(\?|$)/.test(path)) return 'pumpfun@/coins';
+  return null;
+}
+
+/** Milliseconds until this provider is usable again, or 0. The HOST park
+ *  only: a parked route scope does not make the provider unusable. */
 export function cooldownRemainingMs(id: HttpProviderId): number {
   return Math.max(0, (blockedUntil.get(id) ?? 0) - Date.now());
+}
+
+/** Milliseconds until a call to this route may go out: the host park, or
+ *  the route's own park when it has one, whichever ends later. */
+export function routeCooldownMs(id: HttpProviderId, path: string): number {
+  const scope = parkScope(id, path);
+  const host = cooldownRemainingMs(id);
+  if (!scope) return host;
+  return Math.max(host, (blockedUntil.get(scope) ?? 0) - Date.now());
 }
 
 /** Calls waiting in this provider's normal queue — for the diagnostics panel. */
@@ -595,9 +650,15 @@ function park(id: HttpProviderId, retryAfter: string | null, quota = false, rout
     slowStartUntil.set(id, until + SLOW_START_MS);
     return QUOTA_PARK_MS;
   }
-  const prev = parkStrikes.get(id);
+  // A route with its own limiter parks only itself (see parkScope): its own
+  // clock, its own strikes, and no slow start on the host's gap — the rest
+  // of the host was never refused.
+  const scope = parkScope(id, route);
+  const key = scope ?? id;
+  const wasKeyUntil = blockedUntil.get(key) ?? 0;
+  const prev = parkStrikes.get(key);
   const count = prev && now - prev.lastAt < STRIKE_DECAY_MS ? prev.count + 1 : 1;
-  parkStrikes.set(id, { count, lastAt: now });
+  parkStrikes.set(key, { count, lastAt: now });
   const escalated = Math.min(RATE_LIMIT_COOLDOWN_MAX_MS, RATE_LIMIT_COOLDOWN_MS * 2 ** (count - 1));
   // `Retry-After` may EXTEND the park; it may never shorten it.
   //
@@ -614,6 +675,16 @@ function park(id: HttpProviderId, retryAfter: string | null, quota = false, rout
   // only costs us freshness.
   const length = Math.max(escalated, parseRetryAfterMs(retryAfter) ?? 0);
   const until = now + length;
+  if (scope) {
+    if (until > wasKeyUntil) {
+      blockedUntil.set(key, until);
+      httpLog(
+        'warn',
+        `provider ${id} (${providerHost(id)}, ${routeShape(route)}) rate limited — this route paused ${Math.round(length / 1000)}s${count > 1 ? `, strike ${count}` : ''}${retryAfter ? ` (it asked for ${retryAfter})` : ''}. Only this route waits (creator records, pump.fun's coin lists); coin records, prices and charts keep loading.`,
+      );
+    }
+    return length;
+  }
   if (until > wasUntil) {
     blockedUntil.set(id, until);
     httpLog(
@@ -710,23 +781,27 @@ const quotaParked = new Set<HttpProviderId>();
  * minute and doubles to an hour. It must not fire on the ordinary bad
  * afternoon a free provider has — one success clears it completely.
  */
-const failStreak = new Map<HttpProviderId, number>();
+const failStreak = new Map<string, number>();
 const FAIL_STREAK_PARK = 10;
 const STREAK_PARK_MS = 60_000;
 const STREAK_PARK_MAX_MS = 60 * 60_000;
 
-function noteFailure(id: HttpProviderId, why: string): void {
-  const n = (failStreak.get(id) ?? 0) + 1;
-  failStreak.set(id, n);
-  if (n < FAIL_STREAK_PARK || cooldownRemainingMs(id) > 0) return;
+function noteFailure(id: HttpProviderId, why: string, path?: string): void {
+  // A scoped route keeps its own streak: ten refusals from pump's list route
+  // say nothing about its coin records, and must not park those.
+  const scope = parkScope(id, path);
+  const key = scope ?? id;
+  const n = (failStreak.get(key) ?? 0) + 1;
+  failStreak.set(key, n);
+  if (n < FAIL_STREAK_PARK || (scope ? routeCooldownMs(id, path ?? '') : cooldownRemainingMs(id)) > 0) return;
   // Every FAIL_STREAK_PARK-th failure in an unbroken run extends the park,
   // so a provider that is still dead after the first minute earns two, then
   // four — and one that recovers pays nothing.
   const doublings = Math.floor(n / FAIL_STREAK_PARK) - 1;
   const length = Math.min(STREAK_PARK_MAX_MS, STREAK_PARK_MS * 2 ** doublings);
   const until = Date.now() + length;
-  if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
-  slowStartUntil.set(id, until + SLOW_START_MS);
+  if (until > (blockedUntil.get(key) ?? 0)) blockedUntil.set(key, until);
+  if (!scope) slowStartUntil.set(id, until + SLOW_START_MS);
   const st = stats.get(id);
   if (st) {
     st.lastError = `${id}: ${n} failures in a row — paused ${Math.ceil(length / 60_000)}m. Last: ${why.replace(`${id}: `, '')}`;
@@ -759,7 +834,7 @@ function effectiveGap(id: HttpProviderId): number {
  */
 const SOFT_PARK_MAX_MS = 60_000;
 
-function softParkFromHeaders(id: HttpProviderId, headers: { get(name: string): string | null }): void {
+function softParkFromHeaders(id: HttpProviderId, headers: { get(name: string): string | null }, path?: string): void {
   let remaining: number;
   let reset: number;
   try {
@@ -777,12 +852,13 @@ function softParkFromHeaders(id: HttpProviderId, headers: { get(name: string): s
   const untilMs = reset > 1e12 ? reset : reset > 1e9 ? reset * 1000 : now + reset * 1000;
   const wait = Math.min(SOFT_PARK_MAX_MS, Math.max(1_000, untilMs - now));
   const until = now + wait;
-  if (until > (blockedUntil.get(id) ?? 0)) blockedUntil.set(id, until);
+  const key = parkScope(id, path) ?? id;
+  if (until > (blockedUntil.get(key) ?? 0)) blockedUntil.set(key, until);
 }
 
-function parkedResult<T>(id: HttpProviderId): FetchResult<T> {
+function parkedResult<T>(id: HttpProviderId, path?: string): FetchResult<T> {
   transportFailures += 1;
-  const cooling = cooldownRemainingMs(id);
+  const cooling = path === undefined ? cooldownRemainingMs(id) : routeCooldownMs(id, path);
   return {
     ok: false,
     message: parkIsQuota(id)
@@ -894,6 +970,14 @@ function noteWindow(keys: string[]): void {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Hosts whose calls only queue to START: the gap, the window and the park
+ * still apply, but a request does not wait for the one before it to finish.
+ * Relay's quotes (2026-10-03): a buy plan asks 2-4 at once, and serially
+ * that was most of a 2.5 s plan; in parallel Relay answers 10 in ~0.6 s.
+ */
+const PARALLEL_HOSTS: ReadonlySet<HttpProviderId> = new Set<HttpProviderId>(['relay']);
+
+/**
  * Serialise `run` behind the provider's queue. `skip` is consulted when the
  * call reaches the FRONT of the queue; a non-null answer is returned in
  * place of a request (the park, or a queue wait past the cap).
@@ -926,10 +1010,11 @@ function gate<T>(
   const enqueuedAt = Date.now();
   queued.set(id, (queued.get(id) ?? 0) + 1);
   const prev = queues.get(id) ?? Promise.resolve();
-  const next = prev.then(async () => {
+  // Admission: everything up to the moment the request may start.
+  const admit = prev.then(async (): Promise<{ early: T } | null> => {
     queued.set(id, Math.max(0, (queued.get(id) ?? 1) - 1));
     const early = opts.skip();
-    if (early !== null) return early;
+    if (early !== null) return { early };
     if (Date.now() - enqueuedAt > MAX_QUEUE_WAIT_MS) {
       throw new QueueWaitError(Math.round((Date.now() - enqueuedAt) / 1000));
     }
@@ -938,11 +1023,17 @@ function gate<T>(
     await waitGap();
     // The park may have been set while this call waited for the window.
     const late = opts.skip();
-    if (late !== null) return late;
+    if (late !== null) return { early: late };
     lastCallAt.set(id, Date.now());
     noteWindow(wkeys);
-    return run();
+    return null;
   });
+  if (PARALLEL_HOSTS.has(id)) {
+    // Only the start is serial; the request runs beside the others.
+    queues.set(id, admit.catch(() => undefined));
+    return admit.then((a) => (a ? a.early : run()));
+  }
+  const next = admit.then((a) => (a ? a.early : run()));
   // Keep the chain alive on rejection so one failure never wedges the host.
   queues.set(id, next.catch(() => undefined));
   return next;
@@ -1008,9 +1099,9 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
   // local builder's curve lookup out for 20 s and push every pasted-mint buy
   // to the relayer. A priority call that 429s simply extends the park.
   const priority = opts.priority === true;
-  if (!priority && cooldownRemainingMs(id) > 0) return parkedResult<T>(id);
+  if (!priority && routeCooldownMs(id, path) > 0) return parkedResult<T>(id, path);
 
-  const skip = (): FetchResult<T> | null => (!priority && cooldownRemainingMs(id) > 0 ? parkedResult<T>(id) : null);
+  const skip = (): FetchResult<T> | null => (!priority && routeCooldownMs(id, path) > 0 ? parkedResult<T>(id, path) : null);
 
   const attempt = async (): Promise<FetchResult<T>> => {
     const s = statsFor(id);
@@ -1076,7 +1167,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         }
         s.errors += 1;
         s.lastError = msg;
-        noteFailure(id, msg);
+        noteFailure(id, msg, path);
         return { ok: false, message: msg, ms: Date.now() - started, status };
       }
       // A 2xx is not yet a success. The body is read FIRST — still streamed,
@@ -1098,7 +1189,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
           : `${id}: rate limited (HTTP ${res.status}${verdict.detail ? ` — ${verdict.detail}` : ''}) — pausing ${Math.ceil(parkedMs / 1000)}s`;
         s.errors += 1;
         s.lastError = msg;
-        noteFailure(id, msg);
+        noteFailure(id, msg, path);
         return { ok: false, message: msg, ms: Date.now() - started, status };
       }
       if (verdict.verdict === 'error') {
@@ -1107,7 +1198,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         const msg = `${id}: HTTP ${res.status}${verdict.detail ? ` — ${verdict.detail}` : ' — error body'}`;
         s.errors += 1;
         s.lastError = msg;
-        noteFailure(id, msg);
+        noteFailure(id, msg, path);
         return { ok: false, message: msg, ms: Date.now() - started, status };
       }
       // A success clears any lingering park — unless the provider's own
@@ -1116,8 +1207,15 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
       // …and ends the streak. One good answer is enough: the streak is about
       // a provider that is not working, not about its lifetime record.
       failStreak.delete(id);
+      // A scoped route clears its own park and streak. Another route's
+      // success does not: it says nothing about this route's limiter.
+      const scope = parkScope(id, path);
+      if (scope) {
+        blockedUntil.delete(scope);
+        failStreak.delete(scope);
+      }
       quotaParked.delete(id);
-      softParkFromHeaders(id, res.headers);
+      softParkFromHeaders(id, res.headers, path);
       const ms = Date.now() - started;
       s.samples.push(ms);
       if (s.samples.length > 20) s.samples.shift();
@@ -1137,7 +1235,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
       // A transport failure counts too. "fetch failed" on a loop is the same
       // waste as a 400 on a loop, and three providers in the reported
       // session were failing exactly that way.
-      noteFailure(id, msg);
+      noteFailure(id, msg, path);
       return { ok: false, message: msg, ms: Date.now() - started, status };
     }
   };
@@ -1243,6 +1341,18 @@ export function putCache(key: string, value: unknown, ttlMs: number): void {
 
 export function clearCache(): void {
   cache.clear();
+}
+
+/**
+ * Mark an entry out of date WITHOUT deleting it: the next `memo` reloads,
+ * and if that reload is refused the old value is still served, inside its
+ * grace, exactly like any other expired entry. For values that are only
+ * wrong once something happens (a creator's record when they launch again),
+ * not after a clock runs out.
+ */
+export function expireCache(key: string): void {
+  const e = cache.get(key);
+  if (e && Date.now() - e.at <= e.ttl) e.at = Date.now() - e.ttl - 1;
 }
 
 /** Loads in progress, so concurrent misses share ONE fetch. A cold token

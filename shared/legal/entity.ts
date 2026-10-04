@@ -92,10 +92,16 @@ export const LIABILITY_CAP_USD = 100;
 // billed on its SOL value, and taken in the token you receive when neither
 // side has a SOL price. Same rate; a new way of charging it, so everyone is
 // asked once.
-export const TERMS_VERSION = '2026-09-27.1';
+// 2026-10-01.1: the All-in-One wallet. Bridging moves to Relay (relay.link),
+// whose transactions carry only a commitment to the destination; Krypt's fee
+// now applies to moves between chains (Terms §8); the All-in-One wallet reads
+// balances on Ethereum, Base and Arbitrum through publicnode (Privacy). New
+// hosts receive requests and a fee applies where none did, so everyone is
+// asked once.
+export const TERMS_VERSION = '2026-10-03.1';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '27 September 2026';
+export const TERMS_EFFECTIVE_DATE = '3 October 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

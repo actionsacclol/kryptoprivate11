@@ -18,22 +18,17 @@ const ok = (label) => {
 
 {
   // A route is enabled only once the thing it targets has been MEASURED — the
-  // launcher's BUILDER_VERIFIED pattern. Mayan's Solana programs have not been
-  // decoded, so solana->bnb is deliberately absent and must stay absent until
-  // they are.
-  assert.ok(!ENABLED_ROUTES.has('solana->bnb'), 'an unmeasured route is not enabled');
-  assert.ok(ENABLED_ROUTES.has('solana->robinhood'), 'the measured Solana route is');
+  // launcher's BUILDER_VERIFIED pattern. Until 2026-10-01 solana->bnb was
+  // absent (LI.FI could only offer it through Mayan's unreadable lookup
+  // tables). Every route is now Relay, called directly, and all six were
+  // measured from real quotes — pinned and tampered-tested in
+  // test/relay.test.mjs.
   for (const r of allRoutes()) {
     const id = routeId(r.from, r.to);
-    if (r.from !== 'solana') assert.ok(ENABLED_ROUTES.has(id), `${id} has a pinned contract, so it is enabled`);
+    assert.ok(ENABLED_ROUTES.has(id), `${id} is a measured Relay route, so it is enabled`);
   }
-  ok('every EVM-source route is enabled; the unmeasured Solana one is not');
-}
-
-{
-  // Five of six today. The sixth is a measurement away, not a redesign.
-  assert.equal(ENABLED_ROUTES.size, 5);
-  ok('five of the six directions are live, and the sixth is one quote away');
+  assert.equal(ENABLED_ROUTES.size, 6, 'and nothing beyond the six measured ones');
+  ok('all six routes are enabled — each one measured on Relay');
 }
 
 // -- what can be proved about a transaction we did not build ---------------
@@ -179,6 +174,49 @@ const OURS = FIX.bnb_to_robinhood.toAddress;
   assert.match(chainRefusal({ InstructionError: [0, { Custom: 6001 }] }, ['Program log: AnchorError occurred. Error Code: SlippageExceeded. Error Number: 6001. Error Message: Slippage tolerance exceeded.']), /SlippageExceeded \(6001\)/);
   assert.equal(chainRefusal({ InstructionError: [1, 'X'] }, []), '{"InstructionError":[1,"X"]}', 'with no log to read, the raw error');
   ok('a refusal from the chain is said in words when the logs carry them');
+}
+
+// -- one quote, one deposit (review 2026-10-02) --------------------------
+{
+  // A Relay send REBUILDS its transaction (fresh blockhash / nonce), so a
+  // quote that outlived a lost broadcast reply was a second deposit one click
+  // away. Pinned from source: send() takes the quote before any send path
+  // runs, refuses a Relay request already on record, and demands the quote
+  // be named; both pages name it.
+  const src = fs.readFileSync(new URL('../electron/engine/bridge.ts', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('export async function send('), src.indexOf('/** Human units of the source chain'));
+  const take = body.indexOf('lastQuote.delete(key);');
+  assert.ok(take > 0 && take < body.indexOf('sendFromEvmRelay(') && take < body.indexOf('sendFromSolanaRelay('), 'the quote is taken before any send path runs');
+  assert.ok(body.includes('already sent once'), 'a Relay request already on record is refused');
+  assert.ok(body.includes('must name the quote'), 'a real send must name its quote');
+  assert.ok(body.includes('replaced by a newer one'), 'a quote another page replaced is refused');
+  for (const page of ['../src/pages/Bridge.tsx', '../src/pages/AioWallet.tsx']) {
+    const ui = fs.readFileSync(new URL(page, import.meta.url), 'utf8');
+    assert.ok(/quote\??\.quoteId/.test(ui), `${page} sends the quote it showed, by id`);
+  }
+  ok('one quote buys one deposit: taken before sending, named by the page, never replayed');
+}
+
+// -- Krypt's fee on a move is collected like every other Krypt fee --------
+{
+  // 2026-10-02, the owner: "why don't we collect fees like we do normally".
+  // Never a Relay app fee (USDC accrued at Relay for the owner and every
+  // referrer to go and claim). Solana: transfers in the deposit's own
+  // transaction. BNB / Robinhood: the ordinary EVM fee plan, sent as plain
+  // transfers to the treasury and referrer right AFTER the deposit went out.
+  const src = fs.readFileSync(new URL('../electron/engine/bridge.ts', import.meta.url), 'utf8');
+  const quote = src.slice(src.indexOf('async function quoteRelay('), src.indexOf('// ── Relay: top-ups'));
+  assert.ok(!/appFees/.test(quote), 'no Relay app fee is ever quoted');
+  assert.ok(quote.includes('evmFeePlan('), "the EVM fee is the trade path's own plan");
+  assert.ok(quote.includes('depositRaw = amountRaw - plan.totalWei'), 'and comes off the deposit, so the user moves exactly what they typed');
+  const evmSend = src.slice(src.indexOf('async function sendFromEvmRelay('), src.indexOf('// ── Solana source'));
+  const sentOk = evmSend.indexOf("if (!out.hash || !recorded)");
+  const legs = evmSend.indexOf('sendFeeLegs(');
+  assert.ok(legs > sentOk && sentOk > 0, 'the fee goes only after the deposit went out — no move, no fee');
+  const receipt = evmSend.indexOf('void waitForReceipt(chain, hash)');
+  assert.ok(receipt > sentOk && receipt < legs, "and only after the deposit's receipt (a reverted deposit owes nothing; two sends a moment apart once shared a nonce)");
+  assert.ok(evmSend.slice(receipt, legs).includes("r.status !== 'success'"), 'a reverted deposit sends no fee');
+  ok("a move's Krypt fee is paid like a trade's: in the transaction on Solana, straight transfers after it on EVM");
 }
 
 console.log(`\nbridgeengine: ${passed}/${passed} passed`);

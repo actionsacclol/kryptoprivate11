@@ -25,6 +25,7 @@ import { VersionedTransaction } from '@solana/web3.js';
 import {
   assuranceOf,
   bridgeProblems,
+  chainLabel,
   isEvmBridgeChain,
   routeId,
   sizeRefusal,
@@ -45,12 +46,35 @@ import { getAccountInfo, getBalance, getSignatureStatuses, isBlockhashValid, sen
 import { AddressLookupTableAccount, PublicKey, VersionedTransaction as VT } from '@solana/web3.js';
 import { unknownBridgePrograms } from '../system/signPolicy';
 import { anchorReason } from './liveSigner';
+import { broadcastAndConfirm } from './broadcast';
+import * as feeEstimator from './feeEstimator';
+import { SOLANA_DEPOSIT_CU_LIMIT, evmFeeMultiplier, solanaDepositPrice, type AioSpeed } from '@shared/aioSpeed';
 import { base58Decode, base58Encode } from '../chain/base58';
-import { sendBuilt } from '../evm/trade';
+import { evmFeePlan, sendBuilt, sendFeeLegs } from '../evm/trade';
+import type { FeePlan } from '../evm/uniswap';
 import type { EvmPolicy } from '../evm/policy';
 import type { Address, Hex } from 'viem';
 import { CHAINS } from '../evm/chains';
-import { client } from '../evm/client';
+import { client, feeFields, waitForReceipt } from '../evm/client';
+import * as relay from './relay';
+import { rentSafeTransfers } from './liveSigner';
+import { holderRateApplies } from './kryptoHolding';
+import { ComputeBudgetProgram, SystemProgram, TransactionInstruction, TransactionMessage } from '@solana/web3.js';
+import { getLatestBlockhashInfo } from '../chain/rpcClient';
+import { FEE_BPS, REFERRAL_SHARE_BPS, feesEnabled, looksLikeSolAddress, splitFee, treasuryIntegrity } from '@shared/fees';
+import { holderFeeBps } from '@shared/krypto';
+import { evmFeesEnabled, weiToEth } from '@shared/evm';
+import {
+  RELAY_CHAIN_ID,
+  RELAY_EVM_DEPOSITORY,
+  RELAY_EVM_DEPOSIT_SELECTOR,
+  RELAY_NATIVE,
+  destinationProblem,
+  evmDepositProblem,
+  solanaDepositProblem,
+  type RelayQuote,
+} from '@shared/relay';
+import { QUOTE_LIFE_MS, nativeSymbolOf, type BridgeRail, type BridgeStatus } from '@shared/bridge';
 
 /**
  * LI.FI's contract, per chain, MEASURED 2026-09-11.
@@ -117,6 +141,10 @@ const LIFI_CONTRACT: Record<'robinhood' | 'bnb', string> = {
  * than failing at the signer with something unreadable.
  */
 export const ENABLED_ROUTES: ReadonlySet<string> = new Set<string>([
+  // 2026-10-01: every route is RELAY, called directly (shared/relay.ts), and
+  // all six were measured that day — including solana->bnb, which LI.FI
+  // could only offer through Mayan's unreadable lookup tables (below).
+  'solana->bnb',
   'solana->robinhood',
   'robinhood->solana',
   'robinhood->bnb',
@@ -147,7 +175,42 @@ export const ENABLED_ROUTES: ReadonlySet<string> = new Set<string>([
 
 export interface BridgeDeps {
   httpUrl: string;
+  /** The Solana referrer from Settings, for Krypt's fee on a Solana-source
+   *  transfer (a fifth of it, exactly as on a trade). */
+  referrer?: string;
+  /** The EVM referrer from Settings, for an EVM-source transfer. */
+  evmReferrer?: string;
+  /** All-in-One speed tier (shared/aioSpeed.ts). Absent = Normal. */
+  speed?: AioSpeed;
 }
+
+/**
+ * Which rail carries a NEW transfer. Relay since 2026-10-01: all six routes,
+ * keyless quotes in about a second, fills in about a second, and no 75-a-
+ * two-hours quote budget. LI.FI stays wired behind this one constant as the
+ * way back, and its in-flight records are still followed through LI.FI.
+ *
+ * What the switch costs: LI.FI's EVM calldata names the receiver, so those
+ * sources were 'verified'; Relay's names only the depositor and a
+ * commitment, so every Relay transfer is 'trusted' (shared/relay.ts).
+ */
+const NEW_TRANSFER_RAIL: BridgeRail = 'relay';
+
+/** Relay's deposit compiled here, so the compute budget is ours. MEASURED
+ *  2026-10-01 (mainnet simulation, fee transfer included): 13,701 units —
+ *  the limit is about three times that, because the priority paid is
+ *  limit × price whether the units are used or not. */
+
+/** Krypt's fee on a Solana-source Relay transfer: the bare transfers that go
+ *  in the same transaction as the deposit, rent-safe. */
+interface SolanaFee {
+  transfers: Array<{ to: string; lamports: number }>;
+  totalLamports: number;
+}
+
+type RawQuote =
+  | { rail: 'lifi'; q: lifi.LifiQuote }
+  | { rail: 'relay'; q: RelayQuote; depositRaw: string; fee: SolanaFee | null; evmFee: FeePlan | null };
 
 /** Our own address on a chain — the only address a bridge may ever send to. */
 function ownAddress(chain: BridgeChain): string | null {
@@ -159,12 +222,15 @@ function decimalsOf(chain: BridgeChain): number {
   return chain === 'solana' ? 9 : 18;
 }
 
-/** Human units to base units, through a string so no exponent is involved. */
-function toRaw(amount: number, decimals: number): bigint {
+/**
+ * Human units to base units, through the SHORTEST decimal that round-trips:
+ * 0.0085 is "0.0085", never toFixed(18)'s "0.008500000000000001" (which sent
+ * 8500000000000001 wei in the 2026-10-03 live test). No exponent either.
+ */
+export function toRaw(amount: number, decimals: number): bigint {
   if (!Number.isFinite(amount) || amount <= 0) return 0n;
-  const intDigits = Math.max(1, Math.floor(Math.log10(amount)) + 1);
-  const places = Math.max(decimals, Math.min(20, 15 - intDigits));
-  const [whole, frac = ''] = amount.toFixed(places).split('.');
+  const s = amount.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 });
+  const [whole, frac = ''] = s.split('.');
   return BigInt(`${whole}${frac.slice(0, decimals).padEnd(decimals, '0')}` || '0');
 }
 
@@ -173,12 +239,13 @@ export interface QuoteResult {
   message: string;
   quote?: BridgeQuote;
   /** Present only on the way OUT — never persisted, never sent to the UI. */
-  _raw?: lifi.LifiQuote;
+  _raw?: RawQuote;
 }
 
-/** The last quote per draft, so Check and Send act on what the page showed. */
-const QUOTE_TTL_MS = 60_000;
-const lastQuote = new Map<string, { at: number; quote: BridgeQuote; raw: lifi.LifiQuote; from: string; to: string }>();
+/** The last quote per draft, so Check and Send act on what the page showed.
+ *  Its life is QUOTE_LIFE_MS (shared/bridge.ts), per rail. */
+const lastQuote = new Map<string, { at: number; quote: BridgeQuote; raw: RawQuote; from: string; to: string }>();
+
 const quoteKey = (d: BridgeDraft): string => `${d.from}>${d.to}:${d.amount}`;
 
 /** Bridge events worth a desktop notification, injected by main. */
@@ -213,6 +280,8 @@ export async function quote(draft: BridgeDraft, deps: BridgeDeps): Promise<Quote
   const held = await sourceBalance(draft.from, from, deps);
   const problems = bridgeProblems(draft, held, ENABLED_ROUTES);
   if (problems.length) return { ok: false, message: problems[0]! };
+
+  if (NEW_TRANSFER_RAIL === 'relay') return quoteRelay(draft, deps, from, to);
 
   const fromAmountRaw = toRaw(draft.amount, decimalsOf(draft.from)).toString();
   const r = await lifi.quote({ from: draft.from, to: draft.to, fromAmountRaw, fromAddress: from, toAddress: to });
@@ -252,7 +321,7 @@ export async function quote(draft: BridgeDraft, deps: BridgeDeps): Promise<Quote
   const result: QuoteResult = {
     ok: true,
     message: `via ${q.toolName}`,
-    _raw: q,
+    _raw: { rail: 'lifi', q },
     quote: {
       from: draft.from,
       to: draft.to,
@@ -266,13 +335,165 @@ export async function quote(draft: BridgeDraft, deps: BridgeDeps): Promise<Quote
       durationSec: q.durationSec,
       assurance,
       feeUsd: q.fromUsd !== null && q.toUsd !== null ? q.fromUsd - q.toUsd : null,
+      rail: 'lifi',
+      quoteId: `lifi-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     },
   };
   // The quote a Check or Send will act on is THIS one, for a minute: the
   // page shows one transaction and signs the same one, and a bridge costs
   // one quote token instead of three. Found by audit 2026-09-11.
-  if (result.quote) lastQuote.set(quoteKey(draft), { at: Date.now(), quote: result.quote, raw: q, from, to });
+  if (result.quote && result._raw) lastQuote.set(quoteKey(draft), { at: Date.now(), quote: result.quote, raw: result._raw, from, to });
   return result;
+}
+
+// ── Relay ──────────────────────────────────────────────────────────────
+
+/**
+ * Price one transfer on Relay, Krypt's fee included, and check the bytes
+ * NOW — so the page never shows a quote the send would refuse to sign.
+ *
+ *  · From Solana the fee is two bare transfers in the deposit's own
+ *    transaction (treasury + referrer, rent-safe, exactly as on a trade),
+ *    and Relay is quoted for what is left.
+ *  · From BNB / Robinhood it is collected the way an EVM curve buy pays it:
+ *    plain native transfers straight to the treasury and the referrer,
+ *    sent right after the deposit (an EVM wallet cannot put two payments in
+ *    one transaction). Relay is quoted for what is left. Never a Relay "app
+ *    fee": that accrued as USDC at Relay for the owner — and every referrer —
+ *    to go and claim, which is not how this app pays anyone (2026-10-02).
+ */
+/** Worst-case gas for a Relay deposit and for one fee leg (the 'fee' policy's
+ *  own ceiling), held back from an EVM-source move so the fee can be paid. */
+const EVM_DEPOSIT_GAS = 80_000n;
+const EVM_FEE_LEG_GAS = 60_000n;
+
+async function quoteRelay(draft: BridgeDraft, deps: BridgeDeps, from: string, to: string): Promise<QuoteResult> {
+  const amountRaw = toRaw(draft.amount, decimalsOf(draft.from));
+  if (amountRaw <= 0n) return { ok: false, message: 'Enter an amount.' };
+  // Unknown holding is not a holder: the same rule as every other fee.
+  const holder = holderRateApplies();
+  let depositRaw = amountRaw;
+  let fee: SolanaFee | null = null;
+  let evmFee: FeePlan | null = null;
+  let feeNote: string | null = null;
+  const pct = (bps: number): string => `${(bps / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}%`;
+
+  if (draft.from === 'solana') {
+    const treasury = feesEnabled() ? treasuryIntegrity().treasury : '';
+    if (treasury) {
+      const ref = (deps.referrer ?? '').trim();
+      const hasRef = looksLikeSolAddress(ref) && ref !== treasury && ref !== from;
+      const bps = holderFeeBps(FEE_BPS, holder);
+      const split = splitFee(Number(amountRaw), hasRef, bps);
+      if (split.totalLamports > 0) {
+        const wanted = [{ to: treasury, lamports: split.treasuryLamports }];
+        if (split.referrerLamports > 0) wanted.push({ to: ref, lamports: split.referrerLamports });
+        // A transfer that would leave an empty recipient below rent reverts
+        // the whole transaction — dropped, never allowed to block the move.
+        const safe = await rentSafeTransfers(wanted, deps.httpUrl);
+        const total = safe.reduce((a, t) => a + t.lamports, 0);
+        if (total > 0) {
+          fee = { transfers: safe, totalLamports: total };
+          depositRaw = amountRaw - BigInt(total);
+          feeNote = `Krypt fee ${pct(bps)}${holder ? ' (halved: $KRYPTO holder)' : ''}${safe.some((t) => t.to === ref) ? ', a fifth of it to your referrer' : ''}`;
+        }
+      }
+    }
+  } else if (evmFeesEnabled()) {
+    // The ordinary EVM fee (trade.ts feePlanFor): rate, holder discount and
+    // referrer rules are the trade path's own, not re-implemented here.
+    const plan = evmFeePlan(amountRaw, deps.evmReferrer ?? '', from as `0x${string}`);
+    if (plan.totalWei > 0n && plan.treasury && plan.totalWei < amountRaw) {
+      evmFee = plan;
+      depositRaw = amountRaw - plan.totalWei;
+      // Hundredths of a basis point: a 1-wei rounding must not read "0.49%".
+      const bps = Number((plan.totalWei * 1_000_000n) / amountRaw) / 100;
+      feeNote = `Krypt fee ${pct(bps)}${holder ? ' (halved: $KRYPTO holder)' : ''}${plan.referrerWei > 0n ? ', a fifth of it to your referrer' : ''}, paid straight to them right after the deposit`;
+    }
+  }
+
+  // From an EVM chain the deposit AND its fee legs each pay gas on top of the
+  // amount. A move of the whole balance passed the deposit's own check and
+  // left nothing for the legs — they were refused and no fee was paid
+  // (swarm 2026-10-03, MS-4). Worst-case gas for all of them stays behind.
+  if (draft.from !== 'solana') {
+    const chain = draft.from;
+    try {
+      const [held, fees] = await Promise.all([client(chain).getBalance({ address: from as `0x${string}` }), feeFields(chain)]);
+      const legs = evmFee ? (evmFee.referrerWei > 0n ? 2n : 1n) : 0n;
+      const gasReserve = (EVM_DEPOSIT_GAS + legs * EVM_FEE_LEG_GAS) * fees.maxFeePerGas;
+      if (amountRaw + gasReserve > held) {
+        const room = held > gasReserve ? held - gasReserve : 0n;
+        const sym = nativeSymbolOf(chain);
+        return {
+          ok: false,
+          message: `Leave about ${weiToEth(gasReserve).toPrecision(2)} ${sym} for network fees — at most ${weiToEth(room).toFixed(6)} ${sym} can move.`,
+        };
+      }
+    } catch {
+      // Unread: the send's own "value + gas" check still refuses a deposit the
+      // wallet cannot pay for. Never block a quote on a read.
+    }
+  }
+
+  const r = await relay.quote({
+    user: from,
+    recipient: to,
+    originChainId: RELAY_CHAIN_ID[draft.from],
+    destinationChainId: RELAY_CHAIN_ID[draft.to],
+    originCurrency: RELAY_NATIVE[draft.from],
+    destinationCurrency: RELAY_NATIVE[draft.to],
+    amount: depositRaw.toString(),
+    tradeType: 'EXACT_INPUT',
+    // A failed fill comes back to the wallet it left, explicitly.
+    refundTo: from,
+  });
+  if (!r.ok) return { ok: false, message: r.message };
+  const q = r.data;
+  const why =
+    draft.from === 'solana'
+      ? solanaDepositProblem(q, from, depositRaw.toString())
+      : evmDepositProblem(q, from, depositRaw.toString(), CHAINS[draft.from as 'bnb' | 'robinhood'].viem.id);
+  if (why) {
+    logger.error(`bridge quote refused (relay): ${why}`);
+    return { ok: false, message: `That quote cannot be signed: ${why}. Nothing was sent.` };
+  }
+  // What Relay says it will deliver must be what was asked: our own address,
+  // that chain, its native coin. The deposit bytes cannot say; the quote can.
+  const dest = destinationProblem(q, draft.to, to);
+  if (dest) {
+    logger.error(`bridge quote refused (relay): ${dest}`);
+    return { ok: false, message: `That quote cannot be signed: ${dest}. Nothing was sent.` };
+  }
+
+  // Relay prices the DEPOSIT; on Solana the user's amount is the deposit
+  // plus Krypt's fee, so dollars scale from the deposit's own rate.
+  const usdPerRaw = q.inUsd !== null && depositRaw > 0n ? q.inUsd / Number(depositRaw) : null;
+  const fromUsd = usdPerRaw !== null ? usdPerRaw * Number(amountRaw) : null;
+  // Krypt's share, in dollars at the deposit's own rate.
+  const feeRaw = fee ? BigInt(fee.totalLamports) : evmFee ? evmFee.totalWei : 0n;
+  const kryptFeeUsd = feeRaw > 0n ? (usdPerRaw !== null ? usdPerRaw * Number(feeRaw) : null) : 0;
+  const quoted: BridgeQuote = {
+    from: draft.from,
+    to: draft.to,
+    fromAmountRaw: amountRaw.toString(),
+    toAmountRaw: q.amountOutRaw,
+    toAmountMinRaw: q.minOutRaw,
+    toDecimals: q.outDecimals,
+    fromUsd,
+    toUsd: q.outUsd,
+    tool: 'Relay',
+    durationSec: q.timeEstimateSec,
+    assurance: assuranceOf(draft.from, 'relay'),
+    feeUsd: fromUsd !== null && q.outUsd !== null ? fromUsd - q.outUsd : null,
+    rail: 'relay',
+    quoteId: q.requestId,
+    kryptFeeUsd,
+    kryptFeeNote: feeNote,
+  };
+  const raw: RawQuote = { rail: 'relay', q, depositRaw: depositRaw.toString(), fee, evmFee };
+  lastQuote.set(quoteKey(draft), { at: Date.now(), quote: quoted, raw, from, to });
+  return { ok: true, message: 'via Relay', quote: quoted, _raw: raw };
 }
 
 /** LI.FI's `BridgeData.receiver` when the destination is not an EVM chain. */
@@ -380,7 +601,7 @@ export interface SendResult {
  * executes the signed bytes and reports what would happen; on EVM the gas
  * estimate IS that simulation.
  */
-export async function send(draft: BridgeDraft, deps: BridgeDeps, simulateOnly: boolean): Promise<SendResult> {
+export async function send(draft: BridgeDraft, deps: BridgeDeps, simulateOnly: boolean, quoteId?: string): Promise<SendResult> {
   // The record has to be writable BEFORE anything moves. Money this app
   // cannot write down must not leave: a user would see it gone from one side,
   // nothing on the other, and have nothing to chase.
@@ -391,7 +612,8 @@ export async function send(draft: BridgeDraft, deps: BridgeDeps, simulateOnly: b
 
   const key = quoteKey(draft);
   const cached = lastQuote.get(key);
-  const fresh = cached && Date.now() - cached.at < QUOTE_TTL_MS ? cached : null;
+  const ttl = QUOTE_LIFE_MS[cached?.raw.rail ?? 'lifi'];
+  const fresh = cached && Date.now() - cached.at < ttl ? cached : null;
   // The wallets the quote was made FOR. A Robinhood wallet can be switched
   // while its chain is disarmed, and the cached transaction would still
   // deliver to the old one; the bytes cannot tell (the destination is not in
@@ -403,24 +625,49 @@ export async function send(draft: BridgeDraft, deps: BridgeDeps, simulateOnly: b
   // A real send acts on the quote the page showed and the user checked, or
   // not at all: a silent re-quote here would sign bytes nobody has seen.
   if (!simulateOnly && !fresh) {
-    return { ok: false, message: 'That quote has expired. Check it again — nothing was sent.' };
+    return { ok: false, message: 'That quote has expired. Get a new one — nothing was sent.' };
+  }
+  // The quote the page SHOWED, by name. Two pages share this cache, and a
+  // quote made on one must never be sent from the other (review 2026-10-02).
+  if (fresh && quoteId !== undefined && fresh.quote.quoteId !== quoteId) {
+    return { ok: false, message: 'That quote was replaced by a newer one. Get a new quote — nothing was sent.' };
+  }
+  if (!simulateOnly && quoteId === undefined) {
+    return { ok: false, message: 'internal: a send must name the quote it acts on — nothing was sent.' };
   }
   const q = fresh ? { ok: true, message: 'cached', quote: fresh.quote, _raw: fresh.raw } : await quote(draft, deps);
   if (!q.ok || !q.quote || !q._raw) return { ok: false, message: q.message };
+  if (!simulateOnly) {
+    // SINGLE USE, taken before anything awaits. A Relay send rebuilds its
+    // transaction every time (fresh blockhash, fresh nonce), so a quote that
+    // survived a lost broadcast reply was a SECOND deposit one click away
+    // (review 2026-10-02). Whatever happens next, this quote is spent.
+    lastQuote.delete(key);
+    // And one deposit per Relay request, whatever the cache says.
+    if (q._raw.rail === 'relay') {
+      const requestId = q._raw.q.requestId;
+      if (store.all().some((t) => t.requestId === requestId)) {
+        return { ok: false, message: 'This quote was already sent once. Get a new quote — nothing more was sent.' };
+      }
+    }
+  }
 
   // Size is judged on the QUOTE, because only the quote knows the dollars.
   const refusal = sizeRefusal(q.quote);
   if (refusal) return { ok: false, message: refusal };
 
-  const r = isEvmBridgeChain(draft.from)
-    ? await sendFromEvm(draft, q.quote, q._raw, simulateOnly)
-    : await sendFromSolana(draft, q.quote, q._raw, deps, simulateOnly);
-  // A sent quote is spent. A refused one is KEPT for its minute unless the
-  // refusal says the quote itself is stale: the same bytes refuse the same
-  // way, and a re-quote costs a token and waits behind the aggregator's
-  // pacing — which read as a hung "Check it first" on 2026-09-11.
+  const raw = q._raw;
+  const r =
+    raw.rail === 'relay'
+      ? isEvmBridgeChain(draft.from)
+        ? await sendFromEvmRelay(draft, q.quote, raw, simulateOnly, deps.speed)
+        : await sendFromSolanaRelay(draft, q.quote, raw, deps, simulateOnly)
+      : isEvmBridgeChain(draft.from)
+        ? await sendFromEvm(draft, q.quote, raw.q, simulateOnly)
+        : await sendFromSolana(draft, q.quote, raw.q, deps, simulateOnly);
+  // A real send spent its quote above, sent or not. A refused CHECK keeps
+  // the quote for its life unless the refusal says the quote is stale.
   if (r.ok && !simulateOnly) {
-    lastQuote.delete(key);
     // Relay delivers in seconds; main's timer asks every two minutes. Ask
     // soon after a send so the page says "Arrived" while the user is still
     // looking (measured 2026-09-11: landed in ~3 s, shown 65 s later).
@@ -511,6 +758,296 @@ export function relayDepositProblem(tx: VersionedTransaction, tool: string, from
   const total = deposit + transfers;
   if (total !== BigInt(fromAmountRaw)) return `the transaction moves ${total} lamports, not the ${fromAmountRaw} quoted`;
   return null;
+}
+
+// ── Relay: top-ups that fund a buy (All-in-One "buy anywhere") ───────────
+//
+// EXACT_OUTPUT: the destination receives exactly what the buy needs (plus
+// its reserve, at least the minimum top-up). No Krypt fee — the owner's call
+// (2026-10-02): one fee per order, and the buy pays it. Kept in their OWN
+// single-use store, keyed by Relay's request id, so a fee-free top-up can
+// never be sent as an ordinary move through bridge:send or aio:moveSend.
+
+const topUps = new Map<string, { at: number; quote: BridgeQuote; raw: Extract<RawQuote, { rail: 'relay' }>; from: string; to: string }>();
+
+export interface TopUpRequest {
+  from: BridgeChain;
+  to: BridgeChain;
+  /** Base units of the DESTINATION coin that must arrive. */
+  outRaw: bigint;
+}
+
+/** Quote one top-up. The page shows it; `sendTopUp` sends it by id. */
+export async function quoteTopUp(t: TopUpRequest, deps: BridgeDeps): Promise<QuoteResult> {
+  void deps;
+  if (t.from === t.to) return { ok: false, message: 'A top-up moves between two chains.' };
+  if (!ENABLED_ROUTES.has(routeId(t.from, t.to))) return { ok: false, message: `${chainLabel(t.from)} to ${chainLabel(t.to)} is not enabled.` };
+  if (t.outRaw <= 0n) return { ok: false, message: 'Nothing to top up.' };
+  const from = ownAddress(t.from);
+  const to = ownAddress(t.to);
+  if (!from || !to) return { ok: false, message: 'A wallet is missing on one of the two chains.' };
+  const r = await relay.quote({
+    user: from,
+    recipient: to,
+    originChainId: RELAY_CHAIN_ID[t.from],
+    destinationChainId: RELAY_CHAIN_ID[t.to],
+    originCurrency: RELAY_NATIVE[t.from],
+    destinationCurrency: RELAY_NATIVE[t.to],
+    amount: t.outRaw.toString(),
+    tradeType: 'EXACT_OUTPUT',
+    refundTo: from,
+  });
+  if (!r.ok) return { ok: false, message: r.message };
+  const q = r.data;
+  const why =
+    (t.from === 'solana'
+      ? solanaDepositProblem(q, from, q.amountInRaw)
+      : evmDepositProblem(q, from, q.amountInRaw, CHAINS[t.from as 'bnb' | 'robinhood'].viem.id)) ??
+    destinationProblem(q, t.to, to) ??
+    (BigInt(q.amountOutRaw) < t.outRaw ? `Relay would deliver ${q.amountOutRaw}, less than the ${t.outRaw} asked` : null);
+  if (why) {
+    logger.error(`top-up quote refused (relay): ${why}`);
+    return { ok: false, message: `That top-up cannot be signed: ${why}. Nothing was sent.` };
+  }
+  const quoted: BridgeQuote = {
+    from: t.from,
+    to: t.to,
+    fromAmountRaw: q.amountInRaw,
+    toAmountRaw: q.amountOutRaw,
+    toAmountMinRaw: q.minOutRaw,
+    toDecimals: q.outDecimals,
+    fromUsd: q.inUsd,
+    toUsd: q.outUsd,
+    tool: 'Relay',
+    durationSec: q.timeEstimateSec,
+    assurance: assuranceOf(t.from, 'relay'),
+    feeUsd: q.inUsd !== null && q.outUsd !== null ? q.inUsd - q.outUsd : null,
+    rail: 'relay',
+    quoteId: q.requestId,
+    kryptFeeUsd: 0,
+    kryptFeeNote: 'No Krypt fee on this top-up — the buy it funds pays the fee',
+  };
+  const raw: Extract<RawQuote, { rail: 'relay' }> = { rail: 'relay', q, depositRaw: q.amountInRaw, fee: null, evmFee: null };
+  // Old entries go: a quote is good for half a minute.
+  for (const [k, v] of topUps) if (Date.now() - v.at > QUOTE_LIFE_MS.relay) topUps.delete(k);
+  topUps.set(q.requestId, { at: Date.now(), quote: quoted, raw, from, to });
+  return { ok: true, message: 'via Relay', quote: quoted, _raw: raw };
+}
+
+/** Send a top-up quoted by `quoteTopUp`. Single use; real, never simulated
+ *  separately — the Solana path simulates and loss-guards before it sends,
+ *  the EVM path estimates gas, exactly as for any move. */
+export async function sendTopUp(quoteId: string, deps: BridgeDeps): Promise<SendResult> {
+  const entry = topUps.get(quoteId);
+  topUps.delete(quoteId); // single use, taken before anything awaits
+  if (!entry) return { ok: false, message: 'That top-up quote is gone (already used, or never made). Nothing was sent.' };
+  if (Date.now() - entry.at >= QUOTE_LIFE_MS.relay) return { ok: false, message: 'That top-up quote has expired. Nothing was sent.' };
+  const storeFailure = store.failure();
+  if (storeFailure) return { ok: false, message: `Refusing to move funds: the in-flight record cannot be written (${storeFailure}).` };
+  const { quote: quoted, raw } = entry;
+  if (entry.from !== ownAddress(quoted.from) || entry.to !== ownAddress(quoted.to)) {
+    return { ok: false, message: 'A wallet changed since that quote. Nothing was sent.' };
+  }
+  if (store.all().some((r) => r.requestId === raw.q.requestId)) return { ok: false, message: 'That top-up was already sent once. Nothing more was sent.' };
+  const refusal = sizeRefusal(quoted);
+  if (refusal) return { ok: false, message: refusal };
+  const draft: BridgeDraft = { from: quoted.from, to: quoted.to, amount: Number(BigInt(quoted.fromAmountRaw)) / 10 ** decimalsOf(quoted.from) };
+  const r = isEvmBridgeChain(quoted.from)
+    ? await sendFromEvmRelay(draft, quoted, raw, false, deps.speed)
+    : await sendFromSolanaRelay(draft, quoted, raw, deps, false);
+  if (r.ok) for (const ms of [5_000, 15_000, 45_000]) setTimeout(() => void poll(), ms).unref?.();
+  return r;
+}
+
+// ── Relay: Solana source ─────────────────────────────────────────────────
+
+/**
+ * Compile Relay's deposit HERE — its one instruction, with the compute
+ * budget and Krypt's fee transfers around it — and sign it under the bridge
+ * policy. No lookup table: every account is in the static keys, where the
+ * signer can name it (Relay's table only shortens the transaction).
+ */
+async function sendFromSolanaRelay(
+  draft: BridgeDraft,
+  quoted: BridgeQuote,
+  raw: Extract<RawQuote, { rail: 'relay' }>,
+  deps: BridgeDeps,
+  simulateOnly: boolean,
+): Promise<SendResult> {
+  const owner = wallet.publicKey();
+  if (!owner) return { ok: false, message: 'No active Solana wallet.' };
+  const why = solanaDepositProblem(raw.q, owner, raw.depositRaw);
+  if (why) {
+    logger.error(`bridge refused (relay): ${why}`);
+    return { ok: false, message: `Refusing: ${why}. Nothing was sent.` };
+  }
+  const ix = raw.q.solana!.instructions[0]!;
+  const payer = new PublicKey(owner);
+  // Independent reads, together (they were one after the other). The fee
+  // estimate is the tier's input; unread, the tier's floor applies.
+  const [bh, before, est] = await Promise.all([
+    getLatestBlockhashInfo(deps.httpUrl),
+    getBalance(deps.httpUrl, owner),
+    feeEstimator.estimate(deps.httpUrl, [owner]).catch(() => null),
+  ]);
+  const cuPrice = solanaDepositPrice(deps.speed ?? 'normal', est);
+  if (!bh.ok || !bh.data) return { ok: false, message: `Could not read a recent blockhash: ${bh.message}. Nothing was sent.` };
+  const tx = new VersionedTransaction(
+    new TransactionMessage({
+      payerKey: payer,
+      recentBlockhash: bh.data.blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: SOLANA_DEPOSIT_CU_LIMIT }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: cuPrice }),
+        ...(raw.fee?.transfers ?? []).map((t) => SystemProgram.transfer({ fromPubkey: payer, toPubkey: new PublicKey(t.to), lamports: t.lamports })),
+        new TransactionInstruction({
+          programId: new PublicKey(ix.programId),
+          keys: ix.keys.map((k) => ({ pubkey: new PublicKey(k.pubkey), isSigner: k.isSigner, isWritable: k.isWritable })),
+          data: Buffer.from(ix.data, 'hex'),
+        }),
+      ],
+    }).compileToV0Message(),
+  );
+  // The money, read off the COMPILED bytes: deposit + every bare transfer
+  // must be exactly what the user asked to move — the fee included.
+  const moneyWhy = relayDepositProblem(tx, 'relaydepository', quoted.fromAmountRaw);
+  if (moneyWhy) {
+    logger.error(`bridge refused (relay): ${moneyWhy}`);
+    return { ok: false, message: `Refusing: ${moneyWhy}. Nothing was sent.` };
+  }
+
+  if (!before.ok || before.data === undefined) return { ok: false, message: `Could not read your balance before the transfer: ${before.message}. Nothing was sent.` };
+
+  const signed = wallet.signVersionedTransaction(tx.serialize(), {
+    intent: 'bridge',
+    // Nothing leaves by a bare transfer except Krypt's fee, to the two
+    // addresses quoted, at exactly the amounts quoted.
+    maxTransferLamports: 0,
+    feeAllowance: (raw.fee?.transfers ?? []).map((t) => ({ address: t.to, maxLamports: t.lamports })),
+  });
+  if (!signed.ok || !signed.signed) {
+    logger.error(`bridge refused by the signer (relay): ${signed.message}`);
+    return { ok: false, message: `${signed.message.replace(/\.?$/, '.')} Nothing was sent.` };
+  }
+  const base64 = Buffer.from(signed.signed).toString('base64');
+  const sim = await simulateTransaction(deps.httpUrl, base64, [owner]);
+  if (!sim.ok || !sim.data) return { ok: false, message: `Could not simulate the transfer: ${sim.message}` };
+  if (sim.data.err) {
+    const reason = chainRefusal(sim.data.err, sim.data.logs);
+    logger.warn(`bridge refused by the chain (relay): ${reason}`);
+    return { ok: false, message: `The chain refused this transfer: ${reason}. Nothing was sent.` };
+  }
+  const post = sim.data.postLamports[0];
+  if (typeof post !== 'number') return { ok: false, message: 'The simulation did not report your balance afterwards. Nothing was sent.' };
+  const spent = before.data - post;
+  const allowed = Number(quoted.fromAmountRaw) + SOLANA_COST_TOLERANCE_LAMPORTS;
+  if (spent > allowed) {
+    logger.error(`bridge refused by the loss guard (relay): simulation spends ${spent} lamports, allowed ${allowed}`);
+    return { ok: false, message: 'Refusing: the simulation spends more than this transfer should cost. Nothing was sent.' };
+  }
+  if (simulateOnly) return { ok: true, message: 'The chain accepts this transfer.' };
+
+  const signature = solanaSignature(signed.signed);
+  if (!signature) return { ok: false, message: 'Could not read the signature of the signed transfer.' };
+  // Written BEFORE the broadcast, as on every other path.
+  store.record({ ...inFlightFrom(draft, quoted, signature), blockhash: bh.data.blockhash, rail: 'relay', requestId: raw.q.requestId });
+  logger.info(`bridge: sending ${draft.amount} from ${draft.from} to ${draft.to} via Relay — ${signature} (request ${raw.q.requestId})`);
+  const sent = await sendRawTransaction(deps.httpUrl, base64);
+  // Either way the SAME bytes keep going out until they confirm or can no
+  // longer land: a dropped packet is retried, a lost reply is followed by
+  // signature. Background — the move is "On its way" from the first accept.
+  const lastValidBlockHeight = bh.data.lastValidBlockHeight;
+  void broadcastAndConfirm({ httpUrl: deps.httpUrl, base64, signature, lanes: ['rpc'], lastValidBlockHeight })
+    .then((r) => {
+      if (r.chainErr) store.update(signature, { status: 'failed', note: 'the deposit failed on chain — nothing was moved but the network fee' });
+      else if (r.expired) store.update(signature, { status: 'failed', note: 'the deposit expired before it landed — nothing was moved' });
+    })
+    .catch((e) => logger.warn(`bridge: deposit rebroadcast stopped — ${(e as Error).message}`));
+  if (!sent.ok) {
+    store.update(signature, { status: 'unknown', note: `broadcast did not confirm: ${sent.message}` });
+    return { ok: false, message: `Could not send the transfer: ${sent.message}. Check the Bridge panel before retrying.`, txHash: signature };
+  }
+  return { ok: true, message: 'On its way.', txHash: signature };
+}
+
+// ── Relay: EVM source ────────────────────────────────────────────────────
+
+async function sendFromEvmRelay(
+  draft: BridgeDraft,
+  quoted: BridgeQuote,
+  raw: Extract<RawQuote, { rail: 'relay' }>,
+  simulateOnly: boolean,
+  speed: AioSpeed = 'normal',
+): Promise<SendResult> {
+  const chain = draft.from as 'robinhood' | 'bnb';
+  const owner = evmWallet.address(chain);
+  if (!owner) return { ok: false, message: `No wallet on ${chain}.` };
+  const why = evmDepositProblem(raw.q, owner, raw.depositRaw, CHAINS[chain].viem.id);
+  if (why) {
+    logger.error(`bridge refused (relay): ${why}`);
+    return { ok: false, message: `Refusing: ${why}. Nothing was sent.` };
+  }
+  const call = raw.q.evm!;
+  const value = BigInt(call.value);
+  const policy: EvmPolicy = {
+    chainId: CHAINS[chain].viem.id,
+    intent: 'bridge',
+    // The one call, to the pinned depository, with the measured selector and
+    // exactly the value asked for.
+    allow: [{ to: RELAY_EVM_DEPOSITORY, selectors: [RELAY_EVM_DEPOSIT_SELECTOR as Hex], maxValueWei: value }],
+    maxGas: 3_000_000n,
+    maxFeePerGasWei: 100_000_000_000n,
+    maxGasCostWei: 10_000_000_000_000_000n,
+    approveSpenders: [],
+    permit2Spenders: [],
+  };
+  let recorded = false;
+  let recordedHash: string | null = null;
+  const out = await sendBuilt(chain, owner, { to: RELAY_EVM_DEPOSITORY as Address, data: call.data as Hex, value }, policy, {
+    simulateOnly,
+    wait: false,
+    feeMultiplier: evmFeeMultiplier(speed, chain),
+    onSent: (hash) => {
+      if (simulateOnly) return;
+      store.record({ ...inFlightFrom(draft, quoted, hash), rail: 'relay', requestId: raw.q.requestId });
+      recorded = true;
+      recordedHash = hash;
+      logger.info(`bridge: sending ${draft.amount} from ${chain} to ${draft.to} via Relay — ${hash} (request ${raw.q.requestId})`);
+    },
+  });
+  if (!out.ok) {
+    logger.warn(`bridge send failed on ${chain} (relay): ${out.message}`);
+    if (recorded && out.hash) store.update(out.hash, { status: 'unknown', note: `broadcast did not confirm: ${out.message}` });
+    // No hash back = the node definitively refused it (the nonce went to
+    // another transaction): nothing left the wallet, so the record must not
+    // sit "On its way" forever (swarm 2026-10-03, MS-8).
+    else if (recorded && recordedHash) store.update(recordedHash, { status: 'failed', note: `nothing was sent: ${out.message}` });
+    const sent = recorded && out.hash;
+    return { ok: false, message: sent ? out.message : `${out.message.replace(/\.?$/, '.')} Nothing was sent.`, txHash: out.hash ?? undefined };
+  }
+  if (simulateOnly) return { ok: true, message: 'The chain accepts this transfer.' };
+  if (!out.hash || !recorded) return { ok: false, message: 'Sent, but no transaction hash came back — check the chain before retrying.' };
+  // Krypt's fee, the way an EVM curve buy pays it: straight to the treasury
+  // and the referrer, right after the deposit went out. Only once the
+  // deposit has gone — no move, no fee — and never able to fail the move.
+  // After the deposit's RECEIPT, not merely its broadcast: a reverted
+  // deposit moved nothing and owes nothing, and two sends a moment apart is
+  // how the fee once collided with the deposit's nonce (2026-10-03).
+  if (raw.evmFee) {
+    const fee = raw.evmFee;
+    const walletId = evmWallet.info(chain).id ?? undefined;
+    const hash = out.hash;
+    void waitForReceipt(chain, hash)
+      .then((r) => {
+        if (!r) return logger.warn(`bridge: Krypt fee not sent — the deposit ${hash} has no receipt yet`);
+        if (r.status !== 'success') return logger.warn(`bridge: Krypt fee not sent — the deposit ${hash} reverted`);
+        return sendFeeLegs(chain, walletId, owner, fee, 'move').then((h) => {
+          if (h) logger.info(`bridge: Krypt fee ${weiToEth(fee.totalWei).toFixed(6)} sent after the move — ${h}`);
+        });
+      })
+      .catch((e) => logger.warn(`bridge: Krypt fee after the move failed — ${(e as Error).message}`));
+  }
+  return { ok: true, message: 'On its way.', txHash: out.hash };
 }
 
 // ── Solana source ────────────────────────────────────────────────────────
@@ -772,6 +1309,12 @@ function inFlightFrom(draft: BridgeDraft, q: BridgeQuote, txHash: string): InFli
  */
 let polling: Promise<number> | null = null;
 
+/** What the record of one transfer says now (by its id / tx hash), or null
+ *  when there is no record. Local — no request. */
+export function statusOf(id: string): BridgeStatus | null {
+  return store.all().find((t) => t.id === id || t.txHash === id)?.status ?? null;
+}
+
 export function poll(): Promise<number> {
   // One at a time: main's timer does not await this, and the status calls
   // are gated per provider, so a second poll behind a slow first one only
@@ -787,7 +1330,7 @@ async function pollOnce(): Promise<number> {
   const live = store.pending();
   let changed = 0;
   for (const t of live) {
-    const r = await lifi.status(t.txHash, t.from, t.to);
+    const r = t.rail === 'relay' ? await relayStatusFor(t) : await lifi.status(t.txHash, t.from, t.to);
     if (!r.ok) continue; // could not ask is not an answer
     if (r.data.status === t.status || (r.data.status === 'unknown' && t.status === 'pending')) {
       // The aggregator has nothing new. On a Solana source the chain itself
@@ -817,6 +1360,35 @@ async function pollOnce(): Promise<number> {
     changed += 1;
   }
   return changed;
+}
+
+/**
+ * A Relay transfer's status, in the shape LI.FI's poll already reads.
+ *
+ * "Done" is only believed when Relay's record names OUR deposit: the request
+ * id is Relay's, and a success on a request whose deposit is someone else's
+ * transaction says nothing about ours. Until it does, it stays unknown.
+ */
+async function relayStatusFor(t: InFlight): Promise<{ ok: true; data: { status: BridgeStatus; deliveredRaw: string | null; detail: string | null } } | { ok: false }> {
+  if (!t.requestId) return { ok: false };
+  const r = await relay.status(t.requestId);
+  if (!r.ok) return { ok: false };
+  // Solana signatures are case-sensitive base58; EVM hashes are hex.
+  const ours = r.data.inTxHashes.some((h) => (t.from === 'solana' ? h === t.txHash : h.toLowerCase() === t.txHash.toLowerCase()));
+  // An ENDED request is believed only when it names our deposit — filled,
+  // refunded or failed alike; each one stops the polling for good.
+  if ((r.data.status === 'done' || r.data.status === 'refunded' || r.data.status === 'failed' || r.data.status === 'partial') && !ours) {
+    return { ok: true, data: { status: 'unknown', deliveredRaw: null, detail: `Relay reports the request ${r.data.raw}, but its record does not name this app's deposit` } };
+  }
+  const fill = r.data.outTxHashes[0];
+  return {
+    ok: true,
+    data: {
+      status: r.data.status,
+      deliveredRaw: null,
+      detail: r.data.detail ?? (r.data.status === 'done' && fill ? `filled in ${fill.slice(0, 14)}…` : null),
+    },
+  };
 }
 
 /**

@@ -82,6 +82,9 @@ const BOUNDS: Record<string, { min: number; max: number; int?: boolean }> = {
   'execution.maxLiveConsecutiveLosses': { min: 0, max: 50, int: true },
   'execution.cashoutThresholdSol': { min: 0.000001, max: 100 },
   'execution.computeUnitLimit': { min: 10_000, max: 1_400_000, int: true },
+  // Below $5 Relay refuses (and its fixed cost is most of it); above $1,000
+  // of idle float on every chain is a lot of money parked in hot wallets.
+  'aio.floatUsd': { min: 5, max: 1_000 },
   'strategy.maxSessionLossSol': { min: 0, max: 1000 },
   'strategy.maxConsecutiveLosses': { min: 1, max: 100, int: true },
   'strategy.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
@@ -167,6 +170,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   'execution.feeUrgency': ['normal', 'competitive', 'high', 'emergency'],
   'execution.mevMode': ['off', 'fast', 'private'],
   'execution.feeLane': ['fast', 'lean'],
+  'aio.speed': ['cheap', 'normal', 'fast'],
   'execution.jitoTipPercentile': [50, 75, 95],
   'strategy.runnerAlerts.minBucket': ['top1', 'top1_5', 'top5_10'],
   'strategy.runnerAlerts.windows': ['both', '60', '120'],

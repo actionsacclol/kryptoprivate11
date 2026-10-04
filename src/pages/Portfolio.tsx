@@ -8,6 +8,7 @@ import { AreaChart } from '../components/viz/AreaChart';
 import { PnlCard, type CardSubject } from '../components/terminal/PnlCard';
 import { EvmPortfolioCard } from '../components/terminal/EvmPortfolioCard';
 import { useTerminal } from '../state/TerminalProvider';
+import { AllChainsPortfolio } from './AllChains';
 import { EvmFillsSection } from '../components/terminal/EvmFillsSection';
 import { ResetPaperButton } from '../components/ResetPaperButton';
 import { type ChainKind, EVM_CHAIN_META, isEvmChain } from '@shared/evm';
@@ -143,7 +144,9 @@ function PositionRow({
  * rail's positions and fills on Robinhood Chain and BNB (2026-09-11).
  */
 export function PortfolioPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
-  const { chain } = useTerminal();
+  const { chain, allChains } = useTerminal();
+  // ALL in the chain switch: every chain's positions in one list, in dollars.
+  if (allChains) return <AllChainsPortfolio onOpenToken={onOpenToken} />;
   if (isEvmChain(chain)) {
     return (
       <Page title="Portfolio" subtitle={`What you hold on ${EVM_CHAIN_META[chain].name}, what you paid, and every fill — joined from the chain and this install's ledger. Switch the chain in the top bar for Solana.`}>

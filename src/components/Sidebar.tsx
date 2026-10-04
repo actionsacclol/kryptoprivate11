@@ -74,6 +74,7 @@ export type RouteId =
   | 'backtest'
   | 'execution'
   | 'wallet'
+  | 'walletaio'
   | 'walletrobinhood'
   | 'walletbnb'
   | 'swap'
@@ -113,6 +114,9 @@ export const TERMINAL_ROUTES: RouteSpec[] = [
   { id: 'trades', label: 'Trades', i18n: 'nav.trades', hint: 'Every round trip you made, in and out', icon: Receipt },
   { id: 'orders', label: 'Orders', i18n: 'nav.orders', hint: 'Place and manage stop losses, take profits, limits', icon: ListOrdered },
   { id: 'positions', label: 'Portfolio', i18n: 'nav.portfolio', hint: 'Positions and PnL', icon: Wallet },
+  // One wallet on every chain (2026-10-01): one recovery phrase, one dollar
+  // total. First in the list because it is the one most people want.
+  { id: 'walletaio', label: 'All-in-One Wallet', i18n: 'nav.aioWallet', hint: 'One wallet on every chain, one balance in dollars', icon: Layers },
   { id: 'wallet', label: 'Sol Wallet', i18n: 'nav.solWallet', hint: 'Your Solana trading wallet, keys and arming', icon: KeyRound },
   // One page per EVM chain rather than one page with a chain switch: a user
   // looking for their BNB balance should find "BNB Wallet" in the menu, not

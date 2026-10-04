@@ -26,6 +26,10 @@ import {
   setJupiterApiKey,
   jupiterKeyed,
   routeShape,
+  routeCooldownMs,
+  expireCache,
+  cached,
+  putCache,
 } from './.http.mjs';
 
 let hits = [];
@@ -583,6 +587,49 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // Two creators' lists are one shape.
   assert.equal(routeShape('/coins?creator=A111&limit=100'), routeShape('/coins?creator=B222&limit=100'));
   console.log('ok  the park log names the route shape, never the coin or creator');
+}
+
+// 2026-10-01: pump.fun's `/coins` list has its OWN limiter. Measured: after
+// every 429 on `/coins?creator=`, `/coins-v3/{mint}` answered 200 (12 of 12).
+// Parking the host for it stopped coin records for two minutes at a time,
+// and with a park every three minutes pump.fun sat parked two thirds of the
+// day. A list 429 now parks the list route only.
+{
+  stubFetch((url) => (url.includes('/coins?') ? res(429, '', { 'retry-after': '1' }) : res(200, '{"mint":"M"}')));
+  const refused = await getJson('pumpfun', '/coins?offset=0&limit=100&creator=Cre111');
+  assert.equal(refused.ok, false, 'the creator list was refused');
+  assert.equal(cooldownRemainingMs('pumpfun'), 0, 'the HOST is not parked');
+  assert.ok(routeCooldownMs('pumpfun', '/coins?offset=0&limit=50') >= 19_000, 'the list route is, at the usual 20 s');
+  const record = await getJson('pumpfun', '/coins-v3/5vPUcAb7HVr7dKB5FXYuKYufgLL1DtzgAcdYzME3pump');
+  assert.equal(record.ok, true, 'coin records still load while the list waits');
+  const before = hits.length;
+  const list = await getJson('pumpfun', '/coins?offset=0&limit=50&sort=created_timestamp');
+  assert.equal(list.ok, false, 'another list call fails fast…');
+  assert.equal(hits.length, before, '…without a request');
+  assert.match(list.message, /rate limited, retrying in/, 'and says when');
+  assert.ok(routeCooldownMs('pumpfun', '/coins?creator=B222') > 0, "a coin record's success does not clear the list's park");
+  // Not every path under /coins is the list: only the measured route is scoped.
+  assert.equal(routeCooldownMs('pumpfun', '/coins/king-of-the-hill'), 0, 'a sibling route is not assumed to share it');
+  console.log("ok  a 429 on pump's /coins list parks that route, not the host");
+}
+
+// expireCache: out of date, not gone. The next memo reloads; a refused
+// reload still gets the old value back, inside its grace.
+{
+  clearCache();
+  putCache('ch:Cre111', { launches: 3 }, 60_000);
+  assert.deepEqual(cached('ch:Cre111'), { launches: 3 }, 'fresh before');
+  expireCache('ch:Cre111');
+  assert.equal(cached('ch:Cre111'), null, 'expired: not served as current');
+  stubFetch(() => {
+    throw new Error('fetch failed');
+  });
+  const served = await memo('ch:Cre111', 60_000, async () => {
+    const r = await getJson('dexscreener', '/creator-refused');
+    return r.ok ? r.data : null;
+  });
+  assert.deepEqual(served, { launches: 3 }, 'a refused reload falls back to the expired record');
+  console.log('ok  an expired creator record is a fallback, not a loss');
 }
 
 console.log('\nhttp layer: all rate-limit rules hold');

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AioRefuel, AioTopUpNote, buyThroughPlan, planMoves, useAioBuyPlan } from './AioTopUp';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { AppSettings } from '@shared/types';
 import { EVM_CHAIN_META, EVM_FEE_BPS, VENUE_LABEL, type EvmChainKind, type EvmQuote, type EvmTokenState } from '@shared/evm';
@@ -117,6 +118,9 @@ export function EvmTradePanel({
     };
   }, [chain, side, amount, sellPct, address, walletExists, state?.venue]);
 
+  // All-in-One "buy anywhere": a live buy this chain cannot cover is topped
+  // up from another chain first — planned while the panel is open.
+  const { plan: aioPlan, pending: aioPending } = useAioBuyPlan(chain, amount, side === 'buy' && armed);
   const blocked = !loaded
     ? 'Reading the EVM wallet…'
     : evm?.wallet.failure
@@ -131,9 +135,13 @@ export function EvmTradePanel({
       // still shown below either way.
       state?.untradable && side === 'buy'
       ? state.untradable
-      : side === 'buy' && armed && balanceKnown && (balance ?? 0) <= 0
-        ? `This wallet has no ${sym} on ${meta.name} — send some in, or switch to Paper.`
-        : null;
+      : side === 'buy' && armed && aioPending
+        ? 'All-in-One: checking whether this buy needs a top-up…'
+        : side === 'buy' && armed && aioPlan?.kind === 'refuse'
+        ? aioPlan.message
+        : side === 'buy' && armed && balanceKnown && (balance ?? 0) <= 0 && !planMoves(aioPlan)
+          ? `This wallet has no ${sym} on ${meta.name} — send some in, or switch to Paper.`
+          : null;
 
   const setMode = async (wantLive: boolean): Promise<void> => {
     if (wantLive === armed) return;
@@ -171,7 +179,15 @@ export function EvmTradePanel({
     setBusy(true);
     try {
       const r = side === 'buy'
-        ? await window.krypt.evm.buy(chain, address, amount, !armed)
+        ? armed && aioPlan && planMoves(aioPlan)
+          ? await buyThroughPlan({
+              chain,
+              token: address,
+              amount,
+              plan: aioPlan,
+              confirm: (title, message) => modal.confirm({ title, message, confirmLabel: 'Top up and buy' }),
+            })
+          : await window.krypt.evm.buy(chain, address, amount, !armed)
         : await window.krypt.evm.sell(chain, address, sellPct, !armed);
       if (r.ok) toast.success(r.message);
       else if (isPendingResult(r)) toast.warn(PENDING_TOAST);
@@ -372,7 +388,7 @@ export function EvmTradePanel({
       >
         {busy && <Loader2 className="h-4 w-4 animate-spin" />}
         {side === 'buy'
-          ? armed ? `Buy ${amount} ${sym}` : `Simulate buy ${amount} ${sym}`
+          ? armed ? `${planMoves(aioPlan) ? 'Top up + buy' : 'Buy'} ${amount} ${sym}` : `Simulate buy ${amount} ${sym}`
           : armed ? `Sell ${sellPct}%` : `Simulate sell ${sellPct}%`}
       </button>
 
@@ -383,6 +399,8 @@ export function EvmTradePanel({
           {state.untradable} — selling is still allowed; the quote below is the honest answer.
         </p>
       )}
+      {side === 'buy' && armed && <AioTopUpNote plan={aioPlan} />}
+      {side === 'sell' && armed && <AioRefuel chain={chain} balance={balance} />}
       {blocked && (
         <p className="text-body text-arc-gold/80 leading-relaxed flex items-start gap-1.5">
           <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-px" />

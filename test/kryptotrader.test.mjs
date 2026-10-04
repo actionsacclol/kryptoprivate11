@@ -754,13 +754,17 @@ async function liveSession(h, opts = {}) {
   assert.ok(T.walletRemoveBlocked('W1'), 'T24: its wallet cannot be removed');
   assert.equal(T.walletRemoveBlocked('W9'), null);
   const ipc = src('../electron/ipc.ts');
-  const rm = ipc.slice(ipc.indexOf("ipcMain.handle('wallet:remove'"), ipc.indexOf("ipcMain.handle('wallet:remove'") + 1500);
+  // 2026-10-01: the body moved into removeSolanaWallet, which the All-in-One
+  // wallet's removal shares; the handler must still go through it.
+  const rm = ipc.slice(ipc.indexOf('const removeSolanaWallet = '), ipc.indexOf('const removeSolanaWallet = ') + 1500);
+  assert.ok(ipc.slice(ipc.indexOf("ipcMain.handle('wallet:remove'"), ipc.indexOf("ipcMain.handle('wallet:remove'") + 200).includes('removeSolanaWallet('), 'wallet:remove goes through the guarded helper');
   assert.ok(rm.indexOf('kryptoTrader.walletRemoveBlocked(') > 0 && rm.indexOf('kryptoTrader.walletRemoveBlocked(') < rm.indexOf("disarm('no_wallet')"), 'the guard runs BEFORE the unconditional disarm (critic #16)');
   const kill = ipc.slice(ipc.indexOf("ipcMain.handle('engine:kill'"), ipc.indexOf("ipcMain.handle('engine:kill'") + 400);
   assert.ok(kill.includes('kryptoTrader.pauseAll('), 'the engine kill switch pauses sessions');
   const ak = ipc.slice(ipc.indexOf("ipcMain.handle('automation:killSwitch'"), ipc.indexOf("ipcMain.handle('automation:killSwitch'") + 400);
   assert.ok(ak.includes('kryptoTrader.pauseAll('), 'and so does the scripts’ kill switch (critic #9)');
-  const sel = ipc.slice(ipc.indexOf("ipcMain.handle('wallet:select'"), ipc.indexOf("ipcMain.handle('wallet:select'") + 1200);
+  const sel = ipc.slice(ipc.indexOf('const switchSolanaWallet = '), ipc.indexOf('const switchSolanaWallet = ') + 1200);
+  assert.ok(ipc.slice(ipc.indexOf("ipcMain.handle('wallet:select'"), ipc.indexOf("ipcMain.handle('wallet:select'") + 200).includes('switchSolanaWallet('), 'wallet:select goes through the shared switch');
   assert.ok(sel.includes('kryptoTrader.onWalletSwitched('), 'a wallet switch re-checks claims');
   ok('T10/T24: both kill switches pause; a wallet switch re-checks claims; wallet:remove guarded before disarm');
 }
@@ -1504,7 +1508,7 @@ const byId = (id) => T.list().find((x) => x.id === id);
   const eng = src('../electron/engine/engine.ts');
   const hb = eng.slice(eng.indexOf('async hostBuy('), eng.indexOf('async hostSell('));
   assert.ok(hb.includes('traderClaimFor({ walletId: null, chain }, mint)'), 'hostBuy’s EVM branch (scripts bot.buy, MCP buy_token) consults the claim');
-  assert.ok(hb.indexOf('traderClaimFor({ walletId: null, chain }, mint)') < hb.indexOf('this.evmCopy.buy(chain, mint, sol)'), 'before the EVM buy goes out');
+  assert.ok(hb.indexOf('traderClaimFor({ walletId: null, chain }, mint)') < hb.indexOf('this.evmCopy.buy(chain, mint, sol,'), 'before the EVM buy goes out');
   assert.ok(src('../electron/engine/automation.ts').includes('traderClaimFor({ walletId: null, address: wallet.address ?? null, chain }, mint)'), 'script buyGate on EVM');
   assert.ok(src('../electron/engine/copyTrade.ts').includes('traderClaimFor({ walletId: c.walletId ?? null, chain: chainOf(c) }, t.mint)'), 'EVM copy buys');
   const ipc = src('../electron/ipc.ts');

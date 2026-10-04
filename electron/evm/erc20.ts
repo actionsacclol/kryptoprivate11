@@ -80,6 +80,17 @@ export async function holdingsOf(chain: EvmChainKind, owner: Address, tokens: Ad
       { address: t, abi: ERC20_ABI, functionName: 'decimals' as const },
     ]),
   });
+  // A REJECTED aggregate call (a 429 past the gate's retries, a timeout, an
+  // HTTP error) comes back as status 'failure' on EVERY call of its chunk,
+  // all carrying the same error object; a token that merely reverts gets an
+  // error of its own. Reading the former as "holds nothing" pruned live
+  // script bags and dropped tokens from the All-in-One total (v6 audit
+  // 2026-10-03) — unknown is thrown, never returned as empty.
+  const failures = new Map<unknown, number>();
+  for (const r of res) if (r.status === 'failure') failures.set(r.error, (failures.get(r.error) ?? 0) + 1);
+  for (const [err, n] of failures) {
+    if (n > 1) throw new Error(`token balances not read — ${(err as Error)?.message?.split('\n')[0] ?? 'the endpoint refused the batch'}`);
+  }
   tokens.forEach((t, i) => {
     const bal = res[i * 4];
     if (bal.status !== 'success') return;

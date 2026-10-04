@@ -5,6 +5,7 @@
 // destination smuggled into the same tx, and anything over the cap.
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { checkOutflowForTest as check } from './.signpolicy.mjs';
 import { maxWithdrawableLamports, RENT_EXEMPT_MIN_LAMPORTS, WITHDRAW_FEE_HEADROOM_LAMPORTS } from './.sweep.mjs';
@@ -97,6 +98,22 @@ const transfer = (to, lamports) => SystemProgram.transfer({ fromPubkey: me.publi
   const r = check(tx([transfer(OTHER_HOME, 500_000)]), MY_PUB, HOME, SWEEP(500_000));
   assert.equal(r.ok, false);
   console.log("ok  another wallet's home address is REFUSED for this wallet");
+}
+
+// ── an unsaved withdrawal-address edit never looks like the destination ──
+{
+  // User report 2026-10-03: the field showed the new address, nothing was
+  // saved, and 0.1 SOL went to the old one. Withdraw is refused while the
+  // field differs from the saved address, and the native confirmation is
+  // parented to the window so Windows cannot open it behind the app.
+  const page = fs.readFileSync(new URL('../src/pages/Wallet.tsx', import.meta.url), 'utf8');
+  assert.ok(page.includes("const homeUnsaved = !!info?.exists && homeInput.trim() !== (info.homeAddress ?? '')"));
+  assert.ok(page.includes('unsavedHome={homeUnsaved}'));
+  assert.ok(/const reason = unsavedHome\s*\n\s*\? /.test(page.replace(/\r\n/g, '\n')), 'the unsaved edit is the FIRST refusal reason');
+  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8');
+  const setHome = ipc.slice(ipc.indexOf("ipcMain.handle('wallet:setHome'"), ipc.indexOf("ipcMain.handle('wallet:withdraw'"));
+  assert.ok(setHome.includes('confirmNative(e.sender,') && !setHome.includes('dialog.showMessageBox('), 'setHome asks on the window that sent it');
+  console.log('ok  an unsaved withdrawal-address edit blocks Withdraw; the confirmation is parented');
 }
 
 console.log('withdraw: all passed');

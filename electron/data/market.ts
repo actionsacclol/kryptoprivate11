@@ -55,6 +55,7 @@ import {
 import {
   cached,
   cooldownRemainingMs,
+  routeCooldownMs,
   parkIsQuota,
   memo,
   providerHost,
@@ -68,6 +69,7 @@ import * as jup from './providers/jupiter';
 import * as ds from './providers/dexscreener';
 import * as pf from './providers/pumpfun';
 import * as gt from './providers/geckoterminal';
+import * as ps from './providers/pumpswap';
 import * as rc from './providers/rugcheck';
 import { NO_EDGE_NOTE, type RugReport, type VolatilityNote } from '@shared/rugrules';
 import type { OddsReport } from '@shared/odds';
@@ -314,13 +316,19 @@ export function providerStatuses(): ProviderStatus[] {
  * message so the renderer can say "rate limited" instead of showing an
  * empty list under a fresh "2s ago" stamp.
  */
-export function parkNote(only?: ProviderId[]): string {
-  const parked = parkedProviders().filter((id) => !only || only.includes(id));
+export function parkNote(only?: ProviderId[], routes?: Partial<Record<ProviderId, string>>): string {
+  // `routes` names the route a caller actually depends on, for a provider
+  // whose routes park separately (pump.fun's /coins list, http.parkScope).
+  const wait = (id: ProviderId): number => {
+    const route = routes?.[id];
+    return route ? routeCooldownMs(id, route) : cooldownRemainingMs(id);
+  };
+  const parked = (Object.keys(PROVIDER_META) as ProviderId[]).filter((id) => (!only || only.includes(id)) && wait(id) > 0);
   if (!parked.length) return '';
   const parts = parked.map((id) =>
     parkIsQuota(id)
       ? `${PROVIDER_META[id].label} (no allowance left)`
-      : `${PROVIDER_META[id].label} (retrying in ${humanWait(cooldownRemainingMs(id))})`,
+      : `${PROVIDER_META[id].label} (retrying in ${humanWait(wait(id))})`,
   );
   return `Rate limited by ${parts.join(', ')}.`;
 }
@@ -350,7 +358,8 @@ const COLUMN_ROW_SOURCES: Record<DiscoverColumn, ProviderId[]> = {
 const askedByColumn = new Map<DiscoverColumn, ProviderId[]>();
 
 export function discoverParkNote(column: DiscoverColumn): string {
-  return parkNote(askedByColumn.get(column) ?? COLUMN_ROW_SOURCES[column]);
+  // A column's pump rows come from pump's /coins list, which parks on its own.
+  return parkNote(askedByColumn.get(column) ?? COLUMN_ROW_SOURCES[column], { pumpfun: '/coins' });
 }
 
 // ── Merge helpers ─────────────────────────────────────────────────────
@@ -895,7 +904,7 @@ export async function discover(
   // banner for nothing, and the feed fills the column within a minute or
   // two anyway (measured 2026-09-20: pump.fun asked three times at start-up,
   // three 429s, banner on all three columns until the books filled).
-  const bootstrapWanted = (liveCount: number): boolean => !live || (liveCount < Math.ceil(n / 2) && cooldownRemainingMs('pumpfun') === 0);
+  const bootstrapWanted = (liveCount: number): boolean => !live || (liveCount < Math.ceil(n / 2) && routeCooldownMs('pumpfun', '/coins') === 0);
 
   let rows: TokenSummary[] = [];
 
@@ -1859,12 +1868,13 @@ export function clearChartCache(): void {
 }
 
 function chartProvidersParked(): boolean {
-  return cooldownRemainingMs('geckoterminal') > 0 || cooldownRemainingMs('birdeye') > 0;
+  return cooldownRemainingMs('geckoterminal') > 0 || cooldownRemainingMs('birdeye') > 0 || cooldownRemainingMs('pumpswap') > 0;
 }
 
-const PROVIDER_LABEL: Record<'birdeye' | 'geckoterminal', string> = {
+const PROVIDER_LABEL: Record<'birdeye' | 'geckoterminal' | 'pumpswap', string> = {
   birdeye: 'Birdeye',
   geckoterminal: 'GeckoTerminal',
+  pumpswap: 'pump.fun',
 };
 
 /**
@@ -1936,7 +1946,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
   // 1. Provider history at the REQUESTED interval. Precedence unchanged:
   //    Birdeye when the user brought a key, else GeckoTerminal.
   let history: Candle[] | null = null;
-  let historySource: 'birdeye' | 'geckoterminal' | null = null;
+  let historySource: 'birdeye' | 'geckoterminal' | 'pumpswap' | null = null;
   if (usable('birdeye') && be.supports(interval)) {
     const rows = await be.ohlcv(c.data().birdeyeApiKey.trim(), mint, interval, limit, { priority: true });
     if (rows?.length) {
@@ -1953,6 +1963,19 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
         history = rows;
         historySource = 'geckoterminal';
       }
+    }
+  }
+  // pump.fun's own candles (swap-api): the only keyless history a coin on
+  // its curve has, and the fallback for a graduated pump coin when
+  // GeckoTerminal is parked or silent — real 1s/5s/15s too, so a pump coin
+  // no longer degrades to 1m below. Measured 2026-10-01: a two-minute-old
+  // coin already had its bars. Before this, a curve coin with no Birdeye key
+  // and no open page (a script's buy, an AI reading the chart) had none.
+  if (!history && s.launchpad === 'pumpfun' && usable('pumpswap') && ps.candlesSupported(interval)) {
+    const rows = await ps.candles(mint, interval, limit);
+    if (rows?.length) {
+      history = rows;
+      historySource = 'pumpswap';
     }
   }
 
@@ -2018,9 +2041,17 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
   // Any launchpad's curve, not just pump's: nothing indexes a pre-graduation
   // token on any of them.
   const onCurveNow = s.bondingCurvePct !== null && s.bondingCurvePct < 100;
+  // Except pump.fun's own curve (2026-10-01): its swap API does serve curve
+  // candles, so when we are here that route did not answer — say so.
+  const pumpCurveNote = (): string => {
+    const wait = cooldownRemainingMs('pumpswap');
+    return wait > 0 ? `pump.fun's chart route is rate limited — retrying in ${humanWait(wait)}.` : "pump.fun's chart route did not answer.";
+  };
   const staleNote = (ageMs: number): string =>
     onCurveNow
-      ? `Not updating — this token is still on its bonding curve, so no chart provider indexes it. Showing the last loaded chart (${Math.max(1, Math.round(ageMs / 1000))}s old). Start scanning and keep this page open and Krypt draws it live from its own feed.`
+      ? s.launchpad === 'pumpfun'
+        ? `Not updating — ${pumpCurveNote()} Showing the last loaded chart (${Math.max(1, Math.round(ageMs / 1000))}s old). Start scanning and keep this page open and Krypt draws it live from its own feed.`
+        : `Not updating — this token is still on its bonding curve, so no chart provider indexes it. Showing the last loaded chart (${Math.max(1, Math.round(ageMs / 1000))}s old). Start scanning and keep this page open and Krypt draws it live from its own feed.`
       : tape.staleChartNote(ageMs, parked);
 
   if (tapeSol.length) {
@@ -2086,7 +2117,9 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
   const onCurve = s.bondingCurvePct !== null && s.bondingCurvePct < 100;
   return {
     ...base,
-    note: onCurve
+    note: onCurve && s.launchpad === 'pumpfun'
+      ? `No candles yet — ${pumpCurveNote()} Start the engine (Start scanning) and keep this page open — Krypt will build the chart from its own live feed.`
+      : onCurve
       ? `This token is still on its bonding curve at ${s.bondingCurvePct?.toFixed(1)}%, so no chart provider indexes it yet. Start the engine (Start scanning) and keep this page open — Krypt will build the chart from its own live feed.`
       : subMinute
         ? `No ${interval} data. Sub-minute candles come from the live feed (start the engine and open this token) or from Birdeye with an API key.`
@@ -2108,7 +2141,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
  * user to do something, the second only needs time.
  */
 function chartParkNote(): string {
-  const down = (['geckoterminal', 'birdeye'] as const).filter((id) => cooldownRemainingMs(id) > 0);
+  const down = (['geckoterminal', 'birdeye', 'pumpswap'] as const).filter((id) => cooldownRemainingMs(id) > 0);
   if (!down.length) return 'No candle source returned data for this token.';
   const spent = down.filter((id) => parkIsQuota(id));
   const slow = down.filter((id) => !parkIsQuota(id));

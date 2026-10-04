@@ -280,6 +280,28 @@ export function importSecret(input: string, label = '', forChain?: EvmChainKind,
   };
 }
 
+/**
+ * The All-in-One wallet's EVM key: add it with NO home chain (it signs on
+ * BNB and Robinhood alike — the same address on both), or find it when it is
+ * already held. Never changes who signs; the caller's to scrub.
+ */
+export function ensureFromPrivateKey(key: Uint8Array, label: string): { ok: boolean; message: string; id?: string; address?: string; existed?: boolean } {
+  const blocked = blockedByFailure();
+  if (blocked) return blocked;
+  if (!encAvailable()) return { ok: false, message: 'OS secure storage is unavailable — refusing to store a key unencrypted.' };
+  if (key.length !== 32) return { ok: false, message: 'internal: an EVM private key is 32 bytes' };
+  const pk = `0x${Buffer.from(key).toString('hex')}` as Hex;
+  const account = privateKeyToAccount(pk);
+  const f = loadFile();
+  const held = f.wallets.find((w) => w.address.toLowerCase() === account.address.toLowerCase());
+  if (held) return { ok: true, message: `${held.label} is already in your wallet list`, id: held.id, address: held.address, existed: true };
+  const record = { id: newId(), label: cleanLabel(label, f.wallets.length + 1), address: account.address, secretEnc: encryptSecret(pk), createdAt: Date.now() };
+  const res = addWallet(f, record);
+  if (!res.ok) return { ok: false, message: res.message };
+  persist(res.file);
+  return { ok: true, message: 'Wallet added', id: record.id, address: account.address, existed: false };
+}
+
 /** Say which chain a wallet belongs to. See `assignWallet`. */
 export function assign(chain: EvmChainKind, id: string): { ok: boolean; message: string } {
   const blocked = blockedByFailure();

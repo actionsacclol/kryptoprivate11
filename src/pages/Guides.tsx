@@ -18,12 +18,12 @@
 // from the code. test/guides.test.mjs fails if a card has no advanced twin.
 
 import { useEffect, useRef, useState } from 'react';
-import { AtSign, BookOpen, ExternalLink, Flame, Bot, Code2, Coins, Compass, Cpu, KeyRound, LayoutGrid, Megaphone, Percent, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
+import { AtSign, BookOpen, ExternalLink, Flame, Bot, Code2, Coins, Compass, Cpu, KeyRound, Layers, LayoutGrid, Megaphone, Percent, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
 import { WORKSPACES, type WorkspaceId } from '../workspaces';
 import { Card, Page } from '../components/common';
 import { GuidePanel } from '../components/GuidePanel';
 import { cls } from '../utils/format';
-import { API_KEY_SITES, API_KEYS_VIDEO_URL, GUIDE_VIDEOS, MEMECOIN_GUIDE_URL, PUMP_QUICKSTART_URL } from '../guideVideos';
+import { AIO_WALLET_VIDEO_URL, API_KEY_SITES, API_KEYS_VIDEO_URL, GUIDE_VIDEOS, MEMECOIN_GUIDE_URL, PUMP_QUICKSTART_URL } from '../guideVideos';
 import { ADVANCED_GUIDES, type AdvancedGuide } from './guidesAdvanced';
 
 export interface SectionGuide {
@@ -212,6 +212,30 @@ export const PUMP_GUIDE: SectionGuide = {
   video: { url: PUMP_QUICKSTART_URL, label: 'Watch the pump.fun quickstart' },
 };
 
+/** The All-in-One wallet (6.0.0, 2026-10-03), with krypt cc's video. Every
+ *  label here is the one on the page; the limits are the code's. */
+export const AIO_WALLET_GUIDE: SectionGuide = {
+  what: 'One wallet for Solana, BNB Chain and Robinhood, backed up by one 12-word recovery phrase and shown in dollars. Buy on any chain: if that chain is short, the buy first moves money over from your other chains, then buys.',
+  steps: [
+    'Open Wallet Utilities, then All-in-One Wallet. Press Create All-in-One wallet, or Use my recovery phrase if you already have one. The same phrase opens it in Phantom and MetaMask.',
+    'Write the 12 words down on paper and keep them safe. Anyone who has them can take everything in the wallet.',
+    'Switch the top bar to Paper, then press Use it on every chain. Now every buy and sell, on every chain, uses this wallet.',
+    'Fund it. Under Receive there are two addresses: send SOL to the Solana one, and BNB or Robinhood ETH to the other — it is the same address on both chains. USDC sent to the Solana address is turned into SOL for you.',
+    'In the top bar, pick ALL and switch it to Live. That turns on every chain at once. The dollar total at the top right is everything the wallet holds.',
+    'Open any coin on any chain, type an amount and press Buy. If that chain is short, the button says Top up + buy and shows what the move costs. It moves the money, waits for it to land, then buys — usually in under 10 seconds.',
+    'Want instant buys, and quick-buy buttons and hotkeys that work on every chain? Under Speed, turn on Keep money ready on every chain (float). It keeps about $25 on each chain.',
+    'To cash out, press Compress: it sells every token and moves everything into one coin — SOL, ETH or BNB — ready to send. Send sends to any address.',
+  ],
+  careful: [
+    'Only the Buy button on a coin’s page, and scripts, top up by themselves. Quick-buy buttons, hotkeys, copy trading and Krypto Trader use only what is already on that chain — the float covers them.',
+    'Only SOL, BNB and Robinhood ETH (and USDC on Solana) can pay for a top-up. USDT, USDG, and anything on Ethereum, Base or Arbitrum count in the total but cannot.',
+    'A top-up moves at least $25 when it can; what is left stays on that chain for your next buy. Moving money on its own pays Krypt’s 0.5%; money moved for a buy does not — the buy pays its usual 0.5%.',
+    'Compress leaves $KRYPTO, coins a running bot holds, and tiny leftovers alone. It does sell coins your copy trading bought.',
+    'If you lose the 12 words, nobody can get the wallet back. Not even us.',
+  ],
+  video: { url: AIO_WALLET_VIDEO_URL, label: 'Watch the All-in-One wallet guide' },
+};
+
 /** Standalone deep-dive guides for the higher-stakes features, added
  *  2026-09-23. Each is its own card, like the AI and export guides. */
 export const COPY_TRADING_GUIDE: SectionGuide = {
@@ -342,10 +366,11 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
   wallets: {
     what: 'Your wallets, and the tools that move money between them.',
     steps: [
+      'All-in-One Wallet is one wallet for every chain, backed up by one phrase. It has its own guide below.',
       'Wallet is your Solana wallet. Robinhood and BNB each have their own page.',
       'On the Robinhood or BNB page, press Check my rewards to see what a reward pool has paid you.',
       'Swap changes one coin into another coin.',
-      'Bridge moves coins from one chain to another chain. It takes a few minutes.',
+      'Bridge moves coins from one chain to another chain, usually in seconds.',
       'Creator makes extra wallets. Funder sends money to them and collects it back.',
     ],
     careful: [
@@ -544,6 +569,7 @@ function VideoRow() {
 
 /** The standalone cards after the per-workspace ones, in page order. */
 const EXTRA_GUIDES: { id: string; title: string; guide: SectionGuide; icon: LucideIcon }[] = [
+  { id: 'aio-wallet', title: 'All-in-One wallet', guide: AIO_WALLET_GUIDE, icon: Layers },
   { id: 'copy-trading', title: 'Copy trading', guide: COPY_TRADING_GUIDE, icon: Users },
   { id: 'scripts-deep', title: 'Scripts', guide: SCRIPTS_GUIDE, icon: Code2 },
   { id: 'pumpfun', title: 'pump.fun accounts', guide: PUMP_GUIDE, icon: AtSign },

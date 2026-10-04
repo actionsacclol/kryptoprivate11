@@ -20,6 +20,7 @@
 
 import type { ClosedTrade, Position, TradeHistoryRow } from './portfolio';
 import type { ChainKind } from './evm';
+import { nativeSymbolOf } from './evm';
 
 /** Flat cost modelled on every paper sell, percent of gross proceeds. */
 export const PAPER_ROUND_TRIP_COST_PCT = 1;
@@ -259,8 +260,8 @@ export function sellPaper(
   }
   const what = closedAll ? 'closed' : `sold ${Math.round(share * 100)}% of`;
   const message = pos.decimalsKnown
-    ? `Paper ${what} ${pos.symbol || mint.slice(0, 6)} — ${proceeds.toFixed(4)} SOL back, ${realized >= 0 ? '+' : ''}${realized.toFixed(4)} SOL (${PAPER_FILL_MODEL})`
-    : `Paper ${what} ${pos.symbol || mint.slice(0, 6)} — token units unknown, booked as a full loss of ${costOut.toFixed(4)} SOL`;
+    ? `Paper ${what} ${pos.symbol || mint.slice(0, 6)} — ${proceeds.toFixed(4)} ${nativeSymbolOf(chain)} back, ${realized >= 0 ? '+' : ''}${realized.toFixed(4)} ${nativeSymbolOf(chain)} (${PAPER_FILL_MODEL})`
+    : `Paper ${what} ${pos.symbol || mint.slice(0, 6)} — token units unknown, booked as a full loss of ${costOut.toFixed(4)} ${nativeSymbolOf(chain)}`;
   return { ok: true, message, book: { ...book, open, closed }, tokensSold, proceedsSol: proceeds, realizedSol: realized, closed: closedAll };
 }
 

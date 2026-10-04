@@ -18,6 +18,7 @@ export const vi: Catalogue = {
   'nav.solWallet': 'Ví Sol',
   'nav.robinhoodWallet': 'Ví Robinhood',
   'nav.bnbWallet': 'Ví BNB',
+  'nav.aioWallet': 'Ví Tất cả trong một',
   'nav.swap': 'Swap',
   'nav.bridge': 'Bridge',
   'nav.observatory': 'Đài quan sát',

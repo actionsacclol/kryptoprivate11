@@ -18,6 +18,7 @@ export const tr: Catalogue = {
   'nav.solWallet': 'Sol cüzdanı',
   'nav.robinhoodWallet': 'Robinhood cüzdanı',
   'nav.bnbWallet': 'BNB cüzdanı',
+  'nav.aioWallet': 'Hepsi Bir Arada cüzdan',
   'nav.swap': 'Swap',
   'nav.bridge': 'Bridge',
   'nav.observatory': 'Gözlemevi',

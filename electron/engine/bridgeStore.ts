@@ -95,6 +95,13 @@ export function init(userDataDir: string): void {
       status: terminal(r.status) ? (r.status as BridgeStatus) : 'unknown',
       deliveredRaw: typeof r.deliveredRaw === 'string' ? r.deliveredRaw : null,
       note: typeof r.note === 'string' ? r.note : null,
+      // Dropped by this parser until 2026-10-01: a restored Solana transfer
+      // lost its blockhash, so 'never landed' could no longer be proven and
+      // it was polled as unknown forever. And the rail decides which API is
+      // asked about it — a Relay transfer asked of LI.FI is never found.
+      ...(typeof r.blockhash === 'string' ? { blockhash: r.blockhash } : {}),
+      ...(r.rail === 'relay' || r.rail === 'lifi' ? { rail: r.rail } : {}),
+      ...(typeof r.requestId === 'string' ? { requestId: r.requestId } : {}),
     });
   }
   const live = cache.filter((t) => isInFlight(t.status)).length;

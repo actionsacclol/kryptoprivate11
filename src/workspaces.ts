@@ -104,9 +104,9 @@ export const WORKSPACES: WorkspaceSpec[] = [
     id: 'wallets',
     title: 'Wallet Utilities',
     blurb: 'Your keys, what reward pools paid them, and the wallet list you fund and copy from.',
-    routes: ['wallet', 'walletrobinhood', 'walletbnb', 'swap', 'bridge', 'creator', 'funder'],
+    routes: ['walletaio', 'wallet', 'walletrobinhood', 'walletbnb', 'swap', 'bridge', 'creator', 'funder'],
     groups: [
-      { label: 'Your wallets', routes: ['wallet', 'walletrobinhood', 'walletbnb'] },
+      { label: 'Your wallets', routes: ['walletaio', 'wallet', 'walletrobinhood', 'walletbnb'] },
       // Its own heading. It is neither a wallet nor part of the Lab's
       // many-wallet machinery — it is the one thing on this workspace that
       // acts on what a single wallet is holding right now.

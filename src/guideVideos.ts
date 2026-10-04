@@ -19,6 +19,10 @@ export const PUMP_QUICKSTART_URL = 'https://www.youtube.com/watch?v=ylEtm666evc'
  *  Jupiter (2026-09-29). On the onboarding keys step and the API setup guide. */
 export const API_KEYS_VIDEO_URL = 'https://www.youtube.com/watch?v=C-q1Vl1YvBY';
 
+/** krypt cc's All-in-One wallet guide (2026-10-03). On the Guides page and
+ *  at the top of the All-in-One Wallet page. */
+export const AIO_WALLET_VIDEO_URL = 'https://www.youtube.com/watch?v=MJuEgklC-Lo';
+
 /** Where each key is made. The same pages the onboarding "Get a key" links open. */
 export const API_KEY_SITES = [
   { name: 'Helius', url: 'https://dashboard.helius.dev' },
@@ -29,6 +33,7 @@ export const API_KEY_SITES = [
 /** Every video, in the order the Guides page shows them. */
 export const GUIDE_VIDEOS: readonly { url: string; title: string; blurb: string }[] = [
   { url: APP_TUTORIAL_URL, title: 'App tutorial', blurb: 'Getting around the app.' },
+  { url: AIO_WALLET_VIDEO_URL, title: 'All-in-One wallet', blurb: 'One wallet for every chain: buy anywhere, move, compress.' },
   { url: MEMECOIN_GUIDE_URL, title: 'Memecoin trading', blurb: 'How memecoins work, and how not to lose it all.' },
   { url: API_KEYS_VIDEO_URL, title: 'API setup', blurb: 'The three free keys, step by step.' },
   { url: PUMP_QUICKSTART_URL, title: 'pump.fun quickstart', blurb: 'Accounts, sign-in and callouts.' },

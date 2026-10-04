@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_SETTINGS, SETTINGS_REVISION, type AppSettings } from '@shared/types';
 import { isLocaleId } from '@shared/i18n';
+import { isAioSpeed } from '@shared/aioSpeed';
 import { isSkinId, isThemeId } from '@shared/theme';
 import { webhookUrlProblem } from '@shared/webhook';
 import { logger } from './logger';
@@ -248,6 +249,16 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
     bridge: {
       enabled: typeof loaded.bridge?.enabled === 'boolean' ? loaded.bridge.enabled : d.bridge.enabled,
     },
+    // The float fails CLOSED like the bridge: a half-written block never
+    // starts moving money in the background.
+    aio: {
+      speed: isAioSpeed(loaded.aio?.speed) ? loaded.aio.speed : d.aio.speed,
+      floatEnabled: loaded.aio?.floatEnabled === true,
+      floatUsd:
+        typeof loaded.aio?.floatUsd === 'number' && Number.isFinite(loaded.aio.floatUsd) && loaded.aio.floatUsd >= 5 && loaded.aio.floatUsd <= 1_000
+          ? loaded.aio.floatUsd
+          : d.aio.floatUsd,
+    },
     reduceEffects: loaded.reduceEffects ?? d.reduceEffects,
     hardwareAcceleration: loaded.hardwareAcceleration ?? d.hardwareAcceleration,
     recorderDir: loaded.recorderDir ?? d.recorderDir,
@@ -340,6 +351,8 @@ export function update(patch: Partial<AppSettings>): AppSettings {
       providers: { ...cur.data.providers, ...(patch.data?.providers ?? {}) },
     },
     alerts: { ...cur.alerts, ...(patch.alerts ?? {}) },
+    // Field by field: a patch naming only the speed must not reset the float.
+    aio: { ...cur.aio, ...(patch.aio ?? {}) },
     evm: {
       ...cur.evm,
       ...(patch.evm ?? {}),

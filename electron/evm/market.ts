@@ -213,8 +213,16 @@ async function buildSummary(chain: EvmChainKind, token: Address, opts: { holders
   const now = Date.now();
   const row = emptySummary(token);
   row.chain = chain;
-  row.name = v.name || info?.name || pairs[0]?.baseToken.name || '';
-  row.symbol = v.symbol || info?.symbol || pairs[0]?.baseToken.symbol || '';
+  // DexScreener's /token-pairs lists every pool the token is IN, quote side
+  // included, and a pair's price is always its BASE token's. Reading pairs[0]
+  // priced USDT as WBNB ($197 a coin, v6 audit 2026-10-03): only pairs where
+  // this token is the base are its price; a token seen only as the quote
+  // side is priced from that pair's rate.
+  const tl = token.toLowerCase();
+  const own = pairs.filter((p) => p.baseToken.address.toLowerCase() === tl);
+  const quoteSide = own.length ? null : (pairs.find((p) => p.quoteToken.address.toLowerCase() === tl && p.priceUsd !== null && p.priceNative !== null && p.priceNative > 0) ?? null);
+  row.name = v.name || info?.name || own[0]?.baseToken.name || '';
+  row.symbol = v.symbol || info?.symbol || own[0]?.baseToken.symbol || quoteSide?.quoteToken.symbol || '';
   row.decimals = v.decimals;
   row.launchpad = v.record ? 'pons' : v.fourMeme ? 'fourmeme' : chain === 'robinhood' ? 'robinhood' : 'bnb';
   row.creator = v.record?.deployer ?? null;
@@ -224,8 +232,8 @@ async function buildSummary(chain: EvmChainKind, token: Address, opts: { holders
 
   // DexScreener lists four.meme curves as pairs too; a curve token's own
   // state stays the authority for price, the pair gives socials and stats.
-  const best = pairs[0] ?? null;
-  const created = pairs.map((p) => p.pairCreatedAt).filter((n): n is number => n !== null);
+  const best = own[0] ?? null;
+  const created = own.map((p) => p.pairCreatedAt).filter((n): n is number => n !== null);
   row.createdAt = created.length ? Math.min(...created) : null;
   if (row.createdAt === null && (v.record || v.fourMeme)) {
     const seen = launchLookups.get(chain)?.(token) ?? null;
@@ -257,6 +265,14 @@ async function buildSummary(chain: EvmChainKind, token: Address, opts: { holders
     row.stats = statsFromPair(best);
     row.sources.price = 'dexscreener';
     row.sources.liquidity = 'dexscreener';
+  } else if (quoteSide) {
+    // 1 base = priceNative of this token, and 1 base = priceUsd dollars.
+    const px = (quoteSide.priceUsd as number) / (quoteSide.priceNative as number);
+    if (Number.isFinite(px) && px > 0) {
+      row.priceUsd = px;
+      row.priceSol = usd ? px / usd : null;
+      row.sources.price = 'dexscreener';
+    }
   } else if (v.venue === 'pons-v4' && v.key) {
     // The probe is denominated in the pool's OTHER currency. Reading it as
     // ETH is only true for a native-paired pool; a USDG or tokenised-stock

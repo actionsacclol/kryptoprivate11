@@ -304,6 +304,10 @@ ok('every outbound third-party host is disclosed in the privacy policy', () => {
     'bsc-rpc.publicnode.com',
     'bsc-dataseed.bnbchain.org',
     'rpc-bnb.blockmachine.io',
+    // All-in-One wallet balance reads on other EVM chains (electron/evm/otherChains.ts)
+    'ethereum-rpc.publicnode.com',
+    'base-rpc.publicnode.com',
+    'arbitrum-one-rpc.publicnode.com',
     // launcher upload, update check, images
     'pump.fun',
     'krypt.cc',

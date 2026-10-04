@@ -63,7 +63,14 @@ const CHANNELS = {
   'swap:quote': ['raw'],
   'swap:execute': ['raw', 'simulateOnly'],
   'bridge:quote': ['raw'],
-  'bridge:send': ['raw', 'simulateOnly'],
+  // quoteId since 2026-10-02: a send names the quote the page showed.
+  'bridge:send': ['raw', 'simulateOnly', 'quoteId'],
+  // The All-in-One wallet's move between chains (2026-10-01).
+  'aio:moveQuote': ['raw'],
+  'aio:moveSend': ['raw', 'simulateOnly', 'quoteId'],
+  // Buy anywhere (2026-10-02): one object each, quote id inside.
+  'aio:buyPlan': ['raw'],
+  'aio:buy': ['raw'],
   'launch:upload': ['filePath', 'fields'],
   'launch:preview': ['raw'],
   'launch:send': ['raw'],

@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react';
+import { AioRefuel, AioTopUpNote, buyThroughPlan, planMoves, useAioBuyPlan } from './AioTopUp';
+import { useModal } from '../../state/ModalProvider';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import type { TokenSummary } from '@shared/market';
 import type { AppSettings, LiveState, WalletInfo } from '@shared/types';
@@ -93,12 +95,21 @@ export function TradePanel({
   //   • Sell — never blocked by mode beyond needing a wallet; a paper sell
   //     simulates, a live sell is real. Refusing an exit is a trap the order
   //     engine avoids too ("breakers stop buys, never sells").
+  // All-in-One "buy anywhere": a live buy this wallet cannot cover is
+  // topped up from another chain first (shared/aioConvert.ts). Planned while
+  // the panel is open, so the click pays only for the move and the buy.
+  const modal = useModal();
+  const { plan: aioPlan, pending: aioPending } = useAioBuyPlan('solana', amountSol, side === 'buy' && isLive);
   const blocked = !wallet?.exists
     ? 'No trading wallet. Create one on the Wallet page.'
     : side === 'buy' && isLive
-      ? balanceKnown && !funded
-        ? 'Trading wallet has no SOL — switch to Paper or fund it.'
-        : null
+      ? aioPending
+        ? 'All-in-One: checking whether this buy needs a top-up…'
+        : aioPlan?.kind === 'refuse'
+        ? aioPlan.message
+        : balanceKnown && !funded && !planMoves(aioPlan)
+          ? 'Trading wallet has no SOL — switch to Paper or fund it.'
+          : null
       : null;
 
   const doBuy = async (): Promise<void> => {
@@ -107,8 +118,18 @@ export function TradePanel({
       // Paper mode simulates (nothing broadcast); Live mode is a real buy.
       // Either way executeTrade simulates and loss-guards first — the safety is
       // internal, not a switch the user has to remember.
-      const r = await window.krypt.live.testTrade(token.mint, amountSol, !isLive);
+      const r =
+        isLive && aioPlan && planMoves(aioPlan)
+          ? await buyThroughPlan({
+              chain: 'solana',
+              token: token.mint,
+              amount: amountSol,
+              plan: aioPlan,
+              confirm: (title, message) => modal.confirm({ title, message, confirmLabel: 'Top up and buy' }),
+            })
+          : await window.krypt.live.testTrade(token.mint, amountSol, !isLive);
       if (r.ok) toast.success(r.message);
+      else if (r.data && 'stage' in r.data && r.data.stage === 'pending') toast.warn(r.message);
       else toast.error(r.message);
       onTraded();
     } catch (err) {
@@ -282,9 +303,13 @@ export function TradePanel({
         )}
       >
         {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-        {side === 'buy' ? `${isLive ? 'Buy' : 'Paper buy'} ${amountSol} SOL` : `${isLive ? 'Sell' : 'Paper sell'} ${sellPct}%`}
+        {side === 'buy'
+          ? `${isLive ? (planMoves(aioPlan) ? 'Top up + buy' : 'Buy') : 'Paper buy'} ${amountSol} SOL`
+          : `${isLive ? 'Sell' : 'Paper sell'} ${sellPct}%`}
       </button>
 
+      {side === 'buy' && isLive && <AioTopUpNote plan={aioPlan} />}
+      {side === 'sell' && isLive && <AioRefuel chain="solana" balance={wallet?.balanceSol ?? null} />}
       {blocked && (
         <p className="text-body text-arc-gold/80 leading-relaxed flex items-start gap-1.5">
           <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-px" />

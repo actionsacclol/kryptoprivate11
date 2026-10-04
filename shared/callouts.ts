@@ -329,6 +329,53 @@ export function parseCoinCallouts(raw: unknown, mint: string, chain: ChainKind):
   return out;
 }
 
+/**
+ * `GET /mint-positions/{mint}?withThesis=true` → that coin's callouts, keyless
+ * (found 2026-09-30 in the coin page's bundle). It lists pump accounts'
+ * positions in the coin, filtered server-side to those carrying a callout;
+ * `sortBy=CLOSED_PNL` serves callers who have fully exited. Each row is a
+ * position with its `callout` inside, so the caller's own numbers come along
+ * (`skinInTheGame` works). A row without a callout is skipped, never filled.
+ * No current market cap is served, so `multiple` is null, as on /callout/top.
+ */
+export function parseMintPositions(raw: unknown, mint: string, chain: ChainKind): Callout[] {
+  const rows = (raw as { positions?: unknown } | null)?.positions;
+  if (!Array.isArray(rows)) return [];
+  const out: Callout[] = [];
+  for (const row of rows) {
+    if (typeof row !== 'object' || row === null) continue;
+    const p = row as Record<string, unknown>;
+    const callout = (typeof p.callout === 'object' && p.callout !== null ? p.callout : null) as Record<string, unknown> | null;
+    if (!callout) continue;
+    const id = str(callout.calloutId, 64);
+    const when = at(callout.calloutTimestamp);
+    if (!id || when === null) continue;
+    out.push({
+      id,
+      mint: str(p.coinMint, 64) ?? mint,
+      chain,
+      rawChain: chain,
+      name: null,
+      symbol: null,
+      imageUrl: null,
+      at: when,
+      thesis: str(callout.thesis, 400),
+      calledAtMcapUsd: num(callout.calledOutAtMcap),
+      mcapUsdNow: null,
+      calloutPriceUsd: num(callout.calloutPrice),
+      multiple: null,
+      peakMultiple: sane(callout.maxMultiplier),
+      likes: num(callout.likes),
+      replies: num(callout.replyCount),
+      views: num(callout.viewCount),
+      updates: num(callout.updateCount),
+      coinCallouts: null,
+      caller: parseCaller(p),
+    });
+  }
+  return out;
+}
+
 /** Newest first. The feed arrives in pump's recommendation rank, which is not
  *  time order and is not a ranking this app has any way to check. */
 export function newestFirst(rows: Callout[]): Callout[] {

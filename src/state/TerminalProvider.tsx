@@ -114,6 +114,14 @@ interface TerminalState {
    *  columns and refetches — a Solana row must never sit under an EVM header. */
   chain: ChainKind;
   setChain: (c: ChainKind) => void;
+  /**
+   * "ALL" in the chain switch (2026-10-01, the All-in-One wallet): the top
+   * bar shows every chain at once — one dollar total, one Paper/Live for all
+   * of them. `chain` keeps the last single chain picked, so every page that
+   * shows one chain at a time still has one to show. Persisted.
+   */
+  allChains: boolean;
+  setAllChains: (on: boolean) => void;
   /** Locally pinned tokens — the watchlist, persisted in localStorage. A
    *  Solana pin is the bare mint; an EVM pin is `${chain}:${address}`,
    *  because an 0x address alone does not say which chain it is on. */
@@ -173,6 +181,15 @@ const HIDE_FLAGGED_KEY = 'krypt.terminal.hideFlagged';
 const SORT_KEY = 'krypt.terminal.sortBy';
 const MIN_ODDS_KEY = 'krypt.terminal.minOddsBucket';
 const CHAIN_KEY = 'krypt.terminal.chain';
+const ALL_CHAINS_KEY = 'krypt.terminal.allChains';
+
+function loadAllChains(): boolean {
+  try {
+    return localStorage.getItem(ALL_CHAINS_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 function loadChain(): ChainKind {
   try {
@@ -264,6 +281,15 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
   const [minOddsBucket, setMinOddsBucketState] = useState<OddsBucket | null>(loadMinOddsBucket);
   const [tick, setTick] = useState(0);
   const [chain, setChainState] = useState<ChainKind>(loadChain);
+  const [allChains, setAllChainsState] = useState<boolean>(loadAllChains);
+  const setAllChains = useCallback((on: boolean) => {
+    setAllChainsState(on);
+    try {
+      localStorage.setItem(ALL_CHAINS_KEY, on ? '1' : '0');
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
   // Read through a ref by `load`, which must stay identity-stable.
   const chainRef = useRef<ChainKind>(chain);
 
@@ -748,6 +774,8 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       openToken,
       chain,
       setChain,
+      allChains,
+      setAllChains,
       watchlist,
       toggleWatch,
       isWatched,
@@ -757,7 +785,7 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
       hideFlagged, setHideFlagged, hiddenFlaggedCount,
       sortBy, setSortBy, minOddsBucket, setMinOddsBucket, hiddenByOddsCount,
       providers, refreshProviders, refreshSec, paused, setDiscoverActive, refreshNow, openMint,
-      openChain, openToken, chain, setChain, watchlist, toggleWatch, isWatched,
+      openChain, openToken, chain, setChain, allChains, setAllChains, watchlist, toggleWatch, isWatched,
     ],
   );
 

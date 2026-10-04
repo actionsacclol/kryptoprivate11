@@ -143,6 +143,8 @@ export interface LeaderView {
   label: string;
   enabled: boolean;
   mode: string;
+  /** The chain the config follows; absent = Solana. */
+  chain?: ChainKind;
 }
 
 /** A followed wallet's swap, as the engine reports it (copy trading's feed). */
@@ -165,6 +167,9 @@ export interface SettledFill {
   /** A sell's realised result against the wallet's own average cost, fees
    *  included; null when the basis is unknown. Always null for a buy. */
   realizedSol: number | null;
+  /** The chain the fill settled on; absent = Solana. Only that chain's
+   *  scripts count it (an EVM token never matches a Solana mint anyway). */
+  chain?: ChainKind;
 }
 
 export interface AutomationHost {
@@ -230,6 +235,8 @@ export interface AutomationHost {
   discover(column: DiscoverColumn, limit: number, chain?: ChainKind): Promise<TokenSummary[]>;
   /** pump.fun's public callouts feed, newest first. Null when pump is not answering. */
   callouts(limit: number, chain?: ChainKind): Promise<Callout[] | null>;
+  /** Every callout on one pump.fun coin, newest first. Null when pump is not answering. */
+  coinCallouts(mint: string, chain?: ChainKind): Promise<Callout[] | null>;
   /** Every fill this install made, newest first. */
   history(limit: number, chain?: ChainKind): TradeHistoryRow[];
   /** Every token the active wallet holds on the chain. Null when the wallet could not be read. */
@@ -496,6 +503,11 @@ let host: AutomationHost | null = null;
 let scripts: UserScript[] = [];
 const runtimes = new Map<string, Runtime>();
 let killSwitch = false;
+/** The automation kill switch, for main's other unattended money movers (the
+ *  All-in-One float stops with the rest, v6 audit 2026-10-03). */
+export function killSwitchOn(): boolean {
+  return killSwitch;
+}
 /** Keys of shipped scripts ever seeded here. A user who deletes one keeps it deleted. */
 let bundledSeen: string[] = [];
 let shipped: BundledScript[] = [];
@@ -1021,7 +1033,7 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
     if (!existing.enabled) void stopCode(existing, 'edited');
     if (existing.enabled && existing.kind === 'rules') armSchedules(existing);
     if (!wasLiveArmed && existing.mode === 'live' && existing.enabled) {
-      host?.toast('warn', `LIVE script armed: "${existing.name}" — real SOL will be spent within its budget`);
+      host?.toast('warn', `LIVE script armed: "${existing.name}" — real ${nativeSymbolOf(scriptChain(existing))} will be spent within its budget`);
     }
     changed();
     return { ok: true, message: toLive ? 'Saved — switched to live, re-enable to arm it' : 'Saved', id: existing.id };
@@ -1033,7 +1045,7 @@ export function upsert(input: Omit<UserScript, 'id' | 'createdAt' | 'updatedAt'>
   runtimes.set(s.id, freshRuntime());
   persist();
   changed();
-  return { ok: true, message: `Saved "${s.name}" — paper, disabled. Enable it when ready.`, id: s.id };
+  return { ok: true, message: `Saved "${s.name}" — ${s.mode}, disabled. Enable it when ready.`, id: s.id };
 }
 
 export function remove(id: string): { ok: boolean; message: string } {
@@ -1065,7 +1077,7 @@ export function setEnabled(id: string, enabled: boolean): { ok: boolean; message
   persist();
   if (enabled) {
     slog(s, 'info', `enabled (${s.mode})`);
-    if (s.mode === 'live') host?.toast('warn', `LIVE script armed: "${s.name}" — real SOL will be spent within its budget`);
+    if (s.mode === 'live') host?.toast('warn', `LIVE script armed: "${s.name}" — real ${nativeSymbolOf(scriptChain(s))} will be spent within its budget`);
     if (s.kind === 'code') void startCode(s);
     else armSchedules(s);
   } else {
@@ -1182,12 +1194,23 @@ async function ctxFor(s: UserScript, mint: string, base?: RuleContext): Promise<
   // POSITION. `held` means "held by this script": that is what the field guide
   // says, what the open-position cap counts, and what the script may sell.
   const mine = rtFor(s).opened.has(mint);
-  let c = base ?? (row ? contextFromLaunch(row, now) : emptyContext(mint, pos?.symbol, pos?.name));
+  c0: {
+    // An EVM token's own scanner window, when there is one (2026-10-03): a
+    // Robinhood/BNB script's bot.token used to be null for everything.
+    if (base || row || scriptChain(s) === 'solana') break c0;
+    const l = evmHooks?.launch(scriptChain(s) as EvmChainKind, mint) ?? null;
+    if (l) base = contextFromEvmLaunch(l, now);
+  }
+  // A coin the scanner never saw launch (a graduated one) still has a name.
+  const evmId = !base && !row && scriptChain(s) !== 'solana' && !pos?.symbol ? (evmHooks?.identity?.(scriptChain(s) as EvmChainKind, mint) ?? null) : null;
+  let c = base ?? (row ? contextFromLaunch(row, now) : emptyContext(mint, pos?.symbol || evmId?.symbol, pos?.name || evmId?.name));
   c = withMarket(c, h.marketCached(mint, scriptChain(s)));
   c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(mint) ?? null) : null);
   c = withLaunchIntel(c, scriptChain(s) === 'solana' ? (h.launchIntelCached?.(mint) ?? null) : null);
   c = withPosition(c, mine && pos ? withPeak(s.mode, pos) : null, now);
-  c = withGlobals(c, { walletSol: h.wallet().sol, now });
+  // The chain's OWN wallet: an EVM script's walletSol is its chain's coin.
+  c = withGlobals(c, { walletSol: h.wallet(scriptChain(s)).sol, now });
+  if (scriptChain(s) !== 'solana' && (c.priceSol === null || c.priceSol === undefined)) c.priceSol = h.priceSol(mint, scriptChain(s));
   return c;
 }
 
@@ -1288,16 +1311,16 @@ function effectiveLossCap(s: UserScript, rt: Runtime): { cap: number; why: strin
     // What the wallet held before today's realised losses came out of it.
     const start = sol - Math.min(0, rt.realizedToday);
     const share = Math.max(0.001, (start * pct) / 100);
-    if (share < abs) return { cap: Math.round(share * 1e6) / 1e6, why: `${pct}% of the ${start.toFixed(3)} SOL wallet` };
+    if (share < abs) return { cap: Math.round(share * 1e6) / 1e6, why: `${pct}% of the ${start.toFixed(3)} ${nativeSymbolOf(scriptChain(s))} wallet` };
   }
-  return { cap: abs, why: `the ${abs} SOL loss limit` };
+  return { cap: abs, why: `the ${abs} ${nativeSymbolOf(scriptChain(s))} loss limit` };
 }
 
 /** Disable the script when today's realised loss has reached the stop. True when it did. */
 function checkLossCap(s: UserScript, rt: Runtime): boolean {
   const { cap, why } = effectiveLossCap(s, rt);
   if (rt.realizedToday > -cap) return false;
-  disable(s, `down ${Math.abs(rt.realizedToday).toFixed(3)} SOL today, past ${why}`);
+  disable(s, `down ${Math.abs(rt.realizedToday).toFixed(3)} ${nativeSymbolOf(scriptChain(s))} today, past ${why}`);
   return true;
 }
 
@@ -1316,11 +1339,22 @@ function noteEpisodeClosed(s: UserScript, rt: Runtime, mint: string, realized: n
   host?.notify(`Script cooling off: ${s.name}`, why.slice(0, 200));
 }
 
+/**
+ * A reconciled EVM sell (ipc.ts, from the EVM ledger) — so a Robinhood or BNB
+ * script's daily loss stop and cool-off count live exits too. Until
+ * 2026-10-03 only paper EVM sells reached them, and a live EVM script could
+ * lose without limit.
+ */
+export function onEvmFillSettled(f: SettledFill & { chain: ChainKind }): void {
+  onFillSettled(f);
+}
+
 /** A reconciled fill from the chain (host.onFillSettled). */
 function onFillSettled(f: SettledFill): void {
   if (f.side !== 'sell' || f.realizedSol === null || !Number.isFinite(f.realizedSol)) return;
   for (const s of scripts) {
     if (s.mode !== 'live') continue;
+    if (scriptChain(s) !== (f.chain ?? 'solana')) continue;
     const rt = rtFor(s);
     const open = rt.opened.get(f.mint);
     const closed = rt.closed.get(f.mint);
@@ -1334,7 +1368,7 @@ function onFillSettled(f: SettledFill): void {
     slog(
       s,
       f.realizedSol < 0 ? 'warn' : 'info',
-      `exit on ${f.mint.slice(0, 8)} realised ${f.realizedSol >= 0 ? '+' : ''}${f.realizedSol.toFixed(4)} SOL (from the chain, ${f.requested}% sold) — today ${rt.realizedToday >= 0 ? '+' : ''}${rt.realizedToday.toFixed(4)} SOL`,
+      `exit on ${f.mint.slice(0, 8)} realised ${f.realizedSol >= 0 ? '+' : ''}${f.realizedSol.toFixed(4)} ${nativeSymbolOf(scriptChain(s))} (from the chain, ${f.requested}% sold) — today ${rt.realizedToday >= 0 ? '+' : ''}${rt.realizedToday.toFixed(4)} ${nativeSymbolOf(scriptChain(s))}`,
     );
     // A full sell ends the episode; judge it once.
     if (f.requested >= 100) {
@@ -1357,10 +1391,10 @@ function refuse(s: UserScript, why: string): ActResult {
 }
 
 /** The budget gate every BUY-like action passes: caps, live gates, size. */
-async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, what: string, wallet: { address?: string | null } = {}, lane: FeeLane = 'fast'): Promise<ActResult | null> {
+async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, what: string, wallet: { address?: string | null } = {}, lane: FeeLane = 'fast', topUp = false): Promise<ActResult | null> {
   const h = host as AutomationHost;
   if (!Number.isFinite(sol) || sol <= 0) return refuse(s, `buy ${what}: amount must be a positive number of SOL`);
-  if (sol > s.budget.maxSolPerTrade) return refuse(s, `buy ${what}: ${sol} SOL is over the script's max per trade (${s.budget.maxSolPerTrade})`);
+  if (sol > s.budget.maxSolPerTrade) return refuse(s, `buy ${what}: ${sol} ${nativeSymbolOf(scriptChain(s))} is over the script's max per trade (${s.budget.maxSolPerTrade})`);
   if (rt.buysToday >= s.budget.maxBuysPerDay) return refuse(s, `buy ${what}: ${s.budget.maxBuysPerDay} buys today already`);
   if (checkLossCap(s, rt)) return { ok: false, message: 'daily loss limit' };
   if (rt.coolOffUntil !== null) {
@@ -1393,6 +1427,18 @@ async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, wh
     // size a real buy so that they take more than a tenth of it. Paper pays
     // no fee and rehearses any size. Last of the live checks: an engine that
     // is not armed says so before a size is judged.
+    // Keep the gas to SELL (EVM, 2026-10-03). A Solana buy is trimmed by the
+    // engine (planBuySize); the EVM rail spent to the last wei, leaving a bag
+    // it could not pay gas to exit. A buy being topped up is funded with this
+    // reserve already (aioConvert fundedTarget).
+    if (chain !== 'solana' && !topUp) {
+      const named = wallet.address ? evmHooks?.wallets(chain as EvmChainKind).find((w) => w.address.toLowerCase() === wallet.address?.toLowerCase()) : undefined;
+      const held = wallet.address ? (named?.native ?? null) : h.wallet(chain).sol;
+      const keep = EXIT_GAS[chain] ?? 0;
+      if (held !== null && sol * 1.005 + keep > held) {
+        return refuse(s, `buy ${what}: ${sol} would leave less than ${keep} ${nativeSymbolOf(chain)} to pay gas to sell it (the wallet holds ${held.toPrecision(4)})${aioHooks?.active() ? ' — pass {topUp: true} to fund it from your other chains' : ''}`);
+      }
+    }
     if (chain === 'solana') {
       const share = roundTripFeeShare(sol, lane);
       if (share > MAX_UNATTENDED_FEE_SHARE) {
@@ -1487,6 +1533,9 @@ interface ActOpts {
   /** Sell this many tokens (UI units) — converted to a percent of the
    *  position the app can see, in sellOne. */
   tokens?: number;
+  /** Fund this buy from the All-in-One wallet's other chains when its own
+   *  chain is short (live only). */
+  topUp?: boolean;
 }
 
 /** Slippage a script may ask for on one trade: a percent from 0.1 to 50. */
@@ -1499,7 +1548,7 @@ const SLIPPAGE_MAX = 50;
  * "the trading wallet with defaults" — a typo in a wallet address must not
  * quietly spend from the main wallet.
  */
-function tradeExtras(v: unknown, what: string): { ok: true; wallet: string; slippagePct?: number; feeLane?: FeeLane } | { ok: false; error: string } {
+function tradeExtras(v: unknown, what: string): { ok: true; wallet: string; slippagePct?: number; feeLane?: FeeLane; topUp?: boolean } | { ok: false; error: string } {
   if (v === undefined || v === null) return { ok: true, wallet: '' };
   if (typeof v === 'string') return { ok: true, wallet: v.trim() };
   if (typeof v !== 'object' || Array.isArray(v)) return { ok: false, error: `${what}: the last argument is a wallet address or an options object` };
@@ -1517,7 +1566,8 @@ function tradeExtras(v: unknown, what: string): { ok: true; wallet: string; slip
     if (typeof o.lane !== 'string' || !(FEE_LANES as readonly string[]).includes(o.lane)) return { ok: false, error: `${what}: lane must be one of ${FEE_LANES.join(', ')}` };
     feeLane = o.lane as FeeLane;
   }
-  return { ok: true, wallet, slippagePct, ...(feeLane ? { feeLane } : {}) };
+  if (o.topUp !== undefined && typeof o.topUp !== 'boolean') return { ok: false, error: `${what}: topUp must be true or false` };
+  return { ok: true, wallet, slippagePct, ...(feeLane ? { feeLane } : {}), ...(o.topUp === true ? { topUp: true } : {}) };
 }
 
 function act(s: UserScript, action: RuleAction, ctx: RuleContext | null, opts: ActOpts = {}): Promise<ActResult> {
@@ -1552,25 +1602,44 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
   switch (action.type) {
     case 'buy': {
       const sol = Number(action.sol);
-      const gate = await buyGate(s, rt, mint, sol, what, {}, opts.feeLane ?? 'fast');
+      const topUp = opts.topUp === true && s.mode === 'live';
+      const gate = await buyGate(s, rt, mint, sol, what, {}, opts.feeLane ?? 'fast', topUp);
       if (gate) return gate;
       // The gate awaited: re-read the arm bit before spending. The kill switch
       // says "every script is off" and must not be overtaken by a buy that was
       // already past its checks.
       if (!s.enabled || killSwitch) return { ok: false, message: 'script is disabled' };
+      // All-in-One: fund this chain from the others first — never a costly
+      // top-up unattended, never a buy on money that has not arrived. Paper
+      // spends nothing, so it needs no money moved.
+      let funded: unknown | null = null;
+      if (topUp) {
+        if (!aioHooks || !aioHooks.active()) return refuse(s, `buy ${what}: {topUp} needs the All-in-One wallet signing on every chain`);
+        const f = await aioHooks.fund(scriptChain(s), sol);
+        if (!f.ok) return refuse(s, `buy ${what}: not funded — ${f.message}`);
+        funded = f.funded;
+        if (funded) slog(s, 'info', `buy ${what}: ${f.message}`);
+        if (!s.enabled || killSwitch) return { ok: false, message: 'script is disabled' };
+      }
       const tradeOpts: ScriptTradeOpts = { ...(opts.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {}), ...(opts.feeLane ? { feeLane: opts.feeLane } : {}) };
       const r = await h.buy(mint, sol, s.mode, scriptChain(s), s.budget.maxSolPerTrade, Object.keys(tradeOpts).length ? tradeOpts : undefined);
+      if (!(r.ok || r.pending) && funded && aioHooks) {
+        // The owner's rule: a top-up no buy paid for is billed as a move.
+        const billed = await aioHooks.bill(funded).catch(() => '');
+        slog(s, 'warn', `buy ${what} failed after its top-up: ${r.message}${billed}`);
+        return { ok: false, message: r.message };
+      }
       if (r.ok || r.pending) {
         rt.buysToday += 1;
         rt.opened.set(mint, openedWithBuy(rt.opened.get(mint), sol, now, r.signature));
         h.subscribeTicks(mint);
-        slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}buy ${what} ${sol} SOL: ${r.message}${r.pending ? ' (pending)' : ''}`);
+        slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}buy ${what} ${sol} ${nativeSymbolOf(scriptChain(s))}: ${r.message}${r.pending ? ' (pending)' : ''}`);
         recorder.record('script_buy', { scriptId: s.id, name: s.name, mode: s.mode, mint, sol, ok: r.ok, signature: r.signature ?? null });
         persist();
         changed();
         return { ok: true, message: r.message };
       }
-      slog(s, 'warn', `buy ${what} ${sol} SOL failed: ${r.message}`);
+      slog(s, 'warn', `buy ${what} ${sol} ${nativeSymbolOf(scriptChain(s))} failed: ${r.message}`);
       return { ok: false, message: r.message };
     }
     case 'sell': {
@@ -1743,6 +1812,15 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
     const chainCost = h.spentSolFor(entry.sigs);
     if (chainCost !== null && Number.isFinite(chainCost) && chainCost > 0) ourCost = chainCost;
   }
+  // EVM: the ledger prices the wallet's basis with gas and fee legs, and the
+  // script only knows what it asked to spend, so the ratio came out at 97–99 %
+  // and "sell 100 %" left dust (the 09-25 Solana bug again). When every buy of
+  // this bag was the script's own, its share IS the whole bag (2026-10-03).
+  if (scriptChain(s) !== 'solana' && entry?.sigs?.length && before) {
+    const whole = evmHooks?.ownsWholeBag(scriptChain(s) as EvmChainKind, mint, entry.sigs) ?? null;
+    const wc = before.costSol;
+    if (whole === true && wc !== null && Number.isFinite(wc) && wc > 0) ourCost = wc;
+  }
   let pctOfWallet = pct;
   // An UNKNOWN wallet basis means the script cannot work out its own share, so
   // it sells the percentage it asked for rather than guessing a ratio — the
@@ -1777,7 +1855,7 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
       closeEntry(rt, mint);
       if (realized !== null) noteEpisodeClosed(s, rt, mint, realized);
     }
-    slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}sell ${pct}% ${what}: ${r.message}${realized !== null ? ` (realised ${realized >= 0 ? '+' : ''}${realized.toFixed(4)} SOL${typeof r.realizedSol === 'number' ? '' : ', estimated'})` : ''}`);
+    slog(s, 'info', `${s.mode === 'paper' ? 'PAPER ' : ''}sell ${pct}% ${what}: ${r.message}${realized !== null ? ` (realised ${realized >= 0 ? '+' : ''}${realized.toFixed(4)} ${nativeSymbolOf(scriptChain(s))}${typeof r.realizedSol === 'number' ? '' : ', estimated'})` : ''}`);
     recorder.record('script_sell', { scriptId: s.id, name: s.name, mode: s.mode, mint, pct, ok: r.ok, realizedSol: realized, signature: r.signature ?? null });
     persist();
     changed();
@@ -2324,18 +2402,25 @@ async function walletTrade(
   const h = host as AutomationHost;
   const rt = rtFor(s);
   const label = mint.slice(0, 8);
+  const chain = scriptChain(s);
+  // On Robinhood / BNB an address is compared lower-case, as the rail stores it.
+  if (chain !== 'solana') address = address.toLowerCase();
   const who = address.slice(0, 8);
-  if (scriptChain(s) !== 'solana') return refuse(s, `${side}: naming a wallet is Solana-only`);
+  const unit = nativeSymbolOf(chain);
+  if (chain !== 'solana' && !evmHooks?.walletTrade) return refuse(s, `${side}: naming a wallet is not available on this chain in this build`);
   if (rateLimited(s, rt, Date.now())) return refuse(s, `${side} ${label}: over ${s.budget.maxActionsPerMinute} actions in a minute`);
 
   if (side === 'buy') {
     const gate = await buyGate(s, rt, mint, amount, label, { address });
     if (gate) return gate;
     if (s.mode === 'paper') {
-      slog(s, 'info', `PAPER buy ${amount} SOL of ${label} as ${who}… — nothing spent`);
+      slog(s, 'info', `PAPER buy ${amount} ${unit} of ${label} as ${who}… — nothing spent`);
       return { ok: true, message: 'paper: nothing was bought' };
     }
-    const r = await h.walletBuy(address, mint, amount, s.budget.maxSolPerTrade);
+    const r =
+      chain === 'solana'
+        ? await h.walletBuy(address, mint, amount, s.budget.maxSolPerTrade)
+        : await (evmHooks as EvmScriptHooks).walletTrade!(chain as EvmChainKind, 'buy', address, mint, amount);
     if (r.ok) {
       // Counted like any other buy this script made: the budget is about what
       // the SCRIPT spends, not about which key signed it.
@@ -2344,18 +2429,27 @@ async function walletTrade(
       rt.opened.set(mint, { costSol: (prev?.costSol ?? 0) + amount, at: Date.now(), wallet: address });
       persist();
     }
-    slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'bought' : 'buy failed'} ${amount} SOL of ${label} as ${who}…: ${r.message}`);
+    slog(s, r.ok ? 'info' : 'warn', `${r.ok ? 'bought' : 'buy failed'} ${amount} ${unit} of ${label} as ${who}…: ${r.message}`);
     return { ok: r.ok, message: r.message };
   }
 
   // A script may only sell a mint it opened — the same rule as bot.sell. It is
   // what separates the script's own bags from bags bought by hand.
   if (!rt.opened.has(mint)) return refuse(s, `sell ${label}: this script does not hold it`);
+  // …and only from the wallet it bought it WITH: the claim is (wallet, coin),
+  // not the coin alone, or a named sell could dump a bag the user bought by
+  // hand in another of their wallets (v6 audit 2026-10-03).
+  const claimed = rt.opened.get(mint)?.wallet ?? h.wallet(chain).address ?? null;
+  const same = (a: string | null | undefined, b: string): boolean => !!a && (chain === 'solana' ? a === b : a.toLowerCase() === b.toLowerCase());
+  if (!same(claimed, address)) return refuse(s, `sell ${label}: this script did not buy it with ${who}…`);
   if (s.mode === 'paper') {
     slog(s, 'info', `PAPER sell ${Math.round(amount)}% of ${label} as ${who}… — nothing sold`);
     return { ok: true, message: 'paper: nothing was sold' };
   }
-  const r = await h.walletSell(address, mint, amount);
+  const r =
+    chain === 'solana'
+      ? await h.walletSell(address, mint, amount)
+      : await (evmHooks as EvmScriptHooks).walletTrade!(chain as EvmChainKind, 'sell', address, mint, amount);
   // A full exit from the wallet that bought it ends the script's claim; the
   // active-wallet prune never sees this bag, so nothing else would.
   if (r.ok && amount >= 100 && rt.opened.get(mint)?.wallet === address) {
@@ -2381,6 +2475,17 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
   // handler that started before the switch moved, and every read below costs
   // something — `positions` walks the book, `market` hits a live provider.
   if (!s.enabled || killSwitch) return answer(false, undefined, 'script is disabled');
+  // A token on Robinhood or BNB is a 0x address (2026-10-03): the old check
+  // was base58-only, so EVERY token method failed "bad mint" on an EVM
+  // script. Compared lower-case, as the scanner and the ledger store it.
+  const evm = scriptChain(s) !== 'solana';
+  if (evm && args.length) {
+    const low = (v: unknown): unknown => (typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v) ? v.toLowerCase() : v);
+    const a0 = args[0];
+    args = [a0 !== null && typeof a0 === 'object' && !Array.isArray(a0) && 'mint' in a0 ? { ...(a0 as Record<string, unknown>), mint: low((a0 as Record<string, unknown>).mint) } : low(a0), ...args.slice(1)];
+  }
+  const isMint = (v: unknown): v is string =>
+    typeof v === 'string' && (evm ? /^0x[0-9a-f]{40}$/.test(v) : /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v));
   try {
     switch (method) {
       case 'buy': {
@@ -2388,7 +2493,9 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (!isMint(mint)) return answer(false, undefined, 'buy: bad mint');
         const x = tradeExtras(who, 'buy');
         if (!x.ok) return answer(false, undefined, x.error);
-        if (!x.wallet) return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint), { slippagePct: x.slippagePct, feeLane: x.feeLane }));
+        if (evm && x.feeLane !== undefined) return answer(false, undefined, 'buy: lane is Solana-only — gas on this chain is set by the chain');
+        if (!x.wallet) return result(await act(s, { type: 'buy', sol: Number(sol) }, await ctxFor(s, mint), { slippagePct: x.slippagePct, feeLane: x.feeLane, ...(x.topUp ? { topUp: true } : {}) }));
+        if (x.topUp) return answer(false, undefined, 'buy: topUp funds the trading wallet only — drop it, or the wallet');
         // Another wallet trades at the execution setting's slippage; a value
         // that would be dropped on the floor is refused (audit 2026-09-27).
         if (x.slippagePct !== undefined) return answer(false, undefined, 'buy: slippagePct applies to the trading wallet only — drop it, or the wallet');
@@ -2420,6 +2527,7 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         }
         const x = tradeExtras(extras, 'sell');
         if (!x.ok) return answer(false, undefined, x.error);
+        if (evm && x.feeLane !== undefined) return answer(false, undefined, 'sell: lane is Solana-only — gas on this chain is set by the chain');
         if (!x.wallet) {
           return result(await act(s, { type: 'sell', pct: tokens !== undefined ? 100 : Number(pct) }, await ctxFor(s, mint), { slippagePct: x.slippagePct, tokens, feeLane: x.feeLane }));
         }
@@ -2431,10 +2539,15 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         return result(await chain(s, () => walletTrade(s, 'sell', x.wallet, mint, Number(pct))));
       }
       case 'wallets':
-        return answer(true, h.wallets());
+        // The chain's OWN list: an EVM script was handed Solana's wallets.
+        return answer(true, evm ? (evmHooks?.wallets(scriptChain(s) as EvmChainKind) ?? []) : h.wallets());
       case 'sellAll':
         return result(await act(s, { type: 'sell_all' }, null));
       case 'order': {
+        // Advanced orders are Solana's (advOrders). Gated FIRST: three kinds
+        // below go straight to the engine and would have placed a Solana
+        // order against an EVM address (latent behind the old mint check).
+        if (evm) return answer(false, undefined, `order: advanced orders are Solana-only — on ${chainLabel(scriptChain(s))} sell with bot.sell from a tick or position handler`);
         const req = (typeof args[0] === 'object' && args[0] !== null ? args[0] : {}) as Record<string, unknown>;
         if (!isMint(req.mint)) return answer(false, undefined, 'order: bad mint');
         if (!ORDER_KINDS.includes(req.kind as OrderKind)) return answer(false, undefined, `order: kind must be one of ${ORDER_KINDS.join(', ')}`);
@@ -2536,9 +2649,11 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       }
       case 'clearCompletedOrders':
         // Housekeeping, not an action — no budget cost, safe to call every tick.
+        // Solana's order list only; an EVM script has none to clear.
+        if (evm) return answer(true, 0);
         return answer(true, h.clearCompletedOrders());
       case 'templates':
-        return answer(true, h.templates());
+        return answer(true, evm ? [] : h.templates());
       case 'applyTemplate': {
         const [mint, templateId] = args;
         if (!isMint(mint)) return answer(false, undefined, 'applyTemplate: bad mint');
@@ -2761,16 +2876,20 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       // A free read: which pump.fun accounts are signed in, so a script can
       // post from each in turn. Addresses and names only — never a token.
       case 'pumpAccounts':
-        return answer(true, h.pumpAccounts());
+        return answer(true, evm ? [] : h.pumpAccounts());
       case 'price': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'price: bad mint');
-        return answer(true, h.priceSol(mint));
+        // The chain's own price (an EVM script read Solana's cache: always null).
+        return answer(true, h.priceSol(mint, scriptChain(s)));
       }
       case 'token': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'token: bad mint');
-        if (!h.launch(mint) && !h.marketCached(mint, scriptChain(s))) return answer(true, null);
+        const known = evm
+          ? !!evmHooks?.launch(scriptChain(s) as EvmChainKind, mint) || h.marketCached(mint, scriptChain(s)) !== null || h.priceSol(mint, scriptChain(s)) !== null
+          : !!h.launch(mint) || !!h.marketCached(mint, scriptChain(s));
+        if (!known) return answer(true, null);
         return answer(true, await ctxFor(s, mint));
       }
       case 'market': {
@@ -2791,12 +2910,15 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       case 'security': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'security: bad mint');
+        // Nothing to read on EVM: unknown, and not charged an action for it.
+        if (evm) return answer(true, null);
         if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `security: over ${s.budget.maxActionsPerMinute} actions in a minute`);
         return answer(true, await h.security(mint, scriptChain(s)));
       }
       case 'creator': {
         const [mint] = args;
         if (!isMint(mint)) return answer(false, undefined, 'creator: bad mint');
+        if (evm) return answer(true, null);
         if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `creator: over ${s.budget.maxActionsPerMinute} actions in a minute`);
         return answer(true, await h.creator(mint, scriptChain(s)));
       }
@@ -2855,8 +2977,17 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `callouts: over ${s.budget.maxActionsPerMinute} actions in a minute`);
         return answer(true, await h.callouts(limit, scriptChain(s)));
       }
+      case 'coinCallouts': {
+        const mint = typeof args[0] === 'string' ? args[0].trim() : '';
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return answer(false, undefined, 'coinCallouts: a Solana mint address is required');
+        if (scriptChain(s) !== 'solana') return answer(true, null);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `coinCallouts: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await h.coinCallouts(mint, scriptChain(s)));
+      }
       case 'history':
-        // This install's own record — free, like orders.
+        // This install's own record — free, like orders. On EVM, the chain's
+        // own ledger (it answered [] while that ledger sat there).
+        if (evm) return answer(true, evmHooks?.history(scriptChain(s) as EvmChainKind, clampInt(args[0], 1, 200, 50)) ?? []);
         return answer(true, h.history(clampInt(args[0], 1, 200, 50), scriptChain(s)));
       case 'holdings': {
         // A chain read unless one landed in the last two seconds, so it is
@@ -2869,6 +3000,55 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
       }
       case 'solUsd':
         return answer(true, await h.solUsd());
+      case 'nativeUsd':
+        // The script's own chain coin in dollars: SOL, ETH or BNB.
+        return answer(true, evm ? ((await evmHooks?.nativeUsd(scriptChain(s))) ?? null) : await h.solUsd());
+      // ── All-in-One (2026-10-03) ────────────────────────────────────────
+      case 'aioInfo':
+        return answer(true, aioHooks ? aioHooks.info() : null);
+      case 'aioBalances': {
+        if (!aioHooks) return answer(true, null);
+        if (rateLimited(s, rtFor(s), Date.now())) return answer(false, undefined, `aio.balances: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        return answer(true, await aioHooks.balances());
+      }
+      case 'aioMove': {
+        const [from, to, amt] = args;
+        const chains = ['solana', 'bnb', 'robinhood'];
+        if (typeof from !== 'string' || !chains.includes(from) || typeof to !== 'string' || !chains.includes(to) || from === to) {
+          return answer(false, undefined, "aio.move: name two different chains of 'solana', 'bnb', 'robinhood'");
+        }
+        const amount = Number(amt);
+        if (!Number.isFinite(amount) || amount <= 0) return answer(false, undefined, 'aio.move: amount must be a positive number (in the FROM chain\'s coin)');
+        const rtm = rtFor(s);
+        if (rateLimited(s, rtm, Date.now())) return answer(false, undefined, `aio.move: over ${s.budget.maxActionsPerMinute} actions in a minute`);
+        if (s.mode === 'paper') {
+          slog(s, 'info', `PAPER move ${amount} ${nativeSymbolOf(from as ChainKind)} ${from} → ${to} — nothing moved`);
+          return result({ ok: true, message: 'paper: nothing was moved' });
+        }
+        if (!aioHooks || !aioHooks.active()) return answer(false, undefined, 'aio.move: needs the All-in-One wallet signing on every chain');
+        // The master switch is the app being off, not a script's rule — a
+        // move is real money like a buy (v6 audit 2026-10-03: moves went on
+        // with every chain in Paper).
+        const off = h.liveBlockedReason(from as ChainKind) ?? h.liveBlockedReason(to as ChainKind);
+        if (off) return result(refuse(s, `aio.move: not moved — ${off}`));
+        // …and bounded by the script's own size: one move is worth at most one
+        // max trade, in dollars. No price, no move: unknown is never fine.
+        const [fromUsd, ownUsd] = await Promise.all([evmHooks?.nativeUsd(from as ChainKind) ?? null, evmHooks?.nativeUsd(scriptChain(s)) ?? null]);
+        if (fromUsd === null || ownUsd === null) return result(refuse(s, "aio.move: no price right now to check it against this script's max per trade"));
+        const moveUsd = amount * fromUsd;
+        const capUsd = s.budget.maxSolPerTrade * ownUsd;
+        if (moveUsd > capUsd * 1.0001) {
+          return result(refuse(s, `aio.move: about $${moveUsd.toFixed(2)} is over this script's max per trade (${s.budget.maxSolPerTrade} ${nativeSymbolOf(scriptChain(s))}, about $${capUsd.toFixed(2)})`));
+        }
+        const day = new Date().toISOString().slice(0, 10);
+        const m = aioMoves.get(s.id);
+        const used = m && m.day === day ? m.n : 0;
+        if (used >= AIO_MOVES_PER_DAY) return answer(false, undefined, `aio.move: ${AIO_MOVES_PER_DAY} moves today already — every move pays Relay and Krypt's fee`);
+        aioMoves.set(s.id, { day, n: used + 1 });
+        const r = await chain(s, () => aioHooks!.move(from as 'solana', to as 'solana', amount));
+        slog(s, r.ok ? 'info' : 'warn', `move ${amount} ${nativeSymbolOf(from as ChainKind)} ${from} → ${to}: ${r.message}${r.txHash ? ` (${r.txHash.slice(0, 12)}…)` : ''}`);
+        return result({ ok: r.ok, message: r.message });
+      }
       case 'walletScores': {
         const o = (typeof args[0] === 'object' && args[0] !== null ? args[0] : {}) as Record<string, unknown>;
         const window = o.window === undefined ? 'week' : o.window;
@@ -3015,27 +3195,30 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(p.mint) ?? null) : null);
           c = withLaunchIntel(c, scriptChain(s) === 'solana' ? (h.launchIntelCached?.(p.mint) ?? null) : null);
           c = withPosition(c, withPeak(s.mode, p), now);
-          out.push(withGlobals(c, { walletSol: h.wallet().sol, now }));
+          out.push(withGlobals(c, { walletSol: h.wallet(scriptChain(s)).sol, now }));
         }
         return answer(true, out);
       }
       case 'orders': {
         const [mint] = args;
         if (mint !== undefined && !isMint(mint)) return answer(false, undefined, 'orders: bad mint');
-        return answer(true, h.orders(mint));
+        // Solana's advanced orders; an EVM script has none (it was handed Solana's).
+        return answer(true, evm ? [] : h.orders(mint));
       }
       case 'runners': {
         const now = Date.now();
         const c = scriptChain(s);
         // A Robinhood or BNB script reads its OWN chain's flags (2026-09-29:
         // it was handed Solana's list — base58 mints it could not trade).
-        if (c !== 'solana') return answer(true, (evmRunnerSource?.(c as EvmChainKind) ?? []).map((f) => contextFromEvmRunner(f, null, now)));
+        if (c !== 'solana') return answer(true, (evmRunnerSource?.(c as EvmChainKind) ?? []).map((f) => contextFromEvmRunner(f, evmHooks?.launch(c as EvmChainKind, f.token) ?? null, now)));
         return answer(true, h.runners().map((f) => contextFromRunner(f, h.launch(f.mint), now)));
       }
       case 'leaders':
-        return answer(true, h.leaders());
+        // This chain's followed wallets only (they came mixed, with no chain).
+        return answer(true, h.leaders().filter((l) => (l.chain ?? 'solana') === scriptChain(s)));
       case 'wallet':
-        return answer(true, h.wallet());
+        // The script's OWN chain wallet — an EVM script read Solana's.
+        return answer(true, h.wallet(scriptChain(s)));
       case 'getState':
         return answer(true, rtFor(s).kv);
       case 'setState': {
@@ -3411,6 +3594,19 @@ export function onEngineEvent(ev: EngineEvent): void {
       if (alertFires.size > 5_000) alertFires.delete(alertFires.keys().next().value as string);
       return;
     }
+    case 'evmFill': {
+      // A LIVE fill on Robinhood or BNB (2026-10-03: only paper EVM fills
+      // reached scripts). To the scripts on that chain that hold the token.
+      const f = ev.fill;
+      if (ev.state === 'landed') return;
+      for (const s of scripts) {
+        if (!s.enabled || s.kind !== 'code' || scriptChain(s) !== f.chain) continue;
+        if (!rtFor(s).opened.has(f.token)) continue;
+        enqueue(s, 'fill', { mint: f.token, side: f.side, ok: ev.state !== 'failed' });
+      }
+      void pollPositions();
+      return;
+    }
     case 'fill':
     case 'paper': {
       for (const s of scripts) {
@@ -3435,6 +3631,73 @@ export function onEngineEvent(ev: EngineEvent): void {
  * its `launch`; every later one is a `launch_update`, which keeps the two
  * rails' triggers meaning the same thing to a rule.
  */
+/**
+ * EVM reads a script on Robinhood or BNB needs and the engine host does not
+ * carry (2026-10-03, parity with Solana): the scanner's launch for a token,
+ * whether the script made every buy of a bag, this install's EVM trades, the
+ * chain coin's USD price, and the chain's wallet list. Wired in ipc.ts.
+ */
+export interface EvmScriptHooks {
+  launch(chain: EvmChainKind, token: string): EvmScanLaunch | null;
+  /** True when every reconciled buy of `token` in the chain's signer is one
+   *  of `hashes`; null when that cannot be told. */
+  ownsWholeBag(chain: EvmChainKind, token: string, hashes: string[]): boolean | null;
+  history(chain: EvmChainKind, limit: number): unknown[];
+  nativeUsd(chain: ChainKind): Promise<number | null>;
+  /** `native` = that wallet's last-read balance on this chain; null unknown. */
+  wallets(chain: EvmChainKind): Array<{ address: string; label: string; active: boolean; native?: number | null }>;
+  /** A trade by one of the user's OTHER wallets on this chain, by address —
+   *  the same rules as Solana's (own wallet only, the multi-wallet
+   *  acknowledgement). Optional: a build without it refuses. */
+  walletTrade?(chain: EvmChainKind, side: 'buy' | 'sell', address: string, token: string, amount: number): Promise<{ ok: boolean; message: string }>;
+  /** A token's symbol and name from the last market read, or null. */
+  identity?(chain: EvmChainKind, token: string): { symbol: string; name: string } | null;
+}
+let evmHooks: EvmScriptHooks | null = null;
+export function setEvmScriptHooks(h: EvmScriptHooks | null): void {
+  evmHooks = h;
+}
+
+/** Coins an ENABLED script holds on a chain — Compress leaves them to their
+ *  script rather than selling a running bot's bag (v6 audit 2026-10-03). */
+export function heldByScripts(chain: ChainKind): Set<string> {
+  const out = new Set<string>();
+  for (const s of scripts) {
+    if (!s.enabled || scriptChain(s) !== chain) continue;
+    for (const m of rtFor(s).opened.keys()) out.add(chain === 'solana' ? m : m.toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * The All-in-One wallet, for scripts (2026-10-03): read it, move money
+ * between its chains, and fund a buy from the other chains. Wired in ipc.ts
+ * to the same code the AIO page uses — the same quotes, signer rules and
+ * Krypt fee. Null = no wallet support in this build (tests).
+ */
+export interface AioScriptHooks {
+  /** The All-in-One wallet exists and signs on every chain. */
+  active(): boolean;
+  info(): unknown;
+  balances(): Promise<unknown>;
+  move(from: 'solana' | 'bnb' | 'robinhood', to: 'solana' | 'bnb' | 'robinhood', amount: number): Promise<{ ok: boolean; message: string; txHash?: string }>;
+  /** Make `chain` hold enough for a buy of `amount`, topping it up from the
+   *  other chains if needed (unattended: a costly top-up is refused). */
+  fund(chain: 'solana' | 'bnb' | 'robinhood', amount: number): Promise<{ ok: boolean; message: string; funded: unknown | null }>;
+  /** A top-up whose buy then failed is billed as a move; the sentence to log. */
+  bill(funded: unknown): Promise<string>;
+}
+let aioHooks: AioScriptHooks | null = null;
+export function setAioScriptHooks(h: AioScriptHooks | null): void {
+  aioHooks = h;
+}
+/** Moves a script may make in a day — every one pays Relay and Krypt's fee. */
+const AIO_MOVES_PER_DAY = 20;
+const aioMoves = new Map<string, { day: string; n: number }>();
+
+/** What each chain keeps back to pay for selling (aioConvert CHAIN_RESERVE). */
+const EXIT_GAS: Record<string, number> = { bnb: 0.0005, robinhood: 0.0001 };
+
 /** Where an EVM chain's runner flags are read (the chain scanner, wired in
  *  ipc.ts beside its launch hook). Null = none (tests, a build without it). */
 let evmRunnerSource: ((chain: EvmChainKind) => EvmRunnerFlag[]) | null = null;
@@ -3466,6 +3729,42 @@ export function onEvmLaunch(chain: ChainKind, launch: EvmScanLaunch): void {
     async (s) => ctxFor(s, launch.token, base),
     first ? undefined : { map: (rt) => rt.lastUpdateAt, ms: LAUNCH_UPDATE_THROTTLE_MS },
   );
+}
+
+/**
+ * A price print on Robinhood or BNB (the chain scanner, 2026-10-03), as the
+ * same `tick` a Solana script hears — for the tokens a script holds or
+ * subscribed to. Until now an EVM script had no price stream at all.
+ */
+export function onEvmTick(chain: ChainKind, token: string, priceNative: number): void {
+  if (!host || !(priceNative > 0)) return;
+  const mint = token.toLowerCase();
+  for (const s of scripts) {
+    if (!s.enabled || scriptChain(s) !== chain) continue;
+    const rt = rtFor(s);
+    if (!rt.opened.has(mint) && !rt.subscribed.has(mint)) continue;
+    const now = Date.now();
+    if (now - (rt.lastTickAt.get(mint) ?? 0) < TICK_THROTTLE_MS) continue;
+    rt.lastTickAt.set(mint, now);
+    if (s.kind === 'rules' && s.rules.trigger !== 'tick') continue;
+    if (s.kind === 'code' && !rt.running) continue;
+    if (rt.building >= BUILD_CAP) {
+      rt.health.dropped += 1;
+      continue;
+    }
+    rt.building += 1;
+    void bounded(ctxFor(s, mint))
+      .then((c) => {
+        c.priceSol = priceNative;
+        if (s.kind === 'rules') return runRules(s, c);
+        enqueue(s, 'tick', c);
+        return undefined;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        rt.building -= 1;
+      });
+  }
 }
 
 /** A followed wallet traded (copy trading's watcher). */
@@ -3503,7 +3802,7 @@ export async function pollPositions(): Promise<void> {
       c = withLaunchLinks(c, scriptChain(s) === 'solana' ? (h.launchLinks?.(p.mint) ?? null) : null);
       c = withLaunchIntel(c, scriptChain(s) === 'solana' ? (h.launchIntelCached?.(p.mint) ?? null) : null);
       c = withPosition(c, withPeak(s.mode, p), now);
-      c = withGlobals(c, { walletSol: h.wallet().sol, now });
+      c = withGlobals(c, { walletSol: h.wallet(scriptChain(s)).sol, now });
       if (s.kind === 'rules') await runRules(s, c);
       else enqueue(s, 'position', c);
     }

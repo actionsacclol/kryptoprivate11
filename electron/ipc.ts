@@ -2,7 +2,7 @@
 // the greppable contract between main and renderer. Handlers never throw
 // across IPC; they return { ok, message, data? }.
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, shell } from 'electron';
 import { probeRoundTrip } from './engine/farmProbe';
 import { postFlag } from './system/discordWebhook';
 import fs from 'node:fs';
@@ -18,9 +18,22 @@ import * as store from './system/settings-store';
 import { validateSettingsPatch } from './system/settingsValidation';
 import type { AiAnalysis } from '@shared/ai';
 import * as wallet from './system/wallet';
+import { evmPrivateKeyAtPath, normaliseSeedPhrase, seedPhraseProblem, solanaSeedAtPath } from './system/seedPhrase';
+import { base58Decode } from './chain/base58';
+import { Keypair } from '@solana/web3.js';
+import { privateKeyToAccount } from 'viem/accounts';
+import * as aioWallet from './system/aioWallet';
+import { aioBalances } from './engine/aioBalances';
+import * as solanaSend from './engine/send';
+import * as evmSend from './evm/send';
+import { sendRequestOf, type SendRequest, type SendResult, type SendReview } from '@shared/send';
+import * as sendBook from './system/sendBook';
+import { checkRecipient, cleanLabel, familyOf, recipientWarnings } from '@shared/sendBook';
+import { FLOAT_COOLDOWN_MS, FLOAT_MAX_FAILURES, FLOAT_MAX_PER_DAY, nextFloatRefill } from '@shared/aioFloat';
+import { KNOWN_MINTS } from '@shared/swap';
 import * as fund from './engine/fund';
 import * as lab from '@shared/lab';
-import { getAccountInfo, getBalance, getTokenBalanceForMint } from './chain/rpcClient';
+import { getAccountInfo, getBalance, getMultipleAccountInfo, getTokenBalanceForMint } from './chain/rpcClient';
 import * as kryptoMode from './engine/kryptoMode';
 import * as kryptoTrader from './engine/kryptoTrader';
 import type { TraderEvmHost, TraderLedgerFill, TraderMarket } from './engine/kryptoTrader';
@@ -43,6 +56,88 @@ import * as heliusBudget from './system/heliusBudget';
 import * as integrityGuard from './system/integrityGuard';
 import * as evmRail from './evm/rail';
 import * as evmScanner from './evm/scanner';
+import * as tokenDiscovery from './evm/tokenDiscovery';
+import { resolveVenue } from './evm/venue';
+import { CHAINS } from './evm/chains';
+
+// ── EVM prices for scripts and paper (2026-10-03) ─────────────────────
+// The chain scanner hears bonding-curve trades only: a graduated coin had no
+// price at all, and a curve print never expired, so a coin that graduated
+// kept its graduation price. The newer of the curve print and the market
+// summary's price wins; the summary is cached here and refreshed in the
+// background, so the synchronous read never waits on the network.
+const evmPx = new Map<string, { price: number; at: number }>();
+/** Symbol and name from the same read — identity only, never market facts. */
+const evmIdentity = new Map<string, { symbol: string; name: string }>();
+const evmPxBusy = new Set<string>();
+const EVM_PX_REFRESH_MS = 15_000;
+/** A summary price older than this is not a price (the curve print still is). */
+const EVM_PX_MAX_AGE_MS = 120_000;
+function evmPxKey(chain: string, token: string): string {
+  return `${chain}:${token.toLowerCase()}`;
+}
+async function evmPxRefresh(chain: EvmChainKind, token: string): Promise<void> {
+  const k = evmPxKey(chain, token);
+  if (evmPxBusy.has(k)) return;
+  evmPxBusy.add(k);
+  try {
+    const s = await evmRail.summary(chain, token);
+    if (s.priceSol !== null && Number.isFinite(s.priceSol) && s.priceSol > 0) evmPx.set(k, { price: s.priceSol, at: Date.now() });
+    if (s.symbol) {
+      if (evmIdentity.size > 2_000) evmIdentity.clear();
+      evmIdentity.set(k, { symbol: s.symbol, name: s.name || s.symbol });
+    }
+  } catch {
+    /* unknown stays unknown */
+  } finally {
+    evmPxBusy.delete(k);
+  }
+}
+/**
+ * Is this curve quoted in the chain's own coin? Pons curves on Robinhood can
+ * be quoted in USDG or a tokenised stock, and a print from one is not an ETH
+ * price (v6 audit 2026-10-03). A launch's pair never changes, so this is
+ * learned once per token; until it is known the print is not used.
+ */
+const curveNative = new Map<string, boolean>();
+const curveNativeAsked = new Set<string>();
+function curveQuoteNative(chain: EvmChainKind, token: string): boolean | null {
+  if (chain !== 'robinhood') return true; // BNB prints are gated on quoteKind in the scanner
+  const k = evmPxKey(chain, token);
+  const v = curveNative.get(k);
+  if (v !== undefined) return v;
+  if (!curveNativeAsked.has(k)) {
+    curveNativeAsked.add(k);
+    void resolveVenue('robinhood', token as `0x${string}`)
+      .then((ven) => {
+        if (curveNative.size > 5_000) curveNative.clear();
+        curveNative.set(k, !ven.record || ven.record.pairToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase());
+      })
+      .catch(() => curveNativeAsked.delete(k));
+  }
+  return null;
+}
+function evmPriceNative(chain: EvmChainKind, token: string): number | null {
+  const now = Date.now();
+  const curve = curveQuoteNative(chain, token) === true ? evmScanner.lastPrint(chain, token) : null;
+  const sum = evmPx.get(evmPxKey(chain, token)) ?? null;
+  if (!sum || now - sum.at > EVM_PX_REFRESH_MS) void evmPxRefresh(chain, token);
+  const live = sum && now - sum.at <= EVM_PX_MAX_AGE_MS ? sum : null;
+  if (curve && live) return curve.at >= live.at ? curve.price : live.price;
+  return curve?.price ?? live?.price ?? null;
+}
+async function evmPriceFresh(chain: EvmChainKind, token: string): Promise<number | null> {
+  const sum = evmPx.get(evmPxKey(chain, token));
+  if (!sum || Date.now() - sum.at > 30_000) await evmPxRefresh(chain, token);
+  return evmPriceNative(chain, token);
+}
+const evmBalanceAsked = new Map<string, number>();
+function evmBalanceKick(chain: EvmChainKind): void {
+  const last = evmBalanceAsked.get(chain) ?? 0;
+  if (Date.now() - last < 10_000) return;
+  evmBalanceAsked.set(chain, Date.now());
+  void evmWallet.refreshBalance(chain).catch(() => undefined);
+}
 import * as walletScout from './engine/walletScout';
 import * as scoutScan from './engine/scoutScan';
 import * as walletHistory from './engine/walletHistory';
@@ -68,8 +163,14 @@ import { nameListProblem } from '@shared/pumpStats';
 const MAX_BULK = 40;
 import { looksLikeSolAddress } from '@shared/fees';
 import * as dexMeta from './data/providers/dexscreenerMeta';
-import { clearRpcRejection } from './evm/client';
-import { EVM_CHAINS, EVM_CHAIN_META, isEvmAddress, isEvmChain, type EvmChainKind, type ChainKind } from '@shared/evm';
+import { clearRpcRejection, client as evmClient } from './evm/client';
+import { nativeUsd as evmNativeUsd } from './evm/prices';
+import * as aioBuy from './engine/aioBuy';
+import { AIO_CHAIN_LABEL, AIO_CHAINS, AIO_EVM_PATHS, AIO_SOLANA_PATHS, aioEvmPath, aioSolanaPath, isAioPathChoice, type AioChain, type AioScanRow } from '@shared/aio';
+import { CHAIN_RESERVE, REFUEL_USD } from '@shared/aioConvert';
+import { COMPRESS_COIN, COMPRESS_KEEP, describeCompress, excludeKey, planCompress, safeSymbol, type CompressPlan } from '@shared/aioCompress';
+import { KRYPTO_TOKEN } from '@shared/krypto';
+import { EVM_CHAINS, EVM_CHAIN_META, NATIVE_ADDRESS, isEvmAddress, isEvmChain, type EvmChainKind, type ChainKind } from '@shared/evm';
 import * as launcher from './engine/launcher';
 import type { LaunchDeps } from './engine/launcher';
 import { MAX_DESCRIPTION, MAX_NAME, MAX_SYMBOL, type LaunchDraft } from '@shared/launch';
@@ -83,7 +184,8 @@ import * as swap from './engine/swap';
 import * as usdcSweep from './engine/usdcSweep';
 import { USDC_MINT } from './engine/tokenWithdraw';
 import * as bridge from './engine/bridge';
-import type { BridgeDraft } from '@shared/bridge';
+import type { BridgeDraft, BridgeQuote } from '@shared/bridge';
+import { HARD_FLOOR_USD } from '@shared/bridge';
 import { WSOL_MINT, type SwapDraft } from '@shared/swap';
 
 /** Chat replies are plain text; a named constant keeps the join sites tidy. */
@@ -286,10 +388,119 @@ const fail = (message: string): IpcResult<never> => ({ ok: false, message });
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const isAddress = (v: unknown): v is string => typeof v === 'string' && BASE58_ADDRESS.test(v);
 
+/**
+ * A native confirmation attached to the window that asked for it. Parentless,
+ * Windows can open the box BEHIND the app: the page then waits on a dialog the
+ * user never sees, and an edit they believe they saved was never saved
+ * (user report 2026-10-03 — a withdrawal went to the old address).
+ */
+/**
+ * On Linux with no keyring Chromium falls back to 'basic_text': "encrypted"
+ * with a fixed built-in key, so a stored phrase would in effect be plain text
+ * — and one phrase opens every chain. Refused there with a way out; unknown
+ * is not fine either (v6 audit 2026-10-03). Windows and macOS always have a
+ * real store (DPAPI, Keychain).
+ */
+function weakKeyStore(): string | null {
+  if (process.platform !== 'linux') return null;
+  let backend = 'unknown';
+  try {
+    backend = (safeStorage as unknown as { getSelectedStorageBackend?: () => string }).getSelectedStorageBackend?.() ?? 'unknown';
+  } catch {
+    /* stays unknown */
+  }
+  if (backend === 'basic_text' || backend === 'unknown') {
+    return 'This system has no secure key store (no keyring is running), so Krypto Bot will not save a recovery phrase it cannot really encrypt. Install or unlock GNOME Keyring or KWallet, restart Krypto Bot, and try again.';
+  }
+  return null;
+}
+
+function confirmNative(sender: Electron.WebContents, opts: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> {
+  const win = BrowserWindow.fromWebContents(sender);
+  return win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts);
+}
+
+/** The address(es) a pasted secret would add — derived here, for the
+ *  confirmation only. Null when it does not parse (the import itself then
+ *  refuses it with its own message). Never logged. */
+function solanaAddressOfSecret(input: string): string | null {
+  try {
+    const t = input.trim();
+    let seed: Uint8Array;
+    if (t.startsWith('[')) seed = new Uint8Array(JSON.parse(t) as number[]).slice(0, 32);
+    else {
+      const bytes = base58Decode(t);
+      seed = bytes.length >= 64 ? bytes.slice(0, 32) : bytes;
+    }
+    return seed.length === 32 ? Keypair.fromSeed(seed).publicKey.toBase58() : null;
+  } catch {
+    return null;
+  }
+}
+function evmAddressOfSecret(input: string): string | null {
+  const bare = input.trim().replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]{64}$/.test(bare)) return null;
+  try {
+    return privateKeyToAccount(`0x${bare.toLowerCase()}`).address;
+  } catch {
+    return null;
+  }
+}
+function addressesOfPhrase(input: string, paths?: { solana: string; evm: string }): string[] | null {
+  try {
+    if (seedPhraseProblem(input)) return null;
+    const phrase = normaliseSeedPhrase(input);
+    const seed = solanaSeedAtPath(phrase, aioSolanaPath(paths?.solana));
+    const key = evmPrivateKeyAtPath(phrase, aioEvmPath(paths?.evm));
+    const sol = Keypair.fromSeed(seed).publicKey.toBase58();
+    const evm = privateKeyToAccount(`0x${Buffer.from(key).toString('hex')}`).address;
+    seed.fill(0);
+    key.fill(0);
+    return [sol, evm];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The gate on every key import (swarm 2026-10-03). Page content cannot press
+ * a native dialog, so a compromised renderer can no longer slip in a key it
+ * knows and then move funds to it as "your own wallet".
+ */
+async function confirmImport(sender: Electron.WebContents, what: string, addresses: string[]): Promise<boolean> {
+  const { response } = await confirmNative(sender, {
+    type: 'warning',
+    buttons: ['Cancel', 'Import'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: 'Confirm import',
+    message: `Add ${what} to Krypto Bot?`,
+    detail:
+      `${addresses.length > 1 ? 'Addresses' : 'Address'}:\n${addresses.join('\n')}\n\n` +
+      'A wallet added here can sign trades, and money can be moved to it from your other wallets without asking again. ' +
+      'Only import a key you control. If you did not just paste a key into Krypto Bot, press Cancel.',
+  });
+  if (response !== 1) logger.warn(`import of ${what} cancelled at the confirmation dialog`);
+  return response === 1;
+}
+
+/**
+ * The execution endpoint: the user's fast / Helius URL when they set one,
+ * else the public one. `execHttpUrl` is DERIVED by resolveRpc() and never
+ * stored, so `s.rpc.execHttpUrl` read straight off store.load() is ALWAYS
+ * undefined — every IPC money path (Swap, Bridge and AIO moves, top-ups,
+ * Send, launches, fund/collect, USDC withdraw, creator fees) ran on the
+ * public RPC whatever the user configured (swarm 2026-10-03). Always resolve.
+ */
+export const execUrlOf = (rpc: Parameters<typeof resolveRpc>[0]): string => resolveRpc(rpc).execHttpUrl ?? rpc.httpUrl;
+
 /** The Solana endpoint a bridge reads and sends on — the same one trades use. */
 export function bridgeDeps(): bridge.BridgeDeps {
   const s = store.load();
-  return { httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl };
+  // The referrers ride along for Krypt's fee on a transfer (a fifth of it,
+  // exactly as on a trade) — Solana's for a Solana source, the EVM one else.
+  return { httpUrl: execUrlOf(s.rpc), referrer: s.referrer ?? '', evmReferrer: s.evm?.referrer ?? '', speed: s.aio?.speed ?? 'normal' };
 }
 
 /**
@@ -309,6 +520,13 @@ export function setWindowHost(h: WindowHost): void {
   windows = h;
 }
 
+/** Clears the float's failure stop (set inside registerIpc). */
+let aioFloatReset: () => void = () => undefined;
+
+/** The All-in-One recovery phrase has been on screen this session (created,
+ *  or revealed through the native dialog). Only then can "backed up" be set. */
+let aioPhraseShown = false;
+
 export function registerIpc(): void {
   // Construct the engine eagerly. It is otherwise built on first use, and
   // the terminal's data layer gets its context from the engine constructor —
@@ -317,7 +535,40 @@ export function registerIpc(): void {
   getEngine();
   // The Robinhood Chain rail beside it: its own wallet file, ledger and arm
   // state, sharing only the settings and the event stream.
-  evmRail.init({ userData: app.getPath('userData'), getSettings: () => store.load(), emit: broadcast });
+  // Tokens SENT to a wallet on BNB / Robinhood, found from the chain's logs.
+  tokenDiscovery.init(app.getPath('userData'), {
+    onFound: (chain, owner) => broadcast({ kind: 'evmHoldings', chain, owner }),
+    wrapped: { robinhood: CHAINS.robinhood.addr.wrapped, bnb: CHAINS.bnb.addr.wrapped },
+  });
+  evmRail.init({
+    userData: app.getPath('userData'),
+    getSettings: () => store.load(),
+    // A live EVM fill reaches scripts too (2026-10-03): the rail's events went
+    // to the window only, so a Robinhood/BNB script never heard its own fills.
+    emit: (ev) => {
+      broadcast(ev);
+      if (ev.kind === 'evmFill') automation.onEngineEvent(ev);
+    },
+  });
+  // A reconciled EVM SELL, priced against the wallet's own basis, for the
+  // scripts' daily loss stop and cool-off (2026-10-03: only Solana and paper
+  // exits counted, so a live EVM script could lose without limit).
+  evmLedger.onSettled((f) => {
+    if (f.side !== 'sell' || f.state !== 'reconciled' || f.nativeDeltaWei === null || f.tokenDeltaRaw === null) return;
+    const sold = -BigInt(f.tokenDeltaRaw);
+    const got = BigInt(f.nativeDeltaWei);
+    if (sold <= 0n) return; // a follow-up fee leg, not an exit
+    const b = evmLedger.basisByToken(f.chain, f.wallet).get(f.token);
+    // Unknown basis = unknown result: never counted as a profit or a loss.
+    // Only a BUY still pending makes the basis unknown. A curve sell's own
+    // fee transfer (pending when the sell settles) and a reverted fill (it
+    // moved no tokens) used to block it, so curve-venue losses never reached
+    // the script's loss stop (v6 audit 2026-10-03).
+    const buyPending = evmLedger.forWallet(f.chain, f.wallet).some((x) => x.token === f.token && x.side === 'buy' && x.state === 'pending');
+    if (!b || b.tokensBought <= 0n || buyPending) return;
+    const costWei = (b.spentWei * sold) / b.tokensBought;
+    automation.onEvmFillSettled({ chain: f.chain, mint: f.token, side: 'sell', at: f.at, wallet: f.wallet, requested: f.requested, realizedSol: Number(got - costWei) / 1e18 });
+  });
   // One Observatory per EVM chain. They are started by the user, not on boot:
   // a scanner polls RPC, and a chain nobody is looking at should not.
   /**
@@ -360,8 +611,74 @@ export function registerIpc(): void {
     onLaunchWindow: (chain, launch) => automation.onEvmLaunch(chain, launch),
     // …and the chain's runner flags, as their runner event and bot.runners().
     onRunner: (chain, flag, launch) => automation.onEvmRunner(chain, flag, launch),
+    // …the price prints, as the scripts' tick, and followed wallets' trades.
+    onPrice: (chain, token, price) => {
+      if (curveQuoteNative(chain, token) === true) automation.onEvmTick(chain, token, price);
+    },
+    onLeaderTrade: (chain, t) =>
+      automation.onLeaderTrade({
+        chain,
+        mint: t.token,
+        symbol: t.symbol,
+        wallet: t.wallet,
+        label: copyTrade.all().find((c) => (c.chain ?? 'solana') === chain && c.wallet.toLowerCase() === t.wallet)?.label ?? '',
+        side: t.isBuy ? 'buy' : 'sell',
+        sol: t.native,
+        priceSol: curveQuoteNative(chain, t.token) === true ? t.priceNative : (evmPriceNative(chain, t.token) ?? 0),
+        soldFraction: t.soldFraction,
+      }),
   });
   automation.setEvmRunnerSource((chain) => evmScanner.flagged(chain));
+  // What a Robinhood/BNB script reads that the engine host does not carry.
+  automation.setEvmScriptHooks({
+    launch: (chain, token) => evmScanner.launches(chain).find((l) => l.token.toLowerCase() === token.toLowerCase()) ?? null,
+    ownsWholeBag: (chain, token, hashes) => {
+      const mine = new Set(hashes.map((h) => h.toLowerCase()));
+      const buys = evmRail.fills(chain).filter((f) => f.token === token && f.side === 'buy' && f.tokenDeltaRaw !== null && BigInt(f.tokenDeltaRaw) > 0n);
+      if (!buys.length) return null;
+      return buys.every((f) => mine.has(f.hash.toLowerCase()));
+    },
+    history: (chain, limit) =>
+      evmRail
+        .fills(chain)
+        .slice()
+        .sort((a, b) => b.at - a.at)
+        .slice(0, limit)
+        .map((f) => ({
+          at: f.at,
+          mint: f.token,
+          symbol: f.symbol,
+          side: f.side,
+          hash: f.hash,
+          requested: f.requested,
+          // The chain's own coin; null until the fill is reconciled.
+          nativeDelta: f.nativeDeltaWei === null ? null : Number(BigInt(f.nativeDeltaWei)) / 1e18,
+          state: f.state,
+        })),
+    nativeUsd: async (chain) => (chain === 'solana' ? market.solUsd() : evmNativeUsd(chain as EvmChainKind)),
+    identity: (chain, token) => evmIdentity.get(evmPxKey(chain, token)) ?? null,
+    wallets: (chain) => {
+      const active = evmWallet.address(chain)?.toLowerCase() ?? null;
+      return evmWallet.list(chain).map((w) => ({ address: w.address, label: w.label, active: w.address.toLowerCase() === active, native: w.balanceNative }));
+    },
+    // One of the user's OTHER wallets on this chain, by address — the rules
+    // Solana's engine.scriptWalletTrade applies: an address that is not the
+    // user's own is refused (never the active wallet instead), and trading
+    // several of their wallets needs the multi-wallet acknowledgement.
+    walletTrade: async (chain, side, address, token, amount) => {
+      const mine = evmWallet.list(chain).find((w) => w.address.toLowerCase() === address.toLowerCase());
+      if (!mine) return { ok: false, message: `no wallet of yours has the address ${address.slice(0, 10)}…` };
+      const { multiWalletProblem } = await import('@shared/multiWallet');
+      const why = multiWalletProblem(1, store.load().multiWallet);
+      if (why) return { ok: false, message: why };
+      if (side === 'buy') {
+        const r = await evmRail.buy(chain, token, amount, false, { walletId: mine.id });
+        return { ok: r.ok, message: r.message };
+      }
+      const r = await evmRail.sell(chain, token, amount, false, { walletId: mine.id });
+      return { ok: r.ok, message: r.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${r.message})` : r.message };
+    },
+  });
   // Recorder mode follows the firehose switch: off = launch tape (creates,
   // first 30 min of trades per mint, completions, health), on = everything.
   recorder.setMode(store.load().recordFirehose ? 'firehose' : 'launch');
@@ -719,6 +1036,8 @@ export function registerIpc(): void {
     }
     try {
       const before = store.load();
+      // Switching the float on (again) clears a stop its failure breaker set.
+      if (v.patch.aio?.floatEnabled === true && before.aio?.floatEnabled !== true) aioFloatReset();
       // The trading mode is stripped from every patch (settingsValidation.ts).
       // Usually it was just carried along by a spread and matches what is
       // already stored — nothing to say. A patch asking for a DIFFERENT mode
@@ -896,8 +1215,10 @@ export function registerIpc(): void {
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
-  ipcMain.handle('wallet:import', (_e, secret: string, label: unknown) => {
+  ipcMain.handle('wallet:import', async (e, secret: string, label: unknown) => {
     if (typeof secret !== 'string') return fail('Invalid key');
+    const addr = solanaAddressOfSecret(secret);
+    if (addr && !(await confirmImport(e.sender, 'this Solana wallet', [addr]))) return fail('Import cancelled');
     const r = wallet.importSecret(secret, typeof label === 'string' ? label : '');
     if (r.ok) { syncLiveMode(); refreshScoutOwnership(); }
     // A sign-in-only pump.fun account with this address moves onto the wallet.
@@ -918,10 +1239,9 @@ export function registerIpc(): void {
    * underneath a broadcast is how a fill lands from a wallet the user was not
    * looking at. Disarming first is one click and makes the change deliberate.
    */
-  ipcMain.handle('wallet:select', (_e, id: unknown) => {
-    if (typeof id !== 'string' || !id) return fail('Invalid wallet id');
+  const switchSolanaWallet = (id: string): { ok: boolean; message: string } => {
     if (getEngine().liveState().armed) {
-      return fail('Disarm live execution before switching wallets.');
+      return { ok: false, message: 'Disarm live execution before switching wallets.' };
     }
     const r = wallet.select(id);
     if (r.ok) logger.warn(`wallet:select — active wallet is now ${wallet.publicKey() ?? 'none'}`);
@@ -933,6 +1253,11 @@ export function registerIpc(): void {
       // Orders and engine positions sell the ACTIVE wallet: re-check Trader claims.
       kryptoTrader.onWalletSwitched(wallet.info().id ?? null);
     }
+    return r;
+  };
+  ipcMain.handle('wallet:select', (_e, id: unknown) => {
+    if (typeof id !== 'string' || !id) return fail('Invalid wallet id');
+    const r = switchSolanaWallet(id);
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
@@ -944,7 +1269,7 @@ export function registerIpc(): void {
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
 
-  ipcMain.handle('wallet:setHome', async (_e, addr: string) => {
+  ipcMain.handle('wallet:setHome', async (e, addr: string) => {
     // The withdrawal address is the ONE destination the signer will send the
     // full balance to. Changing it must require a human, not just a renderer
     // message — that link is what turned an unvalidated settings patch into a
@@ -953,7 +1278,7 @@ export function registerIpc(): void {
     const current = wallet.info().homeAddress;
     if (next === current) return ok('Withdrawal address unchanged', wallet.info());
 
-    const { response } = await dialog.showMessageBox({
+    const { response } = await confirmNative(e.sender, {
       type: 'warning',
       buttons: ['Cancel', 'Change withdrawal address'],
       defaultId: 0,
@@ -1013,6 +1338,165 @@ export function registerIpc(): void {
     }
   });
 
+  // ── Send: any coin or token, to any address (2026-10-03) ─────────────
+  //
+  // The page asks; main re-reads everything, and nothing is signed until the
+  // NATIVE dialog — attached to the asking window, unpressable by page
+  // content — has shown the exact address and amount and the user said yes.
+  // The Solana signer then checks the bytes against an approval only this
+  // handler can file; the EVM policy pins recipient and amount the same way.
+  type PlannedSend =
+    | { ok: true; review: SendReview; solana?: solanaSend.SolanaSendPlan; evm?: evmSend.EvmSendPlan }
+    | { ok: false; message: string };
+  /** The app's own addresses in one family, for the poisoning check: every
+   *  wallet key it holds and every withdrawal address saved (v6 audit). */
+  const ownSendAddresses = (family: 'solana' | 'evm'): Array<{ address: string; label: string | null }> => {
+    const out: Array<{ address: string; label: string | null }> = [];
+    if (family === 'solana') {
+      for (const w of wallet.list()) {
+        out.push({ address: w.publicKey, label: `wallet “${w.label}”` });
+        if (w.homeAddress) out.push({ address: w.homeAddress, label: `withdrawal address (wallet “${w.label}”)` });
+      }
+    } else {
+      const seen = new Set<string>();
+      for (const c of ['bnb', 'robinhood'] as const) {
+        for (const w of evmWallet.list(c)) {
+          if (seen.has(w.address.toLowerCase())) continue;
+          seen.add(w.address.toLowerCase());
+          out.push({ address: w.address, label: `wallet “${w.label}”` });
+        }
+      }
+    }
+    return out;
+  };
+  const planSend = async (req: SendRequest): Promise<PlannedSend> => {
+    const r = await planSendRaw(req);
+    if (!r.ok) return r;
+    // The address book's view of this recipient: a lookalike of an address
+    // you use (address poisoning), a first-time recipient, the saved name.
+    const chk = checkRecipient(sendBook.book(), familyOf(req.chain), r.review.to, ownSendAddresses(familyOf(req.chain)));
+    r.review = { ...r.review, warnings: [...recipientWarnings(chk), ...r.review.warnings], contactLabel: chk.contact?.label ?? null };
+    return r;
+  };
+  const planSendRaw = async (req: SendRequest): Promise<PlannedSend> => {
+    if (req.chain === 'solana') {
+      const owner = wallet.publicKey();
+      if (!owner) return { ok: false, message: 'No Solana wallet.' };
+      // The engine's metadata first, then the well-known list (USDC, USDT…):
+      // a classic SPL mint carries no symbol of its own.
+      const hint = req.token
+        ? (getEngine().holdingsCached()?.data.find((h) => h.mint === req.token)?.symbol ?? KNOWN_MINTS.solana.find((m) => m.mint === req.token)?.symbol ?? null)
+        : null;
+      const held = getEngine().holdingsCached()?.data ?? null;
+      const open = held ? held.filter((h) => h.mint !== 'So11111111111111111111111111111111111111112' && h.uiAmount > 0).length : null;
+      const r = await solanaSend.plan(execUrlOf(store.load().rpc), owner, req, hint, open);
+      return r.ok ? { ok: true, review: r.plan.review, solana: r.plan } : r;
+    }
+    if (!evmRail.enabled(req.chain)) return { ok: false, message: `${EVM_CHAIN_META[req.chain].name} is turned off in Settings.` };
+    const r = await evmSend.plan(req.chain, req);
+    return r.ok ? { ok: true, review: r.plan.review, evm: r.plan } : r;
+  };
+
+  ipcMain.handle('send:review', async (_e, raw: unknown) => {
+    const req = sendRequestOf(raw);
+    if (!req) return fail('Not a send request');
+    try {
+      const r = await planSend(req);
+      return r.ok ? ok('ok', r.review) : fail(r.message);
+    } catch (err) {
+      return fail(`Could not check this send: ${safeErr(err)}`);
+    }
+  });
+
+  ipcMain.handle('send:execute', async (e, raw: unknown) => {
+    const req = sendRequestOf(raw);
+    if (!req) return fail('Not a send request');
+    let planned: PlannedSend;
+    try {
+      // Fresh — never the review the page holds: balances move.
+      planned = await planSend(req);
+    } catch (err) {
+      return fail(`Could not check this send: ${safeErr(err)}`);
+    }
+    if (!planned.ok) return fail(planned.message);
+    const rv = planned.review;
+    const chainName = req.chain === 'solana' ? 'Solana' : EVM_CHAIN_META[req.chain].name;
+    const { response } = await confirmNative(e.sender, {
+      type: 'warning',
+      buttons: ['Cancel', `Send ${rv.amountText}`],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'Confirm send',
+      message: `Send ${rv.amountText} on ${chainName}?`,
+      detail:
+        `To:\n${rv.to}${rv.contactLabel ? `\n(in your address book as “${rv.contactLabel}”)` : ''}\n\nFrom:\n${rv.from}\n` +
+        (rv.token ? `\nToken:\n${rv.token}\n` : '') +
+        (rv.networkFeeText ? `\nNetwork fee: ${rv.networkFeeText}` : '') +
+        (rv.extraCostText ? `\nAlso: ${rv.extraCostText}` : '') +
+        (rv.warnings.length ? `\n\n${rv.warnings.map((w) => `• ${w}`).join('\n')}` : '') +
+        '\n\nA send cannot be undone. Check the address character by character. If you did not just press Send in Krypto Bot, press Cancel.',
+    });
+    if (response !== 1) {
+      logger.warn(`send: cancelled at the confirmation dialog (${rv.amountText} on ${req.chain})`);
+      return fail('Send cancelled');
+    }
+    logger.warn(`send: confirmed — ${rv.amountText} on ${req.chain} from ${rv.from} to ${rv.to}`);
+    let result: SendResult;
+    try {
+      if (planned.solana) {
+        const p = planned.solana;
+        const b = p.build;
+        const approvalId = wallet.approveSend(p.owner, {
+          to: p.review.to,
+          mint: b.kind === 'sol' ? null : b.mint,
+          tokenProgram: b.kind === 'sol' ? null : b.program,
+          maxAmount: b.kind === 'sol' ? b.lamports : b.amount,
+        });
+        result = await getEngine().queueLive(() => solanaSend.execute(execUrlOf(store.load().rpc), p, approvalId));
+        void wallet.refreshBalance(execUrlOf(store.load().rpc));
+      } else if (planned.evm) {
+        result = await evmSend.execute(planned.evm);
+        void evmWallet.refreshBalance(planned.evm.chain);
+      } else {
+        return fail('Nothing to send');
+      }
+    } catch (err) {
+      logger.warn(`send: error — ${safeErr(err)}`);
+      return fail(`Send error: ${safeErr(err)}`);
+    }
+    logger.warn(`send: ${result.ok ? 'sent' : 'FAILED'} — ${result.message}${result.txid ? ` tx=${result.txid}` : ''}`);
+    if (result.txid) sendBook.noteSend({ at: Date.now(), chain: req.chain, to: rv.to, token: rv.token, amountText: rv.amountText, txid: result.txid, ok: result.ok });
+    return { ok: result.ok, message: result.message, data: result };
+  });
+
+  // ── The Send address book (2026-10-03) ───────────────────────────────
+  ipcMain.handle('send:book', () => {
+    const b = sendBook.book();
+    return ok('ok', { contacts: b.contacts, history: b.history.slice(0, 50), failure: sendBook.failure() });
+  });
+  ipcMain.handle('send:saveContact', (_e, label: unknown, chain: unknown, address: unknown) => {
+    const name = cleanLabel(label);
+    if (!name) return fail('Give the address a name.');
+    if (chain !== 'solana' && chain !== 'bnb' && chain !== 'robinhood') return fail('Unknown chain');
+    if (typeof address !== 'string') return fail('Not an address');
+    const family = familyOf(chain);
+    const a = address.trim();
+    if (family === 'solana' ? !isAddress(a) : !isEvmAddress(a)) return fail(`That is not a ${family === 'solana' ? 'Solana' : 'EVM'} address.`);
+    // Only an address a send actually went to: the page can call this, and a
+    // contact's name is printed in the native Send dialog (v6 audit).
+    if (!sendBook.book().history.some((h) => h.ok && familyOf(h.chain) === family && (family === 'evm' ? h.to.toLowerCase() === a.toLowerCase() : h.to === a))) {
+      return fail('Save an address after a send to it has gone through.');
+    }
+    const r = sendBook.saveContact({ label: name, family, address: a });
+    return r.ok ? ok(`Saved as “${name}”`, sendBook.book().contacts) : fail(r.message);
+  });
+  ipcMain.handle('send:removeContact', (_e, id: unknown) => {
+    if (typeof id !== 'string') return fail('Not a contact');
+    const r = sendBook.removeContact(id);
+    return r.ok ? ok('Removed', sendBook.book().contacts) : fail(r.message);
+  });
+
   ipcMain.handle('wallet:setMaxBalance', (_e, sol: number) => {
     const r = wallet.setMaxBalance(Number(sol));
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
@@ -1060,12 +1544,12 @@ export function registerIpc(): void {
     return r.ok ? ok('ok', r.data) : fail(r.message);
   });
 
-  ipcMain.handle('wallet:remove', (_e, id: unknown) => {
+  const removeSolanaWallet = (id: unknown): { ok: boolean; message: string } => {
     // A Krypto Trader session's wallet cannot go while the session is not
     // stopped and empty — checked BEFORE the disarm below, so a refused
     // removal disarms nothing (critic #16).
     const traderBlock = kryptoTrader.walletRemoveBlocked(typeof id === 'string' && id ? id : (wallet.info().id ?? ''));
-    if (traderBlock) return fail(traderBlock);
+    if (traderBlock) return { ok: false, message: traderBlock };
     // Disarm FIRST and unconditionally. Removing any wallet can promote a
     // different one to active, and staying armed across that change is the
     // same hazard `wallet:select` refuses outright.
@@ -1080,7 +1564,269 @@ export function registerIpc(): void {
       logger.warn(`wallet:remove — active wallet is now ${wallet.publicKey() ?? 'none'}`);
       syncLiveMode(); // a promoted wallet re-arms; no wallet stays disarmed
     }
+    return r;
+  };
+  ipcMain.handle('wallet:remove', (_e, id: unknown) => {
+    const r = removeSolanaWallet(id);
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
+  });
+
+  // ── All-in-One wallet (2026-10-01) ─────────────────────────────────────
+  // One phrase, one Solana key + one EVM key, held in the ordinary stores
+  // (shared/aio.ts). Nothing here signs; switching and removing go through
+  // the same functions and interlocks as the per-chain pages.
+  const armedChains = (): string[] => [
+    ...(getEngine().liveState().armed ? ['Solana'] : []),
+    ...EVM_CHAINS.filter((c) => evmRail.armed(c)).map((c) => EVM_CHAIN_META[c].shortName),
+  ];
+  const aioAnnounce = (): void => {
+    broadcast({ kind: 'aioChanged' });
+  };
+  ipcMain.handle('aio:info', () => ok('ok', aioWallet.info()));
+  // Everything both addresses hold, every chain, in dollars. Reads only.
+  ipcMain.handle('aio:balances', async (_e, refresh: unknown) => {
+    const i = aioWallet.info();
+    if (!i.exists) return fail('No All-in-One wallet.');
+    const b = await aioBalances({ httpUrl: resolveRpc(store.load().rpc).httpUrl, solanaAddress: i.solanaAddress, evmAddress: i.evmAddress, force: refresh === true });
+    return ok('ok', b);
+  });
+  /** After a key was added: if it became the Solana signer (the first
+   *  wallet on this install), everything a switch does must happen too —
+   *  the live mode, the caches, the event, the Trader claims. */
+  const afterAioKeysAdded = (solanaBefore: string | null): void => {
+    refreshScoutOwnership();
+    evmRail.wallet.announce();
+    if (wallet.publicKey() !== solanaBefore) {
+      syncLiveMode();
+      getEngine().clearWalletCaches();
+      broadcast({ kind: 'walletSwitched', publicKey: wallet.publicKey() ?? null });
+      kryptoTrader.onWalletSwitched(wallet.info().id ?? null);
+    }
+    aioAnnounce();
+  };
+  ipcMain.handle('aio:create', async (e, label: unknown) => {
+    const weak = weakKeyStore();
+    if (weak) return fail(weak);
+    // A NATIVE yes before a phrase exists: the reply carries it once, and page
+    // content alone must never be able to mint a wallet whose keys it then
+    // knows (v6 audit 2026-10-03 — the same rule as reveal and import).
+    const { response } = await confirmNative(e.sender, {
+      type: 'question',
+      buttons: ['Cancel', 'Create and show the phrase'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'Create an All-in-One wallet',
+      message: 'Create an All-in-One wallet?',
+      detail:
+        'One recovery phrase for every chain. Its words are shown on the next screen — write them down; anyone who sees them can take everything in the wallet.\n\n' +
+        'Make sure nobody is watching your screen and nothing is recording it. If you did not just ask for a new wallet in Krypto Bot, press Cancel.',
+    });
+    if (response !== 1) return fail('Cancelled');
+    const before = wallet.publicKey();
+    const r = aioWallet.create(label);
+    if (r.ok) aioPhraseShown = true;
+    // Announced on failure too when a record now exists (the phrase is saved
+    // and the page must show Repair), not only on success.
+    if (r.ok || aioWallet.info().exists) afterAioKeysAdded(before);
+    // The phrase goes back ONCE, for the backup screen. Never logged.
+    return r.ok ? ok(r.message, { info: aioWallet.info(), phrase: r.phrase }) : fail(r.message);
+  });
+  /**
+   * Where does this phrase hold money? (2026-10-03.) Wallets derive different
+   * paths — a Trust Wallet phrase read the Phantom way looked EMPTY. Read-only:
+   * every catalogued address and its balance, nothing stored, nothing signed.
+   */
+  ipcMain.handle('aio:scanPhrase', async (_e, raw: unknown) => {
+    if (typeof raw !== 'string') return fail('Enter the recovery phrase.');
+    const problem = seedPhraseProblem(raw);
+    if (problem) return fail(problem);
+    const phrase = normaliseSeedPhrase(raw);
+    const sol = AIO_SOLANA_PATHS.map((p) => {
+      const seed = solanaSeedAtPath(phrase, p.path as number[]);
+      const address = Keypair.fromSeed(seed).publicKey.toBase58();
+      seed.fill(0);
+      return { id: p.id, label: p.label, address };
+    });
+    const evm = AIO_EVM_PATHS.map((p) => {
+      const key = evmPrivateKeyAtPath(phrase, p.path as string);
+      const address = privateKeyToAccount(`0x${Buffer.from(key).toString('hex')}`).address;
+      key.fill(0);
+      return { id: p.id, label: p.label, address };
+    });
+    const evmChains = EVM_CHAINS.filter((c) => evmRail.enabled(c));
+    const [solInfo, ...evmBals] = await Promise.all([
+      getMultipleAccountInfo(execUrlOf(store.load().rpc), sol.map((r) => r.address)).catch(() => null),
+      ...evmChains.map((c) =>
+        Promise.all(evm.map((r) => evmClient(c).getBalance({ address: r.address as `0x${string}` }).then((w) => Number(w) / 1e18, () => null))),
+      ),
+    ]);
+    // Unread stays null (honest null): never shown as an empty wallet.
+    const solRows: AioScanRow[] = sol.map((r, i) => ({
+      ...r,
+      balances: { solana: solInfo && solInfo.ok && solInfo.data ? (solInfo.data[i] ? solInfo.data[i]!.lamports / 1e9 : 0) : null },
+    }));
+    const evmRows: AioScanRow[] = evm.map((r, i) => ({
+      ...r,
+      balances: Object.fromEntries(evmChains.map((c, k) => [c, (evmBals[k] as Array<number | null>)[i] ?? null])),
+    }));
+    return ok('ok', { solana: solRows, evm: evmRows });
+  });
+  ipcMain.handle('aio:import', async (e, phrase: unknown, label: unknown, choice: unknown) => {
+    const weak = weakKeyStore();
+    if (weak) return fail(weak);
+    // A path choice from the scan, or the defaults. An unknown id is refused,
+    // never "corrected": the user picked an address, not a guess at one.
+    if (choice !== undefined && choice !== null && !isAioPathChoice(choice)) return fail('Unknown derivation path');
+    const paths = isAioPathChoice(choice) ? { solana: choice.solana, evm: choice.evm } : undefined;
+    const addrs = typeof phrase === 'string' ? addressesOfPhrase(phrase, paths) : null;
+    if (addrs && !(await confirmImport(e.sender, 'this All-in-One wallet (every chain)', addrs))) return fail('Import cancelled');
+    const before = wallet.publicKey();
+    const r = aioWallet.importPhrase(phrase, label, paths);
+    if (r.ok || aioWallet.info().exists) afterAioKeysAdded(before);
+    return r.ok ? ok(r.message, aioWallet.info()) : fail(r.message);
+  });
+  /**
+   * The phrase is every key on every chain, so it is decrypted only after a
+   * NATIVE confirmation in main — page content cannot press it. A renderer
+   * modal alone meant any renderer compromise could take the whole wallet
+   * with one call (review 2026-10-02). Same pattern as wallet:setHome.
+   */
+  ipcMain.handle('aio:reveal', async (e) => {
+    if (!aioWallet.info().exists) return fail('No All-in-One wallet.');
+    const { response } = await confirmNative(e.sender, {
+      type: 'warning',
+      buttons: ['Cancel', 'Show recovery phrase'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'Show recovery phrase',
+      message: 'Show the All-in-One wallet\'s recovery phrase?',
+      detail:
+        'These words are every key in this wallet, on every chain. Anyone who sees them can take everything in it.\n\n' +
+        'Make sure nobody is watching your screen and nothing is recording it. If you did not just ask to see the phrase in Krypto Bot, press Cancel.',
+    });
+    if (response !== 1) {
+      logger.warn('aio wallet: recovery phrase NOT shown — cancelled at the confirmation dialog');
+      return fail('Cancelled');
+    }
+    const r = aioWallet.reveal();
+    if (r.ok) aioPhraseShown = true;
+    if (r.ok) logger.warn('aio wallet: recovery phrase shown');
+    return r.ok ? ok('ok', r.phrase) : fail(r.message);
+  });
+  ipcMain.handle('aio:backedUp', () => {
+    // A bare claim from the page is not a backup: the phrase must have been
+    // on screen this session (create, or a natively confirmed reveal) —
+    // otherwise "backed up" unlocks Remove, which deletes the only copy
+    // (swarm 2026-10-03).
+    if (!aioPhraseShown) return fail('Show the recovery phrase and write it down first.');
+    const r = aioWallet.markBackedUp();
+    if (r.ok) aioAnnounce();
+    return r.ok ? ok(r.message, aioWallet.info()) : fail(r.message);
+  });
+  ipcMain.handle('aio:repair', () => {
+    const before = wallet.publicKey();
+    const r = aioWallet.repair();
+    afterAioKeysAdded(before);
+    return r.ok ? ok(r.message, aioWallet.info()) : fail(r.message);
+  });
+  /**
+   * Make it the signer on every chain. Refused while ANY chain is live —
+   * the same rule as each page's own switcher, all at once, so it never
+   * half-switches: either every chain moves or none does.
+   */
+  ipcMain.handle('aio:activate', () => {
+    const live = armedChains();
+    if (live.length) return fail(`Switch ${live.join(', ')} to Paper before making the All-in-One wallet the signer everywhere.`);
+    const ids = aioWallet.walletIds();
+    if (!ids.solana || !ids.evm) return fail('A key is missing from its wallet list — use Repair first.');
+    // Each chain is switched in turn; there is no rollback (switching back
+    // would be a second change the user did not ask for), so a failure part
+    // way says EXACTLY which chains moved — never "did not switch" over a
+    // half-switched state (review 2026-10-02).
+    const switched: string[] = [];
+    const fails = (why: string): ReturnType<typeof fail> => {
+      aioAnnounce();
+      return fail(switched.length ? `${why}. Already switched: ${switched.join(', ')} — the page shows where it signs now.` : why);
+    };
+    try {
+      const sol = switchSolanaWallet(ids.solana);
+      if (!sol.ok) return fails(`Solana did not switch: ${sol.message}`);
+      switched.push('Solana');
+      for (const c of EVM_CHAINS) {
+        const r = evmRail.wallet.select(c, ids.evm);
+        if (!r.ok) return fails(`${EVM_CHAIN_META[c].shortName} did not switch: ${r.message}`);
+        switched.push(EVM_CHAIN_META[c].shortName);
+      }
+    } catch (err) {
+      return fails(`Switching stopped: ${safeErr(err)}`);
+    }
+    logger.warn('aio wallet: now the signer on every chain');
+    aioAnnounce();
+    return ok('The All-in-One wallet now signs on every chain', aioWallet.info());
+  });
+  /**
+   * Remove it: both keys from their stores, then the record. Refused until
+   * the phrase is confirmed written down — removing deletes the only copy
+   * this machine has, and the funds go with it if nothing else holds it.
+   */
+  ipcMain.handle('aio:remove', async (e) => {
+    const i = aioWallet.info();
+    if (!i.exists) return fail('No All-in-One wallet.');
+    if (!i.backedUp) return fail('Write down the recovery phrase first (Show phrase, then confirm). Removing deletes the only copy on this machine.');
+    const live = armedChains();
+    if (live.length) return fail(`Switch ${live.join(', ')} to Paper before removing the All-in-One wallet.`);
+    // Keys the phrase ADOPTED (they were in the lists before the wallet was
+    // set up) stay: removing the All-in-One wallet must not delete a wallet
+    // the user had on its own, with its label, withdrawal address and links.
+    const adopted = aioWallet.adoptedKeys();
+    const removeEvm = i.evmWalletId !== null && !adopted.evm;
+    const removeSol = i.solanaWalletId !== null && !adopted.solana;
+    // EVERY refusal is checked before ANYTHING is removed, so a Trader
+    // session on one key can never leave the other already deleted.
+    if (removeEvm) {
+      const block = kryptoTrader.walletRemoveBlocked(i.evmWalletId!, 'evm');
+      if (block) return fail(block);
+    }
+    if (removeSol) {
+      const block = kryptoTrader.walletRemoveBlocked(i.solanaWalletId!);
+      if (block) return fail(block);
+    }
+    // The last step before deleting the only copy of the phrase on this
+    // profile: a native confirmation page content cannot press.
+    const { response } = await confirmNative(e.sender, {
+      type: 'warning',
+      buttons: ['Cancel', 'Remove'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'Remove the All-in-One wallet',
+      message: 'Remove the All-in-One wallet from this profile?',
+      detail:
+        `Solana: ${i.solanaAddress ?? '—'}\nEVM: ${i.evmAddress ?? '—'}\n\n` +
+        'Its recovery phrase and keys are deleted from this profile. Anything they hold stays on chain, and only your written-down phrase can bring it back. ' +
+        'Copies made earlier with Duplicate profile keep their own keys.',
+    });
+    if (response !== 1) {
+      logger.warn('aio wallet: remove cancelled at the confirmation dialog');
+      return fail('Remove cancelled');
+    }
+    if (removeEvm) {
+      const r = evmRail.wallet.remove(i.evmWalletId!);
+      if (!r.ok) return fail(`EVM key not removed: ${r.message}`);
+    }
+    if (removeSol) {
+      const r = removeSolanaWallet(i.solanaWalletId!);
+      if (!r.ok) return fail(`Solana key not removed: ${r.message}. The EVM key was removed; the recovery phrase is kept so Repair can restore it.`);
+    }
+    const r = aioWallet.forget();
+    refreshScoutOwnership();
+    aioAnnounce();
+    const kept = [adopted.solana ? 'Solana' : null, adopted.evm ? 'EVM' : null].filter(Boolean);
+    return r.ok
+      ? ok(kept.length ? `${r.message}. Your ${kept.join(' and ')} wallet from before stays in its list.` : r.message, aioWallet.info())
+      : fail(r.message);
   });
 
   // ── chat bots (Telegram / Discord) ───────────────────────────────
@@ -1817,12 +2563,12 @@ export function registerIpc(): void {
     },
     fund: async (fromWalletId, toAddress, lamports) => {
       const st = store.load();
-      const r = await fund.fundWallets(st.rpc.execHttpUrl ?? st.rpc.httpUrl, [{ publicKey: toAddress, lamports }], fromWalletId);
+      const r = await fund.fundWallets(execUrlOf(st.rpc), [{ publicKey: toAddress, lamports }], fromWalletId);
       return { ok: r.ok, message: r.message };
     },
     collect: async (walletId, toWalletId) => {
       const st = store.load();
-      const [r] = await fund.collectToActive(st.rpc.execHttpUrl ?? st.rpc.httpUrl, [walletId], toWalletId);
+      const [r] = await fund.collectToActive(execUrlOf(st.rpc), [walletId], toWalletId);
       return r ? { ok: r.ok, message: r.message } : { ok: false, message: 'nothing was collected' };
     },
     ask: async (facts, goal) => {
@@ -2538,7 +3284,7 @@ export function registerIpc(): void {
     const s = store.load();
     return {
       cfg: s.launch,
-      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: execUrlOf(s.rpc),
       activeSolanaWalletId: wallet.list().find((w) => w.active)?.id ?? null,
       activeEvmWalletId: evmWallet.list('robinhood').find((w) => w.active)?.id ?? null,
       // The EVM referrer, not the Solana one: this only reaches
@@ -2571,7 +3317,7 @@ export function registerIpc(): void {
   const swapDeps = (): swap.SwapDeps => {
     const s = store.load();
     return {
-      httpUrl: s.rpc.execHttpUrl ?? s.rpc.httpUrl,
+      httpUrl: execUrlOf(s.rpc),
       referrer: s.referrer,
       live: getEngine().liveState().armed && s.execution.liveEnabled,
     };
@@ -2691,7 +3437,7 @@ export function registerIpc(): void {
     else return fail('Amount must be a positive number of USDC, or max');
     const { withdrawUsdc } = await import('./engine/tokenWithdraw');
     const s = store.load();
-    const r = await withdrawUsdc(s.rpc.execHttpUrl ?? resolveRpc(s.rpc).httpUrl, { walletId, amountRaw });
+    const r = await withdrawUsdc(execUrlOf(s.rpc), { walletId, amountRaw });
     logger.warn(`rewards: USDC withdrawal from ${walletId} to ${r.dest ?? '(no address)'}: ${r.ok ? `sent ${r.amountRaw} base units as ${r.signature}` : r.message}`);
     return r.ok ? ok(r.message === 'confirmed' ? 'USDC sent to your withdrawal address.' : 'USDC sent — confirmation pending.', r) : fail(r.message);
   });
@@ -2747,16 +3493,498 @@ export function registerIpc(): void {
     }
   });
 
-  ipcMain.handle('bridge:send', async (_e, raw: unknown, simulateOnly: unknown) => {
+  ipcMain.handle('bridge:send', async (_e, raw: unknown, simulateOnly: unknown, quoteId: unknown) => {
     if (!store.load().bridge.enabled) return fail('Bridging is switched off for this install.');
     const draft = bridgeDraftOf(raw);
     if (!draft) return fail('That is not a transfer');
     try {
-      const r = await bridge.send(draft, bridgeDeps(), simulateOnly === true);
+      const r = await bridge.send(draft, bridgeDeps(), simulateOnly === true, typeof quoteId === 'string' ? quoteId : undefined);
       if (r.ok && simulateOnly !== true) logger.warn(`bridge: ${draft.amount} sent ${draft.from} to ${draft.to} (${r.txHash ?? 'no hash'})`);
       return r.ok ? ok(r.message, r) : fail(r.message);
     } catch (err) {
       return fail(`Transfer error: ${safeErr(err)}`);
+    }
+  });
+
+  // ── All-in-One: move between chains (2026-10-01) ─────────────────────
+  // The Bridge engine, unchanged, between the All-in-One wallet's own
+  // addresses. Its own consent, not the Bridge switch: the wallet page is
+  // where the user asked for it. Only while the All-in-One wallet signs on
+  // every chain — otherwise 'its' addresses would be whichever wallets
+  // happen to be active, and the money would go somewhere the page does
+  // not show.
+  const aioMoveBlocked = (draft?: { from: string; to: string } | null): string | null => {
+    const i = aioWallet.info();
+    if (!i.exists) return 'No All-in-One wallet.';
+    if (!i.activeEverywhere) return 'Make the All-in-One wallet the signer on every chain first (Use it on every chain).';
+    // A switched-off chain is not a destination: the Move card once showed
+    // "Solana → Solana" and quoted to BNB (swarm 2026-10-03, UX-7).
+    for (const c of draft ? [draft.from, draft.to] : []) {
+      if (isEvmChain(c) && !evmRail.enabled(c)) return `${EVM_CHAIN_META[c].name} is turned off in Settings.`;
+    }
+    return null;
+  };
+  ipcMain.handle('aio:moveQuote', async (_e, raw: unknown) => {
+    const draft = bridgeDraftOf(raw);
+    if (!draft) return fail('That is not a transfer');
+    const blocked = aioMoveBlocked(draft);
+    if (blocked) return fail(blocked);
+    try {
+      const r = await bridge.quote(draft, bridgeDeps());
+      return r.ok && r.quote ? ok(r.message, r.quote) : fail(r.message);
+    } catch (err) {
+      return fail(`Could not price that move: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('aio:moveSend', async (_e, raw: unknown, simulateOnly: unknown, quoteId: unknown) => {
+    const draft = bridgeDraftOf(raw);
+    if (!draft) return fail('That is not a transfer');
+    const blocked = aioMoveBlocked(draft);
+    if (blocked) return fail(blocked);
+    try {
+      const r = await bridge.send(draft, bridgeDeps(), simulateOnly === true, typeof quoteId === 'string' ? quoteId : undefined);
+      if (r.ok && simulateOnly !== true) logger.warn(`aio move: ${draft.amount} sent ${draft.from} to ${draft.to} (${r.txHash ?? 'no hash'})`);
+      return r.ok ? ok(r.message, r) : fail(r.message);
+    } catch (err) {
+      return fail(`Move error: ${safeErr(err)}`);
+    }
+  });
+
+  // ── All-in-One: buy anywhere (phase 3, 2026-10-02) ───────────────────
+  // When the chain a buy is on is short, top it up from another chain
+  // (Relay, exact output, no Krypt fee — the buy pays it), wait until the
+  // money is ON the chain, then the ordinary manual buy. Only in Live, only
+  // while the All-in-One wallet signs on every chain. engine/aioBuy.ts.
+  const aioChainOf = (v: unknown): AioChain | null => (v === 'solana' || v === 'bnb' || v === 'robinhood' ? v : null);
+  const aioBuyHost: aioBuy.AioBuyHost = {
+    offReason: (chain) => {
+      const i = aioWallet.info();
+      if (!i.exists) return 'No All-in-One wallet.';
+      if (!i.activeEverywhere) return 'The All-in-One wallet is not the signer on every chain.';
+      const live = chain === 'solana' ? getEngine().liveState().armed && store.load().execution.liveEnabled : evmRail.armed(chain);
+      return live ? null : 'Paper mode — a paper buy needs no top-up.';
+    },
+    enabled: (c) => c === 'solana' || evmRail.enabled(c),
+    nativeHeld: async (c) => {
+      const i = aioWallet.info();
+      try {
+        if (c === 'solana') {
+          if (!i.solanaAddress) return null;
+          const r = await getBalance(bridgeDeps().httpUrl, i.solanaAddress);
+          return r.ok && r.data !== undefined ? r.data / 1e9 : null;
+        }
+        if (!i.evmAddress) return null;
+        const wei = await evmClient(c).getBalance({ address: i.evmAddress as `0x${string}` });
+        return Number(wei) / 1e18;
+      } catch {
+        return null;
+      }
+    },
+    priceUsd: async (c) => {
+      try {
+        return c === 'solana' ? await market.solUsd() : await evmNativeUsd(c);
+      } catch {
+        return null;
+      }
+    },
+    quoteTopUp: (from, to, outRaw) => bridge.quoteTopUp({ from, to, outRaw }, bridgeDeps()),
+    sendTopUp: (id) => bridge.sendTopUp(id, bridgeDeps()),
+    buy: async (c, token, amount, heldNow) => {
+      // The same calls the trade panels make, live: every guard, fee and
+      // ledger rule of an ordinary manual buy applies.
+      if (c === 'solana') {
+        // The manual buy sizes itself from the engine's CACHED balance, which
+        // refreshes every 8–30 s and has not seen a top-up that landed a
+        // moment ago — the buy was refused or trimmed after the money had
+        // arrived (swarm 2026-10-03, MS-1). Hand it the balance just read on
+        // the execution endpoint (or read it now, for a buy needing none).
+        const owner = aioWallet.info().solanaAddress;
+        let lamports = heldNow !== null ? Math.floor(heldNow * 1e9) : null;
+        if (lamports === null && owner) {
+          const r = await getBalance(bridgeDeps().httpUrl, owner).catch(() => null);
+          lamports = r && r.ok && r.data !== undefined ? r.data : null;
+        }
+        if (owner && lamports !== null) getEngine().noteWalletBalance(owner, lamports);
+        const r = await getEngine().testTrade(token, amount, false, { manual: true });
+        return { ok: r.ok, message: r.message, pending: r.stage === 'pending' };
+      }
+      const r = await evmRail.buy(c, token, amount, false);
+      return { ok: r.ok, message: r.message, pending: r.stage === 'pending' };
+    },
+    chargeMoveFee: async (from, to, inAmount, outAmount) => {
+      // Always on an EVM chain: one end of every top-up is one. The money now
+      // sits on the destination, so that is where it is charged when it can
+      // be; a Solana buy's top-up came FROM an EVM chain, which pays instead.
+      const chain = to !== 'solana' ? to : from;
+      if (chain === 'solana') return null;
+      const basis = chain === to ? outAmount : inAmount;
+      const owner = evmWallet.address(chain);
+      if (!owner || !(basis > 0)) return null;
+      const plan = evmTrade.evmFeePlan(BigInt(Math.floor(basis * 1e18)), store.load().evm?.referrer ?? '', owner);
+      if (plan.totalWei <= 0n || !plan.treasury) return null;
+      const h = await evmTrade.sendFeeLegs(chain, evmWallet.info(chain).id ?? undefined, owner, plan, 'top-up without a buy');
+      if (!h) return null;
+      logger.warn(`aio buy: top-up ${from}→${to} was not spent on a buy — billed as a move (${Number(plan.totalWei) / 1e18} on ${chain}, ${h})`);
+      return { amount: Number(plan.totalWei) / 1e18, symbol: EVM_CHAIN_META[chain].nativeSymbol };
+    },
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((res) => setTimeout(res, ms)),
+    speed: () => store.load().aio?.speed ?? 'normal',
+    transferEnded: (txHash) => {
+      const s = bridge.statusOf(txHash);
+      return s === 'refunded' || s === 'failed' ? s : null;
+    },
+  };
+  // ── The float (opt-in, 2026-10-03) ─────────────────────────────────
+  // Keeps about settings.aio.floatUsd ready on each chain so a buy there
+  // needs no conversion. shared/aioFloat.ts decides; this runs it: one
+  // refill at a time, an ORDINARY move (Relay + Krypt's 0.5 %, like the
+  // Move card), never on an unread balance, never while a top-up is in
+  // flight, at most once per chain per cooldown and FLOAT_MAX_PER_DAY a day,
+  // and it stops itself after FLOAT_MAX_FAILURES failures in a row.
+  const floatState = { lastByChain: new Map<AioChain, number>(), day: [] as number[], failures: 0, stopped: false, running: false };
+  /** Compress in progress, and a quiet spell after it: the float used to
+   *  refill (and charge fees on) the chains Compress had just emptied. */
+  let compressing = false;
+  let floatPausedUntil = 0;
+  const floatTick = async (): Promise<void> => {
+    const s = store.load();
+    if (!s.aio?.floatEnabled || floatState.stopped || floatState.running || aioBuy.isFunding()) return;
+    // Unattended money stays still while the user is compressing, just after,
+    // with the automation kill switch on, and with every chain in Paper —
+    // the float only exists to make LIVE buys instant (v6 audit 2026-10-03).
+    if (compressing || Date.now() < floatPausedUntil || automation.killSwitchOn()) return;
+    if (!AIO_CHAINS.some((c) => aioLiveOn(c))) return;
+    const i = aioWallet.info();
+    if (!i.exists || !i.activeEverywhere) return;
+    const now = Date.now();
+    floatState.day = floatState.day.filter((t) => now - t < 24 * 3_600_000);
+    if (floatState.day.length >= FLOAT_MAX_PER_DAY) return;
+    floatState.running = true;
+    try {
+      const chains = AIO_CHAINS.filter((c) => aioBuyHost.enabled(c));
+      const states = await Promise.all(
+        chains.map(async (c) => ({ chain: c, held: await aioBuyHost.nativeHeld(c), priceUsd: await aioBuyHost.priceUsd(c), reserve: CHAIN_RESERVE[c] })),
+      );
+      const move = nextFloatRefill(states, s.aio.floatUsd);
+      if (!move) return;
+      if (now - (floatState.lastByChain.get(move.to) ?? 0) < FLOAT_COOLDOWN_MS) return;
+      floatState.lastByChain.set(move.to, now);
+      floatState.day.push(now);
+      const draft = { from: move.from, to: move.to, amount: Number(move.amountFrom.toPrecision(6)) };
+      const q = await bridge.quote(draft, bridgeDeps());
+      const bad = q.ok && q.quote ? await unattendedQuoteProblem(draft, q.quote) : null;
+      const r = q.ok && q.quote && !bad ? await bridge.send(draft, bridgeDeps(), false, q.quote.quoteId ?? undefined) : { ok: false, message: bad ?? q.message };
+      if (r.ok) {
+        floatState.failures = 0;
+        const msg = `Float: moved about $${move.usd.toFixed(2)} from ${AIO_CHAIN_LABEL[move.from]} to ${AIO_CHAIN_LABEL[move.to]} (a normal move: Relay's cost + Krypt's 0.5%).`;
+        logger.warn(`[notice] ${msg}`);
+        getEngine().pushNotification('All-in-One float', msg);
+      } else {
+        floatState.failures += 1;
+        logger.warn(`aio float: refill ${move.from}→${move.to} not done — ${r.message}`);
+        if (floatState.failures >= FLOAT_MAX_FAILURES) {
+          floatState.stopped = true;
+          const msg = `Float stopped after ${FLOAT_MAX_FAILURES} failed refills in a row (last: ${r.message}). Turn it off and on again on the All-in-One page to restart it.`;
+          logger.warn(`[notice] ${msg}`);
+          getEngine().pushNotification('All-in-One float stopped', msg);
+        }
+      }
+    } catch (err) {
+      floatState.failures += 1;
+      logger.warn(`aio float: tick failed — ${safeErr(err)}`);
+    } finally {
+      floatState.running = false;
+    }
+  };
+  setInterval(() => void floatTick(), 60_000);
+  /** Turning the float off and on again clears a stop. */
+  aioFloatReset = () => {
+    floatState.stopped = false;
+    floatState.failures = 0;
+  };
+
+  /**
+   * Nobody reads the quote of an UNATTENDED move (Compress, the float, refuel,
+   * a script): bound it by the app's OWN prices, as top-ups are (MS-6). The
+   * guaranteed minimum out must be worth what goes in, less a normal move's
+   * cost; no price means no move — unknown is never fine (v6 audit 2026-10-03).
+   */
+  const UNATTENDED_MOVE_MAX_LOSS = 0.03;
+  const UNATTENDED_MOVE_SLACK_USD = 0.25;
+  const unattendedQuoteProblem = async (draft: { from: AioChain; to: AioChain; amount: number }, q: BridgeQuote): Promise<string | null> => {
+    const [inPx, outPx] = await Promise.all([aioBuyHost.priceUsd(draft.from), aioBuyHost.priceUsd(draft.to)]);
+    if (!inPx || !outPx) return 'no price right now to check the quote against — not moved';
+    const inUsd = draft.amount * inPx;
+    const outUsd = (Number(q.toAmountMinRaw) / 10 ** q.toDecimals) * outPx;
+    // Relay's $5 no-refund floor, judged by OUR price: an unpriced quote waives it for a
+    // person who sees the quote, never for a move nobody looks at (v6 audit).
+    if (inUsd < HARD_FLOOR_USD) return `about $${inUsd.toFixed(2)} — under Relay's $${HARD_FLOOR_USD} minimum (a failed transfer that small is never refunded), not moved`;
+    if (!(outUsd >= inUsd * (1 - UNATTENDED_MOVE_MAX_LOSS) - UNATTENDED_MOVE_SLACK_USD)) {
+      return `the quote guarantees about $${outUsd.toFixed(2)} for $${inUsd.toFixed(2)} by the app's own prices — more than a normal move costs, not moved`;
+    }
+    return null;
+  };
+
+  /** A move between the All-in-One wallet's own chains, quoted and sent at
+   *  once — the one path scripts and Compress share, with the Move card's
+   *  blockers (signer everywhere, chain switched on) and Relay's own checks. */
+  const aioMoveNow = async (from: AioChain, to: AioChain, amount: number, by: string): Promise<{ ok: boolean; message: string; txHash?: string }> => {
+    const draft = { from, to, amount: Number(amount.toPrecision(9)) };
+    const blocked = aioMoveBlocked(draft);
+    if (blocked) return { ok: false, message: blocked };
+    const q = await bridge.quote(draft, bridgeDeps());
+    if (!q.ok || !q.quote) return { ok: false, message: `not quoted: ${q.message}` };
+    const bad = await unattendedQuoteProblem(draft, q.quote);
+    if (bad) return { ok: false, message: bad };
+    const r = await bridge.send(draft, bridgeDeps(), false, q.quote.quoteId ?? undefined);
+    if (r.ok) logger.warn(`aio move (${by}): ${draft.amount} ${from} → ${to} (${r.txHash ?? 'no hash'})`);
+    return { ok: r.ok, message: r.message, ...(r.txHash ? { txHash: r.txHash } : {}) };
+  };
+
+  // ── All-in-One: Compress (2026-10-03) ─────────────────────────────
+  // Everything into one coin on one chain, for a withdrawal: sell each token
+  // for its chain's coin, then move each other chain's coin to the target.
+  // Planned in shared/aioCompress (pure, tested); confirmed once, natively —
+  // the dialog lists every sell and move; run here in order, step by step.
+  // A chain in Paper never "sells" on paper: its tokens are listed as
+  // waiting on Live and stay put.
+  const aioLiveOn = (c: AioChain): boolean => (c === 'solana' ? getEngine().liveState().armed && store.load().execution.liveEnabled : evmRail.armed(c));
+  const compressPlanNow = async (target: AioChain): Promise<{ plan: CompressPlan } | { error: string }> => {
+    const i = aioWallet.info();
+    if (!i.exists) return { error: 'No All-in-One wallet.' };
+    const bal = await aioBalances({ httpUrl: resolveRpc(store.load().rpc).httpUrl, solanaAddress: i.solanaAddress, evmAddress: i.evmAddress, force: true });
+    if (bal.totalUsd === null) return { error: 'No chain could be read just now — try again in a moment.' };
+    // Left alone: the user's $KRYPTO (it halves their fees — selling it is a
+    // decision of its own), and any coin a running bot holds (v6 audit).
+    const exclude: Record<string, string> = {};
+    if (KRYPTO_TOKEN.mint) exclude[excludeKey('solana', KRYPTO_TOKEN.mint)] = 'your $KRYPTO — holding it halves your fees; sell it on its own if you mean to';
+    for (const a of bal.assets) {
+      if (!a.token || (a.chain !== 'solana' && a.chain !== 'bnb' && a.chain !== 'robinhood')) continue;
+      const c = a.chain;
+      const owner = c === 'solana' ? i.solanaAddress : i.evmAddress;
+      const bot =
+        (owner && kryptoTrader.claimOn(owner, a.token, c) ? 'a Krypto Trader session holds it' : null) ??
+        (automation.heldByScripts(c).has(c === 'solana' ? a.token : a.token.toLowerCase()) ? 'a running script holds it' : null);
+      if (bot) exclude[excludeKey(c, a.token)] = `${bot} — stop that first to include it`;
+    }
+    const plan = planCompress({
+      bal,
+      target,
+      signingOn: i.signingOn,
+      live: { solana: aioLiveOn('solana'), bnb: aioLiveOn('bnb'), robinhood: aioLiveOn('robinhood') },
+      enabled: { solana: true, bnb: evmRail.enabled('bnb'), robinhood: evmRail.enabled('robinhood') },
+      exclude,
+    });
+    return { plan };
+  };
+  ipcMain.handle('aio:compressPlan', async (_e, raw: unknown) => {
+    const t = aioChainOf(raw);
+    if (!t) return fail('Pick SOL, ETH or BNB.');
+    try {
+      const r = await compressPlanNow(t);
+      return 'error' in r ? fail(r.error) : ok('ok', r.plan);
+    } catch (err) {
+      return fail(`Could not plan that: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('aio:compress', async (e, raw: unknown) => {
+    const t = aioChainOf(raw);
+    if (!t) return fail('Pick SOL, ETH or BNB.');
+    if (compressing) return fail('A compress is already running.');
+    // Taken before the first await: checked-then-set after the plan read let
+    // two clicks both pass (v6 audit 2026-10-03). Released on every exit.
+    compressing = true;
+    let ran = false;
+    try {
+    // Planned again here, from a fresh read: what the page showed may be a
+    // minute old, and the dialog must describe what will actually happen.
+    const first = await compressPlanNow(t);
+    if ('error' in first) return fail(first.error);
+    const plan = first.plan;
+    if (plan.nothingToDo) return fail(plan.needsLive.length ? `Nothing can run yet — ${plan.needsLive.map((c) => AIO_CHAIN_LABEL[c]).join(' and ')} must be in Live to sell.` : `Nothing to sell or move — it is already all ${plan.coin}, or what is left is too small to move.`);
+    const stays = plan.stays.length ? `\n\nStays where it is:\n${plan.stays.slice(0, 12).map((s) => `• ${safeSymbol(s.symbol)} on ${AIO_CHAIN_LABEL[s.chain]} — ${s.why}`).join('\n')}${plan.stays.length > 12 ? `\n• and ${plan.stays.length - 12} more` : ''}` : '';
+    const { response } = await confirmNative(e.sender, {
+      type: 'warning',
+      buttons: ['Cancel', `Compress to ${plan.coin}`],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: 'Compress the All-in-One wallet',
+      message: `Turn everything into ${plan.coin} on ${AIO_CHAIN_LABEL[t]}?`,
+      detail:
+        describeCompress(plan) +
+        stays +
+        `\n\nThese are real transactions. Each sell pays Krypt's 0.5 %; each move pays Relay's cost plus Krypt's 0.5 %${plan.estCostUsd !== null ? ` — about $${plan.estCostUsd.toFixed(2)} in all` : ''}.` +
+        (plan.estFinalUsd !== null ? ` About $${plan.estFinalUsd.toFixed(2)} of ${plan.coin} at the end${plan.unread.length ? ' — not counting what could not be read' : ''}.` : ''),
+    });
+    if (response !== 1) return fail('Cancelled — nothing was sold or moved.');
+    ran = true;
+    const steps: Array<{ step: string; ok: boolean; message: string }> = [];
+    const note = (step: string, state: 'running' | 'done' | 'failed', message: string): void => {
+      broadcast({ kind: 'aioCompress', step, state, message });
+      if (state !== 'running') steps.push({ step, ok: state === 'done', message });
+    };
+    try {
+      for (const s of plan.sells.filter((x) => !x.blocked)) {
+        const step = `Sell ${safeSymbol(s.symbol)} on ${AIO_CHAIN_LABEL[s.chain]}`;
+        note(step, 'running', 'selling…');
+        // Live is checked again per step: a chain switched to Paper while
+        // this ran would otherwise "sell" on paper and report it as done.
+        if (!aioLiveOn(s.chain)) {
+          note(step, 'failed', `${AIO_CHAIN_LABEL[s.chain]} left Live — not sold`);
+          continue;
+        }
+        try {
+          const r = s.chain === 'solana' ? await getEngine().manualSell(s.token, 100, { manual: true }) : await evmRail.sell(s.chain, s.token, 100, false);
+          // Sent but not confirmed in time is not a failure: say so.
+          if (!r.ok && r.stage === 'pending') note(step, 'done', `sent, not confirmed yet — check Trades (${r.message})`);
+          else note(step, r.ok ? 'done' : 'failed', r.message);
+        } catch (err) {
+          note(step, 'failed', safeErr(err));
+        }
+      }
+      // Let the sells' coin land before reading what there is to move.
+      if (plan.sells.some((x) => !x.blocked) && plan.moves.some((x) => !x.blocked)) await new Promise((r) => setTimeout(r, 4_000));
+      for (const m of plan.moves.filter((x) => !x.blocked)) {
+        const step = `Move ${COMPRESS_COIN[m.from]} from ${AIO_CHAIN_LABEL[m.from]} to ${AIO_CHAIN_LABEL[m.to]}`;
+        note(step, 'running', 'moving…');
+        // What is there NOW, less what the chain keeps — never the estimate.
+        const held = await aioBuyHost.nativeHeld(m.from);
+        if (held === null) {
+          note(step, 'failed', `could not read the ${COMPRESS_COIN[m.from]} balance — nothing moved`);
+          continue;
+        }
+        const amount = held - COMPRESS_KEEP[m.from];
+        if (!(amount > 0)) {
+          note(step, 'failed', 'nothing left to move');
+          continue;
+        }
+        try {
+          const r = await aioMoveNow(m.from, m.to, amount, 'compress');
+          note(step, r.ok ? 'done' : 'failed', r.message);
+        } catch (err) {
+          note(step, 'failed', safeErr(err));
+        }
+      }
+    } finally {
+      broadcast({ kind: 'aioChanged' });
+    }
+    const done = steps.filter((s) => s.ok).length;
+    const msg = `${done} of ${steps.length} step${steps.length === 1 ? '' : 's'} done${done < steps.length ? ' — see each step below' : ''}.`;
+    logger.warn(`aio compress to ${plan.coin}: ${msg}`);
+    return ok(msg, { steps });
+    } finally {
+      compressing = false;
+      // The float stays out of the way for half an hour after a run.
+      if (ran) floatPausedUntil = Date.now() + 30 * 60_000;
+    }
+  });
+
+  // ── All-in-One for scripts (2026-10-03) ───────────────────────────
+  // The same quotes, signer rules and Krypt fee the AIO page uses.
+  automation.setAioScriptHooks({
+    active: () => {
+      const i = aioWallet.info();
+      return i.exists && i.activeEverywhere;
+    },
+    info: () => {
+      const i = aioWallet.info();
+      return { exists: i.exists, activeEverywhere: i.activeEverywhere, solanaAddress: i.solanaAddress, evmAddress: i.evmAddress };
+    },
+    balances: async () => {
+      const i = aioWallet.info();
+      if (!i.exists) return null;
+      return aioBalances({ httpUrl: resolveRpc(store.load().rpc).httpUrl, solanaAddress: i.solanaAddress, evmAddress: i.evmAddress });
+    },
+    move: (from, to, amount) => aioMoveNow(from, to, amount, 'script'),
+    fund: async (chain, amount) => {
+      const r = await aioBuy.fundForBuy({ chain, amount }, aioBuyHost);
+      // The script's buy then sizes from the engine's CACHED Solana balance,
+      // which has not seen a top-up that landed a moment ago: the buy was
+      // refused and the top-up billed as a move (v6 audit 2026-10-03, the
+      // MS-1 fix the manual path already had). Hand it what arrived.
+      if (r.ok && r.funded && chain === 'solana') {
+        const owner = aioWallet.info().solanaAddress;
+        if (owner) getEngine().noteWalletBalance(owner, Math.floor(r.funded.seen * 1e9));
+      }
+      return r;
+    },
+    bill: (funded) => aioBuy.billUnspentTopUp(funded as aioBuy.FundedTopUp, aioBuyHost),
+  });
+
+  // ── Gas refuel for exits (2026-10-03) ───────────────────────────────
+  ipcMain.handle('aio:refuel', async (_e, raw: unknown) => {
+    const chain = aioChainOf(raw);
+    if (!chain) return fail('Unknown chain');
+    const i = aioWallet.info();
+    if (!i.exists || !i.activeEverywhere) return fail('Refuel needs the All-in-One wallet signing on every chain.');
+    if (aioBuy.isFunding()) return fail('A top-up is already on its way — wait a few seconds.');
+    const [held, px] = await Promise.all([aioBuyHost.nativeHeld(chain), aioBuyHost.priceUsd(chain)]);
+    if (held === null || px === null) return fail('Could not read this chain right now — nothing moved.');
+    // The source: the other chain with the most dollars to spare above its reserve.
+    const others = AIO_CHAINS.filter((c) => c !== chain && aioBuyHost.enabled(c));
+    const reads = await Promise.all(others.map(async (c) => ({ c, held: await aioBuyHost.nativeHeld(c), px: await aioBuyHost.priceUsd(c) })));
+    const spare = reads
+      .filter((r) => r.held !== null && r.px !== null)
+      .map((r) => ({ c: r.c, px: r.px as number, usd: ((r.held as number) - CHAIN_RESERVE[r.c]) * (r.px as number) }))
+      .sort((a, b) => b.usd - a.usd)[0];
+    // A little over $5 leaves: Relay's cost and Krypt's 0.5 % come out of it.
+    const sendUsd = REFUEL_USD * 1.1;
+    if (!spare || spare.usd < sendUsd) return fail(`No other chain has $${sendUsd.toFixed(2)} to spare above its own reserve.`);
+    const draft = { from: spare.c, to: chain, amount: Number((sendUsd / spare.px).toPrecision(6)) };
+    const q = await bridge.quote(draft, bridgeDeps());
+    if (!q.ok || !q.quote) return fail(`Refuel not quoted: ${q.message}`);
+    // Nobody reads this quote: the same own-price bound as every unattended move.
+    const bad = await unattendedQuoteProblem(draft, q.quote);
+    if (bad) return fail(`Refuel not sent — ${bad}`);
+    const sent = await bridge.send(draft, bridgeDeps(), false, q.quote.quoteId ?? undefined);
+    if (!sent.ok) return fail(`Refuel not sent: ${sent.message}`);
+    logger.warn(`aio refuel: ${draft.amount} ${spare.c} → ${chain} (${sent.txHash ?? 'no hash'})`);
+    // Wait for the gas to land (a minute at most) — then the sell can go.
+    const want = held + (Number(q.quote.toAmountMinRaw) / 10 ** q.quote.toDecimals) * 0.999;
+    for (let n = 0; n < 200; n++) {
+      await new Promise((r) => setTimeout(r, 300));
+      const now = await aioBuyHost.nativeHeld(chain);
+      if (now !== null && now >= want) return ok(`Refuelled — ${(now - held).toPrecision(3)} ${EVM_CHAIN_META[chain as EvmChainKind]?.nativeSymbol ?? 'SOL'} arrived from ${AIO_CHAIN_LABEL[spare.c]}. You can sell now.`, { arrived: true });
+      const st = sent.txHash ? bridge.statusOf(sent.txHash) : null;
+      if (st === 'refunded' || st === 'failed') return fail(`The refuel was ${st} by Relay — nothing arrived.`);
+    }
+    return ok('Refuel sent — it has not landed yet. Watch Recent transfers on the All-in-One page.', { arrived: false });
+  });
+
+  const aioBuyArgs = (raw: unknown): { chain: AioChain; amount: number; token?: string } | null => {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const chain = aioChainOf(o.chain);
+    const amount = typeof o.amount === 'number' && Number.isFinite(o.amount) && o.amount > 0 ? o.amount : null;
+    if (!chain || amount === null) return null;
+    if (chain !== 'solana' && amount > 50) return null; // the evm:buy ceiling
+    return { chain, amount, ...(typeof o.token === 'string' ? { token: o.token } : {}) };
+  };
+  ipcMain.handle('aio:buyPlan', async (_e, raw: unknown) => {
+    const a = aioBuyArgs(raw);
+    if (!a) return fail('That is not a buy');
+    try {
+      return ok('ok', await aioBuy.plan({ chain: a.chain, amount: a.amount }, aioBuyHost));
+    } catch (err) {
+      return fail(`Could not plan the top-up: ${safeErr(err)}`);
+    }
+  });
+  ipcMain.handle('aio:buy', async (_e, raw: unknown) => {
+    const a = aioBuyArgs(raw);
+    if (!a || !a.token) return fail('That is not a buy');
+    const token = a.token;
+    if (a.chain === 'solana' ? !isAddress(token) : !isEvmAddress(token)) return fail('Invalid token address');
+    const o = (raw ?? {}) as Record<string, unknown>;
+    try {
+      const r = await aioBuy.execute(
+        { chain: a.chain, token, amount: a.amount, quoteId: typeof o.quoteId === 'string' ? o.quoteId : null, acceptAsk: o.acceptAsk === true },
+        aioBuyHost,
+      );
+      logger.warn(`aio buy on ${a.chain}: ${r.ok ? 'ok' : 'not done'} — ${r.message}`);
+      return r.ok ? ok(r.message, r) : { ok: false, message: r.message, data: r };
+    } catch (err) {
+      return fail(`Buy error: ${safeErr(err)}`);
     }
   });
 
@@ -2825,7 +4053,7 @@ export function registerIpc(): void {
       : [];
     const s = store.load();
     const key = s.launch.walletId ? wallet.publicKeyOf(s.launch.walletId) : null;
-    const fees = key ? await pumpFees.readCreatorFees(s.rpc.execHttpUrl ?? s.rpc.httpUrl, key) : null;
+    const fees = key ? await pumpFees.readCreatorFees(execUrlOf(s.rpc), key) : null;
     // `summaryMany` answers a Map keyed by mint. Walking the REQUESTED list
     // rather than the map's own keys keeps the order the user sees and gives
     // a row for a mint the providers could not answer for, with nulls in it
@@ -3001,8 +4229,10 @@ export function registerIpc(): void {
   // This is wallet:import followed by pump:signIn, done in main so the key is
   // handled by exactly the same code as any other import (and never logged),
   // and so a half-done run can say which half landed.
-  ipcMain.handle('pump:importAccount', async (_e, secret: unknown, label: unknown) => {
+  ipcMain.handle('pump:importAccount', async (e, secret: unknown, label: unknown) => {
     if (typeof secret !== 'string' || !secret.trim()) return fail('Paste the wallet’s private key');
+    const addr = solanaAddressOfSecret(secret);
+    if (addr && !(await confirmImport(e.sender, 'this Solana wallet', [addr]))) return fail('Import cancelled');
     const r = wallet.importSecret(secret, typeof label === 'string' ? label : '');
     logger.info(r.ok ? `pump:importAccount — a wallet was imported (${wallet.list().length} now)` : `pump:importAccount — import failed: ${r.message}`);
     if (!r.ok || !r.publicKey) return fail(r.message);
@@ -3202,7 +4432,7 @@ export function registerIpc(): void {
     const key = wallet.publicKeyOf(id);
     if (!key) return fail('The launch wallet no longer exists.');
     try {
-      return ok('ok', await pumpFees.readCreatorFees(s.rpc.execHttpUrl ?? s.rpc.httpUrl, key));
+      return ok('ok', await pumpFees.readCreatorFees(execUrlOf(s.rpc), key));
     } catch (err) {
       return fail(`Could not read creator fees: ${safeErr(err)}`);
     }
@@ -3216,7 +4446,7 @@ export function registerIpc(): void {
     const id = s.launch.walletId;
     if (!id) return fail('No Solana launch wallet is set.');
     try {
-      const r = await pumpFees.claimCreatorFees(s.rpc.execHttpUrl ?? s.rpc.httpUrl, id);
+      const r = await pumpFees.claimCreatorFees(execUrlOf(s.rpc), id);
       return r.ok ? ok(r.message, r) : fail(r.message);
     } catch (err) {
       return fail(`Claim error: ${safeErr(err)}`);
@@ -3349,10 +4579,12 @@ export function registerIpc(): void {
       return fail(`Wallet not saved: ${safeErr(err)}`);
     }
   });
-  ipcMain.handle('evm:wallet:import', (_e, chain: unknown, secret: unknown, label: unknown) => {
+  ipcMain.handle('evm:wallet:import', async (e, chain: unknown, secret: unknown, label: unknown) => {
     const c = chainOf(chain);
     if (!c) return fail('Unknown chain');
     if (typeof secret !== 'string' || !secret.trim()) return fail('Paste a private key');
+    const addr = evmAddressOfSecret(secret);
+    if (addr && !(await confirmImport(e.sender, `this ${EVM_CHAIN_META[c].name} wallet`, [addr]))) return fail('Import cancelled');
     try {
       const r = evmRail.wallet.importSecret(secret, typeof label === 'string' ? label : '', c);
       if (r.ok) { logger.warn(`evm wallet: imported ${r.address} for ${c}`); refreshScoutOwnership(); }
@@ -3379,6 +4611,9 @@ export function registerIpc(): void {
     const c = chainOf(chain);
     if (!c) return fail('Unknown chain');
     if (typeof id !== 'string' || !id) return fail('Invalid wallet id');
+    // Giving the All-in-One key a single home would quietly stop it signing
+    // on the other chain — the one thing it exists to do.
+    if (id === aioWallet.walletIds().evm) return fail('This is the All-in-One wallet\'s key — it belongs to every chain.');
     try {
       const r = evmRail.wallet.assign(c, id);
       return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
@@ -3693,7 +4928,7 @@ export function registerIpc(): void {
       resolved.push({ publicKey: pk, lamports });
     }
     if (totalLamports > lab.MAX_FUND_BATCH_LAMPORTS) return fail(`Fund at most ${lab.MAX_FUND_BATCH_LAMPORTS / 1e9} SOL per batch`);
-    const httpUrl = resolveRpc(store.load().rpc).execHttpUrl ?? store.load().rpc.httpUrl;
+    const httpUrl = execUrlOf(store.load().rpc);
     const r = await fund.fundWallets(httpUrl, resolved, fromId);
     logger.info(`lab fund: ${r.message}${r.signature ? ` ${r.signature.slice(0, 12)}…` : ''}`);
     const data = { signature: r.signature ?? '', sentSol: r.sentLamports / 1e9, count: r.count };
@@ -3703,7 +4938,7 @@ export function registerIpc(): void {
   ipcMain.handle('lab:collect', async (_e, walletIds: unknown, toWalletId: unknown) => {
     if (!getEngine().liveState().armed || !store.load().execution.liveEnabled) return fail('Arm live execution first — collecting moves real SOL');
     if (!Array.isArray(walletIds) || walletIds.length === 0 || walletIds.length > 20 || !walletIds.every((x) => typeof x === 'string')) return fail('Pick 1–20 wallets');
-    const httpUrl = resolveRpc(store.load().rpc).execHttpUrl ?? store.load().rpc.httpUrl;
+    const httpUrl = execUrlOf(store.load().rpc);
     const toId = typeof toWalletId === 'string' && toWalletId ? toWalletId : undefined;
     if (toId && !wallet.list().some((w) => w.id === toId)) return fail('The wallet to collect to is not one of yours');
     const r = await fund.collectToActive(httpUrl, walletIds as string[], toId);
@@ -3736,6 +4971,25 @@ export function registerIpc(): void {
   ipcMain.handle('live:sellAll', () => {
     const r = getEngine().sellAllHeld('manual');
     return r.ok ? ok(r.message) : fail(r.message);
+  });
+
+  // Sell dust (2026-10-03): the plan (read-only), then the real thing —
+  // which plans again in main before it sells anything.
+  ipcMain.handle('live:dustPlan', async () => {
+    try {
+      const r = await getEngine().dustPlan();
+      return r.ok ? ok('ok', r.plan) : fail(r.message);
+    } catch (err) {
+      return fail(`Could not plan that: ${(err as Error).message}`);
+    }
+  });
+  ipcMain.handle('live:sellDust', async () => {
+    try {
+      const r = await getEngine().sellDust();
+      return r.ok ? ok(r.message, r) : { ok: false, message: r.message, data: r };
+    } catch (err) {
+      return fail(`Sell dust error: ${(err as Error).message}`);
+    }
   });
 
   ipcMain.handle('live:sweepRent', async () => {
@@ -4445,15 +5699,15 @@ export function registerIpc(): void {
   evmTrade.setHolderRate(() => kryptoHolding.holderRateApplies());
 
   getEngine().setEvmCopy({
-    buy: async (chain, token, amountNative, walletId) => {
-      const r = await evmRail.buy(chain, token, amountNative, false, { walletId });
+    buy: async (chain, token, amountNative, walletId, opts) => {
+      const r = await evmRail.buy(chain, token, amountNative, false, { walletId, ...(opts?.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {}) });
       return { ok: r.ok, message: r.message, signature: r.hash ?? undefined, pending: r.stage === 'pending', spentSol: r.amountIn ? Number(BigInt(r.amountIn)) / 1e18 : undefined };
     },
     // `amountRaw` wins over the percent in the rail, which is the point: a
     // mirrored copy sell is sized from the base units the copy holds, not
     // from a share of a balance that also contains hand-bought bags.
-    sell: async (chain, token, pct, walletId, amountRaw) => {
-      const r = await evmRail.sell(chain, token, pct, false, { walletId, amountRaw });
+    sell: async (chain, token, pct, walletId, amountRaw, opts) => {
+      const r = await evmRail.sell(chain, token, pct, false, { walletId, amountRaw, ...(opts?.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {}) });
       return { ok: r.ok, message: r.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${r.message})` : r.message, signature: r.hash ?? undefined };
     },
     // The three reads copy trading settles a position with: what this wallet
@@ -4487,7 +5741,8 @@ export function registerIpc(): void {
       return null;
     },
     maxLive: () => null,
-    price: (chain, token) => evmScanner.lastPriceNative(chain, token),
+    price: (chain, token) => evmPriceNative(chain, token),
+    priceFresh: (chain, token) => evmPriceFresh(chain, token),
     facts: async (chain, token) => {
       const sum = await evmRail.summary(chain, token);
       return { liquidityUsd: sum.liquidityUsd, marketCapUsd: sum.marketCapUsd, kryptScore: null, isPumpfun: false };
@@ -4499,6 +5754,9 @@ export function registerIpc(): void {
       const addr = evmWallet.address(chain);
       if (!addr) return null;
       const wei = evmWallet.balanceWei(chain, addr);
+      // Unknown stays unknown, but is asked for: until something else read
+      // the balance, a script's every bot.wallet() said null (2026-10-03).
+      if (wei === null) evmBalanceKick(chain);
       return { native: wei === null ? null : Number(wei) / 1e18, address: addr };
     },
     // Positions WITH basis, from the EVM ledger, so a script on that chain

@@ -205,6 +205,12 @@ export interface ScannerHost {
    *  `target` says what it is ABOUT: the click opens that token, and a
    *  Discord webhook for the chain links to it. */
   notify?(title: string, body: string, target?: { mint: string; chain: EvmChainKind }): void;
+  /** A curve trade printed a price — scripts on the chain hear it as their
+   *  `tick` for the tokens they hold or subscribed to (2026-10-03). */
+  onPrice?(chain: EvmChainKind, token: string, priceNative: number): void;
+  /** A followed wallet traded on this chain — scripts hear it as their
+   *  `leaderTrade` (2026-10-03: only copy trading heard it). */
+  onLeaderTrade?(chain: EvmChainKind, t: { wallet: string; token: string; symbol: string; isBuy: boolean; native: number; priceNative: number; soldFraction: number | null }): void;
 }
 
 let host: ScannerHost | null = null;
@@ -502,12 +508,23 @@ const LAST_PRICE_CAP = 8_000;
 export function lastPriceNative(chain: EvmChainKind, token: string): number | null {
   return lastPrice.get(`${chain}:${token.toLowerCase()}`)?.price ?? null;
 }
+/** The last curve print WITH its time. A curve price only moves on a trade,
+ *  so an old print is still the curve's price — until the coin graduates and
+ *  trades somewhere this scanner does not hear. Readers compare the time. */
+export function lastPrint(chain: EvmChainKind, token: string): { price: number; at: number } | null {
+  return lastPrice.get(`${chain}:${token.toLowerCase()}`) ?? null;
+}
 function notePrice(chain: EvmChainKind, token: string, quoteWei: bigint, tokensRaw: bigint, now: number): number | null {
   if (tokensRaw <= 0n || quoteWei <= 0n) return null;
   // Both sides carry 18 decimals on these curves, so the ratio is the price.
   const price = Number(quoteWei) / Number(tokensRaw);
   if (!Number.isFinite(price) || price <= 0) return null;
   lastPrice.set(`${chain}:${token}`, { price, at: now });
+  try {
+    host?.onPrice?.(chain, token, price);
+  } catch {
+    /* a script hook never breaks the scanner */
+  }
   while (lastPrice.size > LAST_PRICE_CAP) {
     const oldest = lastPrice.keys().next().value;
     if (oldest === undefined) break;
@@ -571,6 +588,7 @@ async function forwardCopy(
       soldFraction,
       tokens: Number(tokensRaw < 0n ? -tokensRaw : tokensRaw) / 1e18,
     });
+    host?.onLeaderTrade?.(chain, { wallet: trader.toLowerCase(), token, symbol, isBuy, native, priceNative: price ?? 0, soldFraction });
   } catch (e) {
     logger.warn(`evm scanner ${chain}: could not forward a followed wallet's trade — ${shortError(e)}`);
   }

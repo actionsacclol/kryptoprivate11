@@ -30,6 +30,7 @@ import { cls, fmtUsd, shortAddr } from '../utils/format';
 import { useToast } from '../state/ToastProvider';
 import { ageLabel, cachedPortfolio, rememberPortfolio } from '../state/routeCache';
 import { useTerminal } from '../state/TerminalProvider';
+import { AllChainsTrades } from './AllChains';
 import { EVM_CHAIN_META, evmClosedTrips, isEvmChain, type ChainKind, type EvmChainKind, type EvmFill } from '@shared/evm';
 import { EvmFillsSection } from '../components/terminal/EvmFillsSection';
 
@@ -39,7 +40,9 @@ import { EvmFillsSection } from '../components/terminal/EvmFillsSection';
  * whatever was active and pointed at the Wallet page for the rest.
  */
 export function TradesPage({ onOpenToken }: { onOpenToken: (mint: string, chain?: ChainKind) => void }) {
-  const { chain } = useTerminal();
+  const { chain, allChains } = useTerminal();
+  // ALL in the chain switch: every chain's closed trades, newest first.
+  if (allChains) return <AllChainsTrades onOpenToken={onOpenToken} />;
   if (isEvmChain(chain)) return <EvmTradesPage chain={chain} onOpenToken={onOpenToken} />;
   return <SolanaTradesPage onOpenToken={onOpenToken} />;
 }
