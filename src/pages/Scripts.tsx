@@ -18,7 +18,7 @@ import { inputsProblem } from '@shared/scriptInputs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, BookOpen, Clipboard, Code2, Eraser, FolderOpen, ListChecks, Play, Plus, Power, RotateCcw, Settings2, Trash2 } from 'lucide-react';
 import { nativeSymbolOf, type ChainKind } from '@shared/evm';
-import { DEFAULT_LOSS_PCT_OF_WALLET,
+import { DEFAULT_COOL_OFF_AFTER_LOSSES, DEFAULT_LOSS_PCT_OF_WALLET,
   ALERT_KINDS,
   DEFAULT_BUDGET,
   OPS_FOR_KIND,
@@ -726,7 +726,7 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                   )}
 
                   {/* Budget */}
-                  <div className="grid grid-cols-6 gap-3">
+                  <div className="grid grid-cols-7 gap-3">
                     <Field label="Max per trade" hint={nativeSymbolOf(scriptChain(draft))}>
                       <input type="number" step="0.01" value={draft.budget.maxSolPerTrade} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxSolPerTrade: Number(e.target.value) } })} className={inputCls} />
                     </Field>
@@ -739,6 +739,10 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                     <Field label="Loss stop, % of wallet" hint="whichever is smaller">
                       <input type="number" value={draft.budget.maxLossPctOfWallet ?? DEFAULT_LOSS_PCT_OF_WALLET} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxLossPctOfWallet: Number(e.target.value) } })} className={inputCls} />
                     </Field>
+                    {/* 2026-10-04: the three-losses pause is a setting; 0 lifts it. */}
+                    <Field label="Pause after losses" hint="in a row · 0 = never">
+                      <input type="number" min={0} step={1} value={draft.budget.coolOffAfterLosses ?? DEFAULT_COOL_OFF_AFTER_LOSSES} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, coolOffAfterLosses: Number(e.target.value) } })} className={inputCls} />
+                    </Field>
                     <Field label="Open positions">
                       <input type="number" value={draft.budget.maxOpenPositions} onChange={(e) => setDraft({ ...draft, budget: { ...draft.budget, maxOpenPositions: Number(e.target.value) } })} className={inputCls} />
                     </Field>
@@ -747,7 +751,7 @@ ${kept} Live trades and copy trading are not touched. A copy of the old paper re
                     </Field>
                   </div>
                   <div className="text-body text-krypt-muted">
-                    Every action a script takes is checked against this budget in the app, not in the script. A buy over the cap is refused, not shrunk, and so is a buy the wallet can only part-fund. The daily loss stop counts every exit — stop-loss and take-profit orders included, priced from the chain — and is the SOL figure or the wallet share, whichever is smaller; past it the script turns itself off. Three losing exits in a row pause a live script's buys for an hour. A live buy under 0.03 SOL is refused: the priority-fee floors would take more than a tenth of it on the round trip.
+                    Every action a script takes is checked against this budget in the app, not in the script. A buy over the cap is refused, not shrunk, and so is a buy the wallet can only part-fund. The daily loss stop counts every exit — stop-loss and take-profit orders included, priced from the chain — and is the SOL figure or the wallet share, whichever is smaller; past it the script turns itself off. That many losing exits in a row (three unless you change it) pause a live script's buys for an hour; a streak says nothing about the next trade, so 0 lifts the pause and leaves the loss stop as the guard. A live buy under 0.03 SOL is refused: the priority-fee floors would take more than a tenth of it on the round trip.
                     {' '}
                     <button className="underline text-krypt-muted hover:text-white" onClick={() => setDraft({ ...draft, budget: { ...DEFAULT_BUDGET } })}>
                       Reset to defaults

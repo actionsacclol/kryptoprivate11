@@ -238,6 +238,15 @@ export interface ScriptBudget {
    * existed reads as DEFAULT_LOSS_PCT_OF_WALLET.
    */
   maxLossPctOfWallet?: number;
+  /**
+   * Losing exits in a row that pause a live script's buys for an hour;
+   * 0 = never pause (2026-10-04). A brake, not a selector: measured over 410
+   * trades, the ones inside a pause did 6.5 points BETTER than the rest
+   * (interval through zero), and on one night the pause refused 8 of 40
+   * confirmed buys. The daily loss stop is what protects the wallet. Optional:
+   * a script saved before this existed reads as DEFAULT_COOL_OFF_AFTER_LOSSES.
+   */
+  coolOffAfterLosses?: number;
   /** Positions this script may hold open at once. */
   maxOpenPositions: number;
   /** Any action (buy, sell, order, notify…) per minute — the runaway guard.
@@ -252,21 +261,26 @@ export const BUDGET_BOUNDS = {
   maxBuysPerDay: { min: 1, max: 500 },
   maxLossSolPerDay: { min: 0.01, max: 100 },
   maxLossPctOfWallet: { min: 1, max: 100 },
+  coolOffAfterLosses: { min: 0, max: 50 },
   maxOpenPositions: { min: 1, max: 50 },
   maxActionsPerMinute: { min: 1, max: 120 },
 } as const;
 
 /** Budget fields a saved script may lack; the default applies then. */
-const OPTIONAL_BUDGET_KEYS: ReadonlySet<keyof ScriptBudget> = new Set(['maxLossPctOfWallet']);
+const OPTIONAL_BUDGET_KEYS: ReadonlySet<keyof ScriptBudget> = new Set(['maxLossPctOfWallet', 'coolOffAfterLosses']);
 
 /** What `maxLossPctOfWallet` reads as when a script does not say. */
 export const DEFAULT_LOSS_PCT_OF_WALLET = 25;
+
+/** What `coolOffAfterLosses` reads as when a script does not say. */
+export const DEFAULT_COOL_OFF_AFTER_LOSSES = 3;
 
 export const DEFAULT_BUDGET: ScriptBudget = {
   maxSolPerTrade: 0.05,
   maxBuysPerDay: 20,
   maxLossSolPerDay: 0.5,
   maxLossPctOfWallet: DEFAULT_LOSS_PCT_OF_WALLET,
+  coolOffAfterLosses: DEFAULT_COOL_OFF_AFTER_LOSSES,
   maxOpenPositions: 5,
   maxActionsPerMinute: 30,
 };

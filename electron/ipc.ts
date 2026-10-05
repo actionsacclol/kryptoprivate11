@@ -6018,6 +6018,10 @@ export function registerIpc(): void {
         ...(budgetIn.maxLossPctOfWallet === undefined || budgetIn.maxLossPctOfWallet === null || budgetIn.maxLossPctOfWallet === ''
           ? {}
           : { maxLossPctOfWallet: Number(budgetIn.maxLossPctOfWallet) }),
+        // 2026-10-04: the cool-off streak, 0 = never pause. Optional the same way.
+        ...(budgetIn.coolOffAfterLosses === undefined || budgetIn.coolOffAfterLosses === null || budgetIn.coolOffAfterLosses === ''
+          ? {}
+          : { coolOffAfterLosses: Number(budgetIn.coolOffAfterLosses) }),
         maxOpenPositions: Number(budgetIn.maxOpenPositions),
         maxActionsPerMinute: Number(budgetIn.maxActionsPerMinute),
       },

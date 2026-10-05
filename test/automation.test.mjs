@@ -692,6 +692,76 @@ test('LIVE: a winning exit resets the streak', async () => {
   assert.equal(auto.snapshot().stats[c.id].coolOffUntil, null);
 });
 
+// 2026-10-04: the pause is a budget setting. Measured over 410 trades it does
+// not pick worse trades (the ones inside a pause did 6.5 points better), and on
+// one live night it refused 8 of 40 confirmed buys — so a user may lift it.
+test('LIVE: the cool-off is a budget setting — 0 never pauses, and the streak is still counted', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: { ...LIVE_OK, coolOffAfterLosses: 0 } }));
+  auto.setEnabled(c.id, true);
+  [MINT, MINT2, MINT3].forEach((m, i) => auto.onSandboxMessage(c.id, { t: 'call', id: 10 + i, method: 'buy', args: [m, 0.05] }));
+  await tick();
+  [MINT, MINT2, MINT3].forEach((m) => h.settle(fill(m, -0.01)));
+  await tick();
+  const st = auto.snapshot().stats[c.id];
+  assert.equal(st.coolOffUntil, null, 'no pause at 0');
+  assert.equal(st.lossStreak, 3, 'the streak is still counted for the page');
+  assert.ok(!h.calls.toasts.some((t) => /cooling off/.test(t.message)), 'and nothing is announced');
+  auto.onSandboxMessage(c.id, { t: 'call', id: 20, method: 'buy', args: [MINT, 0.05] });
+  await tick();
+  assert.equal(h.calls.buys.length, 4, 'the next buy goes out');
+  // The daily loss stop is what is left, and it still works.
+  assert.ok(Math.abs(st.realizedSolToday - -0.03) < 1e-9);
+});
+
+test('LIVE: a script’s own streak length — five means five, and the message says so', async () => {
+  const h = setup({ walletSol: 100 });
+  const mints = [MINT, MINT2, MINT3, 'CopyMint444444444444444444444444444444444', 'CopyMint555555555555555555555555555555555'];
+  const c = saved(codeScript({ mode: 'live', budget: { ...LIVE_OK, coolOffAfterLosses: 5 } }));
+  auto.setEnabled(c.id, true);
+  mints.forEach((m, i) => auto.onSandboxMessage(c.id, { t: 'call', id: 10 + i, method: 'buy', args: [m, 0.05] }));
+  await tick();
+  assert.equal(h.calls.buys.length, 5);
+  mints.slice(0, 4).forEach((m) => h.settle(fill(m, -0.01)));
+  await tick();
+  assert.equal(auto.snapshot().stats[c.id].coolOffUntil, null, 'four is not five');
+  h.settle(fill(mints[4], -0.01));
+  await tick();
+  assert.ok(typeof auto.snapshot().stats[c.id].coolOffUntil === 'number', 'the fifth starts the pause');
+  assert.ok(h.calls.notifies.some((b) => /5 losing exits in a row/.test(b)));
+  auto.onSandboxMessage(c.id, { t: 'call', id: 30, method: 'buy', args: [MINT, 0.05] });
+  await tick();
+  assert.match(h.calls.replies.find((r) => r.cid === 30).value.message, /cooling off after 5 losing exits in a row/);
+});
+
+test('LIVE: setting the pause to 0 while one is running lets the next buy through', async () => {
+  const h = setup({ walletSol: 100 });
+  const c = saved(codeScript({ mode: 'live', budget: LIVE_OK }));
+  auto.setEnabled(c.id, true);
+  [MINT, MINT2, MINT3].forEach((m, i) => auto.onSandboxMessage(c.id, { t: 'call', id: 10 + i, method: 'buy', args: [m, 0.05] }));
+  await tick();
+  [MINT, MINT2, MINT3].forEach((m) => h.settle(fill(m, -0.01)));
+  await tick();
+  assert.ok(typeof auto.snapshot().stats[c.id].coolOffUntil === 'number', 'paused at the default three');
+  const r = auto.upsert({ ...auto.all().find((s) => s.id === c.id), budget: { ...LIVE_OK, coolOffAfterLosses: 0 } });
+  assert.ok(r.ok, r.message);
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 40, method: 'buy', args: [MINT, 0.05] });
+  await tick();
+  assert.equal(h.calls.buys.length, 4, 'the buy goes out');
+  assert.equal(auto.snapshot().stats[c.id].coolOffUntil, null, 'and the pause is cleared');
+});
+
+test('the cool-off setting: 0 to 50, absent reads as three', () => {
+  setup();
+  assert.equal(auto.upsert(codeScript({ name: 'zero', budget: { ...LIVE_OK, coolOffAfterLosses: 0 } })).ok, true, '0 is allowed: it means never');
+  assert.equal(auto.upsert(codeScript({ name: 'neg', budget: { ...LIVE_OK, coolOffAfterLosses: -1 } })).ok, false);
+  assert.equal(auto.upsert(codeScript({ name: 'big', budget: { ...LIVE_OK, coolOffAfterLosses: 51 } })).ok, false);
+  const old = saved(codeScript({ name: 'old', budget: LIVE_OK }));
+  assert.equal(old.budget.coolOffAfterLosses, undefined, 'a script saved before the setting keeps no value');
+  assert.equal(auto.COOL_OFF_AFTER_LOSSES, 3, 'and the default is three');
+});
+
 test('LIVE: a buy under 0.03 SOL is refused — the fee floors would take more than a tenth of it; paper rehearses any size', async () => {
   const h = setup({ walletSol: 100 });
   const c = saved(codeScript({ mode: 'live', budget: LIVE_OK }));

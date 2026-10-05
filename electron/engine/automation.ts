@@ -78,7 +78,7 @@ import {
   type UserScript,
   type BundledScript,
 } from '@shared/automation';
-import { DEFAULT_LOSS_PCT_OF_WALLET } from '@shared/automation';
+import { DEFAULT_COOL_OFF_AFTER_LOSSES, DEFAULT_LOSS_PCT_OF_WALLET } from '@shared/automation';
 import { migrateInputDefaults, parseInputs as parseInputSpecs } from '@shared/scriptInputs';
 import { FEE_LANES, MAX_UNATTENDED_FEE_SHARE, minUnattendedBuySol, roundTripFeeShare, type FeeLane } from '@shared/exitBudget';
 import { MAX_STAT_KEYS, MIN_INTERVAL_S, type SandboxToMain, type ScriptStatValue } from '@shared/scriptProtocol';
@@ -1283,9 +1283,21 @@ async function reconcileOpened(s: UserScript, rt: Runtime): Promise<void> {
 // stop is also a share of the wallet so it can never exceed the money in
 // play, and three losing exits in a row pause buys for an hour.
 
-/** Losing exits in a row that start the cool-off, and how long it lasts. */
-export const COOL_OFF_AFTER_LOSSES = 3;
+/** Losing exits in a row that start the cool-off (the default — a script's
+ *  budget may set its own, 0 = never), and how long it lasts. */
+export const COOL_OFF_AFTER_LOSSES = DEFAULT_COOL_OFF_AFTER_LOSSES;
 export const COOL_OFF_MS = 60 * 60_000;
+
+/**
+ * The streak that pauses THIS script's buys: its budget's figure, or the
+ * default when the script does not say. 0 = never (2026-10-04): the streak
+ * carries no information about the next trade — trades inside a pause did
+ * better than the rest over 410 — so it is a brake the user may lift.
+ */
+function coolOffAfter(s: UserScript): number {
+  const n = s.budget.coolOffAfterLosses;
+  return typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.round(n)) : COOL_OFF_AFTER_LOSSES;
+}
 /** Closed episodes remembered, so a late-settling fill still finds its bag. */
 const CLOSED_KEEP = 300;
 
@@ -1329,11 +1341,15 @@ function noteEpisodeClosed(s: UserScript, rt: Runtime, mint: string, realized: n
   if (s.mode !== 'live') return;
   if (realized < 0) rt.lossStreak += 1;
   else if (realized > 0) rt.lossStreak = 0;
-  if (rt.lossStreak < COOL_OFF_AFTER_LOSSES) return;
+  const after = coolOffAfter(s);
+  // Lifted in the budget: the streak is still counted (the page shows it),
+  // nothing pauses. The daily loss stop is unaffected.
+  if (after <= 0) return;
+  if (rt.lossStreak < after) return;
   if (rt.coolOffUntil !== null && Date.now() < rt.coolOffUntil) return;
   rt.coolOffUntil = Date.now() + COOL_OFF_MS;
   rt.lossStreak = 0;
-  const why = `${COOL_OFF_AFTER_LOSSES} losing exits in a row (last: ${mint.slice(0, 8)}) — buys are paused until ${hhmm(rt.coolOffUntil)}; sells and orders still run`;
+  const why = `${after} losing exits in a row (last: ${mint.slice(0, 8)}) — buys are paused until ${hhmm(rt.coolOffUntil)}; sells and orders still run`;
   slog(s, 'warn', `COOLING OFF — ${why}`);
   host?.toast('warn', `Script "${s.name}" cooling off: ${why}`);
   host?.notify(`Script cooling off: ${s.name}`, why.slice(0, 200));
@@ -1398,7 +1414,9 @@ async function buyGate(s: UserScript, rt: Runtime, mint: string, sol: number, wh
   if (rt.buysToday >= s.budget.maxBuysPerDay) return refuse(s, `buy ${what}: ${s.budget.maxBuysPerDay} buys today already`);
   if (checkLossCap(s, rt)) return { ok: false, message: 'daily loss limit' };
   if (rt.coolOffUntil !== null) {
-    if (Date.now() < rt.coolOffUntil) return refuse(s, `buy ${what}: cooling off after ${COOL_OFF_AFTER_LOSSES} losing exits in a row, until ${hhmm(rt.coolOffUntil)}`);
+    // A pause set to 0 in the budget while one was running ends it here.
+    const after = coolOffAfter(s);
+    if (after > 0 && Date.now() < rt.coolOffUntil) return refuse(s, `buy ${what}: cooling off after ${after} losing exits in a row, until ${hhmm(rt.coolOffUntil)}`);
     rt.coolOffUntil = null;
     rt.lossStreak = 0;
   }
