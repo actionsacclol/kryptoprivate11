@@ -1,0 +1,142 @@
+WEBVTT
+
+00:00:00.350 --> 00:00:04.276
+In this video, you will connect a paid RPC to Krypto Bot.
+
+00:00:04.276 --> 00:00:08.546
+An RPC is the line the app uses to talk to the Solana network.
+
+00:00:08.546 --> 00:00:10.268
+The free lines work fine.
+
+00:00:10.268 --> 00:00:13.505
+A paid one is faster, and it does not get busy.
+
+00:00:13.505 --> 00:00:19.703
+First, buy a plan from a provider, like Helius, QuickNode, Triton, or Solana Vibe Station.
+
+00:00:19.703 --> 00:00:20.943
+Then follow along.
+
+00:00:22.190 --> 00:00:23.111
+Start on the Hub.
+
+00:00:23.111 --> 00:00:25.439
+That is the home screen with the big tiles.
+
+00:00:25.439 --> 00:00:27.822
+Click the tile that says Settings and Legal.
+
+00:00:29.070 --> 00:00:30.657
+You are now in Settings.
+
+00:00:30.657 --> 00:00:34.160
+Scroll down until you see the part called Solana RPC.
+
+00:00:34.160 --> 00:00:37.201
+Everything in this video happens in this part.
+
+00:00:38.450 --> 00:00:41.649
+If your plan is from Helius, this is the easy way.
+
+00:00:41.649 --> 00:00:46.383
+Open your Helius dashboard, copy your API key, and paste it into this box.
+
+00:00:46.383 --> 00:00:47.983
+That is all Helius needs.
+
+00:00:47.983 --> 00:00:50.286
+You can skip ahead to the Save step.
+
+00:00:51.540 --> 00:00:54.190
+Any other provider gives you two links.
+
+00:00:54.190 --> 00:00:55.684
+One starts with https.
+
+00:00:55.684 --> 00:00:57.451
+The other starts with wss.
+
+00:00:57.451 --> 00:00:58.674
+Copy the wss link.
+
+00:00:58.674 --> 00:01:05.060
+In this box, click at the end of the last line, press Enter to start a new line, and paste it.
+
+00:01:05.060 --> 00:01:07.846
+Keep the free link that is already there.
+
+00:01:07.846 --> 00:01:10.699
+More links means you catch more new coins.
+
+00:01:11.950 --> 00:01:13.411
+Now copy the https link.
+
+00:01:13.411 --> 00:01:18.159
+Scroll down a little to the box called Execution endpoint, and paste it there.
+
+00:01:18.159 --> 00:01:19.559
+This is your fast lane.
+
+00:01:19.559 --> 00:01:24.429
+Your buys, your sells, and the checks that they went through, all use this link.
+
+00:01:25.680 --> 00:01:31.097
+This box, called HTTP, is for small everyday lookups, and there are a lot of them.
+
+00:01:31.097 --> 00:01:35.722
+If your plan has no limit, you can paste the same https link here too.
+
+00:01:35.722 --> 00:01:41.469
+If your plan has a limit, leave this box alone, so the lookups do not use up your plan.
+
+00:01:42.720 --> 00:01:47.221
+When your links are in, click the purple button that says Save RPC settings.
+
+00:01:48.470 --> 00:01:50.599
+Then click Measure, right below it.
+
+00:01:50.599 --> 00:01:55.707
+The app tests each link five times, and shows how fast it answered, in milliseconds.
+
+00:01:55.707 --> 00:01:57.349
+A smaller number is faster.
+
+00:01:57.349 --> 00:02:01.789
+If a link shows an error, you probably missed part of it when you copied.
+
+00:02:01.789 --> 00:02:03.796
+Copy it again and paste it again.
+
+00:02:05.050 --> 00:02:08.512
+Do you also trade on BNB Chain or Robinhood?
+
+00:02:08.512 --> 00:02:10.558
+Scroll down to EVM chains.
+
+00:02:10.558 --> 00:02:13.548
+Each one has a box called Own RPC URL.
+
+00:02:13.548 --> 00:02:18.977
+Paste that chain's https link in its box, then click its Save button.
+
+00:02:20.230 --> 00:02:20.918
+That is it.
+
+00:02:20.918 --> 00:02:23.543
+Your trades now go through your paid line.
+
+00:02:23.543 --> 00:02:27.794
+If you ever want to go back to free, empty the boxes and click Save.
+
+00:02:27.794 --> 00:02:28.732
+One last thing.
+
+00:02:28.732 --> 00:02:30.795
+Your link has your key inside it.
+
+00:02:30.795 --> 00:02:32.358
+Treat it like a password.
+
+00:02:32.358 --> 00:02:35.921
+Never post it in a chat, on a stream, or in a screenshot.

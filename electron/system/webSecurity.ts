@@ -1,5 +1,6 @@
 import { shell, type BrowserWindow, app } from 'electron';
 import { isEmbeddableUrl } from '@shared/tokenLinks';
+import { isAppUrl, type AppUrlRules } from '@shared/appUrl';
 import { logger } from './logger';
 
 /**
@@ -87,17 +88,15 @@ export function applyCsp(win: BrowserWindow, devUrl: string | undefined): void {
  * frame can never navigate away from app-local content (a remote page must
  * never gain access to the preload's window.krypt surface).
  */
-export function guardWebContents(win: BrowserWindow): void {
+export function guardWebContents(win: BrowserWindow, own: AppUrlRules): void {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => {
-    const isLocal =
-      url.startsWith('file://') ||
-      url.startsWith('http://localhost') ||
-      url.startsWith('http://127.0.0.1');
-    if (!isLocal) {
+    // The app's own page only — an exact match, never a prefix (see
+    // shared/appUrl.ts for what the prefix test let in).
+    if (!isAppUrl(url, own)) {
       e.preventDefault();
       if (url.startsWith('https://')) void shell.openExternal(url);
     }

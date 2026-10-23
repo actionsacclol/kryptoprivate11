@@ -21,6 +21,7 @@
 import { humanWait } from '@shared/market';
 import type { ProviderId } from '@shared/market';
 import { describeBody } from './refusals';
+import { isPumpHost, pumpFetch, PumpWallError, wallMessage, wallRemainingMs } from './pumpWall';
 
 // Re-exported so the classifier's table can be pinned by the same test that
 // pins the park it feeds (test/http.test.mjs) without a second bundle.
@@ -856,6 +857,13 @@ function softParkFromHeaders(id: HttpProviderId, headers: { get(name: string): s
   if (until > (blockedUntil.get(key) ?? 0)) blockedUntil.set(key, until);
 }
 
+function walledResult<T>(id: HttpProviderId): FetchResult<T> {
+  transportFailures += 1;
+  const msg = `${id}: ${wallMessage()}`;
+  statsFor(id).lastError = msg;
+  return { ok: false, message: msg, ms: 0, status: 403 };
+}
+
 function parkedResult<T>(id: HttpProviderId, path?: string): FetchResult<T> {
   transportFailures += 1;
   const cooling = path === undefined ? cooldownRemainingMs(id) : routeCooldownMs(id, path);
@@ -1100,6 +1108,10 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
   // to the relayer. A priority call that 429s simply extends the park.
   const priority = opts.priority === true;
   if (!priority && routeCooldownMs(id, path) > 0) return parkedResult<T>(id, path);
+  // pump.fun behind a Cloudflare challenge (pumpWall.ts): every call would
+  // come back a challenge page, priority or not, so none enters the queue.
+  const pump = isPumpHost(host);
+  if (pump && wallRemainingMs() > 0) return walledResult<T>(id);
 
   const skip = (): FetchResult<T> | null => (!priority && routeCooldownMs(id, path) > 0 ? parkedResult<T>(id, path) : null);
 
@@ -1111,7 +1123,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
     noteRoute(s, url);
     let status: number | null = null;
     try {
-      const res = await fetch(url, {
+      const res = await (pump ? pumpFetch : fetch)(url, {
         method: opts.json === undefined ? 'GET' : 'POST',
         // A 30x to 127.0.0.1 / 169.254.169.254 is the standard SSRF pivot.
         // We never follow one; a provider that starts redirecting is a
@@ -1222,6 +1234,9 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
       if (!text.trim()) return { ok: true, message: 'empty', data: undefined, ms, status };
       return { ok: true, message: 'ok', data: JSON.parse(text) as T, ms, status };
     } catch (err) {
+      // The wall has its own clock; it must not also feed the per-route
+      // streak, which would leave a park behind after the wall lifts.
+      if (err instanceof PumpWallError) return walledResult<T>(id);
       transportFailures += 1;
       const raw = (err as Error)?.message ?? 'request failed';
       const msg =

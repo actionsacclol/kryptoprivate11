@@ -289,11 +289,14 @@ export interface AutomationHost {
   wallet(chain?: ChainKind): { sol: number | null; address: string | null };
   orders(mint?: string): OrderView[];
   placeOrder(req: NewOrderRequest): Promise<{ ok: boolean; message: string }>;
-  /** Every open order on the mint, or only the given kinds. */
-  cancelOrders(mint: string, kinds?: OrderKind[]): { ok: boolean; message: string; cancelled: number };
+  /** Every open order on the mint that `placedBy` armed, or only the given
+   *  kinds of those. Orders anyone else armed are never touched. */
+  cancelOrders(mint: string, kinds: OrderKind[] | undefined, placedBy: string): { ok: boolean; message: string; cancelled: number };
   clearCompletedOrders(): { ok: boolean; message: string; cleared: number };
   templates(): Array<{ id: string; name: string }>;
-  applyTemplate(mint: string, templateId: string): Promise<{ ok: boolean; message: string }>;
+  /** `by.sellShare` (0..1] scales the template's sell percentages to the
+   *  script's own part of the bag; `by.placedBy` tags the orders. */
+  applyTemplate(mint: string, templateId: string, by?: { placedBy?: string; sellShare?: number }): Promise<{ ok: boolean; message: string }>;
   createAlert(req: NewAlertRequest): { ok: boolean; message: string };
   /** Stream ticks for a mint (idempotent; never unsubscribes — the chart may be on it). */
   subscribeTicks(mint: string): void;
@@ -1692,21 +1695,30 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
     case 'limit_sell': {
       const kind = orderKindOf(action) as OrderKind;
       const isBuy = kind === 'limit_buy';
-      const amount = action.type === 'limit_buy' ? action.sol : action.type === 'take_profit' ? action.sellPct : action.type === 'limit_sell' ? action.pct : 100;
+      let amount = action.type === 'limit_buy' ? action.sol : action.type === 'take_profit' ? action.sellPct : action.type === 'limit_sell' ? action.pct : 100;
       const basis: TriggerBasis = action.type === 'limit_buy' || action.type === 'limit_sell' ? action.basis : 'pct';
       const triggerValue = action.type === 'limit_buy' || action.type === 'limit_sell' ? action.value : action.type === 'take_profit' ? action.gainPct : action.pct;
       if (isBuy) {
         const gate = await buyGate(s, rt, mint, Number(amount), what);
         if (gate) return gate;
-      } else if (!(await h.positions(s.mode, scriptChain(s))).some((p) => p.mint === mint)) {
-        return refuse(s, `${spec.label.toLowerCase()} ${what}: nothing held in ${s.mode} mode`);
+      } else {
+        // A sell order is a sell: only what this script opened, the same rule
+        // as sellOne (2026-10-23). Checking "the wallet holds it" let a live
+        // script arm a limit sell that dumped a bag the user bought by hand.
+        if (!rt.opened.has(mint)) return refuse(s, `${spec.label.toLowerCase()} ${what}: this script does not hold it`);
+        const before = (await h.positions(s.mode, scriptChain(s))).find((p) => p.mint === mint);
+        if (!before) return refuse(s, `${spec.label.toLowerCase()} ${what}: nothing held in ${s.mode} mode`);
+        // The order sells a percentage of the whole holding when it fires, so
+        // it is scaled to the script's share now, as sellOne scales a sell.
+        const share = bagShare(s, rt, mint, before);
+        if (share !== null) amount = Math.max(1, Math.min(100, Math.round(Number(amount) * share)));
       }
       if (s.mode === 'paper') {
         // Advanced orders execute for real. A paper script keeps its paper.
         slog(s, 'info', `PAPER ${describeAction(action)} on ${what} — recorded, not placed (orders execute for real; switch the script to live to place them)`);
         return { ok: true, message: 'paper: order noted, not placed' };
       }
-      const r = await h.placeOrder({ mint, symbol: ctx?.symbol ?? '', kind, triggerBasis: basis, triggerValue, amount: Number(amount), expiresAt: opts.expiresAt ?? null });
+      const r = await h.placeOrder({ mint, symbol: ctx?.symbol ?? '', kind, triggerBasis: basis, triggerValue, amount: Number(amount), expiresAt: opts.expiresAt ?? null, placedBy: orderTag(s) });
       if (r.ok && isBuy) {
         rt.buysToday += 1;
         rt.opened.set(mint, openedWithBuy(rt.opened.get(mint), Number(amount), now, null));
@@ -1719,17 +1731,24 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
       return r;
     }
     case 'cancel_orders': {
-      const r = h.cancelOrders(mint, action.kinds);
+      // Only the orders this script armed (2026-10-23): it used to drop every
+      // order on the coin, the user's own hand-placed stop loss included.
+      const r = h.cancelOrders(mint, action.kinds, orderTag(s));
       slog(s, 'info', `cancel ${action.kinds?.length ? `${action.kinds.join('/')} ` : ''}orders on ${what}: ${r.message}`);
       return { ok: r.ok, message: r.message, count: r.cancelled };
     }
     case 'apply_template': {
-      if (!(await h.positions(s.mode, scriptChain(s))).some((p) => p.mint === mint)) return refuse(s, `apply template ${what}: nothing held in ${s.mode} mode`);
+      // A template arms sell orders, so the same rule as a sell (2026-10-23):
+      // only on a coin this script opened, scaled to its share of the bag.
+      if (!rt.opened.has(mint)) return refuse(s, `apply template ${what}: this script does not hold it`);
+      const before = (await h.positions(s.mode, scriptChain(s))).find((p) => p.mint === mint);
+      if (!before) return refuse(s, `apply template ${what}: nothing held in ${s.mode} mode`);
       if (s.mode === 'paper') {
         slog(s, 'info', `PAPER apply template on ${what} — noted, not placed (orders execute for real)`);
         return { ok: true, message: 'paper: template noted, not placed' };
       }
-      const r = await h.applyTemplate(mint, action.templateId);
+      const share = bagShare(s, rt, mint, before);
+      const r = await h.applyTemplate(mint, action.templateId, { placedBy: orderTag(s), ...(share !== null ? { sellShare: share } : {}) });
       slog(s, r.ok ? 'info' : 'warn', `apply template on ${what}: ${r.message}`);
       return r;
     }
@@ -1774,6 +1793,47 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
   }
 }
 
+/**
+ * The script's share (0..1] of the wallet's bag of `mint`, by cost basis, or
+ * null when it cannot be worked out (the wallet's basis is unknown, or none of
+ * the script's own spend is priced). The same construction copyTrade.ts
+ * `walletPctFor` uses, and the reason `opened` carries costSol at all. Used
+ * by sellOne and by the sell orders a script arms (2026-10-23), which sold a
+ * percentage of the whole holding with no scaling at all.
+ *
+ * Both sides of the ratio must be the same kind of number. The wallet's cost
+ * is the ledger's ALL-IN spend (priority fee, tip, token-account rent
+ * included); the script's used to be the SOL it asked to spend. On a 0.016
+ * SOL buy that is ~0.0027 SOL apart, so every "sell 100%" of a bag only the
+ * script ever bought sold 92–99% and left dust that later cost more to sell
+ * than it was worth (09-25: FOMOFY 96%, Gavel 92%, LIABCAT 94%…). So the
+ * script's own buys are priced from the chain too, when every one is known.
+ */
+function bagShare(s: UserScript, rt: Runtime, mint: string, before: ScriptPosition | undefined): number | null {
+  const h = host as AutomationHost;
+  const entry = rt.opened.get(mint);
+  let ourCost = entry?.costSol ?? 0;
+  if (entry?.sigs?.length && !entry.sigless && h.spentSolFor) {
+    const chainCost = h.spentSolFor(entry.sigs);
+    if (chainCost !== null && Number.isFinite(chainCost) && chainCost > 0) ourCost = chainCost;
+  }
+  // EVM: the ledger prices the wallet's basis with gas and fee legs, and the
+  // script only knows what it asked to spend, so the ratio came out at 97–99 %
+  // and "sell 100 %" left dust (the 09-25 Solana bug again). When every buy of
+  // this bag was the script's own, its share IS the whole bag (2026-10-03).
+  if (scriptChain(s) !== 'solana' && entry?.sigs?.length && before) {
+    const whole = evmHooks?.ownsWholeBag(scriptChain(s) as EvmChainKind, mint, entry.sigs) ?? null;
+    const wc = before.costSol;
+    if (whole === true && wc !== null && Number.isFinite(wc) && wc > 0) ourCost = wc;
+  }
+  const walletCost = before ? before.costSol : null;
+  if (walletCost !== null && Number.isFinite(walletCost) && walletCost > 0 && ourCost > 0) return Math.min(1, ourCost / walletCost);
+  return null;
+}
+
+/** The tag a script's orders carry (AdvOrder.placedBy). */
+const orderTag = (s: UserScript): string => `script:${s.id}`;
+
 async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, what: string, extra: { slippagePct?: number; tokens?: number; feeLane?: FeeLane } = {}): Promise<ActResult> {
   const h = host as AutomationHost;
   // Only what this script opened — the same rule as sell_all. `h.positions`
@@ -1810,42 +1870,14 @@ async function sellOne(s: UserScript, rt: Runtime, mint: string, pct: number, wh
   // `pct` is a percentage of the WHOLE wallet holding, and the guard above is
   // only mint-granular: it proves the script opened this mint, not that it
   // owns all of it. A script that bought 0.01 SOL of a bag the user then
-  // hand-added 5.0 SOL to would sell all 5.01 on a `sell 100%`.
-  //
-  // So scale by the script's share of the cost basis — the same construction
-  // copyTrade.ts `walletPctFor` already uses, and the reason `opened` carries
-  // costSol at all. `Math.max(1, …)` because a share that rounds to zero must
-  // still be able to exit; this only ever shrinks the sell, never grows it.
-  //
-  // Both sides of the ratio must be the same kind of number. The wallet's
-  // cost is the ledger's ALL-IN spend (priority fee, tip, token-account rent
-  // included); the script's used to be the SOL it asked to spend. On a 0.016
-  // SOL buy that is ~0.0027 SOL apart, so every "sell 100%" of a bag only the
-  // script ever bought sold 92–99% and left dust that later cost more to sell
-  // than it was worth (09-25: FOMOFY 96%, Gavel 92%, LIABCAT 94%…). So price
-  // the script's own buys from the chain too, when every one of them is known.
-  const entry = rt.opened.get(mint);
-  let ourCost = entry?.costSol ?? 0;
-  if (entry?.sigs?.length && !entry.sigless && h.spentSolFor) {
-    const chainCost = h.spentSolFor(entry.sigs);
-    if (chainCost !== null && Number.isFinite(chainCost) && chainCost > 0) ourCost = chainCost;
-  }
-  // EVM: the ledger prices the wallet's basis with gas and fee legs, and the
-  // script only knows what it asked to spend, so the ratio came out at 97–99 %
-  // and "sell 100 %" left dust (the 09-25 Solana bug again). When every buy of
-  // this bag was the script's own, its share IS the whole bag (2026-10-03).
-  if (scriptChain(s) !== 'solana' && entry?.sigs?.length && before) {
-    const whole = evmHooks?.ownsWholeBag(scriptChain(s) as EvmChainKind, mint, entry.sigs) ?? null;
-    const wc = before.costSol;
-    if (whole === true && wc !== null && Number.isFinite(wc) && wc > 0) ourCost = wc;
-  }
+  // hand-added 5.0 SOL to would sell all 5.01 on a `sell 100%`. So scale by
+  // the script's share of the cost basis (bagShare).
   let pctOfWallet = pct;
-  // An UNKNOWN wallet basis means the script cannot work out its own share, so
-  // it sells the percentage it asked for rather than guessing a ratio — the
+  // An UNKNOWN share means the script cannot work out its own part, so it
+  // sells the percentage it asked for rather than guessing a ratio — the
   // same branch an unreconciled Solana position already took.
-  const walletCost = before ? before.costSol : null;
-  if (walletCost !== null && Number.isFinite(walletCost) && walletCost > 0 && ourCost > 0) {
-    const ratio = Math.min(1, ourCost / walletCost);
+  const ratio = bagShare(s, rt, mint, before);
+  if (ratio !== null) {
     // A PERCENT is a share of the script's own part of the bag, so it scales
     // by the share. A QUANTITY is already an absolute share of the whole
     // holding, so the script's share is a CEILING on it, not a multiplier —
@@ -2632,14 +2664,19 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
           slog(s, 'warn', msg);
           return result({ ok: false, message: msg });
           }
+          let orderAmount = amount;
           if (kind === 'sell_on_migration' || kind === 'sell_on_dev_sell') {
           if (!rt.opened.has(orderMint)) return result(refuse(s, `order ${kind} on ${label}: this script does not hold it`));
+          // Scaled to the script's share of the bag, as every script sell is.
+          const before = (await h.positions(s.mode, scriptChain(s))).find((p) => p.mint === orderMint);
+          const share = bagShare(s, rt, orderMint, before);
+          if (share !== null) orderAmount = Math.max(1, Math.min(100, Math.round(amount * share)));
           }
           if (kind === 'buy_on_migration') {
           const gate = await buyGate(s, rt, orderMint, amount, label);
           if (gate) return result(gate);
           }
-          const r = await h.placeOrder({ mint: orderMint, symbol: ctx.symbol, kind, triggerBasis: basis, triggerValue: Number.isFinite(value) ? value : null, amount, expiresAt });
+          const r = await h.placeOrder({ mint: orderMint, symbol: ctx.symbol, kind, triggerBasis: basis, triggerValue: Number.isFinite(value) ? value : null, amount: orderAmount, expiresAt, placedBy: orderTag(s) });
           // An armed buy_on_migration is a buy this script has committed to:
           // reserve it now, or the budget counts it only once it fires.
           if (r.ok && kind === 'buy_on_migration') {

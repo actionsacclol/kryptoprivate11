@@ -362,3 +362,17 @@ console.log(`livebreakers: ${passed}/${total} tests passed`);
   assert.match(hook, /liveEnabled: true/, 'and Live is saved as the mode, so the top bar tells the truth');
   console.log('ok  a checked pump upgrade re-arms live only when it disarmed it, and only through the top-bar path');
 }
+
+{
+  // The loss guard is pre − post, and post comes from a simulation at
+  // 'processed'. A pre-balance read at 'confirmed' (the getBalance default)
+  // missed this wallet's own processed-but-unconfirmed trades, so a stop loss
+  // fired a second after a buy was charged that buy and refused (2026-10-23).
+  const src = fs.readFileSync(new URL('../electron/engine/liveSigner.ts', import.meta.url), 'utf8');
+  const guard = src.slice(src.indexOf('const [sim, preRes] = await Promise.all(['), src.indexOf('timing.simulate = Date.now() - simStart;'));
+  assert.match(guard, /getBalance\(p\.httpUrl, owner, 'processed'\)/, 'the pre-balance is read at the simulation’s commitment');
+  const rpc = fs.readFileSync(new URL('../electron/chain/rpcClient.ts', import.meta.url), 'utf8');
+  const sim = rpc.slice(rpc.indexOf('export async function simulateTransaction'), rpc.indexOf('export async function simulateTransaction') + 1500);
+  assert.match(sim, /commitment: 'processed'/, 'and the simulation is still at processed');
+  console.log('ok  the loss guard compares balances read at the same commitment');
+}

@@ -4,6 +4,7 @@ import { EVM_CHAIN_META } from '@shared/evm';
 import type { NotifyTarget } from '@shared/types';
 import path from 'node:path';
 import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { registerIpc, getEngine, syncLiveMode, bridgeDeps, setWindowHost } from './ipc';
 import * as store from './system/settings-store';
 import * as wallet from './system/wallet';
@@ -39,6 +40,10 @@ import * as kryptoTrader from './engine/kryptoTrader';
 import * as programWatch from './engine/programWatch';
 import { registerImageProtocol, registerImageScheme, setEnabled as setImagesEnabled } from './data/images';
 import { installNetAgent } from './system/netAgent';
+import { installPumpTransport } from './system/pumpTransport';
+import * as pumpSocial from './system/pumpSocial';
+import * as pumpProfile from './system/pumpProfile';
+import * as pumpAuth from './system/pumpAuth';
 import { pickUserDataDir, LEGACY_PROFILE_NAMES } from './system/profileContinuity';
 import * as profiles from './system/profiles';
 
@@ -155,6 +160,13 @@ process.env.DIST = path.join(__dirname, '..', 'dist');
 process.env.VITE_PUBLIC = app.isPackaged
   ? process.env.DIST
   : path.join(__dirname, '..', 'public');
+
+/** The only page a window carrying window.krypt may navigate to: our own
+ *  index.html, or the dev server in an unpackaged run (shared/appUrl.ts). */
+function ownPage(devUrl: string | undefined): { indexUrl: string; devUrl?: string } {
+  const indexUrl = pathToFileURL(path.join(process.env.DIST!, 'index.html')).href;
+  return devUrl ? { indexUrl, devUrl } : { indexUrl };
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Single-instance lock
@@ -481,13 +493,12 @@ function showMainWindow(): BrowserWindow {
     quitIfOnlySandboxesRemain();
   });
 
-  guardWebContents(win);
-
   // Only an unpackaged run may point the window at a dev server. Honouring
   // this in a shipped build would let an environment variable load an
   // arbitrary remote origin into a window that carries window.krypt — and
   // apply the permissive dev CSP to it.
   const devUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
+  guardWebContents(win, ownPage(devUrl));
   applyCsp(win, devUrl);
   if (devUrl) {
     win.loadURL(devUrl).catch((err) => logger.error(`loadURL failed: ${err}`));
@@ -634,7 +645,7 @@ function openPanelWindow(panelId: string): { ok: boolean; message: string } {
   // The same navigation and window-open guards the main window gets. A second
   // window carrying window.krypt has to be as locked down as the first, and
   // this was missed when the window was added.
-  guardWebContents(win);
+  guardWebContents(win, ownPage(app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL));
 
   // A panel window that fails is currently invisible in the log: it either
   // shows nothing or shows the renderer's crash card, and neither says why
@@ -717,6 +728,16 @@ async function bootstrap(): Promise<void> {
   // Keep-alive for every outbound fetch (see system/netAgent.ts) — before
   // anything opens a connection.
   installNetAgent();
+  // pump.fun's API is behind Cloudflare, which challenges Node's fetch (fixpump.md).
+  installPumpTransport();
+  // A pump.fun referral that did not land before the last quit is retried while its 24 h window is open.
+  pumpSocial.startReferralRetries();
+  // A pump.fun session that has expired is signed in again silently (wallet key is held); checked at launch and every 3 h.
+  pumpAuth.startSessionKeepAlive();
+  // Every pump.fun account's bio ends with the Krypt line (shared/pumpProfile.ts); checked at launch
+  // and every 6 h in case it was edited away on pump.fun.
+  setTimeout(() => void pumpProfile.ensureAllBioMarks(), 45_000).unref();
+  setInterval(() => void pumpProfile.ensureAllBioMarks(), 6 * 3_600_000).unref();
   // Load persisted orders BEFORE registerIpc(), which constructs the engine
   // and attaches the order host. Restored orders come back PAUSED by design
   // (see advOrders.ts §3) — the user resumes them deliberately.

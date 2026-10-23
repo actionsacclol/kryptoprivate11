@@ -842,6 +842,75 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       'After importing, the app can trade from that wallet. Back it up from Sol Wallet → Backup & removal, and keep only what you can afford to lose in it.',
     ],
   },
+  deposit: {
+    what: 'Money moves in and out of the Solana trading wallet on Wallet Utilities → Sol Wallet. A deposit is a plain SOL transfer to the active wallet’s address from anywhere. Withdraw sends SOL from the active wallet to the withdrawal address saved for it, and nowhere else. Send pays any address, in SOL or any token the wallet holds, after a native confirmation. BNB and Robinhood have their own wallet pages with a deposit address and a Send card.',
+    steps: [
+      'Sol Wallet → Deposit address: copy it, and send SOL on Solana mainnet to it. A first transfer of 0.1 SOL or so proves the route.',
+      'Press Refresh on the balance. It reads the chain, so the transfer shows once it confirms.',
+      'Withdrawal address: paste your own wallet or exchange address and press Save. Each wallet keeps its own.',
+      'Withdraw SOL: type an amount or press Max, press Withdraw, and confirm the dialog. It names the exact address.',
+      'To pay anyone else, or to move a token, use Send: pick what, type the address and amount, then confirm in the system dialog.',
+    ],
+    details: [
+      {
+        heading: 'Withdraw',
+        lines: [
+          'SOL only, from the ACTIVE trading wallet. Tokens are not sent here: sell them first, use Send, or export the key.',
+          'The destination is read-only on the card. The signer refuses any address other than the saved one, so there is nothing else to offer.',
+          'Max is the balance less the rent-exempt minimum and a small fee headroom. A balance at the minimum shows Nothing withdrawable.',
+          'An edited but unsaved withdrawal address blocks Withdraw, because it would still pay the saved one.',
+          'A withdrawal queues behind any trade in flight on that wallet, so it never races a buy.',
+        ],
+      },
+      {
+        heading: 'Send',
+        lines: [
+          'Any address, no Krypt fee. The card only asks: main re-reads the balance and shows a native dialog with the exact address and amount before anything is signed.',
+          'Max on a SOL send keeps a little back for the network fee.',
+          'Robinhood and BNB pages have their own Send card and their own deposit address. One EVM key is the same address on both chains, so a deposit lands on whichever chain it was sent on.',
+        ],
+      },
+    ],
+    careful: [
+      'Only SOL on Solana mainnet to the Solana address. A token sent from another network can be lost for good.',
+      'A transfer cannot be recalled. Check the withdrawal address character by character before saving it.',
+      'Send a small test amount first whenever an address is new, in either direction.',
+    ],
+  },
+  'paid-rpc': {
+    what: 'Settings → Solana RPC takes any provider. The execution endpoint (rpc.fastHttpUrl) carries the trade-critical calls: live buys and sells, confirmations, send-time fee estimates and template sampling. The HTTP endpoint carries bulk reads: mint checks, balances and holder reads. The WebSocket endpoints feed launches, and extra sockets race in parallel, with duplicates dropped. A Helius key fills the execution lane by itself, but a typed execution endpoint wins over it.',
+    steps: [
+      'Helius plan: paste the key in Helius API key. It derives the execution URL, and the feed socket is a separate switch.',
+      'Other provider: add its wss:// URL as a new line in Extra WebSocket endpoints, and paste its https:// URL in Execution endpoint.',
+      'Unmetered plan: also set HTTP (account lookups) to the same https:// URL. Metered plan: leave HTTP on the public endpoint.',
+      'Save RPC settings, then Measure. It makes five getLatestBlockhash round trips per saved endpoint and reports the median, the best, the slot, and whether it serves getTokenAccountsByOwner.',
+      'BNB / Robinhood: EVM chains → Own RPC URL (https only), then that chain’s Save button.',
+    ],
+    details: [
+      {
+        heading: 'What each field does',
+        lines: [
+          'Execution endpoint must be https. HTTP and WebSocket are not held to https, so a local validator on http://127.0.0.1:8899 works.',
+          'Empty Execution endpoint = the Helius key decides, as before. Set, it wins over the derived Helius URL.',
+          'One public socket misses about 20% of events under load, so keep the free lines next to a paid one. The pool also helps coverage.',
+          'The standby block feed only connects to its built-in host (publicnode). A provider’s socket is not used there.',
+        ],
+      },
+      {
+        heading: 'Measure',
+        lines: [
+          'Plain fetch, outside the RPC client, so parks, buckets and failover do not skew it. It is a button, never a poll.',
+          'Samples run one at a time, per endpoint and across endpoints, so it does not measure its own contention.',
+          'Endpoints are shown by host only, because a URL often carries its key and this output gets pasted into bug reports.',
+          'A fast endpoint that is behind the chain shows a lower slot. Fast and stale is not fast.',
+        ],
+      },
+    ],
+    careful: [
+      'An RPC URL usually contains the key. Never paste it into a chat, a stream, a screenshot or a bug report.',
+      'Metered plans bill every call. The HTTP lane does many small reads (a mint check per launch, holder reads), so keep it on the public endpoint unless the plan is unmetered.',
+    ],
+  },
   automation: {
     what: 'Automation holds everything that trades off something other than your click: Copy Simple, Copy Trading, Scripts, Auto-callout, pump.fun accounts, AI connection and Farming (not built yet). Copy Simple and Copy Trading edit the same copy configs in one store and one engine (at most 25 configs). Scripts are rules or sandboxed JavaScript that ask the engine to act, and each ask is checked against that script’s own budget. The AI connection is a loopback MCP server that takes intents, not transactions. All of them go through the same buy/sell pipeline as the buttons, so the same fees, signer policy and breakers apply.',
     steps: [

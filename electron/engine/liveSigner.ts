@@ -953,10 +953,17 @@ async function runPipeline(
   // sequence added a whole RPC round trip (~85ms on a public endpoint,
   // measured 2026-08-24) to every order for no reason. Both are still
   // required before the loss guard; only the waiting is removed.
+  //
+  // AT 'processed', the commitment the simulation runs at (2026-10-23). The
+  // loss is pre − post, and a pre read at 'confirmed' misses this wallet's own
+  // transactions that are processed but not yet confirmed, while the
+  // simulated post already has them applied: a stop loss firing a second
+  // after a 0.5 SOL script buy was charged that buy and refused as a loss,
+  // with no retry. The same gap ran the other way too, hiding part of a loss.
   const simStart = Date.now();
   const [sim, preRes] = await Promise.all([
     simulateTransaction(p.httpUrl, base64, [owner, ataClassic, ata2022]),
-    getBalance(p.httpUrl, owner),
+    getBalance(p.httpUrl, owner, 'processed'),
   ]);
   timing.simulate = Date.now() - simStart;
   if (!sim.ok || !sim.data) return { ok: false, stage: 'simulate', message: `Simulation call failed: ${sim.message}`, timing };

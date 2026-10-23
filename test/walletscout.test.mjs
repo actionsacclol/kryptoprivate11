@@ -46,7 +46,15 @@ const ok = (label) => {
   passed += 1;
 };
 
-const NOW = new Date('2026-09-10T12:00:00').getTime();
+// Today at noon, NOT a fixed date (2026-10-23). The pure helpers take `now`,
+// but the engine side (scout.wallets → rotate) reads the real clock with a
+// 45-day retention, so a pinned 2026-09-10 aged the seeded records out once
+// the calendar passed it — and CI runs this suite before every release.
+const NOW = (() => {
+  const d = new Date();
+  d.setHours(12, 0, 0, 0);
+  return d.getTime();
+})();
 const TODAY = dayOf(NOW);
 
 const day = (offset, over = {}) => ({

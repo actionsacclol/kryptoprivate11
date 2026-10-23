@@ -1079,6 +1079,7 @@ export function WalletsPage() {
 
                     <button
                       onClick={() => void toggle(c)}
+                      title={!c.enabled && c.exitsOnly ? 'Paused by the restart: no new copies, but the copies it already holds still sell when the leader sells and when their own exits hit. Press to follow again.' : undefined}
                       className={cls(
                         'rounded-md border px-3 py-1.5 text-body font-bold uppercase tracking-wider transition',
                         c.enabled
@@ -1086,7 +1087,7 @@ export function WalletsPage() {
                           : 'border-white/10 bg-white/5 text-krypt-muted hover:text-white',
                       )}
                     >
-                      {c.enabled ? 'Following' : 'Paused'}
+                      {c.enabled ? 'Following' : c.exitsOnly ? 'Paused · exits on' : 'Paused'}
                     </button>
 
                     <GhostButton onClick={() => setEditing(c)} className="!py-1.5 !px-2.5 text-body">

@@ -144,6 +144,7 @@ import * as walletHistory from './engine/walletHistory';
 import * as mcpServer from './system/mcpServer';
 import * as diagnostics from './system/diagnostics';
 import * as httpLayer from './data/http';
+import * as pumpWall from './data/pumpWall';
 import * as mcpTools from './engine/mcpTools';
 import { setTraderClaimCheck } from './engine/traderClaims';
 import { MCP_ACCESS_LEVELS, MCP_PORT_MAX, MCP_PORT_MIN, mcpAddCommand, mcpJsonConfig, mcpServerNameFor, type McpAccess } from '@shared/mcp';
@@ -274,7 +275,7 @@ async function settlePumpAccount(walletId: string): Promise<void> {
   // Krypt's referral, inside pump's 24 h window (shared/pumpReferral.ts).
   // Disclosed in the terms and where accounts are made; not a setting.
   await pumpSocial.applyReferral(walletId);
-  await pumpProfile.stampEmptyBio(walletId);
+  await pumpProfile.ensureBioMark(walletId);
 }
 export function getEngine(): SniperEngine {
   if (!engine) {
@@ -2219,6 +2220,8 @@ export function registerIpc(): void {
   // visible only in a live panel — a user who closed the app took the
   // evidence with them.
   httpLayer.attachLog(toLog);
+  // pump.fun's Cloudflare check going up and coming down (2026-10-22).
+  pumpWall.attachLog(toLog);
 
   // ── The AI connection (MCP, 2026-09-21) ───────────────────────────────
   //

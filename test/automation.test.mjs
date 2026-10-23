@@ -136,15 +136,16 @@ function makeHost(over = {}) {
       calls.orders.push({ id: 'o' + calls.orders.length, state: 'armed', symbol: '', ...req });
       return { ok: true, message: 'armed' };
     },
-    cancelOrders: (mint, kinds) => {
-      const hit = (o) => o.mint === mint && (!kinds || kinds.includes(o.kind));
+    // Like the engine: only the orders the caller armed (2026-10-23).
+    cancelOrders: (mint, kinds, placedBy) => {
+      const hit = (o) => o.mint === mint && (!kinds || kinds.includes(o.kind)) && (o.placedBy ?? null) === placedBy;
       const n = calls.orders.filter(hit).length;
       calls.orders = calls.orders.filter((o) => !hit(o));
       return { ok: true, message: 'cancelled ' + n, cancelled: n };
     },
     templates: () => [{ id: 'tpl1', name: 'Default' }],
-    applyTemplate: async (mint, id) => {
-      calls.templates.push({ mint, id });
+    applyTemplate: async (mint, id, by) => {
+      calls.templates.push(by ? { mint, id, by } : { mint, id });
       return { ok: true, message: 'armed 2' };
     },
     createAlert: (req) => {
@@ -1007,7 +1008,7 @@ test('a script’s own state is saved within seconds and coalesced; a buy is sav
     }
     await tick(400);
     assert.equal(writes, 0, 'five setStates, no write yet');
-    auto.onSandboxMessage(c.id, { t: 'call', id: 20, method: 'buy', args: [MINT, 0.01] });
+    auto.onSandboxMessage(c.id, { t: 'call', id: 20, method: 'buy', args: [MINT, 0.05] });
     await tick(450);
     assert.equal(writes, 1, 'the buy is written within 300 ms');
     const saved1 = JSON.parse(fs.readFileSync(path.join(dir, 'automation.json'), 'utf8'));
@@ -1034,7 +1035,7 @@ test('bot.positions REJECTS when the wallet read failed — unknown is not empty
   const c = saved(codeScript());
   auto.setEnabled(c.id, true);
   await tick();
-  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.01] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT, 0.05] });
   await tick(30);
   auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'positions', args: [] });
   await tick(30);
@@ -1480,11 +1481,13 @@ test('advanced orders: a PAPER script notes them; a LIVE script places them, and
   await tick();
   assert.equal(h2.calls.orders.length, 1, 'over the per-trade cap: refused');
   assert.match(h2.calls.replies.find((r) => r.cid === 2).value.message, /over the script's max per trade/);
-  // Stops on something not held are refused; on something held they are placed.
+  // Stops on something the script does not hold are refused; on a bag it
+  // bought they are placed (a stop is a sell — sellOne's rule, 2026-10-23).
   auto.onSandboxMessage(live.id, { t: 'call', id: 3, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 30, amount: 100 }] });
   await tick();
-  assert.match(h2.calls.replies.find((r) => r.cid === 3).value.message, /nothing held/);
-  h2.book.live.push(h2.pos(MINT2, 0.1));
+  assert.match(h2.calls.replies.find((r) => r.cid === 3).value.message, /does not hold it/);
+  auto.onSandboxMessage(live.id, { t: 'call', id: 30, method: 'buy', args: [MINT2, 0.05] });
+  await tick();
   auto.onSandboxMessage(live.id, { t: 'call', id: 4, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 30, amount: 100 }] });
   await tick(); // calls run as they arrive; the cancel must see the placed order
   auto.onSandboxMessage(live.id, { t: 'call', id: 5, method: 'cancelOrders', args: [MINT2] });
@@ -1509,6 +1512,56 @@ test('advanced orders: a PAPER script notes them; a LIVE script places them, and
   assert.equal(h2.calls.replies.find((r) => r.cid === 10).ok, false, 'an unknown kind is refused');
   assert.equal(h2.calls.replies.find((r) => r.cid === 11).ok, false, 'an empty list is refused, never "all"');
   assert.equal(h2.calls.orders.filter((o) => o.mint === MINT2).length, 1, 'nothing else was cancelled');
+});
+
+test('a script cannot sell, or strip the stop from, a bag the user bought by hand (2026-10-23)', async () => {
+  const h = setup();
+  const c = saved(codeScript({ mode: 'live', budget: { maxSolPerTrade: 0.5, maxBuysPerDay: 5, maxLossSolPerDay: 1, maxOpenPositions: 5, maxActionsPerMinute: 60 } }));
+  auto.setEnabled(c.id, true);
+  // The user's own bag of MINT2, with the user's own stop loss on it.
+  h.book.live.push(h.pos(MINT2, 1));
+  h.calls.orders.push({ id: 'user-stop', mint: MINT2, kind: 'stop_loss', state: 'armed', symbol: '', triggerBasis: 'pct', triggerValue: 30, amount: 100 });
+  const sells = [
+    [1, 'order', [{ mint: MINT2, kind: 'limit_sell', triggerBasis: 'price_sol', triggerValue: 1e-12, amount: 100 }]],
+    [2, 'order', [{ mint: MINT2, kind: 'take_profit', triggerBasis: 'pct', triggerValue: 1, amount: 100 }]],
+    [3, 'order', [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 1, amount: 100 }]],
+    [4, 'order', [{ mint: MINT2, kind: 'trailing_stop', triggerBasis: 'pct', triggerValue: 1, amount: 100 }]],
+    [5, 'order', [{ mint: MINT2, kind: 'sell_on_migration', triggerBasis: 'pct', triggerValue: null, amount: 100 }]],
+    [6, 'applyTemplate', [MINT2, 'tpl1']],
+  ];
+  for (const [id, method, args] of sells) auto.onSandboxMessage(c.id, { t: 'call', id, method, args });
+  await tick(30);
+  for (const [id] of sells) {
+    const r = h.calls.replies.find((x) => x.cid === id);
+    assert.equal(r.value?.ok ?? r.ok, false, `call ${id} refused`);
+    assert.match(r.value?.message ?? r.error, /does not hold it/, `call ${id} says why`);
+  }
+  assert.deepEqual(h.calls.orders.map((o) => o.id), ['user-stop'], 'no sell order armed over the user’s bag');
+  assert.equal(h.calls.templates.length, 0, 'no template applied');
+  // Cancelling drops only what the script armed — never the user's stop.
+  auto.onSandboxMessage(c.id, { t: 'call', id: 7, method: 'cancelOrders', args: [MINT2] });
+  await tick();
+  assert.equal(h.calls.replies.find((x) => x.cid === 7).value.cancelled, 0);
+  assert.ok(h.calls.orders.some((o) => o.id === 'user-stop'), 'the user’s stop loss is still armed');
+});
+
+test('a script sell order sells only its share of a bag the user added to, and carries its tag', async () => {
+  const h = setup();
+  const c = saved(codeScript({ mode: 'live', budget: { maxSolPerTrade: 0.5, maxBuysPerDay: 5, maxLossSolPerDay: 1, maxOpenPositions: 5, maxActionsPerMinute: 60 } }));
+  auto.setEnabled(c.id, true);
+  auto.onSandboxMessage(c.id, { t: 'call', id: 1, method: 'buy', args: [MINT2, 0.1] });
+  await tick();
+  // The user hand-adds 0.3 SOL to the same bag: the script owns a quarter.
+  h.book.live.find((p) => p.mint === MINT2).costSol = 0.4;
+  auto.onSandboxMessage(c.id, { t: 'call', id: 2, method: 'order', args: [{ mint: MINT2, kind: 'take_profit', triggerBasis: 'pct', triggerValue: 100, amount: 100 }] });
+  auto.onSandboxMessage(c.id, { t: 'call', id: 3, method: 'order', args: [{ mint: MINT2, kind: 'stop_loss', triggerBasis: 'pct', triggerValue: 30, amount: 100 }] });
+  await tick(30);
+  const placed = h.calls.orders.filter((o) => o.mint === MINT2);
+  assert.deepEqual(placed.map((o) => [o.kind, o.amount]), [['take_profit', 25], ['stop_loss', 25]], '100% of the script’s quarter = 25% of the wallet');
+  assert.ok(placed.every((o) => o.placedBy === `script:${c.id}`), 'each order names the script that armed it');
+  auto.onSandboxMessage(c.id, { t: 'call', id: 4, method: 'cancelOrders', args: [MINT2] });
+  await tick();
+  assert.equal(h.calls.replies.find((x) => x.cid === 4).value.cancelled, 2, 'and it can still cancel its own');
 });
 
 test('a limit order needs an absolute level: a percent basis is refused, not read as a market cap', async () => {
@@ -1545,7 +1598,9 @@ test('watch pins and streams; alert, template, wallet, leaders, runners and disa
   const h = setup({ runners: [{ mint: MINT, name: 'x', symbol: 'COPY', creator: 'c', flaggedAt: 1, windowS: 60, bucket: 'top', observedPct: 33, basePct: 5, n: 10 }] });
   const c = saved(codeScript({ mode: 'live' }));
   auto.setEnabled(c.id, true);
-  h.book.live.push(h.pos(MINT, 0.1));
+  // The script's own bag: a template arms sells, so only on what it opened.
+  auto.onSandboxMessage(c.id, { t: 'call', id: 99, method: 'buy', args: [MINT, 0.05] });
+  await tick();
   const calls = [
     [1, 'watch', [MINT]],
     [2, 'alert', [{ mint: MINT, kind: 'mcap_above', threshold: 100000 }]],
@@ -1562,7 +1617,7 @@ test('watch pins and streams; alert, template, wallet, leaders, runners and disa
   assert.deepEqual(h.calls.pins, [{ mint: MINT, on: true }, { mint: MINT, on: false }]);
   assert.ok(h.calls.subscribed.includes(MINT));
   assert.equal(h.calls.alerts[0].kind, 'mcap_above');
-  assert.deepEqual(h.calls.templates, [{ mint: MINT, id: 'tpl1' }]);
+  assert.deepEqual(h.calls.templates, [{ mint: MINT, id: 'tpl1', by: { placedBy: `script:${c.id}`, sellShare: 1 } }], 'tagged, and scaled to the whole bag the script owns');
   assert.equal(by(4).value.sol, 1.5);
   assert.equal(by(5).value[0].label, 'Sharky');
   assert.equal(by(6).value[0].runnerOddsPct, 33);

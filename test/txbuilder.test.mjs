@@ -26,7 +26,9 @@ import {
   parseGlobal,
   parseCurve,
   encodeTradeData,
+  encodeBuyExactSolIn,
   BUY_DISC,
+  BUY_EXACT_SOL_IN_DISC,
   SELL_DISC,
   derivedLayoutSuspended,
   resetDerivedState,
@@ -278,7 +280,21 @@ test('the derived BUY layout reproduces the reference account list exactly', () 
   const tpl = derivedTemplate('buy');
   assert.deepEqual(fillSlots(tpl, refFill), REF_BUY);
   assert.deepEqual(tpl.writable, REF_BUY_WRITABLE);
-  assert.equal(tpl.disc.toString('hex'), '66063d1201daebea');
+  // buy_exact_sol_in since 2026-10-23 — the same 18 accounts as the `buy`
+  // this reference was decoded from, so the account pin above still holds.
+  assert.equal(tpl.disc.toString('hex'), '38fc74089edfcd5f');
+});
+
+test('a derived buy is buy_exact_sol_in: it spends the SOL asked for, with slippage on the tokens (2026-10-23)', () => {
+  // `buy` takes a token amount under a SOL ceiling; with the amount cut by the
+  // slippage margin, "buy 0.1 SOL" spent ~0.088 and was billed the fee on 0.1.
+  assert.strictEqual(BUY_EXACT_SOL_IN_DISC.toString('hex'), '38fc74089edfcd5f', 'sha256("global:buy_exact_sol_in")[0..8]');
+  assert.strictEqual(derivedTemplate('sell').disc.toString('hex'), SELL_DISC.toString('hex'), 'the sell is unchanged');
+  // Byte-identical to a confirmed mainnet BuyExactSolIn (its trailing
+  // track_volume byte is optional and left off, as on our sell).
+  const data = encodeBuyExactSolIn(0x051d85n, 0xb7d3e67dn);
+  assert.strictEqual(data.toString('hex'), '38fc74089edfcd5f851d0500000000007de6d3b700000000');
+  assert.strictEqual(derivedTemplate('buy').slots.length, 18, 'the same 18 accounts as buy');
 });
 
 test('the derived SELL layout reproduces the reference account list exactly', () => {

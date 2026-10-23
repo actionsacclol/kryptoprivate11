@@ -232,7 +232,7 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // cookie their guard actually reads, and a bearer header in case it also
   // accepts one. Dropping the cookie would be a 401 on every post.
   const eng = src('../electron/engine/autoCallout.ts');
-  const post = eng.slice(eng.indexOf('const res = await fetch(urlFor(CALLOUT_CREATE_PATH)'), eng.length);
+  const post = eng.slice(eng.indexOf('const res = await pumpFetch(urlFor(CALLOUT_CREATE_PATH)'), eng.length);
   assert.match(post, /cookie: `auth_token=\$\{token\}`/, 'the session cookie is sent, under the name their login sets');
   assert.match(post, /authorization: `Bearer \$\{token\}`/, 'and a bearer header beside it');
   assert.match(post, /origin: 'https:\/\/pump\.fun'/, 'with the origin their own client sends');
@@ -246,13 +246,13 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // second place that built the create call would be a second place to forget
   // one of those.
   const eng = src('../electron/engine/autoCallout.ts');
-  assert.equal((eng.match(/fetch\(urlFor\(CALLOUT_CREATE_PATH\)/g) ?? []).length, 1, 'the create call is built once');
+  assert.equal((eng.match(/[Ff]etch\(urlFor\(CALLOUT_CREATE_PATH\)/g) ?? []).length, 1, 'the create call is built once');
   // Two senders, each built once: a callout and a reply to one.
-  assert.equal((eng.match(/fetch\(urlFor\(route\)/g) ?? []).length, 1, 'and the reply call is built once');
+  assert.equal((eng.match(/[Ff]etch\(urlFor\(route\)/g) ?? []).length, 1, 'and the reply call is built once');
   // Bounded to postCallout itself: replyNow lives below it and has a fetch
   // of its own, which is the reply route, not a second create.
   const auto = eng.slice(eng.indexOf('export async function postCallout('), eng.indexOf('export async function replyNow('));
-  assert.doesNotMatch(auto, /fetch\(/, 'the auto path does not post on its own');
+  assert.doesNotMatch(auto, /[Ff]etch\(/, 'the auto path does not post on its own');
   assert.match(auto, /return postNow\(walletId, mint, (?:thesis|text)[,)]/, 'it goes through the one door');
   for (const f of ['../electron/ipc.ts', '../electron/engine/engine.ts', '../electron/engine/automation.ts']) {
     assert.doesNotMatch(src(f), /callout\/create/, `${f} does not build the create call itself`);

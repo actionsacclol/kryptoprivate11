@@ -101,7 +101,7 @@ import { pctForClaim } from '@shared/botStrategy';
 import * as pumpChain from '../data/pumpChain';
 import { LEAN_EXIT_LAMPORTS, PRIORITY_FEE_FLOOR_SOL, UNATTENDED_MIN_FILL_SHARE, leanExec, leanPriorityFeeSol, paperFixedFeeSol, planBuySize, planExitBudget, shouldHoldAsDust, type FeeLane } from '@shared/exitBudget';
 import { describeTemplate, ordersForTemplate } from '@shared/orderTemplates';
-import { isPctKind } from '@shared/orders';
+import { isBuyKind, isPctKind } from '@shared/orders';
 import * as templateStore from '../system/templateStore';
 import type { DisarmReason, ExecutionSnapshot, LiveState, ShadowSendPlan } from '@shared/types';
 import { DEFAULT_BLOCK_FEED_WSS_URL, LIVE_EXECUTION_AVAILABLE } from '@shared/types';
@@ -1301,13 +1301,16 @@ export class SniperEngine {
           .filter((o) => !mint || o.mint === mint)
           .map((o) => ({ id: o.id, mint: o.mint, symbol: o.symbol, kind: o.kind, state: o.state, triggerBasis: o.triggerBasis, triggerValue: o.triggerValue, amount: o.amount, interrupted: advOrders.wasInterrupted(o) })),
       placeOrder: (req) => this.createOrder({ ...req, symbol: req.symbol || this.tokens.get(req.mint)?.row.symbol || market.summaryIfCached(req.mint)?.symbol || '' }),
-      cancelOrders: (mint, kinds) => {
+      cancelOrders: (mint, kinds, placedBy) => {
         let cancelled = 0;
         for (const o of advOrders.all()) {
           if (o.mint !== mint || !['armed', 'paused', 'triggered'].includes(o.state)) continue;
           // Only the named kinds when a list is given (2026-09-27): a script
           // releasing a moonbag drops the stop and keeps the take-profit rungs.
           if (kinds && !kinds.includes(o.kind)) continue;
+          // Only the orders this script armed (2026-10-23): the user's own
+          // stop loss on the same coin is not the script's to drop.
+          if ((o.placedBy ?? null) !== placedBy) continue;
           if (advOrders.cancel(o.id).ok) cancelled += 1;
         }
         if (cancelled) this.emit({ kind: 'orders', snapshot: this.ordersSnapshot() });
@@ -1323,14 +1326,18 @@ export class SniperEngine {
         return { ok: true, message: cleared ? `cleared ${cleared} finished order(s)` : 'nothing to clear', cleared };
       },
       templates: () => templateStore.list().map((t) => ({ id: t.id, name: t.name })),
-      applyTemplate: async (mint, templateId) => {
+      applyTemplate: async (mint, templateId, by) => {
         const t = templateStore.list().find((x) => x.id === templateId);
         if (!t) return { ok: false, message: 'template not found' };
         const symbol = this.tokens.get(mint)?.row.symbol || market.summaryIfCached(mint)?.symbol || '';
         let placed = 0;
         const problems: string[] = [];
         for (const req of ordersForTemplate(t, mint, symbol)) {
-          const r = await this.createOrder(req);
+          // A script's template sells only its own share of the bag, and its
+          // orders carry its tag (2026-10-23) — the same rules as bot.order.
+          const share = by?.sellShare;
+          const amount = !isBuyKind(req.kind) && share !== undefined ? Math.max(1, Math.min(100, Math.round(req.amount * share))) : req.amount;
+          const r = await this.createOrder({ ...req, amount, ...(by?.placedBy ? { placedBy: by.placedBy } : {}) });
           if (r.ok) placed += 1;
           else problems.push(r.message);
         }

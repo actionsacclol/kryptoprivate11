@@ -18,12 +18,13 @@
 // from the code. test/guides.test.mjs fails if a card has no advanced twin.
 
 import { useEffect, useRef, useState } from 'react';
-import { AtSign, BookOpen, ExternalLink, Flame, Bot, Code2, Coins, Compass, Cpu, KeyRound, Layers, LayoutGrid, Megaphone, Percent, PlayCircle, Rocket, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
+import { ArrowDownUp, AtSign, BookOpen, ExternalLink, Flame, Bot, Code2, Coins, Compass, Cpu, KeyRound, Layers, LayoutGrid, Megaphone, Percent, PlayCircle, Rocket, Server, Settings as SettingsIcon, Users, Wallet, type LucideIcon } from 'lucide-react';
 import { WORKSPACES, type WorkspaceId } from '../workspaces';
 import { Card, Page } from '../components/common';
 import { GuidePanel } from '../components/GuidePanel';
+import { GuideVideoPlayer, videoLength } from '../components/GuideVideoPlayer';
 import { cls } from '../utils/format';
-import { AIO_WALLET_VIDEO_URL, API_KEY_SITES, API_KEYS_VIDEO_URL, GUIDE_VIDEOS, MEMECOIN_GUIDE_URL, PUMP_QUICKSTART_URL } from '../guideVideos';
+import { AIO_WALLET_VIDEO_URL, API_KEY_SITES, API_KEYS_VIDEO_URL, APP_GUIDE_VIDEOS, GUIDE_VIDEOS, MEMECOIN_GUIDE_URL, PUMP_QUICKSTART_URL, appVideoFile, type AppGuideVideo } from '../guideVideos';
 import { ADVANCED_GUIDES, type AdvancedGuide } from './guidesAdvanced';
 
 export interface SectionGuide {
@@ -35,6 +36,8 @@ export interface SectionGuide {
   careful: string[];
   /** A video walk-through, opened in the system browser. */
   video?: { url: string; label: string };
+  /** A bundled step-by-step video (APP_GUIDE_VIDEOS id), played on this page. */
+  watch?: string;
   /** Sites the steps send people to, opened in the system browser. */
   links?: readonly { name: string; url: string }[];
 }
@@ -83,6 +86,7 @@ export const START_GUIDE: SectionGuide = {
     'Paper mode is practice with fake money. Live mode is real money. The switch is in the top bar. Check it before you click Buy.',
     'If you lose your key, nobody can get it back. Not even us.',
   ],
+  watch: 'start',
 };
 
 /**
@@ -210,6 +214,7 @@ export const PUMP_GUIDE: SectionGuide = {
     'Accounts made or signed in here are referred on pump.fun by kryptcc. pump pays Krypt a share of that account’s callout rewards, taken from the account’s share.',
   ],
   video: { url: PUMP_QUICKSTART_URL, label: 'Watch the pump.fun quickstart' },
+  watch: 'pump',
 };
 
 /** The All-in-One wallet (6.0.0, 2026-10-03), with krypt cc's video. Every
@@ -252,6 +257,7 @@ export const COPY_TRADING_GUIDE: SectionGuide = {
     'You buy after them, at a worse price, and they are often already out by the time you sell.',
     'Keep it on Paper until you have watched it work with fake money. Live spends real SOL on its own.',
   ],
+  watch: 'copy',
 };
 
 export const SCRIPTS_GUIDE: SectionGuide = {
@@ -282,6 +288,7 @@ export const CALLOUTS_GUIDE: SectionGuide = {
     'You only earn from a callout if it brings real volume — calling every tiny trade just spends your standing.',
     'Nothing posts on paper. A callout is a real, public post whichever mode you are in.',
   ],
+  watch: 'callout',
 };
 
 export const CALLOUT_REWARDS_GUIDE: SectionGuide = {
@@ -312,6 +319,49 @@ export const FEES_GUIDE: SectionGuide = {
   ],
 };
 
+/** Money in and out of the Solana trading wallet (2026-10-22). Every label is
+ *  the one on the Sol Wallet page; withdraw only ever pays the saved address. */
+export const DEPOSIT_GUIDE: SectionGuide = {
+  what: 'Your trading wallet holds the SOL the app trades with. You put money in by sending SOL to its address, and take it out to your own wallet or exchange.',
+  steps: [
+    'Open Wallet Utilities, then Sol Wallet.',
+    'Under Deposit address, press the copy button next to the long address.',
+    'In Phantom or your exchange, choose Send or Withdraw. Pick SOL on the Solana network, paste the address, and send a small amount first.',
+    'Back in the app, press Refresh. The money usually shows up in under a minute.',
+    'To take money out, paste your own wallet or exchange address under Withdrawal address and press Save.',
+    'Under Withdraw SOL, type an amount or press Max, then press Withdraw and confirm.',
+    'To pay someone else, or to send a coin you hold, use the Send box. You confirm in a pop-up before anything moves.',
+  ],
+  careful: [
+    'Only send SOL on the Solana network to this address. A coin sent from another network, like Ethereum, can be lost forever.',
+    'Withdraw only ever pays the withdrawal address you saved. Check it twice: money sent to a wrong address cannot come back.',
+    'Max leaves a tiny bit behind. Solana needs it to keep the wallet open.',
+    'BNB and Robinhood each have their own wallet page with their own deposit address. To take money out there, use the Send box on that page.',
+  ],
+  watch: 'deposit',
+};
+
+/** Paid / custom RPC (2026-10-22): every field named as Settings names it. */
+export const PAID_RPC_GUIDE: SectionGuide = {
+  what: 'An RPC is the line the app uses to talk to the Solana network. The free ones work, but a paid one from Helius, QuickNode, Triton, Solana Vibe Station or any other provider is faster and does not get busy.',
+  steps: [
+    'Buy a plan from a provider. It gives you an https:// link and a wss:// link, or for Helius, an API key.',
+    'Open Settings & Legal from the Hub and scroll to Solana RPC.',
+    'Helius: paste the key in the Helius API key box. That is all it needs.',
+    'Any other provider: put the wss:// link on a new line in Extra WebSocket endpoints. Keep the free line that is already there.',
+    'Paste the https:// link into Execution endpoint. Your buys, sells and confirmations go through it.',
+    'If your plan has no limit, you can paste the same https:// link into HTTP (account lookups) too.',
+    'Press Save RPC settings, then Measure. A smaller number is faster. An error usually means part of the link was not copied.',
+    'Trading on BNB or Robinhood? Paste that chain’s https:// link in its Own RPC URL box under EVM chains and press its Save button.',
+  ],
+  careful: [
+    'Your link has your key inside it. Treat it like a password: never post it in a chat, a stream or a screenshot.',
+    'If you paste a link in Execution endpoint and also have a Helius key, the link you pasted wins.',
+    'On a plan with a monthly limit, keep the HTTP box on the free line. It does a lot of small lookups that would use up your plan.',
+  ],
+  watch: 'rpc',
+};
+
 export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> = {
   terminal: {
     what: 'This is where you look at coins and trade them yourself. Nothing here trades on its own.',
@@ -329,6 +379,7 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
       'Most new coins go to zero. Never put in more than you can lose.',
       'A buy keeps a little SOL back so you can sell later. That is on purpose.',
     ],
+    watch: 'trade',
   },
   automation: {
     what: 'Things that trade without you clicking. Copy another trader, or write your own rules.',
@@ -378,6 +429,7 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
       'Sending coins to the wrong chain or the wrong address loses them. Check twice.',
       'Live execution must be armed on the wallet page before anything real can be sent.',
     ],
+    watch: 'deposit',
   },
   scout: {
     what: 'Shows what other traders did, and what YOU would have made copying them. Useful for finding someone worth following.',
@@ -415,6 +467,7 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
       'Open a coin anywhere and the Chart and Links boxes follow it.',
     ],
     careful: ['Nothing on this screen trades by itself. The Wallet box only shows numbers.'],
+    watch: 'widgets',
   },
   system: {
     what: 'Switches, keys, and the rules you agreed to.',
@@ -428,6 +481,7 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
       'Paper or Live is the switch in the top bar, one per chain. Paper means nothing can spend money.',
       'Market data can be turned off. Then charts and prices stop.',
     ],
+    watch: 'rpc',
   },
   guides: {
     what: 'This page. One short guide for each part of the app.',
@@ -468,6 +522,7 @@ function GuideCard({
   guide,
   icon: Icon,
   advanced,
+  onWatch,
 }: {
   id: string;
   title: string;
@@ -475,8 +530,11 @@ function GuideCard({
   icon?: LucideIcon;
   /** Set when the Advanced switch is on: the card shows this instead. */
   advanced?: AdvancedGuide | null;
+  /** Plays a bundled video on this page. */
+  onWatch: (video: AppGuideVideo) => void;
 }) {
   const careful = advanced ? advanced.careful : guide.careful;
+  const watch = guide.watch ? APP_GUIDE_VIDEOS.find((v) => v.id === guide.watch) ?? null : null;
   return (
     <Card className="scroll-mt-4 space-y-3">
       <div id={`guide-${id}`} className="flex flex-wrap items-center gap-2">
@@ -487,17 +545,29 @@ function GuideCard({
         )}
         <h2 className="font-display text-value font-semibold text-white">{title}</h2>
         {advanced && <span className="rounded border border-krypt-purple/40 bg-krypt-purple/15 px-1.5 py-px text-label uppercase tracking-label text-white/80">Advanced</span>}
-        {guide.video && (
-          // Through main, never a bare href: the renderer must not navigate.
-          <button
-            onClick={() => void window.krypt.app.openExternal(guide.video!.url)}
-            title="Opens YouTube in your browser"
-            className="ml-auto flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-label text-krypt-muted transition hover:border-krypt-purple/50 hover:text-white"
-          >
-            <PlayCircle className="h-3.5 w-3.5" />
-            {guide.video.label}
-          </button>
-        )}
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {watch && (
+            <button
+              onClick={() => onWatch(watch)}
+              title="Plays here, step by step"
+              className="flex items-center gap-1.5 rounded-full border border-krypt-purple/50 bg-krypt-purple/20 px-2.5 py-1 text-label font-semibold text-white transition hover:bg-krypt-purple/30"
+            >
+              <PlayCircle className="h-3.5 w-3.5" />
+              Watch the video ({videoLength(watch.durationSec)})
+            </button>
+          )}
+          {guide.video && (
+            // Through main, never a bare href: the renderer must not navigate.
+            <button
+              onClick={() => void window.krypt.app.openExternal(guide.video!.url)}
+              title="Opens YouTube in your browser"
+              className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-label text-krypt-muted transition hover:border-krypt-purple/50 hover:text-white"
+            >
+              <PlayCircle className="h-3.5 w-3.5" />
+              {guide.video.label}
+            </button>
+          )}
+        </div>
       </div>
       <p className="text-note leading-relaxed text-white/85">{advanced ? advanced.what : guide.what}</p>
       <div>
@@ -536,8 +606,10 @@ function GuideCard({
 }
 
 /** Every video in one place, first thing on the page (2026-09-29): one button
- *  per video in a card header was easy to miss. The per-card buttons stay. */
-function VideoRow() {
+ *  per video in a card header was easy to miss. The per-card buttons stay.
+ *  The bundled step-by-step videos come first and play right here
+ *  (2026-10-22); the YouTube ones follow. */
+function VideoRow({ onWatch }: { onWatch: (video: AppGuideVideo) => void }) {
   return (
     <Card className="scroll-mt-4 space-y-3">
       <div id="guide-videos" className="flex items-center gap-2">
@@ -545,8 +617,30 @@ function VideoRow() {
           <PlayCircle className="h-4 w-4" />
         </span>
         <h2 className="font-display text-value font-semibold text-white">Videos</h2>
-        <span className="text-label text-krypt-muted">Open in your browser</span>
+        <span className="text-label text-krypt-muted">Step by step. Click one to play it here</span>
       </div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {APP_GUIDE_VIDEOS.map((v) => (
+          <button
+            key={v.id}
+            onClick={() => onWatch(v)}
+            className="group flex flex-col overflow-hidden rounded-lg border border-white/10 bg-white/5 text-left transition hover:border-krypt-purple/60"
+          >
+            <span className="relative block aspect-video bg-black">
+              <img src={appVideoFile(v.id, 'jpg')} alt="" className="h-full w-full object-cover opacity-90 transition group-hover:opacity-100" />
+              <span className="absolute inset-0 flex items-center justify-center">
+                <PlayCircle className="h-9 w-9 text-white/90 drop-shadow transition group-hover:scale-110" />
+              </span>
+              <span className="absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-px font-mono text-label text-white">{videoLength(v.durationSec)}</span>
+            </span>
+            <span className="block px-2.5 py-2">
+              <span className="block text-body font-semibold text-white">{v.title}</span>
+              <span className="block text-label leading-relaxed text-krypt-muted">{v.blurb}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      <div className="text-label uppercase tracking-label text-krypt-muted">On YouTube · opens in your browser</div>
       <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
         {GUIDE_VIDEOS.map((v) => (
           // Through main, never a bare href: the renderer must not navigate.
@@ -578,12 +672,15 @@ const EXTRA_GUIDES: { id: string; title: string; guide: SectionGuide; icon: Luci
   { id: 'fees', title: 'Fees & referral', guide: FEES_GUIDE, icon: Percent },
   { id: 'ai', title: 'AI connection', guide: AI_CONNECTION_GUIDE, icon: Bot },
   { id: 'pump-export', title: 'Export a pump.fun wallet', guide: PUMP_EXPORT_GUIDE, icon: KeyRound },
+  { id: 'deposit', title: 'Deposit and withdraw', guide: DEPOSIT_GUIDE, icon: ArrowDownUp },
+  { id: 'paid-rpc', title: 'Use a paid RPC', guide: PAID_RPC_GUIDE, icon: Server },
 ];
 
 export function GuidesPage() {
   const sections = WORKSPACES.filter((w) => w.id !== 'guides');
   const [active, setActive] = useState<string>('videos');
   const [advanced, setAdvanced] = useState<boolean>(readAdvanced);
+  const [playing, setPlaying] = useState<AppGuideVideo | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const adv = (id: string): AdvancedGuide | null => (advanced ? ADVANCED_GUIDES[id] ?? null : null);
 
@@ -658,21 +755,22 @@ export function GuidesPage() {
         </div>
 
         <div className="space-y-4 max-w-3xl">
-          <VideoRow />
-          <GuideCard id="start" title="Start here" guide={START_GUIDE} icon={BookOpen} advanced={adv('start')} />
-          <GuideCard id="memecoins" title="Memecoin basics" guide={MEMECOIN_GUIDE} icon={Flame} advanced={adv('memecoins')} />
-          <GuideCard id="api-setup" title="API setup" guide={API_SETUP_GUIDE} icon={KeyRound} advanced={adv('api-setup')} />
+          <VideoRow onWatch={setPlaying} />
+          <GuideCard id="start" title="Start here" guide={START_GUIDE} icon={BookOpen} advanced={adv('start')} onWatch={setPlaying} />
+          <GuideCard id="memecoins" title="Memecoin basics" guide={MEMECOIN_GUIDE} icon={Flame} advanced={adv('memecoins')} onWatch={setPlaying} />
+          <GuideCard id="api-setup" title="API setup" guide={API_SETUP_GUIDE} icon={KeyRound} advanced={adv('api-setup')} onWatch={setPlaying} />
           {sections.map((w) => (
-            <GuideCard key={w.id} id={w.id} title={w.title} guide={SECTION_GUIDES[w.id as Exclude<WorkspaceId, 'hub'>]} icon={ICONS[w.id]} advanced={adv(w.id)} />
+            <GuideCard key={w.id} id={w.id} title={w.title} guide={SECTION_GUIDES[w.id as Exclude<WorkspaceId, 'hub'>]} icon={ICONS[w.id]} advanced={adv(w.id)} onWatch={setPlaying} />
           ))}
           {EXTRA_GUIDES.map((g) => (
-            <GuideCard key={g.id} id={g.id} title={g.title} guide={g.guide} icon={g.icon} advanced={adv(g.id)} />
+            <GuideCard key={g.id} id={g.id} title={g.title} guide={g.guide} icon={g.icon} advanced={adv(g.id)} onWatch={setPlaying} />
           ))}
           <div id="guide-more" className="scroll-mt-4">
             <GuidePanel />
           </div>
         </div>
       </div>
+      {playing && <GuideVideoPlayer video={playing} onClose={() => setPlaying(null)} />}
     </Page>
   );
 }

@@ -113,6 +113,14 @@ export interface AdvOrder {
    */
   owner: string | null;
 
+  /**
+   * Who armed it, when that was a script: `script:<id>` (2026-10-23). A
+   * script may cancel only the orders it armed itself — `cancelOrders` used
+   * to drop every order on the coin, the user's own stop loss included.
+   * Absent / null = the user (the Orders panel, templates, MCP).
+   */
+  placedBy?: string | null;
+
   createdAt: number;
   updatedAt: number;
   triggeredAt: number | null;
@@ -142,6 +150,8 @@ export interface NewOrderRequest {
   triggerBasis: TriggerBasis;
   amount: number;
   expiresAt?: number | null;
+  /** Set by automation: the script arming it (see AdvOrder.placedBy). */
+  placedBy?: string;
 }
 
 /** Engine-side snapshot for the UI. */

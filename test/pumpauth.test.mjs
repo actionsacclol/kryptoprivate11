@@ -156,7 +156,7 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   assert.doesNotMatch(auth, /urlFor\([^)]*\$\{/, 'no URL is ever built from an interpolated value at a call site');
   assert.match(auth, /redirect: 'error'/, 'a redirect out of the allowlisted host is refused');
   // Every request, not just one.
-  const fetches = (auth.match(/await fetch\(|= fetch\(|fetch\(`/g) ?? []).length;
+  const fetches = (auth.match(/await (?:pump(?:Auth)?F|f)etch\(|= (?:pump(?:Auth)?F|f)etch\(|\b(?:pump(?:Auth)?F|f)etch\(`/g) ?? []).length;
   assert.ok(fetches >= 3, `found the requests (${fetches})`);
   assert.equal((auth.match(/redirect: 'error'/g) ?? []).length, fetches, 'every request refuses redirects');
   assert.ok(PUMP_LOGIN_PATH.startsWith('/'), 'the path is a constant too');

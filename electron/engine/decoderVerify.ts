@@ -38,7 +38,7 @@
 import { bondingCurveFor, globalFor, PUMP_PROGRAM } from '../chain/addresses';
 import { base58Decode } from '../chain/base58';
 import { getAccountInfo, getSignaturesForAddress, getTransaction } from '../chain/rpcClient';
-import { BUY_DISC, SELL_DISC, parseCurve, parseGlobal } from './txBuilder';
+import { BUY_DISC, BUY_EXACT_SOL_IN_DISC, SELL_DISC, parseCurve, parseGlobal } from './txBuilder';
 
 export interface DecoderCheck {
   name: 'global-layout' | 'curve-layout' | 'trade-interface';
@@ -199,7 +199,9 @@ async function checkTradeInterface(
         }
         if (data.length < 8) continue;
         const disc = data.subarray(0, 8);
-        const isBuy = disc.equals(BUY_DISC);
+        // Either buy is ours: a derived build sends exact-in since 2026-10-23,
+        // the learned fallback still sends `buy`.
+        const isBuy = disc.equals(BUY_DISC) || disc.equals(BUY_EXACT_SOL_IN_DISC);
         const isSell = disc.equals(SELL_DISC);
         if (!isBuy && !isSell) continue;
         return {

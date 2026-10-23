@@ -72,3 +72,59 @@ export const SETTLED_OUTCOMES: readonly ReferralOutcome[] = [
 /** The disclosure shown where accounts are made. One sentence, plain words. */
 export const REFERRAL_NOTICE =
   `pump.fun accounts made or signed in here are referred by Krypt (code “${KRYPT_REFERRAL_CODE}”): pump pays Krypt a share of the callout rewards the account earns, taken from the account’s share. This is how the free app earns, alongside the trade fee.`;
+
+// ─── Retrying a referral that did not land ───────────────────────────────
+//
+// The code only counts inside pump's 24 h window, and the first attempt can
+// fail for reasons that have nothing to do with the account — pump busy, a
+// Cloudflare block, the app closed a minute after sign-in. A referral that was
+// not settled is therefore kept (pump-referral-pending.json in userData) and
+// retried until pump gives a final answer or the window is over. Pure rules
+// here; the file and the timer are in system/pumpSocial.ts.
+
+export const REFERRAL_WINDOW_MS = 24 * 3_600_000;
+/** How often an unsettled referral is asked again. */
+export const REFERRAL_RETRY_MS = 5 * 60_000;
+/** Stop a little before the window ends: an answer that late is applyWindowClosed anyway. */
+export const REFERRAL_STOP_MARGIN_MS = 10 * 60_000;
+
+export interface PendingReferral {
+  address: string;
+  walletId: string;
+  /** When the account was first seen unreferred — the window is counted from here, never later than pump's own. */
+  since: number;
+  lastTried: number;
+  tries: number;
+  last: ReferralOutcome;
+}
+
+/** Whether this outcome is final, so the account leaves the queue. */
+export function referralIsSettled(outcome: ReferralOutcome): boolean {
+  return SETTLED_OUTCOMES.includes(outcome);
+}
+
+/** Past the point where asking can still work. */
+export function referralExpired(p: PendingReferral, now: number): boolean {
+  return now - p.since >= REFERRAL_WINDOW_MS - REFERRAL_STOP_MARGIN_MS;
+}
+
+/** Worth asking again right now. */
+export function referralDue(p: PendingReferral, now: number): boolean {
+  return !referralExpired(p, now) && now - p.lastTried >= REFERRAL_RETRY_MS;
+}
+
+/**
+ * The queue after one attempt's answer: settled leaves it, anything else stays
+ * (a new entry keeps its first `since`). Returns a new array.
+ */
+export function referralQueueAfter(
+  queue: readonly PendingReferral[],
+  who: { address: string; walletId: string },
+  outcome: ReferralOutcome,
+  now: number,
+): PendingReferral[] {
+  const rest = queue.filter((p) => p.address !== who.address);
+  if (referralIsSettled(outcome)) return rest;
+  const prev = queue.find((p) => p.address === who.address);
+  return [...rest, { address: who.address, walletId: who.walletId, since: prev?.since ?? now, lastTried: now, tries: (prev?.tries ?? 0) + 1, last: outcome }];
+}

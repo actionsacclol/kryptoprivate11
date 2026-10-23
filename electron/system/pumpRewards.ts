@@ -8,6 +8,7 @@
 
 import * as pumpAuth from './pumpAuth';
 import { logger } from './logger';
+import { pumpFetch } from '../data/pumpWall';
 import { PUMP_API_HOST } from '@shared/pumpAuth';
 import { payoutsFrom, termsFrom, type PumpRewards } from '@shared/pumpRewards';
 
@@ -16,7 +17,7 @@ const urlFor = (route: string): string => `https://${PUMP_API_HOST}${route}`;
 async function authed(walletId: string, route: string, method: 'GET' | 'POST' = 'GET'): Promise<{ ok: boolean; status: number; body: unknown }> {
   const token = pumpAuth.token(walletId);
   if (!token) return { ok: false, status: 0, body: null };
-  const res = await fetch(urlFor(route), {
+  const res = await pumpFetch(urlFor(route), {
     method,
     headers: {
       accept: 'application/json',

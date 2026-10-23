@@ -264,6 +264,7 @@ export function create(
     referencePriceSol: ctx.referencePriceSol,
     peakPriceSol: req.kind === 'trailing_stop' ? ctx.referencePriceSol : null,
     owner: host?.owner?.() ?? null,
+    placedBy: req.placedBy ?? null,
     createdAt: now,
     updatedAt: now,
     triggeredAt: null,

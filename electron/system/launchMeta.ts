@@ -31,6 +31,7 @@ import { readFile } from 'node:fs/promises';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from './logger';
+import { pumpFetch } from '../data/pumpWall';
 
 /** The only host this module will ever contact. */
 const UPLOAD_URL = 'https://pump.fun/api/ipfs';
@@ -101,7 +102,7 @@ export async function uploadLaunchMetadata(filePath: string, fields: MetadataFie
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60_000);
   try {
-    const res = await fetch(UPLOAD_URL, { method: 'POST', body: form, redirect: 'error', signal: controller.signal });
+    const res = await pumpFetch(UPLOAD_URL, { method: 'POST', body: form, redirect: 'error', signal: controller.signal });
     if (!res.ok) return { error: `The pinning service answered HTTP ${res.status}. Nothing was created; try again.` };
     const json = (await res.json()) as { metadataUri?: unknown; metadata?: { image?: unknown } };
     const metadataUri = typeof json.metadataUri === 'string' ? json.metadataUri : '';

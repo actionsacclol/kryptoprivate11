@@ -64,14 +64,14 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   const auth = src('../electron/system/pumpAuth.ts');
   assert.match(auth, /\/users\/\$\{encodeURIComponent\(s\.address\)\}/, 'the display name comes from the public profile too');
   // When pump will not answer (30 a minute), the EDITOR falls back to what this
-  // app last read or wrote — and says so. The empty-bio check never does: it
+  // app last read or wrote — and says so. The bio-line check never does: it
   // must see pump's real bio or write nothing.
   const editor = prof.slice(prof.indexOf('export async function readProfileForEditor('), prof.indexOf('export async function readProfile('));
   assert.match(editor, /cacheMap\(\)\.get\(address\)/, 'the editor falls back to the cache');
   assert.match(editor, /cachedAt: hit\.at/, 'and says how old it is');
   assert.match(prof, /remember\(address, landed\)/, 'a save updates the cache');
-  const stamp = prof.slice(prof.indexOf('export async function stampEmptyBio('), prof.indexOf('export async function stampEmptyBio(') + 600);
-  assert.match(stamp, /await readProfile\(walletId\)/, 'the empty-bio check reads live');
+  const stamp = prof.slice(prof.indexOf('export async function ensureBioMark('), prof.indexOf('export async function ensureBioMark(') + 600);
+  assert.match(stamp, /await readProfile\(walletId\)/, 'the bio-line check reads live');
   assert.doesNotMatch(stamp, /cacheMap|ForEditor/, 'and never from the cache');
   assert.match(prof, /res\.status === 429 && attempt === 0/, 'a 429 is waited out once');
   ok('profiles are read from pump\'s public profile, and unreadable is never empty');

@@ -240,4 +240,21 @@ const PIC = 'https://ipfs.io/ipfs/bafkreiepkuo4ncuveueyf5vba647hrugwwmny3phyzwhv
   ok('renaming an account never touches its bio or picture');
 }
 
+{
+  // ALWAYS in the bio (2026-10-22): a bio with words in it gains the line too,
+  // it is re-checked at launch and every few hours, and an unreadable profile
+  // writes nothing.
+  const prof = fs.readFileSync(new URL('../electron/system/pumpProfile.ts', import.meta.url), 'utf8');
+  const fn = prof.slice(prof.indexOf('export async function ensureBioMark('), prof.indexOf('export async function ensureAllBioMarks('));
+  assert.match(fn, /await readProfile\(walletId\)/, 'reads what pump holds');
+  assert.match(fn, /if \(!read\) return/, 'an unreadable profile writes nothing');
+  assert.match(fn, /endsWith\(BIO_WATERMARK\)\) return/, 'a bio that already ends with the line is not written');
+  assert.match(fn, /writeProfile\(walletId, \{ bio: read\.bio \}\)/, 'a bio with words keeps them and gains the line');
+  assert.doesNotMatch(fn, /bio\.trim\(\) !== ''/, 'no longer limited to empty bios');
+  const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  assert.match(main, /pumpProfile\.ensureAllBioMarks\(\)/, 'every signed-in account is re-checked');
+  assert.match(main, /6 \* 3_600_000/, 'every few hours');
+  ok('every pump.fun bio carries the line, with words or without, and it is re-checked');
+}
+
 console.log(`\npumpprofile: ${passed}/${passed} passed`);

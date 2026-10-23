@@ -271,17 +271,23 @@ export function init(userDataDir: string): void {
   // an app that was closed for a week must not resume spending on wake.
   // Paper configs do resume, because paper costs nothing and an interrupted
   // experiment is a useless one.
+  //
+  // Entries only, though (2026-10-23): the copies a disarmed config still
+  // holds keep their exits (`exitsOnly`, see runsExits). Disarming used to
+  // stop those too — a live copy opened before an update was never sold when
+  // the leader sold, and its stop loss stopped checking.
   let disarmed = 0;
   for (const c of configs) {
     if (c.mode === 'live' && c.enabled) {
       c.enabled = false;
+      c.exitsOnly = true;
       disarmed += 1;
     }
   }
   if (!loadFailure) {
     logger.info(
       `copy: loaded ${configs.length} config(s), ${trades.length} record(s)` +
-        (disarmed > 0 ? ` — ${disarmed} LIVE config(s) disarmed on restart` : ''),
+        (disarmed > 0 ? ` — ${disarmed} LIVE config(s) disarmed on restart (no new copies; exits on the copies they hold still run)` : ''),
     );
   }
 }
@@ -345,7 +351,14 @@ export function upsert(input: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: stri
     // the one the Wallets page has always claimed. Enforced HERE, in main, so
     // one `copy:save` call can never create an armed live follower.
     const toLive = existing.mode !== 'live' && input.mode === 'live';
+    // `exitsOnly` is main's, never the window's: whatever the input says is
+    // ignored, and the restart's exits-only state ends when the user arms
+    // the config again (it then exits as an armed config does) or makes it
+    // paper (paper copies were never disarmed).
+    const keepExitsOnly = existing.exitsOnly === true && !input.enabled && input.mode === 'live';
     Object.assign(existing, input);
+    if (keepExitsOnly) existing.exitsOnly = true;
+    else delete existing.exitsOnly;
     if (toLive) existing.enabled = false;
     persist();
     host?.changed();
@@ -361,6 +374,8 @@ export function upsert(input: Omit<CopyConfig, 'id' | 'createdAt'> & { id?: stri
     return { ok: false, message: 'You are already following that wallet on that chain' };
   }
   const c: CopyConfig = { ...input, id: nextId('cp'), createdAt: Date.now() };
+  delete c.exitsOnly; // main's flag, set only by a restart
+
   // A brand-new live follower is never born armed.
   const bornLive = c.mode === 'live' && c.enabled;
   if (bornLive) c.enabled = false;
@@ -457,9 +472,16 @@ export function all(): CopyConfig[] {
   return configs.map((c) => ({ ...c }));
 }
 
-/** Wallets with an enabled config — the engine's watch list. */
+/** Whether a config's EXITS run: armed, or disarmed by a restart with copies
+ *  still to close (`exitsOnly`). Entries need `enabled` itself. */
+function runsExits(c: CopyConfig): boolean {
+  return c.enabled || c.exitsOnly === true;
+}
+
+/** Wallets the engine must watch: every config that is armed or still has
+ *  exits to run — a leader's sell can only be mirrored if it is heard. */
 export function activeWallets(chain?: ChainKind): Set<string> {
-  return new Set(configs.filter((c) => c.enabled && !isFomo(c) && (chain === undefined || chainOf(c) === chain)).map((c) => c.wallet));
+  return new Set(configs.filter((c) => runsExits(c) && !isFomo(c) && (chain === undefined || chainOf(c) === chain)).map((c) => c.wallet));
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────
@@ -1040,11 +1062,11 @@ function routeSell(t: WalletTrade): SellRoute {
  */
 const supersededSkips = new Map<string, string>();
 
-/** Chains with at least one ENABLED config — the chains whose leader feed
- *  has to be running for following to mean anything. */
+/** Chains with at least one config that is armed or still runs exits — the
+ *  chains whose leader feed has to be running for following to mean anything. */
 export function activeChains(): Set<ChainKind> {
   const out = new Set<ChainKind>();
-  for (const c of configs) if (c.enabled) out.add(chainOf(c));
+  for (const c of configs) if (runsExits(c)) out.add(chainOf(c));
   return out;
 }
 
@@ -1083,7 +1105,9 @@ export function onWalletTrade(t: WalletTrade): void {
   if (chain !== 'solana') t = { ...t, wallet: t.wallet.toLowerCase(), mint: t.mint.toLowerCase() };
   // The crowd hears every followed wallet's trade too (FOMO, 2026-09-20).
   noteCrowdTrade(t);
-  const matching = configs.filter((c) => c.enabled && !isFomo(c) && chainOf(c) === chain && c.wallet === t.wallet);
+  // Armed configs, and restart-disarmed ones that still have exits to run;
+  // the loop below lets the latter EXIT only, never enter.
+  const matching = configs.filter((c) => runsExits(c) && !isFomo(c) && chainOf(c) === chain && c.wallet === t.wallet);
   if (!matching.length) return;
 
   const route: SellRoute = t.isBuy ? (alreadyHandled(t.signature) ? 'drop' : 'new') : routeSell(t);
@@ -1111,7 +1135,7 @@ export function onWalletTrade(t: WalletTrade): void {
         if (route === 'new' && c.copySells) queueExit(c, { ...t, isBuy: false, soldFraction: 1, note: 'they bought back — reverse exit' });
         continue;
       }
-      if (route !== 'new') continue;
+      if (route !== 'new' || !c.enabled) continue;
       void evaluateBuy(c, { ...t, isBuy: true });
       continue;
     }
@@ -1119,7 +1143,8 @@ export function onWalletTrade(t: WalletTrade): void {
       if (c.copySells) queueExit(c, t);
       continue;
     }
-    if (route !== 'new') continue;
+    // An entry needs an ARMED config; exits-only ones never buy.
+    if (route !== 'new' || !c.enabled) continue;
     void evaluateBuy(c, t);
   }
 }
@@ -2974,7 +2999,9 @@ const ownExiting = new Set<string>();
 
 function checkOwnExits(mint: string, priceSol: number, chain: ChainKind | undefined, now: number): void {
   for (const c of configs) {
-    if (!c.enabled) continue;
+    // A restart-disarmed config keeps its own exits (exitsOnly) — the stop
+    // loss on a copy it still holds is exactly what must not go quiet.
+    if (!runsExits(c)) continue;
     if (chain !== undefined && chainOf(c) !== chain) continue;
     const x = ownExitsOf(c);
     if (x.takeProfitPct === null && x.stopLossPct === null && x.maxHoldMin === null && x.trailingPct === null) continue;

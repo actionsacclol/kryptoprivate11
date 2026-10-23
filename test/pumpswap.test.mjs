@@ -13,6 +13,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import {
   PUMP_SWAP_BUY_DISC,
+  PUMP_SWAP_BUY_EXACT_QUOTE_IN_DISC,
   PUMP_SWAP_SELL_DISC,
   PUMP_SWAP_FEE_CEILING_BPS,
   PUMP_SWAP_MIN_COMPUTE_UNITS,
@@ -209,10 +210,17 @@ ok('the base mint is Token-2022 on a fresh pump coin and the quote side stays cl
 
 // ── Instruction data ──────────────────────────────────────────────────
 
-ok('encodePumpSwapData reproduces the real buy’s 24 leading bytes and the real sell’s data', () => {
-  const buy = encodePumpSwapData('buy', BigInt(fx.buy.args.base), BigInt(fx.buy.args.quote));
-  assert.strictEqual(buy.length, 24);
-  assert.strictEqual(hex(buy), fx.buy.data.slice(0, 48));
+ok('a buy is encoded as buy_exact_quote_in (SOL to spend, then fewest tokens); the sell reproduces the real sell’s data', () => {
+  // 2026-10-23: buys moved from `buy` (exact tokens under a SOL ceiling — it
+  // spent the budget minus the slippage margin) to exact-in. Layout from a
+  // confirmed mainnet BuyExactQuoteIn: c62e1552b4d9e870 · u64 spend · u64 min.
+  assert.strictEqual(hex(PUMP_SWAP_BUY_EXACT_QUOTE_IN_DISC), 'c62e1552b4d9e870');
+  const buy = encodePumpSwapData('buy', 1n, 500_000_000n);
+  assert.strictEqual(hex(buy), 'c62e1552b4d9e8700065cd1d000000000100000000000000', 'byte-identical to the mainnet sample (0.5 SOL in, min 1)');
+  const sized = encodePumpSwapData('buy', BigInt(fx.buy.args.base), BigInt(fx.buy.args.quote));
+  assert.strictEqual(sized.length, 24);
+  assert.strictEqual(sized.readBigUInt64LE(8), BigInt(fx.buy.args.quote), 'the SOL budget comes first');
+  assert.strictEqual(sized.readBigUInt64LE(16), BigInt(fx.buy.args.base), 'the token floor second');
   const sell = encodePumpSwapData('sell', BigInt(fx.sell.args.base), BigInt(fx.sell.args.quote));
   assert.strictEqual(hex(sell), fx.sell.data.slice(0, 48));
 });

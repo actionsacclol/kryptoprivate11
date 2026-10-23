@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
 import { logger } from './logger';
+import { pumpFetch } from '../data/pumpWall';
 import * as pumpAuth from './pumpAuth';
 import { PUMP_API_HOST } from '@shared/pumpAuth';
 import { callerStatsFrom, callerStatsPath, type CallerStats } from '@shared/pumpStats';
@@ -33,6 +34,7 @@ import {
   profileProblem,
   profileUpdates,
   withBioWatermark,
+  BIO_WATERMARK,
   type ProfileOutcome,
   type PumpProfileDraft,
 } from '@shared/pumpProfile';
@@ -59,7 +61,7 @@ async function readPublicProfile(address: string): Promise<{ status: number; bod
   // the editor never hangs — and then the cache answers (readProfileForEditor).
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetch(urlFor(route), {
+      const res = await pumpFetch(urlFor(route), {
         headers: { accept: 'application/json' },
         redirect: 'error',
         signal: AbortSignal.timeout(12_000),
@@ -201,7 +203,7 @@ export async function writeProfile(walletId: string, patch: Partial<PumpProfileD
   for (const body of bodies) {
     const field = Object.keys(body)[0];
     try {
-      const res = await fetch(urlFor(PROFILE_PATH), {
+      const res = await pumpFetch(urlFor(PROFILE_PATH), {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -250,21 +252,37 @@ export async function writeProfile(walletId: string, patch: Partial<PumpProfileD
 }
 
 /**
- * An account with NO bio gets just the line (asked 09-22: "if the user doesn't
- * add any bio"). Run after a sign-in and before the account's pump.fun window
- * opens. Never touches a bio that has words in it, and an UNREADABLE profile
- * is not an empty one — a failed read writes nothing ([[fail-open]]).
- * Asked once per wallet per run, so reopening a window does not re-read.
+ * EVERY account's bio ends with the line (asked 2026-10-22: "we should always
+ * have it in bio krypt.cc/bot"). Before that only an EMPTY bio got it (asked
+ * 09-22); now a bio with words in it keeps them and gains the line after them,
+ * and an earlier line (LEGACY_BIO_MARKS) is replaced by the current one.
+ *
+ * Run after a sign-in, and for every signed-in account at launch and every few
+ * hours (ensureAllBioMarks), so a line edited away on pump.fun itself comes
+ * back. An UNREADABLE profile is not a bio without the line — a failed read
+ * writes nothing ([[fail-open]]) and is tried again next time. A bio that
+ * already ends with the line is not written at all.
  */
-const bioChecked = new Set<string>();
-export async function stampEmptyBio(walletId: string): Promise<void> {
-  if (bioChecked.has(walletId)) return;
+const BIO_RECHECK_MS = 6 * 3_600_000;
+const bioCheckedAt = new Map<string, number>();
+export async function ensureBioMark(walletId: string): Promise<void> {
+  const last = bioCheckedAt.get(walletId);
+  if (last !== undefined && Date.now() - last < BIO_RECHECK_MS) return;
   const read = await readProfile(walletId);
   if (!read) return; // unknown: try again next time
-  bioChecked.add(walletId);
-  if (read.bio.trim() !== '') return;
-  const r = await writeProfile(walletId, { bio: '' }); // '' → the line alone
-  logger.info(`pump profile: empty bio ${r.ok ? 'stamped' : `not stamped — ${r.message}`} for ${walletId}`);
+  bioCheckedAt.set(walletId, Date.now());
+  if (read.bio.trim().endsWith(BIO_WATERMARK)) return;
+  // writeProfile puts the line on whatever bio it is given; '' gives the line alone.
+  const r = await writeProfile(walletId, { bio: read.bio });
+  logger.info(`pump profile: bio line ${r.ok ? 'added' : `not added — ${r.message}`} for ${walletId}`);
+}
+
+/** Every signed-in account, one at a time (pump's frontend API rate-limits bursts). */
+export async function ensureAllBioMarks(): Promise<void> {
+  for (const [i, s] of pumpAuth.status().sessions.entries()) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 2_000));
+    await ensureBioMark(s.walletId).catch(() => undefined);
+  }
 }
 
 /**
@@ -283,7 +301,7 @@ export async function callerStats(walletId: string): Promise<CallerStats | { err
   if (!route) return { error: 'that address is not a shape this will put in a URL' };
   try {
     // Public, like the callout list it is derived from — no session sent.
-    const res = await fetch(urlFor(route), {
+    const res = await pumpFetch(urlFor(route), {
       headers: { accept: 'application/json' },
       redirect: 'error',
       signal: AbortSignal.timeout(12_000),
@@ -323,7 +341,7 @@ export async function lookupAccount(address: string): Promise<PumpAccountLookup>
   const hit = lookups.get(address);
   if (hit && Date.now() - hit.at < LOOKUP_TTL_MS) return hit.value;
   try {
-    const res = await fetch(urlFor(route), {
+    const res = await pumpFetch(urlFor(route), {
       headers: { accept: 'application/json', origin: 'https://pump.fun' },
       redirect: 'error',
       signal: AbortSignal.timeout(10_000),

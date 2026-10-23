@@ -78,7 +78,7 @@ const cards = ['start', 'memecoins', 'api-setup', ...sectionIds, ...extraIds];
   for (const c of consts) assert.ok(listed.includes(`url: ${c}`), `${c} is in the Videos row`);
   const src = ['../src/pages/Hub.tsx', '../src/components/Onboarding.tsx', '../src/components/GuidePanel.tsx'].map(read).join('\n') + page;
   assert.ok(!/youtube\.com|youtu\.be/.test(src), 'no page carries its own video URL — they all live in guideVideos.ts');
-  assert.ok(page.indexOf('<VideoRow />') > 0 && page.indexOf('<VideoRow />') < page.indexOf('id="start"'), 'the Videos row is the first thing on the page');
+  assert.ok(page.indexOf('<VideoRow ') > 0 && page.indexOf('<VideoRow ') < page.indexOf('id="start"'), 'the Videos row is the first thing on the page');
   assert.ok(/video: \{ url: MEMECOIN_GUIDE_URL/.test(page), 'the memecoin card has its video');
   ok('every video is in one row at the top of Guides, and the memecoin guide is there');
 }
@@ -93,6 +93,33 @@ const cards = ['start', 'memecoins', 'api-setup', ...sectionIds, ...extraIds];
   const adv = JSON.stringify(ADVANCED_GUIDES.wallets);
   assert.ok(!/Krypt takes no fee on a bridge/.test(adv) && !/Solana→BNB is off/.test(adv), 'the Bridge lines describe Relay and its fee, not LI.FI');
   ok('the All-in-One video is on its page and in Guides, with a written guide');
+}
+
+{
+  // The bundled step-by-step videos (2026-10-22): every one ships its three
+  // files, says how long it is, and every card that offers one names a real one.
+  const videos = read('../src/guideVideos.ts');
+  const block = videos.slice(videos.indexOf('APP_GUIDE_VIDEOS'), videos.indexOf('export const appVideoFile'));
+  const entries = [...block.matchAll(/\{ id: '([a-z0-9-]+)', title: '[^']+', blurb: '[^']+', durationSec: (\d+) \}/g)].map((m) => ({ id: m[1], sec: Number(m[2]) }));
+  assert.ok(entries.length >= 8, `the bundled videos are listed (${entries.length})`);
+  for (const { id, sec } of entries) {
+    for (const ext of ['mp4', 'jpg', 'vtt']) {
+      assert.ok(fs.existsSync(new URL(`../public/guide-videos/${id}.${ext}`, import.meta.url)), `${id}.${ext} is in public/guide-videos`);
+    }
+    assert.ok(sec > 30, `${id} says how long it is (${sec}s)`);
+    assert.ok(read(`../public/guide-videos/${id}.vtt`).startsWith('WEBVTT'), `${id} has real captions`);
+  }
+  const ids = new Set(entries.map((e) => e.id));
+  const watched = [...page.matchAll(/watch: '([a-z0-9-]+)'/g)].map((m) => m[1]);
+  assert.ok(watched.length >= 8, 'the cards offer the videos');
+  for (const w of watched) assert.ok(ids.has(w), `card video "${w}" exists`);
+  for (const id of ids) assert.ok(watched.includes(id), `video "${id}" is offered on a card`);
+  const player = read('../src/components/GuideVideoPlayer.tsx');
+  assert.ok(/<track [^>]*kind="captions"[^>]* default/.test(player) && /const \[captions, setCaptions\] = useState\(true\)/.test(player), 'captions are on by default');
+  assert.ok(/track\.mode = 'hidden'/.test(player) && /toggle-closed-captions-button\{display:none\}/.test(player), 'captions draw under the picture, never over the step bar burned into each frame');
+  assert.ok(!/import \{[^}]*LiquidGlass/.test(player) && !/<LiquidGlass/.test(player), 'no glass lens over a playing video');
+  assert.ok(/appVideoFile = \(id: string, ext: 'mp4' \| 'jpg' \| 'vtt'\): string => `\.\/guide-videos\//.test(videos), 'files load from the app folder, relative to index.html');
+  ok('the bundled videos ship their files and every card points at a real one');
 }
 
 console.log(`\nguides: ${passed}/${passed} passed`);

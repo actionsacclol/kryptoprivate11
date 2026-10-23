@@ -64,6 +64,20 @@ export const PUMP_LOGIN_TEMPLATE: ((timestamp: number) => string) | null = (time
 export const PUMP_LOGIN_PATH = '/auth/login/token';
 export const PUMP_LOGIN_FALLBACK_PATH = '/auth/login';
 
+/**
+ * Making an account is its own step now (OBSERVED 2026-10-22). Until then the
+ * first sign-in with an address created it; now both login routes answer a
+ * new address `404 ACCOUNT_NOT_FOUND` — "No account for this wallet; create
+ * one through POST /auth/register". Register takes the SAME signed body as
+ * login plus an `Origin` header (400 "Missing Origin header" without one),
+ * answers 200 with the session's claims and sets the `auth_token` cookie;
+ * login then works, and the account already has a pump-made username and
+ * picture. A wallet that already has an account never sees the 404.
+ */
+export const PUMP_REGISTER_PATH = '/auth/register';
+/** pump's error code for "this address has no account yet". */
+export const PUMP_NO_ACCOUNT = 'ACCOUNT_NOT_FOUND';
+
 /** The only host this module will ever talk to. */
 export const PUMP_API_HOST = 'frontend-api-v3.pump.fun';
 

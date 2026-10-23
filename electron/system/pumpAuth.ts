@@ -36,11 +36,14 @@ import path from 'node:path';
 import { app, safeStorage } from 'electron';
 import * as wallet from './wallet';
 import { logger } from './logger';
+import { pumpAuthFetch, pumpFetch, PumpWallError, setSessionRenewer } from '../data/pumpWall';
 import {
   loginBodyProblem,
   PUMP_API_HOST,
   PUMP_LOGIN_FALLBACK_PATH,
   PUMP_LOGIN_PATH,
+  PUMP_NO_ACCOUNT,
+  PUMP_REGISTER_PATH,
   pumpLoginReady,
   pumpTimestamp,
   viewOf,
@@ -217,11 +220,13 @@ export function signOut(walletId?: string): { ok: boolean; message: string } {
   if (!walletId) {
     const n = sessions.size;
     sessions.clear();
+    lapsed.clear();
     lastError = null;
     persist();
     return { ok: true, message: n ? `Signed out of ${n} pump.fun account${n === 1 ? '' : 's'}` : 'Nothing to sign out of' };
   }
   const had = sessions.delete(walletId);
+  lapsed.delete(walletId);
   lastError = null;
   persist();
   return { ok: true, message: had ? 'Signed out of pump.fun' : 'That wallet was not signed in' };
@@ -242,9 +247,102 @@ function tokenFrom(body: unknown): string | null {
   return null;
 }
 
+/** A freshly signed login body for this wallet, or why there is none. */
+function signedBody(walletId: string): { body: PumpLoginBody; signed: string } | { why: string } {
+  const timestamp = pumpTimestamp();
+  const signed = wallet.signPumpLogin(walletId, timestamp);
+  if (!signed.ok || !signed.signature || !signed.address) return { why: signed.message };
+  const body: PumpLoginBody = {
+    address: signed.address,
+    signature: signed.signature,
+    timestamp,
+    authType: 'non_custodial',
+  };
+  // Our own error in our own words, before a request goes out — a malformed
+  // body answered 401 would read as "your key is wrong", which it is not.
+  const problem = loginBodyProblem(body);
+  if (problem) return { why: `Cannot sign in — ${problem}` };
+  return { body, signed: signed.signed ?? '' };
+}
+
+/** pump's own words from a refusal, else the status. */
+function refusalOf(status: number, text: string, what: string): { why: string; code: string | null } {
+  let why = `pump.fun refused the ${what} (${status})`;
+  let code: string | null = null;
+  try {
+    const j = JSON.parse(text) as { message?: unknown; error?: unknown };
+    if (typeof j.message === 'string' && j.message) why = `pump.fun: ${j.message}`;
+    if (typeof j.error === 'string') code = j.error;
+  } catch {
+    /* not JSON — the status is what we have */
+  }
+  return { why, code };
+}
+
+/** One pass over the login routes. `noAccount` = pump has no account for the
+ *  address yet, which register fixes and nothing else does. */
+async function login(body: PumpLoginBody): Promise<{ tok: string | null; why: string; noAccount: boolean }> {
+  let why = 'pump.fun did not answer the sign-in';
+  for (const route of LOGIN_ROUTES) {
+    const res = await pumpAuthFetch(urlFor(route.path), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(route.rawJwt ? { ...body, rawJwt: true } : body),
+      redirect: 'error', // a 30x out of an allowlisted host is the classic escape
+      signal: AbortSignal.timeout(15_000),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      // pump's own words, which are specific enough to act on ("Invalid
+      // signature" means the message template is wrong, not the key).
+      const r = refusalOf(res.status, text, 'sign-in');
+      why = r.why;
+      // Both routes answer a new address the same way; asking the other one
+      // would only repeat it.
+      if (res.status === 404 && r.code === PUMP_NO_ACCOUNT) return { tok: null, why, noAccount: true };
+      // 401 means the SIGNATURE was rejected, which the other route would
+      // reject identically — only a missing or malformed route is worth a
+      // second attempt.
+      if (res.status === 401) break;
+      logger.warn(`pump auth: ${route.path} answered ${res.status}; trying the next route`);
+      continue;
+    }
+    let parsed: unknown = text;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      /* a bare token comes back as text */
+    }
+    const tok = tokenFrom(parsed);
+    if (tok) return { tok, why, noAccount: false };
+    why = 'pump.fun accepted the sign-in but returned no token this app could find.';
+    logger.warn(`pump auth: ${route.path} accepted the sign-in but returned no token`);
+  }
+  return { tok: null, why, noAccount: false };
+}
+
 /**
- * Sign in with one of this app's wallets, creating the pump account if that
- * address has never signed in before — pump has no separate registration step.
+ * Make the pump account for this address (shared/pumpAuth.ts,
+ * PUMP_REGISTER_PATH). Same signed body as login, plus the Origin header
+ * pump's register guard asks for — the same one every authenticated call in
+ * pumpSocial/pumpProfile already sends.
+ */
+async function register(body: PumpLoginBody): Promise<{ ok: boolean; why: string }> {
+  const res = await pumpAuthFetch(urlFor(PUMP_REGISTER_PATH), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json', origin: 'https://pump.fun' },
+    body: JSON.stringify(body),
+    redirect: 'error',
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await res.text();
+  if (res.ok) return { ok: true, why: '' };
+  return { ok: false, why: refusalOf(res.status, text, 'new account').why };
+}
+
+/**
+ * Sign in with one of this app's wallets, creating the pump account first if
+ * that address has none — pump made that its own step on 2026-10-22.
  *
  * The caller names a wallet and nothing else. The message, the timestamp and
  * the body are all built here, so there is no request a caller can shape.
@@ -258,83 +356,141 @@ export async function signIn(walletId: string): Promise<{ ok: boolean; message: 
     lastError = why;
     return { ok: false, message: why };
   }
-  const timestamp = pumpTimestamp();
-  const signed = wallet.signPumpLogin(walletId, timestamp);
-  if (!signed.ok || !signed.signature || !signed.address) {
-    lastError = signed.message;
-    return { ok: false, message: signed.message };
+  let first = signedBody(walletId);
+  if ('why' in first) {
+    lastError = first.why;
+    return { ok: false, message: first.why };
   }
-  const body: PumpLoginBody = {
-    address: signed.address,
-    signature: signed.signature,
-    timestamp,
-    authType: 'non_custodial',
-  };
-  // Our own error in our own words, before a request goes out — a malformed
-  // body answered 401 would read as "your key is wrong", which it is not.
-  const problem = loginBodyProblem(body);
-  if (problem) {
-    lastError = problem;
-    return { ok: false, message: `Cannot sign in — ${problem}` };
-  }
+  const address = first.body.address;
   try {
-    let tok: string | null = null;
-    let why = 'pump.fun did not answer the sign-in';
-    for (const route of LOGIN_ROUTES) {
-      const res = await fetch(urlFor(route.path), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(route.rawJwt ? { ...body, rawJwt: true } : body),
-        redirect: 'error', // a 30x out of an allowlisted host is the classic escape
-        signal: AbortSignal.timeout(15_000),
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        // pump's own words, which are specific enough to act on ("Invalid
-        // signature" means the message template is wrong, not the key).
-        why = `pump.fun refused the sign-in (${res.status})`;
-        try {
-          const j = JSON.parse(text) as { message?: unknown };
-          if (typeof j.message === 'string' && j.message) why = `pump.fun: ${j.message}`;
-        } catch {
-          /* not JSON — the status is what we have */
-        }
-        // 401 means the SIGNATURE was rejected, which the other route would
-        // reject identically — only a missing or malformed route is worth a
-        // second attempt.
-        if (res.status === 401) break;
-        logger.warn(`pump auth: ${route.path} answered ${res.status}; trying the next route`);
-        continue;
+    let r = await login(first.body);
+    let created = false;
+    if (r.noAccount) {
+      const reg = await register(first.body);
+      if (!reg.ok) {
+        lastError = reg.why;
+        logger.warn(`pump auth: could not make an account for ${address.slice(0, 6)}… — ${reg.why}`);
+        return { ok: false, message: reg.why };
       }
-      let parsed: unknown = text;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        /* a bare token comes back as text */
+      created = true;
+      logger.info(`pump auth: made a pump.fun account for ${address.slice(0, 6)}…`);
+      // A fresh signature for the login proper rather than replaying one.
+      first = signedBody(walletId);
+      if ('why' in first) {
+        lastError = first.why;
+        return { ok: false, message: first.why };
       }
-      tok = tokenFrom(parsed);
-      if (tok) break;
-      why = 'pump.fun accepted the sign-in but returned no token this app could find.';
-      logger.warn(`pump auth: ${route.path} accepted the sign-in but returned no token`);
+      r = await login(first.body);
     }
-    if (!tok) {
-      lastError = why;
-      logger.warn(`pump auth: sign-in failed — ${why}`);
-      return { ok: false, message: why };
+    if (!r.tok) {
+      lastError = r.why;
+      logger.warn(`pump auth: sign-in failed — ${r.why}`);
+      return { ok: false, message: r.why };
     }
-    sessions.set(walletId, { address: signed.address, walletId, token: tok, at: Date.now(), username: null, via: 'wallet' });
+    sessions.set(walletId, { address, walletId, token: r.tok, at: Date.now(), username: null, via: 'wallet' });
     lastError = null;
     persist();
     // The signature is not logged. The MESSAGE is, because it is the thing
     // worth seeing if the template ever stops matching.
-    logger.info(`pump auth: signed in as ${signed.address.slice(0, 6)}… (signed "${signed.signed ?? ''}")`);
+    logger.info(`pump auth: signed in as ${address.slice(0, 6)}… (signed "${first.signed}")`);
     void refreshProfile(walletId);
-    return { ok: true, message: `Signed in to pump.fun as ${signed.address.slice(0, 6)}…` };
+    return { ok: true, message: `${created ? 'Made a pump.fun account and signed in' : 'Signed in to pump.fun'} as ${address.slice(0, 6)}…` };
   } catch (err) {
-    const why = `Could not reach pump.fun: ${(err as Error).message}`;
+    // Cloudflare's check, not pump's answer (pumpWall.ts): its own words
+    // already say the wallet is fine, which is the thing worth hearing.
+    const why = err instanceof PumpWallError ? err.message : `Could not reach pump.fun: ${(err as Error).message}`;
     lastError = why;
     return { ok: false, message: why };
   }
+}
+
+// ─── Renewing a session that has expired ─────────────────────────────────
+//
+// A pump session lapses after a while. The app holds the wallet key, so signing
+// in again is silent: the same signed message as the first time, no prompt.
+// Three things use it —
+//   · a call that gets a 401 (the hook in pumpFetch.ts) renews and retries once;
+//   · the keep-alive below checks every signed-in wallet now and then, so a
+//     session does not die while the app sits idle;
+//   · a wallet whose session was dropped because renewing failed (pump down, a
+//     locked wallet) is tried again by the keep-alive rather than forgotten.
+// Only wallet sessions renew. A web sign-in (via 'web') has no key behind it.
+// A wallet is signed in again at most once per RENEW_COOLDOWN_MS, so a pump
+// outage or a refused signature cannot turn into a sign-in loop.
+const RENEW_COOLDOWN_MS = 5 * 60_000;
+const renewing = new Map<string, Promise<boolean>>();
+const renewTriedAt = new Map<string, number>();
+/** Wallets whose session was dropped as dead and could not be renewed yet. */
+const lapsed = new Set<string>();
+/** A token that was just replaced → its wallet, so a call still holding the old one finds the new. */
+const replaced = new Map<string, string>();
+
+export function renewSession(walletId: string, now = Date.now()): Promise<boolean> {
+  load();
+  const running = renewing.get(walletId);
+  if (running) return running;
+  const s = sessions.get(walletId);
+  const known = s ? s.via === 'wallet' : lapsed.has(walletId);
+  if (!known || now - (renewTriedAt.get(walletId) ?? 0) < RENEW_COOLDOWN_MS) return Promise.resolve(false);
+  renewTriedAt.set(walletId, now);
+  const before = s?.token;
+  const run = signIn(walletId)
+    .then((r) => {
+      if (r.ok) {
+        if (before) {
+          replaced.set(before, walletId);
+          if (replaced.size > 50) replaced.delete(replaced.keys().next().value as string);
+        }
+        lapsed.delete(walletId);
+        logger.info(`pump auth: renewed the session for wallet ${walletId}`);
+      } else {
+        logger.warn(`pump auth: could not renew the session for wallet ${walletId} — ${r.message}`);
+      }
+      return r.ok;
+    })
+    .catch(() => false)
+    .finally(() => {
+      renewing.delete(walletId);
+    });
+  renewing.set(walletId, run);
+  return run;
+}
+
+// pumpFetch asks this with the token a 401 call carried: find whose it is and
+// hand back that wallet's current token — already renewed by someone else, or
+// freshly so — or null when nothing can be done.
+setSessionRenewer(async (stale) => {
+  load();
+  const id = [...sessions.values()].find((x) => x.token === stale)?.walletId;
+  if (!id) {
+    // Replaced a moment ago by another call's renewal: that wallet's token now.
+    const was = replaced.get(stale);
+    return (was ? sessions.get(was)?.token : null) ?? null;
+  }
+  return (await renewSession(id)) ? (sessions.get(id)?.token ?? null) : null;
+});
+
+const KEEPALIVE_FIRST_MS = 40_000;
+const KEEPALIVE_EVERY_MS = 3 * 3_600_000;
+
+/**
+ * Check every signed-in wallet (refreshProfile renews on a 401) and retry the
+ * ones that lapsed. One at a time, 1.5 s apart — pump rate-limits bursts.
+ */
+export async function keepSessionsAlive(): Promise<void> {
+  load();
+  const ids = [...new Set([...[...sessions.values()].filter((s) => s.via === 'wallet').map((s) => s.walletId), ...lapsed])];
+  for (const [i, id] of ids.entries()) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 1_500));
+    if (sessions.has(id)) await refreshProfile(id);
+    else await renewSession(id);
+  }
+}
+
+/** main.ts: run the check shortly after launch and then every few hours. */
+export function startSessionKeepAlive(): void {
+  setTimeout(() => void keepSessionsAlive(), KEEPALIVE_FIRST_MS).unref();
+  setInterval(() => void keepSessionsAlive(), KEEPALIVE_EVERY_MS).unref();
 }
 
 /** Read one account's display name, so the UI can show who it is. Best effort:
@@ -344,16 +500,20 @@ export async function refreshProfile(walletId: string): Promise<void> {
   const s = sessions.get(walletId);
   if (!s) return;
   try {
-    const res = await fetch(profileUrl(), {
+    const res = await pumpFetch(profileUrl(), {
       headers: { accept: 'application/json', authorization: `Bearer ${s.token}` },
       redirect: 'error',
       signal: AbortSignal.timeout(12_000),
     });
     if (res.status === 401) {
-      // Expired or revoked. Dropping it is the honest move — showing "signed
-      // in" over a dead session is worse than asking again.
+      // Expired or revoked. A wallet's session is signed in again on the spot
+      // (renewSession); only when that cannot be done is it dropped — showing
+      // "signed in" over a dead session is worse than asking again.
+      if (await renewSession(walletId)) return;
+      if (sessions.get(walletId)?.token !== s.token) return; // renewed meanwhile
       logger.info(`pump auth: the session for ${s.address.slice(0, 6)}… is no longer valid; signed out`);
       sessions.delete(walletId);
+      if (s.via === 'wallet') lapsed.add(walletId);
       lastError = 'A pump.fun session expired. Sign in again.';
       persist();
       return;
@@ -362,7 +522,7 @@ export async function refreshProfile(walletId: string): Promise<void> {
     // my-profile only proves the session is alive — it carries the session's
     // claims, not the profile. The name and pump's id for the account come
     // from the PUBLIC profile (2026-09-22; until then no username ever showed).
-    const pub = await fetch(`https://${PUMP_API_HOST}/users/${encodeURIComponent(s.address)}`, {
+    const pub = await pumpFetch(`https://${PUMP_API_HOST}/users/${encodeURIComponent(s.address)}`, {
       headers: { accept: 'application/json' },
       redirect: 'error',
       signal: AbortSignal.timeout(12_000),
@@ -419,7 +579,7 @@ export async function adoptWebSession(token: string): Promise<{ ok: boolean; mes
   if (!tok || tok.length > 4096) return { ok: false, message: 'pump.fun did not hand over a usable session.' };
   let address: string | null = null;
   try {
-    const res = await fetch(profileUrl(), {
+    const res = await pumpFetch(profileUrl(), {
       headers: { accept: 'application/json', authorization: `Bearer ${tok}`, cookie: `auth_token=${tok}` },
       redirect: 'error',
       signal: AbortSignal.timeout(12_000),

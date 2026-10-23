@@ -23,6 +23,8 @@ const test = (name, fn) => cases.push({ name, fn });
 // alphabet rather than a bare length, so "Whale" is not a valid address.
 const WALLET = 'Whae1111111111111111111111111111111111111';
 const MINT = 'CopyMint111111111111111111111111111111111';
+const MINT2 = 'CopyMintTwo1111111111111111111111111111111';
+const MINT3 = 'CopyMintThree111111111111111111111111111111';
 
 function makeHost(over = {}) {
   // `opts` is recorded SEPARATELY: the pinned sell assertion is a deepEqual
@@ -1909,6 +1911,67 @@ test('a parked exit SURVIVES a restart and is mirrored on the way back up', asyn
   const onDisk = JSON.parse(fs.readFileSync(path.join(dir2, 'copytrade.json'), 'utf8'));
   assert.equal(onDisk.pendingExits.length, 1, 'the instruction reached disk');
   assert.equal(onDisk.pendingExits[0].trade.mint, MINT);
+});
+
+test('after a restart a disarmed LIVE copy still EXITS — the leader’s sell and its own stop — but never enters (2026-10-23)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-exitsonly-'));
+  copy._reset();
+  copy.init(dir);
+  const h = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h.host);
+  save({ mode: 'live', enabled: true, sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0, exitStopLossPct: 10 });
+  copy.onWalletTrade(trade({ isBuy: true, signature: 'b1' }));
+  await tick();
+  copy.onWalletTrade(trade({ isBuy: true, mint: MINT2, signature: 'b2' }));
+  await tick();
+  assert.equal(h.calls.buys.length, 2, 'two live copies open before the restart');
+
+  await restart(dir);
+  const h2 = makeHost({ priceSol: 0.001, leaderHolding: 0 });
+  copy.attach(h2.host);
+  const [c] = copy.all();
+  assert.equal(c.enabled, false, 'still never wakes up armed');
+  assert.equal(c.exitsOnly, true, 'but it is marked as still having exits to run');
+  assert.ok(copy.activeWallets('solana').has(WALLET), 'the leader is still watched, or no sell could be heard');
+
+  copy.onWalletTrade(trade({ isBuy: true, mint: MINT3, signature: 'b3' }));
+  await tick();
+  assert.equal(h2.calls.buys.length, 0, 'a new buy by the leader is NOT copied');
+
+  copy.onWalletTrade(trade({ isBuy: false, sol: 1, priceSol: 0.002, soldFraction: 1, signature: 's1' }));
+  await sleep(150);
+  assert.equal(h2.calls.sells.length, 1, 'the leader’s sell is mirrored after the restart');
+  assert.equal(h2.calls.sells[0].mint, MINT);
+
+  copy.markToMarket(MINT2, 0.00089);
+  await sleep(60);
+  assert.equal(h2.calls.sells.length, 2, 'the copy’s own stop loss still fires');
+  assert.equal(h2.calls.sells[1].mint, MINT2);
+});
+
+test('arming clears the restart state; pausing again then stops exits, as the user asked', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-exitsonly2-'));
+  copy._reset();
+  copy.init(dir);
+  copy.attach(makeHost({ priceSol: 0.001, leaderHolding: 0 }).host);
+  save({ mode: 'live', enabled: true, sizing: 'fixed', sizeValue: 1, maxTradeSol: 1, delayMs: 0 });
+  await restart(dir);
+  const [c] = copy.all();
+  assert.equal(c.exitsOnly, true);
+  // An edit that leaves it paused keeps the exits running…
+  copy.upsert({ ...c, label: 'renamed', exitsOnly: undefined });
+  assert.equal(copy.all()[0].exitsOnly, true, 'a rename does not quietly stop its exits');
+  // …the window can never set the flag itself…
+  copy.upsert({ ...c, mode: 'paper', exitsOnly: true });
+  assert.equal(copy.all()[0].exitsOnly, undefined, 'paper was never disarmed, and the window cannot claim the flag');
+  copy.upsert({ ...copy.all()[0], mode: 'live', enabled: false });
+  assert.equal(copy.all()[0].exitsOnly, undefined);
+  // …and arming hands it back to the ordinary rules.
+  copy.upsert({ ...copy.all()[0], enabled: true });
+  assert.equal(copy.all()[0].exitsOnly, undefined, 'armed: no longer exits-only');
+  copy.upsert({ ...copy.all()[0], enabled: false });
+  assert.equal(copy.all()[0].exitsOnly, undefined, 'a pause the user chose stays a full pause');
+  assert.equal(copy.activeWallets('solana').size, 0, 'and nothing is watched for it');
 });
 
 test('after a restart a FRESH parked exit fires, once a position exists to close', async () => {

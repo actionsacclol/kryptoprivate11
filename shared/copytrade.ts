@@ -97,6 +97,16 @@ export interface CopyConfig {
   wallet: string;
   label: string;
   enabled: boolean;
+  /**
+   * Set by main ONLY, when a restart disarmed this live config (2026-10-23).
+   * Entries stay off — an app closed for a week must not resume buying — but
+   * the copies it already holds keep their exits: the leader's sells are
+   * still mirrored (a reverse copy's exit on their buy-back still fires) and
+   * the config's own take-profit / stop-loss / trailing / max hold still
+   * run. Until this existed every live copy stopped exiting at every
+   * restart. Cleared when the user arms the config again or makes it paper.
+   */
+  exitsOnly?: boolean;
   mode: CopyMode;
   /** Absent (every config saved before 2026-09-20) is `copy`. */
   direction?: CopyDirection;

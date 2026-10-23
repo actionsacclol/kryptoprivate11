@@ -21,6 +21,7 @@
 // of the call. A wallet with no pump session does not post at all.
 
 import { logger } from '../system/logger';
+import { pumpFetch } from '../data/pumpWall';
 import * as pumpAuth from '../system/pumpAuth';
 import { act as socialAct, ensureRegistered } from '../system/pumpSocial';
 import { PUMP_API_HOST } from '@shared/pumpAuth';
@@ -59,7 +60,7 @@ interface Preflight {
  */
 export async function preflight(mint: string, token: string): Promise<Preflight | null> {
   try {
-    const res = await fetch(urlFor(`/callout/eligibility/${encodeURIComponent(mint)}`), {
+    const res = await pumpFetch(urlFor(`/callout/eligibility/${encodeURIComponent(mint)}`), {
       headers: { accept: 'application/json', authorization: `Bearer ${token}` },
       redirect: 'error',
       signal: AbortSignal.timeout(12_000),
@@ -173,7 +174,7 @@ export async function postNow(
   }
 
   try {
-    const res = await fetch(urlFor(CALLOUT_CREATE_PATH), {
+    const res = await pumpFetch(urlFor(CALLOUT_CREATE_PATH), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -291,7 +292,7 @@ export async function replyNow(walletId: string, mint: string, content: string):
   if (!body) return { ok: false, message: 'there is no text to reply with', verdict: pre.verdict };
 
   try {
-    const res = await fetch(urlFor(route), {
+    const res = await pumpFetch(urlFor(route), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',

@@ -50,6 +50,14 @@ import '@fontsource/press-start-2p/latin-400.css';
 
 import './index.css';
 
+// A link or file dropped on the window must never navigate it (2026-10-23):
+// Chromium's default for a drop is to open what was dropped in this window,
+// the one carrying window.krypt. The drop zones that take files (PnlCard,
+// TradeReplay) read them in their own React handlers before this runs; this
+// only cancels the browser's default, it does not stop the event.
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => e.preventDefault());
+
 // Errors that escape React entirely (event handlers, timers, un-awaited
 // promises) do not reach the boundary. Log them so they show up in the
 // console page rather than vanishing; never throw from here.

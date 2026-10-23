@@ -249,6 +249,19 @@ export function templateInfo(): string {
  *  transactions and successful on-chain trades on 2026-08-29. */
 export const BUY_DISC = Buffer.from('66063d1201daebea', 'hex');
 export const SELL_DISC = Buffer.from('33e685a4017f83ad', 'hex');
+/**
+ * `global:buy_exact_sol_in` — what a derived BUY is built with (2026-10-23).
+ * Args: `spendable_sol_in` u64, then `min_tokens_out` u64; the same 18
+ * accounts in the same order as `buy` (verified against confirmed mainnet
+ * trades and by simulation, 2026-10-23).
+ *
+ * `buy` takes a TOKEN amount and a SOL ceiling, so with the token amount cut
+ * by slippage (the only way to bound it) "buy 0.1 SOL" spent ~0.088 at the
+ * default 12 % and was billed the platform fee on the full 0.1. Exact-in
+ * spends the SOL asked for and puts the slippage on the tokens instead —
+ * the way Jupiter and the relayer have always sized a buy.
+ */
+export const BUY_EXACT_SOL_IN_DISC = Buffer.from('38fc74089edfcd5f', 'hex');
 
 /** sha256("account:Global")[0..8] — refuses to parse anything but a Global. */
 const GLOBAL_DISC = Buffer.from(sha256(new TextEncoder().encode('account:Global')).slice(0, 8));
@@ -411,7 +424,7 @@ export function derivedTemplate(action: 'buy' | 'sell', opts: LayoutOptions = {}
         ];
   return {
     action,
-    disc: action === 'buy' ? BUY_DISC : SELL_DISC,
+    disc: action === 'buy' ? BUY_EXACT_SOL_IN_DISC : SELL_DISC,
     slots: rows.map(([s]) => s),
     writable: rows.map(([, w]) => w),
     tokenProgram: '',
@@ -486,6 +499,13 @@ export function fillSlots(tpl: TradeTemplate, f: DerivedFill, observed: string[]
  *  bytes — the current instructions carry no trailing args. */
 export function encodeTradeData(disc: Buffer, amount: bigint, solLimit: bigint): Buffer {
   return Buffer.concat([disc, u64le(amount), u64le(solLimit)]);
+}
+
+/** `buy_exact_sol_in` data: discriminator · spendable_sol_in u64 ·
+ *  min_tokens_out u64. 24 bytes; the optional track_volume arg is left off,
+ *  as it is on our `buy` (accepted by simulation, 2026-10-23). */
+export function encodeBuyExactSolIn(spendableLamports: bigint, minTokensOut: bigint): Buffer {
+  return Buffer.concat([BUY_EXACT_SOL_IN_DISC, u64le(spendableLamports), u64le(minTokensOut)]);
 }
 
 // Suspension: the derived layout is the primary path, but it cannot self-heal
@@ -1482,6 +1502,11 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
   let solValueLamports = 0;
   const userAta = ataFor(p.owner, p.mint, tokenProgram);
   if (p.action === 'buy') {
+    // `amount` = the fewest tokens accepted, `limit` = the SOL to spend. A
+    // derived build sends them as exact-in (spend `limit`, receive at least
+    // `amount`); a LEARNED `buy` template reads them as "buy `amount` tokens
+    // for at most `limit`", which under-spends by the slippage — the learner
+    // is only the fallback for a layout change, so that is tolerated there.
     const q = buyQuote(p.solLamports, vSol, vTok);
     amount = (q.tokensOut * BigInt(Math.round((1 - p.slippagePct / 100) * 10_000))) / 10_000n;
     limit = p.solLamports;
@@ -1557,7 +1582,9 @@ export async function buildLocalTrade(p: LocalBuildParams): Promise<LocalBuildRe
     return { ok: false, message: `account derivation failed: ${(err as Error).message}` };
   }
 
-  const data = Buffer.concat([encodeTradeData(tpl.disc, amount, limit), tpl.trailingData]);
+  const data = tpl.disc.equals(BUY_EXACT_SOL_IN_DISC)
+    ? encodeBuyExactSolIn(limit, amount)
+    : Buffer.concat([encodeTradeData(tpl.disc, amount, limit), tpl.trailingData]);
   const tradeIx = new TransactionInstruction({ programId: new PublicKey(PUMP_PROGRAM), keys, data });
 
   const microLamports = Math.max(

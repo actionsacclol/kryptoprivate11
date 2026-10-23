@@ -247,7 +247,7 @@ export function CopySimplePage({ onOpenAdvanced, onOpenScout }: { onOpenAdvanced
                     </div>
                     <div className="text-label text-krypt-muted">
                       {chainName(chainOf(c))} · {c.sizing === 'fixed' ? `${c.sizeValue} ${nativeSymbolOf(chainOf(c))} per trade` : `${c.sizeValue}% of their size`} ·{' '}
-                      {c.enabled ? 'following' : 'paused'}
+                      {c.enabled ? 'following' : c.exitsOnly ? 'paused after restart · still selling what it copied' : 'paused'}
                     </div>
                   </div>
                   <div className="text-right">

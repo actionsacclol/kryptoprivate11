@@ -30,7 +30,38 @@ export const API_KEY_SITES = [
   { name: 'Jupiter', url: 'https://portal.jup.ag' },
 ] as const;
 
-/** Every video, in the order the Guides page shows them. */
+/**
+ * Step-by-step videos that ship WITH the app and play on the Guides page, no
+ * browser (2026-10-22). Narrated screen walk-throughs made in a blank profile.
+ * The files live in public/guide-videos/ as <id>.mp4 + <id>.jpg (poster) +
+ * <id>.vtt (captions), so vite copies them into dist/ and they load from the
+ * app's own folder (CSP media-src 'self'). test/guides.test.mjs checks every
+ * entry has its three files.
+ */
+export interface AppGuideVideo {
+  /** File stem in public/guide-videos/. */
+  id: string;
+  title: string;
+  blurb: string;
+  /** Length in whole seconds, shown on the tile. */
+  durationSec: number;
+}
+
+export const APP_GUIDE_VIDEOS: readonly AppGuideVideo[] = [
+  { id: 'start', title: 'Start here', blurb: 'First setup, your wallet, and Paper vs Live.', durationSec: 137 },
+  { id: 'trade', title: 'Buy and sell a coin', blurb: 'Find a coin, check it, buy it, sell it.', durationSec: 147 },
+  { id: 'deposit', title: 'Deposit and withdraw', blurb: 'Put SOL in, take it back out.', durationSec: 133 },
+  { id: 'widgets', title: 'Set up Widgets', blurb: 'Build your own screen out of boxes.', durationSec: 99 },
+  { id: 'copy', title: 'Copy trading', blurb: 'Follow another wallet, on paper first.', durationSec: 111 },
+  { id: 'pump', title: 'Make a pump.fun account', blurb: 'Free, and it sends no transaction.', durationSec: 106 },
+  { id: 'callout', title: 'Set up auto-callout', blurb: 'Post a callout every time you buy.', durationSec: 117 },
+  { id: 'rpc', title: 'Use a paid RPC', blurb: 'Helius, QuickNode, Triton, Vibe Station or any other.', durationSec: 157 },
+];
+
+/** Relative to index.html, so it resolves in dev and inside the packaged app. */
+export const appVideoFile = (id: string, ext: 'mp4' | 'jpg' | 'vtt'): string => `./guide-videos/${id}.${ext}`;
+
+/** Every YouTube video, in the order the Guides page shows them. */
 export const GUIDE_VIDEOS: readonly { url: string; title: string; blurb: string }[] = [
   { url: APP_TUTORIAL_URL, title: 'App tutorial', blurb: 'Getting around the app.' },
   { url: AIO_WALLET_VIDEO_URL, title: 'All-in-One wallet', blurb: 'One wallet for every chain: buy anywhere, move, compress.' },

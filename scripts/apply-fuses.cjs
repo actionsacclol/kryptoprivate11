@@ -35,6 +35,22 @@ function assertBytecodeMatchesTarget(context) {
   } catch {
     return; // an unreadable stamp is not evidence of a mismatch
   }
+  // The Electron version too (2026-10-23): V8 accepts cached data only from
+  // its own version, so an Electron bump packaged over .jsc compiled by the
+  // old electron.exe ships an app that dies at boot with cachedDataRejected.
+  // The stamp has carried the version since it existed; nothing compared it.
+  let packaging = null;
+  try {
+    packaging = context.packager?.info?.framework?.version ?? context.packager?.config?.electronVersion ?? require('electron/package.json').version;
+  } catch {
+    packaging = null;
+  }
+  if (target.electron && packaging && target.electron !== packaging) {
+    throw new Error(
+      `[fuses] this build's V8 bytecode was compiled by Electron ${target.electron}, but you are packaging Electron ${packaging}. ` +
+        'The app would fail to start ("cachedDataRejected"). Run `npm run build` again after changing Electron, then package.',
+    );
+  }
   const wantPlatform = context.electronPlatformName === 'win32' ? 'win32' : context.electronPlatformName;
   const wantArch = ARCH[context.arch] ?? String(context.arch);
   if (target.platform === wantPlatform && (target.arch === wantArch || wantArch === 'universal')) return;

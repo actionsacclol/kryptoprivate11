@@ -354,14 +354,30 @@ export function pumpSwapAccounts(action: 'buy' | 'sell', f: PumpSwapFill): Accou
   return list;
 }
 
-/** Instruction data: discriminator · base amount u64 · quote limit u64. */
+/**
+ * `global:buy_exact_quote_in` — what a BUY is built with (2026-10-23). Args:
+ * `spendable_quote_in` u64, then `min_base_amount_out` u64; the same accounts
+ * as `buy` (verified against confirmed mainnet trades and by simulation,
+ * 2026-10-23). `buy` takes an exact TOKEN amount under a SOL ceiling, and
+ * with that amount cut by the slippage margin "buy 0.02 SOL" spent ~0.017
+ * while the platform fee was billed on 0.02. Exact-in spends the budget and
+ * puts the margin on the tokens.
+ */
+export const PUMP_SWAP_BUY_EXACT_QUOTE_IN_DISC = disc('global:buy_exact_quote_in');
+
+/** Instruction data. Sell: discriminator · base amount u64 · min quote out
+ *  u64. Buy (exact-in): discriminator · SOL to spend u64 · min base out u64 —
+ *  so for a buy `baseAmount` is the FEWEST tokens accepted and `quoteLimit`
+ *  the SOL spent. */
 export function encodePumpSwapData(action: 'buy' | 'sell', baseAmount: bigint, quoteLimit: bigint): Buffer {
   const u64 = (v: bigint): Buffer => {
     const b = Buffer.alloc(8);
     b.writeBigUInt64LE(v < 0n ? 0n : v);
     return b;
   };
-  return Buffer.concat([action === 'buy' ? PUMP_SWAP_BUY_DISC : PUMP_SWAP_SELL_DISC, u64(baseAmount), u64(quoteLimit)]);
+  return action === 'buy'
+    ? Buffer.concat([PUMP_SWAP_BUY_EXACT_QUOTE_IN_DISC, u64(quoteLimit), u64(baseAmount)])
+    : Buffer.concat([PUMP_SWAP_SELL_DISC, u64(baseAmount), u64(quoteLimit)]);
 }
 
 /** Which of a config list (fee recipients, buyback vaults) a pool's trades
