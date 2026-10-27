@@ -8,7 +8,8 @@
 
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { decodeAmmEvent, decodeAmmLogs, decodeAmmEventEx, poolPriceSol, executedPriceSol, coinSwapView, invertedSwapView } from './.ammdecoder.mjs';
+import { decodeAmmEvent, decodeAmmLogs, decodeAmmEventEx, poolPriceSol, executedPriceSol, coinSwapView, invertedSwapView, quoteSwapView } from './.ammdecoder.mjs';
+import { base58Decode } from './.b58.mjs';
 
 function disc(name) {
   return createHash('sha256').update(`event:${name}`).digest().subarray(0, 8);
@@ -99,7 +100,27 @@ const PK = (n) => Buffer.alloc(32, n);
   assert.equal(ev.timestamp, 1784955620);
   assert.notEqual(ev.mint, ev.pool);
   assert.notEqual(ev.bondingCurve, ev.pool);
+  assert.equal(ev.quoteMint, null, 'no tail: a SOL pool');
   console.log('ok  CompletePumpAmmMigrationEvent (synthetic, byte-exact)');
+}
+
+// ── migration tail: quote_mint (pump.fun, 2026-10) ──
+// A coin launched against a tokenized stock graduates into a pool quoted in
+// it. The field follows `pool`; zero or WSOL there means SOL.
+{
+  const head = Buffer.concat([
+    disc('CompletePumpAmmMigrationEvent'),
+    PK(1), PK(2), u64(206900000000000), u64(45130918), u64(0), PK(3), i64(1784955620), PK(4),
+  ]);
+  const RDDT = 'RDDTGbhHwVXfyCvQMXzzowKjf5qrYBZAnehoXW83ooh';
+  const quoted = decodeAmmEvent(Buffer.concat([head, Buffer.from(base58Decode(RDDT))]).toString('base64'));
+  assert.equal(quoted.quoteMint, RDDT);
+  assert.equal(quoted.solAmount, 45130918n, 'the amount field is left raw — the engine converts it');
+  assert.equal(decodeAmmEvent(Buffer.concat([head, Buffer.alloc(32)]).toString('base64')).quoteMint, null, 'all-zero = SOL');
+  const WSOL = 'So11111111111111111111111111111111111111112';
+  assert.equal(decodeAmmEvent(Buffer.concat([head, Buffer.from(base58Decode(WSOL))]).toString('base64')).quoteMint, null, 'WSOL = SOL');
+  assert.equal(decodeAmmEvent(Buffer.concat([head, Buffer.alloc(20)]).toString('base64')).quoteMint, null, 'a short tail is ignored, not drift');
+  console.log('ok  migration quote_mint tail (quoted, zero, WSOL, short)');
 }
 
 // ── real captured payloads (2026-07-25 tape, pool GnpU6c…C27e) ──
@@ -277,6 +298,24 @@ const sell = decodeAmmEvent(REAL_SELL);
   assert.equal(coinSwapView(n).priceSol, executedPriceSol(n));
   assert.equal(coinSwapView(n).isBuy, true);
   console.log('ok  a WSOL/coin pool is read the right way up (inverted view)');
+}
+
+// ── a coin/QUOTE pool (2026-10): the quote figures convert at the rate ──
+{
+  // At one lamport per unit the view IS coinSwapView (same real buy).
+  const same = quoteSwapView(buy, 6, 1e-9);
+  const plain = coinSwapView(buy);
+  assert.ok(Math.abs(same.priceSol / plain.priceSol - 1) < 1e-12);
+  assert.ok(Math.abs(same.sol / plain.sol - 1) < 1e-12);
+  assert.equal(same.tokens, plain.tokens);
+  assert.equal(same.isBuy, plain.isBuy);
+  // SPX6900: 8 decimals at $0.38 with SOL at $205 → SOL per raw unit.
+  const spx = 0.3756 / 205 / 1e8;
+  const v = quoteSwapView(buy, 6, spx);
+  assert.ok(Math.abs(v.priceSol / plain.priceSol - spx * 1e9) < 1e-9, 'scaled by rate × 1e9');
+  assert.ok(plain.priceSol / v.priceSol > 40 && plain.priceSol / v.priceSol < 60, `the lamport reading was ${(plain.priceSol / v.priceSol).toFixed(0)}× too high`);
+  assert.equal(quoteSwapView({ ...buy, baseAmount: 0n }, 6, spx).priceSol, 0, 'no tokens, no price');
+  console.log('ok  a coin/QUOTE pool converts at the quote rate (quoteSwapView)');
 }
 
 console.log('\nall amm decoder tests passed');

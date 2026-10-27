@@ -202,31 +202,70 @@ export const isWebOnlyAccount = (walletId: string): boolean => walletId.startsWi
 
 // ─── How long a session lasts ────────────────────────────────────────────
 //
-// About two weeks, from pump's own token. That is an OBSERVATION, not a
+// About 30 days, from pump's own token (every token seen 10-22 and 10-25;
+// it was about two weeks before). The view now carries the token's own
+// `exp` (tokenExpiry), so this is only the fallback. That is an OBSERVATION, not a
 // guarantee they publish, so nothing here expires a session on its own: the
 // authority is a 401 from their server, which `refreshProfile` already turns
 // into a sign-out. This constant only decides when the UI says "worth
 // refreshing", and being wrong about it costs one unnecessary sign-in.
-export const PUMP_SESSION_DAYS = 14;
+export const PUMP_SESSION_DAYS = 30;
 /** Flagged as stale with this long left, so nothing lapses mid-run. */
 const RENEW_WITHIN_DAYS = 3;
 
-/** Days left on a session by that estimate — negative once it is past due. */
-export function sessionDaysLeft(s: { at: number }, now = Date.now()): number {
+/** Days left on a session — from pump's own expiry when known, else the
+ *  estimate. Negative once it is past due. */
+export function sessionDaysLeft(s: { at: number; expiresAt?: number | null }, now = Date.now()): number {
+  if (typeof s.expiresAt === 'number') return (s.expiresAt - now) / 86_400_000;
   return PUMP_SESSION_DAYS - (now - s.at) / 86_400_000;
 }
 
 /** Worth signing in again before it bites. */
-export function sessionStale(s: { at: number }, now = Date.now()): boolean {
+export function sessionStale(s: { at: number; expiresAt?: number | null }, now = Date.now()): boolean {
   return sessionDaysLeft(s, now) <= RENEW_WITHIN_DAYS;
 }
 
+/**
+ * When pump's own token says it ends, ms — its `exp` claim, read without
+ * checking the signature (pump checks that; this only decides what the page
+ * says). 30 days on every token seen 2026-10-25. Null when it is not a JWT
+ * with a sane `exp`, and the 14-day estimate stands in.
+ */
+export function tokenExpiry(token: string): number | null {
+  const part = (token ?? '').split('.')[1];
+  if (!part || part.length > 4096) return null;
+  try {
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const claims = JSON.parse(atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))) as { exp?: unknown };
+    const exp = typeof claims.exp === 'number' ? claims.exp * 1000 : NaN;
+    // Inside a year either way, or it is not a value worth showing.
+    return Number.isFinite(exp) && Math.abs(exp - Date.now()) < 366 * 86_400_000 ? exp : null;
+  } catch {
+    return null;
+  }
+}
+
 /** One session as the UI sees it: everything but the credential. */
-export type PumpSessionView = Omit<PumpSession, 'token'>;
+export type PumpSessionView = Omit<PumpSession, 'token'> & { expiresAt?: number | null };
 
 /** Strip the token. The only way a session should ever leave main. */
 export function viewOf(s: PumpSession): PumpSessionView {
-  return { address: s.address, walletId: s.walletId, at: s.at, username: s.username, userId: s.userId ?? null, via: s.via ?? 'wallet' };
+  return { address: s.address, walletId: s.walletId, at: s.at, username: s.username, userId: s.userId ?? null, via: s.via ?? 'wallet', expiresAt: tokenExpiry(s.token) };
+}
+
+/**
+ * A wallet whose pump session ENDED without the user signing out (2026-10-25).
+ * Until then a dead session was simply dropped, so the page showed nothing and
+ * the first sign was scripts' callouts failing. 'expired' = pump ended it and a
+ * wallet sign-in may bring it back (Retry); 'browser' = pump refuses a wallet
+ * sign-in for the account (email or social login, 409 Privy), so only the
+ * browser sign-in works. Cleared by any successful sign-in or a sign-out.
+ */
+export interface PumpSignInNeeded {
+  walletId: string;
+  address: string;
+  reason: 'expired' | 'browser';
+  at: number;
 }
 
 /** What the UI is told. Never carries a token. */
@@ -237,6 +276,8 @@ export interface PumpAuthStatus {
   sessions: PumpSessionView[];
   /** Why the last attempt failed, in pump's words or ours. */
   lastError: string | null;
+  /** Sessions that ended on their own and want signing in again. */
+  needsSignIn?: PumpSignInNeeded[];
 }
 
 /** The session for a wallet, or null. Shared so the UI and main agree on what

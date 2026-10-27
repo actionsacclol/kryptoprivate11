@@ -233,7 +233,7 @@ const PIC = 'https://ipfs.io/ipfs/bafkreiepkuo4ncuveueyf5vba647hrugwwmny3phyzwhv
   assert.doesNotMatch(ipc, /writeProfile\([^)]*bio: ''/, 'no caller passes a blank bio it did not mean');
   assert.match(ipc, /writeProfile\(j\.walletId, \{ username: j\.username \}\)/, 'the rename sends the username only');
   const main = src('../electron/system/pumpProfile.ts');
-  assert.match(main, /patch\.bio !== undefined \? withBioWatermark\(patch\.bio\) : current\.bio/, 'bio stamped in main, kept when not passed');
+  assert.match(main, /patch\.bio !== undefined \? withBioWatermark\(patch\.bio\) : read \? withBioWatermark\(current\.bio\) : current\.bio/, 'bio stamped in main; an unpassed bio keeps its words and regains the line, and only against a profile pump answered with');
   assert.match(main, /patch\.profileImage \?\? current\.profileImage/, 'picture kept when not passed');
   const setProfile = ipc.slice(ipc.indexOf("ipcMain.handle('pump:setProfile'"));
   assert.match(setProfile.slice(0, setProfile.indexOf('\n  });')), /string \| undefined/, 'a missing field stays missing over IPC');
@@ -248,12 +248,16 @@ const PIC = 'https://ipfs.io/ipfs/bafkreiepkuo4ncuveueyf5vba647hrugwwmny3phyzwhv
   const fn = prof.slice(prof.indexOf('export async function ensureBioMark('), prof.indexOf('export async function ensureAllBioMarks('));
   assert.match(fn, /await readProfile\(walletId\)/, 'reads what pump holds');
   assert.match(fn, /if \(!read\) return/, 'an unreadable profile writes nothing');
-  assert.match(fn, /endsWith\(BIO_WATERMARK\)\) return/, 'a bio that already ends with the line is not written');
+  assert.match(fn, /endsWith\(BIO_WATERMARK\)\) \{\n\s+bioCheckedAt\.set\(walletId, Date\.now\(\)\);\n\s+return;/, 'a bio that already ends with the line is not written');
   assert.match(fn, /writeProfile\(walletId, \{ bio: read\.bio \}\)/, 'a bio with words keeps them and gains the line');
   assert.doesNotMatch(fn, /bio\.trim\(\) !== ''/, 'no longer limited to empty bios');
   const main = fs.readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   assert.match(main, /pumpProfile\.ensureAllBioMarks\(\)/, 'every signed-in account is re-checked');
-  assert.match(main, /6 \* 3_600_000/, 'every few hours');
+  assert.match(main, /setInterval\(\(\) => void pumpProfile\.ensureAllBioMarks\(\), 3_600_000\)/, 'hourly (10-25)');
+  assert.match(fn, /if \(r\.ok\) bioCheckedAt\.set/, 'a refused write is retried on the next pass');
+  const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8');
+  assert.match(ipc, /claimWebSession\(r\.publicKey, held\.id\)\) void settlePumpAccount\(held\.id\)/, 'wallet import that adopts a browser session settles it');
+  assert.match(ipc, /if \(r\.ok && r\.walletId\) void settlePumpAccount\(r\.walletId\)/, 'every browser sign-in settles, sign-in-only accounts included');
   ok('every pump.fun bio carries the line, with words or without, and it is re-checked');
 }
 

@@ -187,10 +187,13 @@ export async function writeProfile(walletId: string, patch: Partial<PumpProfileD
   // the account's bio and picture. (When the read fails, an unpassed field
   // equals the blank `current` and so is not sent either.)
   //
-  // The bio gets its last line here, in main, whatever path wrote it.
+  // The bio gets its last line here, in main, whatever path wrote it — and a
+  // write that leaves the bio alone (a rename) puts back a line pump's own
+  // site removed. Only against a profile pump just ANSWERED with: stamping a
+  // blank stand-in would overwrite the real bio with the line alone.
   const next: PumpProfileDraft = {
     username: patch.username ?? current.username,
-    bio: patch.bio !== undefined ? withBioWatermark(patch.bio) : current.bio,
+    bio: patch.bio !== undefined ? withBioWatermark(patch.bio) : read ? withBioWatermark(current.bio) : current.bio,
     profileImage: patch.profileImage ?? current.profileImage,
   };
   const why = profileProblem(next);
@@ -257,23 +260,29 @@ export async function writeProfile(walletId: string, patch: Partial<PumpProfileD
  * 09-22); now a bio with words in it keeps them and gains the line after them,
  * and an earlier line (LEGACY_BIO_MARKS) is replaced by the current one.
  *
- * Run after a sign-in, and for every signed-in account at launch and every few
- * hours (ensureAllBioMarks), so a line edited away on pump.fun itself comes
- * back. An UNREADABLE profile is not a bio without the line — a failed read
- * writes nothing ([[fail-open]]) and is tried again next time. A bio that
- * already ends with the line is not written at all.
+ * Run after EVERY sign-in path (ipc settlePumpAccount — wallet, browser,
+ * import), and for every signed-in account at launch and hourly
+ * (ensureAllBioMarks), so a line edited away on pump.fun itself comes back
+ * within the hour (2026-10-25: "dont want anyone skirting that"). An
+ * UNREADABLE profile is not a bio without the line — a failed read writes
+ * nothing ([[fail-open]]) and is tried again next time; so is a write pump
+ * refused. A bio that already ends with the line is not written at all.
  */
-const BIO_RECHECK_MS = 6 * 3_600_000;
+const BIO_RECHECK_MS = 3_600_000;
 const bioCheckedAt = new Map<string, number>();
 export async function ensureBioMark(walletId: string): Promise<void> {
   const last = bioCheckedAt.get(walletId);
   if (last !== undefined && Date.now() - last < BIO_RECHECK_MS) return;
   const read = await readProfile(walletId);
   if (!read) return; // unknown: try again next time
-  bioCheckedAt.set(walletId, Date.now());
-  if (read.bio.trim().endsWith(BIO_WATERMARK)) return;
+  if (read.bio.trim().endsWith(BIO_WATERMARK)) {
+    bioCheckedAt.set(walletId, Date.now());
+    return;
+  }
   // writeProfile puts the line on whatever bio it is given; '' gives the line alone.
   const r = await writeProfile(walletId, { bio: read.bio });
+  // A refused write is tried again on the next pass, not in six hours.
+  if (r.ok) bioCheckedAt.set(walletId, Date.now());
   logger.info(`pump profile: bio line ${r.ok ? 'added' : `not added — ${r.message}`} for ${walletId}`);
 }
 

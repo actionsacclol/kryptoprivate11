@@ -34,6 +34,8 @@ export const PUMP_AMM_GLOBAL_CONFIG = 'ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJ
 
 /** Wrapped SOL — the quote mint for every pump-amm pool we care about. */
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+/** Thirty-two zero bytes: what pump writes for "the quote is SOL". */
+const ZERO_PUBKEY = '11111111111111111111111111111111';
 
 function eventDiscriminator(name: string): Buffer {
   return createHash('sha256').update(`event:${name}`).digest().subarray(0, 8);
@@ -82,9 +84,16 @@ export interface AmmMigrationEvent {
   bondingCurve: string;
   /** Tokens seeded into the pool (206.9M × 10^6 on the standard migration). */
   mintAmount: bigint;
-  /** Lamports seeded into the pool. */
+  /** Lamports seeded into the pool — or, when `quoteMint` is set, RAW units
+   *  of that token (pump reuses the field). */
   solAmount: bigint;
   poolMigrationFee: bigint;
+  /** The pool's quote mint when it is NOT SOL (pump.fun, 2026-10: a coin
+   *  launched against a tokenized stock graduates into a pool quoted in
+   *  it, and every swap figure on that pool is in the quote token's raw
+   *  units). Null = WSOL, the graduation default; older events end before
+   *  the field and read as SOL. */
+  quoteMint: string | null;
 }
 
 export type AmmEvent = AmmSwapEvent | AmmMigrationEvent;
@@ -224,6 +233,7 @@ function decodeSwap(body: Buffer, isBuy: boolean): AmmSwapEvent {
 
 // Body offsets: 0 user · 32 mint · 64 mintAmount · 72 solAmount
 //               80 poolMigrationFee · 88 bondingCurve · 120 timestamp · 128 pool
+//               160 quote_mint (since 2026-10; absent on older events)
 function decodeMigration(body: Buffer): AmmMigrationEvent {
   const r = new Reader(body);
   const user = r.pubkey();
@@ -234,6 +244,11 @@ function decodeMigration(body: Buffer): AmmMigrationEvent {
   const bondingCurve = r.pubkey();
   const timestamp = Number(r.i64());
   const pool = r.pubkey();
+  let quoteMint: string | null = null;
+  if (r.remaining() >= 32) {
+    const q = r.pubkey();
+    if (q !== ZERO_PUBKEY && q !== WSOL_MINT) quoteMint = q;
+  }
   return {
     kind: 'amm_migration',
     timestamp,
@@ -244,6 +259,7 @@ function decodeMigration(body: Buffer): AmmMigrationEvent {
     mintAmount,
     solAmount,
     poolMigrationFee,
+    quoteMint,
   };
 }
 
@@ -299,6 +315,26 @@ export function coinSwapView(e: AmmSwapEvent, baseDecimals = 6): CoinSwapView {
     isBuy: e.isBuy,
     sol: Number(e.quoteAmount) / 1e9,
     tokens: Number(e.baseAmount) / 10 ** baseDecimals,
+  };
+}
+
+/**
+ * A coin/QUOTE pool where the quote is not SOL (pump.fun, 2026-10): the
+ * same shape as `coinSwapView`, with every quote figure — raw units of the
+ * quote token — converted at `solPerUnit` (SOL per raw unit, from
+ * data/quoteRates.ts). With `solPerUnit = 1e-9` this IS coinSwapView.
+ * 2026-10-26: LUMINA's pool is quoted in SPX6900 (8 decimals, $0.38); read
+ * as lamports its swaps priced the coin ~50× too high and the chart bounced
+ * between that and the provider's bar.
+ */
+export function quoteSwapView(e: AmmSwapEvent, baseDecimals: number, solPerUnit: number): CoinSwapView {
+  const tokens = Number(e.baseAmount) / 10 ** baseDecimals;
+  const paid = Number(e.userQuoteAmount) * solPerUnit;
+  return {
+    priceSol: tokens > 0 && paid > 0 ? paid / tokens : 0,
+    isBuy: e.isBuy,
+    sol: Number(e.quoteAmount) * solPerUnit,
+    tokens,
   };
 }
 

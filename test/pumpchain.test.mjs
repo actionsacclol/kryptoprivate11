@@ -78,7 +78,9 @@ function keyFor(tag) {
 
 // ── Account builders (the layouts the reader parses) ──────────────────
 
-function curveAccount({ vTok, vSol, realTok = 0n, realSol = 0n, supply = 1_000_000_000_000_000n, complete = false, creator = null, mayhem = false }) {
+/** `quoteMint` fills the slot @83: a curve quoted in that token (its two
+ *  reserve slots then hold the quote token's raw units, not lamports). */
+function curveAccount({ vTok, vSol, realTok = 0n, realSol = 0n, supply = 1_000_000_000_000_000n, complete = false, creator = null, mayhem = false, quoteMint = null }) {
   const d = Buffer.alloc(151);
   CURVE_DISC.copy(d, 0);
   d.writeBigUInt64LE(vTok, 8);
@@ -89,6 +91,7 @@ function curveAccount({ vTok, vSol, realTok = 0n, realSol = 0n, supply = 1_000_0
   d[48] = complete ? 1 : 0;
   if (creator) Buffer.from(base58Decode(creator)).copy(d, 49);
   d[81] = mayhem ? 1 : 0;
+  if (quoteMint) Buffer.from(base58Decode(quoteMint)).copy(d, 83);
   return d;
 }
 function mintAccount({ decimals = 6, supply = 1_000_000_000_000_000n } = {}) {
@@ -168,7 +171,29 @@ const view = (a) => {
   const acc = accounts.get(a);
   return acc ? { owner: acc.owner, data: [acc.data.toString('base64'), 'base64'], lamports: 1, executable: false } : null;
 };
+// Jupiter, for a quote token's rate (data/quoteRates.ts): one search names
+// and prices the token, one price read gives SOL/USD. RDDT is the one quote
+// token it knows here; any other is "not listed".
+const RDDT = 'RDDTGbhHwVXfyCvQMXzzowKjf5qrYBZAnehoXW83ooh';
+const RDDT_USD = 138.59;
+const SOL_USD = 205;
+const jupCalls = [];
+const jupiterStub = (url) => {
+  jupCalls.push(url.pathname);
+  const ok = (b) => new Response(JSON.stringify(b), { status: 200, headers: { 'content-type': 'application/json' } });
+  if (url.pathname.startsWith('/tokens/v2/search')) {
+    const q = url.searchParams.get('query') ?? '';
+    return ok(q === RDDT ? [{ id: RDDT, symbol: 'RDDT', name: 'Reddit Inc.', decimals: 6, usdPrice: RDDT_USD }] : []);
+  }
+  if (url.pathname.startsWith('/price/v3')) {
+    const ids = (url.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+    return ok(Object.fromEntries(ids.map((m) => [m, { usdPrice: SOL_USD }])));
+  }
+  return ok([]);
+};
 globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+  if (url.host.endsWith('jup.ag')) return jupiterStub(url);
   const body = JSON.parse(init.body ?? '{}');
   const calls = Array.isArray(body) ? body : [body];
   const replies = calls.map((c) => {
@@ -194,6 +219,7 @@ const reset = () => {
   clearCache();
   accounts.clear();
   rpcCalls.length = 0;
+  jupCalls.length = 0;
   failNext = false;
 };
 
@@ -443,6 +469,105 @@ test('a graduated coin whose pool is unreadable keeps its identity and states no
   assert.equal(s.marketCapUsd, null);
   assert.equal(s.sources.price, undefined);
   assert.equal(s.poolAddress, canonicalPoolFor(B), 'the pool address is derived even when unread');
+});
+
+// ── Curves quoted in a tokenized stock (pump.fun, 2026-10) ────────────
+// The account keeps ONE pair of reserve slots whatever the quote; on such a
+// curve they hold the quote token's raw units. Divided by 1e9 they priced
+// the user's $11–18k coin at a few dollars (2026-10-26) — and that figure
+// then fought Birdeye's for the chart. The reader converts through the quote
+// token's rate, or states nothing.
+
+test('a curve quoted in a tokenized stock is priced through the quote token\'s rate, never as lamports', async () => {
+  reset();
+  const Q = mintFor(5);
+  // The real 5skM7cwc…pump account on 2026-10-26: 45.13 RDDT virtual, 21.33 real.
+  put(bondingCurveFor(Q), 'pump', curveAccount({ vTok: 565_822_810_781_556n, vSol: 45_130_918n, realSol: 21_332_306n, creator: CREATOR, quoteMint: RDDT }));
+  put(Q, TOKEN_PROGRAM, mintAccount());
+  put(metadataFor(Q), 'meta', metaAccount(Q, { name: 'Reddit Inc.', symbol: 'REDDIT', uri: 'https://ipfs.io/ipfs/QmQ' }));
+  const coin = (await readMany(RPC, [Q])).get(Q);
+  assert.ok(coin, 'a coin');
+  assert.ok(coin.quote, 'the quote is named on the coin');
+  assert.equal(coin.quote.mint, RDDT);
+  assert.equal(coin.quote.symbol, 'RDDT');
+  const rate = RDDT_USD / SOL_USD / 1e6;
+  assert.ok(Math.abs(coin.quote.solPerUnit - rate) < 1e-15, `solPerUnit ${coin.quote.solPerUnit}`);
+  const want = curvePriceSol(45_130_918n, 565_822_810_781_556n, 6, rate);
+  assert.equal(coin.priceSol, want);
+  const asLamports = curvePriceSol(45_130_918n, 565_822_810_781_556n, 6);
+  assert.ok(coin.priceSol / asLamports > 600, `the lamport reading was ${(coin.priceSol / asLamports).toFixed(0)}× too low`);
+  assert.ok(Math.abs(coin.liquiditySol - 21_332_306 * rate) < 1e-9, 'the real reserve is converted too');
+  assert.ok(jupCalls.some((p) => p.startsWith('/tokens/v2/search')), 'the rate came from one Jupiter search');
+  const s = toSummary(coin, SOL_USD);
+  assert.deepEqual(s.curveQuote, { mint: RDDT, symbol: 'RDDT' });
+  assert.equal(s.poolQuoteMint, RDDT, 'nothing downstream assumes a SOL pool');
+  assert.ok(Math.abs(s.priceUsd - want * SOL_USD) < 1e-12);
+  // 1e9 tokens at that price: the five-figure cap the user saw, not single digits.
+  assert.ok(s.marketCapUsd > 5_000 && s.marketCapUsd < 50_000, `cap ${s.marketCapUsd}`);
+  // Cached as any coin: the second read costs no RPC and no Jupiter.
+  const rpcBefore = rpcCalls.length;
+  const jupBefore = jupCalls.length;
+  const again = (await readMany(RPC, [Q])).get(Q);
+  assert.equal(again.priceSol, want);
+  assert.equal(rpcCalls.length, rpcBefore);
+  assert.equal(jupCalls.length, jupBefore);
+});
+
+test('a quote token Jupiter does not price leaves the price null — not a lamport figure', async () => {
+  reset();
+  const Q = mintFor(6);
+  const UNKNOWN = keyFor('some-other-quote-token');
+  put(bondingCurveFor(Q), 'pump', curveAccount({ vTok: A_VTOK, vSol: 45_130_918n, realSol: 21_332_306n, creator: CREATOR, quoteMint: UNKNOWN }));
+  put(Q, TOKEN_PROGRAM, mintAccount());
+  put(metadataFor(Q), 'meta', metaAccount(Q, { name: 'Q', symbol: 'Q', uri: 'https://ipfs.io/ipfs/QmQ2' }));
+  const coin = (await readMany(RPC, [Q])).get(Q);
+  assert.ok(coin, 'still a coin');
+  assert.equal(coin.quote.mint, UNKNOWN);
+  assert.equal(coin.quote.solPerUnit, null);
+  assert.equal(coin.priceSol, null, 'no rate, no price');
+  assert.equal(coin.liquiditySol, null);
+  const s = toSummary(coin, SOL_USD);
+  assert.equal(s.priceSol, null);
+  assert.equal(s.priceUsd, null);
+  assert.equal(s.marketCapUsd, null);
+  assert.equal(s.curveQuote.mint, UNKNOWN);
+  assert.equal(s.curveQuote.symbol, null);
+});
+
+test('a graduated coin whose pool is quoted in the stock is priced through the rate too', async () => {
+  reset();
+  const G = mintFor(7);
+  // The pool PDA carries the quote mint: derived with WSOL it does not exist.
+  const pool = canonicalPoolFor(G, RDDT);
+  assert.notEqual(pool, canonicalPoolFor(G));
+  // The quote vault cannot be the WSOL ATA the reader derives first: the
+  // pool names its own, and the reader follows the record.
+  const quoteVault = keyFor('rddt-quote-vault');
+  const baseVault = ataFor(pool, G, TOKEN_PROGRAM);
+  put(bondingCurveFor(G), 'pump', curveAccount({ vTok: 279_900_000_000_000n, vSol: 85_000_000n, realSol: 0n, complete: true, creator: CREATOR, quoteMint: RDDT }));
+  put(G, TOKEN_PROGRAM, mintAccount());
+  put(metadataFor(G), 'meta', metaAccount(G, { name: 'Gamma', symbol: 'GAMMA', uri: 'https://ipfs.io/ipfs/QmGamma' }));
+  put(pool, 'pAMM', poolAccount({ baseMint: G, quoteMint: RDDT, poolBaseAta: baseVault, poolQuoteAta: quoteVault, virtualQuote: 10_000_000n, creator: CREATOR }));
+  put(quoteVault, TOKEN_PROGRAM, tokenAccount({ mint: RDDT, owner: pool, amount: 20_000_000n })); // 20 RDDT
+  put(baseVault, TOKEN_PROGRAM, tokenAccount({ mint: G, owner: pool, amount: B_BASE }));
+  const coin = (await readMany(RPC, [G])).get(G);
+  assert.ok(coin && coin.pool, 'graduated, pool read');
+  const rate = RDDT_USD / SOL_USD / 1e6;
+  assert.equal(coin.quote.mint, RDDT);
+  assert.equal(coin.priceSol, poolPriceSol(20_000_000n, 10_000_000n, B_BASE, 6, rate));
+  assert.ok(coin.priceSol / poolPriceSol(20_000_000n, 10_000_000n, B_BASE, 6) > 600, 'not the lamport reading');
+  assert.ok(Math.abs(coin.liquiditySol - 20_000_000 * rate) < 1e-9, '20 RDDT of liquidity, in SOL');
+  const s = toSummary(coin, SOL_USD);
+  assert.equal(s.poolAddress, pool, 'the summary names the pool that exists');
+  assert.equal(s.poolQuoteMint, RDDT, 'the pool is not a SOL pool');
+  assert.deepEqual(s.curveQuote, { mint: RDDT, symbol: 'RDDT' });
+});
+
+test('a SOL curve reads no Jupiter at all for its price', async () => {
+  reset();
+  seedA();
+  await readMany(RPC, [A]);
+  assert.equal(jupCalls.length, 0);
 });
 
 let passed = 0;

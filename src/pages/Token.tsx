@@ -696,6 +696,20 @@ export function TokenPage({ mint, onBack, onOpenTrader }: { mint: string; onBack
                   Not taped
                 </span>
               )}
+              {s?.curveQuote && (
+                // A pump.fun curve quoted in a tokenized stock (2026-10), not
+                // SOL. Said up here because everything SOL-shaped on this
+                // page is a conversion: the price is the quote reserve at
+                // the stock's rate, the live feed converts each trade, and
+                // the trade panel cannot buy it (the local builder refuses
+                // a non-SOL curve rather than guess its accounts).
+                <span
+                  className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2 py-0.5 text-micro font-bold uppercase tracking-wider text-sky-300"
+                  title={`This coin's pump.fun curve is quoted in ${s.curveQuote.symbol ?? shortAddr(s.curveQuote.mint)} (a tokenized stock), not SOL. Prices here are converted at that token's current rate; the chart's history comes from the providers. This app's own transaction builder does not build trades on such a curve, so an order falls through to Jupiter or the relayer, which may not route it.`}
+                >
+                  Quoted in {s.curveQuote.symbol ?? shortAddr(s.curveQuote.mint, 4)}
+                </span>
+              )}
               {s?.kryptoBot && (
                 // A declared creator bot (shared/kryptoMode.ts) — named on the
                 // page for the same reason it is named in the description:
@@ -885,7 +899,11 @@ export function TokenPage({ mint, onBack, onOpenTrader }: { mint: string; onBack
                 markers={markers}
                 priceLines={priceLines}
                 mode={chartMode}
-                supply={series.supplyForMcap}
+                // The series carries the supply main held when it was built;
+                // a chart that painted before any summary was in memory
+                // (Birdeye answered first, 2026-10-26) says null and takes
+                // the scale from this page's own summary instead.
+                supply={series.supplyForMcap ?? s?.circSupply ?? null}
                 // A degraded series (1m served for a sub-minute ask) must
                 // bucket live ticks by what the bars ARE, not what was asked.
                 bucketSec={BUCKET_SEC[series.effectiveInterval ?? interval]}

@@ -346,6 +346,9 @@ const api = {
   pump: {
     status: () => ipcRenderer.invoke('pump:status'),
     signIn: (walletId: string) => ipcRenderer.invoke('pump:signIn', walletId),
+    /** Sign in on pump.fun in the user's own Chrome or Edge; resolves when its window closes. */
+    browserSignIn: () => ipcRenderer.invoke('pump:browserSignIn'),
+    browserSignInCancel: () => ipcRenderer.invoke('pump:browserSignInCancel'),
     /** One wallet's account, or every account when none is named. */
     signOut: (walletId?: string) => ipcRenderer.invoke('pump:signOut', walletId ?? ''),
     /** Follow/unfollow a pump user or like/unlike a callout, as this wallet's account. */

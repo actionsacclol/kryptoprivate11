@@ -92,15 +92,18 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
 
 {
   // SESSIONS LAPSE QUIETLY, so the age is on screen and staleness is flagged
-  // early. The fourteen days is an OBSERVATION — nothing expires a session on
+  // early. The thirty days is an OBSERVATION — nothing expires a session on
   // it, and a 401 from pump stays the only authority.
   const day = 86_400_000;
   const now = Date.now();
   assert.ok(Math.abs(sessionDaysLeft({ at: now }, now) - PUMP_SESSION_DAYS) < 0.01);
   assert.equal(sessionStale({ at: now }, now), false, 'a fresh session is not stale');
-  assert.equal(sessionStale({ at: now - 10 * day }, now), false);
-  assert.equal(sessionStale({ at: now - 12 * day }, now), true, 'flagged with days to spare');
-  assert.ok(sessionDaysLeft({ at: now - 20 * day }, now) < 0, 'past due goes negative, not to zero');
+  assert.equal(sessionStale({ at: now - 25 * day }, now), false);
+  assert.equal(sessionStale({ at: now - 28 * day }, now), true, 'flagged with days to spare');
+  assert.ok(sessionDaysLeft({ at: now - 31 * day }, now) < 0, 'past due goes negative, not to zero');
+  // pump's own expiry wins over the estimate when the token carries one (10-25).
+  assert.ok(Math.abs(sessionDaysLeft({ at: now - 29 * day, expiresAt: now + 5 * day }, now) - 5) < 0.01);
+  assert.equal(sessionStale({ at: now, expiresAt: now + 2 * day }, now), true, 'a token about to end is flagged whatever its age');
 
   // Nothing in main deletes a session on the clock.
   const auth = src('../electron/system/pumpAuth.ts');

@@ -213,7 +213,7 @@ export function PumpAccountsSection({ wallets }: { wallets: WalletSummary[] }) {
               {signedInCount} of {wallets.length} wallet{wallets.length === 1 ? '' : 's'} signed in.{' '}
             </>
           )}
-          A session lasts about two weeks, then Refresh signs in again.
+          A session lasts about 30 days, then Refresh signs in again.
         </p>
       </Card>
     </Section>

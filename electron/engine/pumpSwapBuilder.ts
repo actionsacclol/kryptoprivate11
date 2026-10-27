@@ -425,8 +425,8 @@ function globalFresh(): boolean {
 }
 
 /** The pool a graduated pump coin trades in, and whether it is one. */
-export function canonicalPoolFor(mint: string): string {
-  return pumpSwapCanonicalPoolFor(mint);
+export function canonicalPoolFor(mint: string, quoteMint?: string): string {
+  return pumpSwapCanonicalPoolFor(mint, quoteMint);
 }
 
 export async function buildPumpSwapTrade(p: PumpSwapBuildParams): Promise<LocalBuildResult> {

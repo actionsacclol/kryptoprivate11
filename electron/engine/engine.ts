@@ -25,10 +25,12 @@ import { canonicalPoolFor } from './pumpSwapBuilder';
 import { DipShadow } from './dipShadow';
 import { StratLab } from './stratLab';
 import { MigShadow } from './migShadow';
-import { coinSwapView, decodeAmmEventEx, decodeCpiAmmEventData, executedPriceSol, invertedSwapView, PUMP_AMM_GLOBAL_CONFIG, type AmmEvent } from './ammDecoder';
+import { coinSwapView, decodeAmmEventEx, decodeCpiAmmEventData, executedPriceSol, invertedSwapView, quoteSwapView, PUMP_AMM_GLOBAL_CONFIG, type AmmEvent, type CoinSwapView } from './ammDecoder';
 import { base58Encode } from '../chain/base58';
 import { fetchSocials, metadataLinksIfCached, type TokenSocials } from './metadata';
 import { decodeCpiEventData, decodeLogsEx, logsMentionPumpTrade, PUMP_PROGRAM_ID, type PumpCreateEvent, type PumpEvent, type PumpTradeEvent } from './pumpDecoder';
+import { curveVSolLamports, rawToLamports, tradeInSol, type TradeInSol } from './quoteCurve';
+import * as quoteRates from '../data/quoteRates';
 import { staticChecks, checkMint, hasHardReject } from './risk';
 import { computeScore } from './scoring';
 import { buyerAcceleration } from './flowWindow';
@@ -582,6 +584,10 @@ export class SniperEngine {
         return out;
       },
       liveLaunch: (mint) => this.tokens.get(mint)?.row ?? null,
+      // The chart's first bar when nothing is cached: the newest price this
+      // session has seen for the mint (tape, feed, chain read) — see
+      // market.seedSeries. Null when it has seen none.
+      knownPriceSol: (mint) => this.cheapPriceSol(mint),
       registerPool: (pool, mint) => this.registerExternalPool(pool, mint),
       watchPumpMint: (mint) => this.watchPumpMint(mint),
       unwatchPumpMint: (mint) => this.unwatchPumpMint(mint),
@@ -3355,7 +3361,13 @@ export class SniperEngine {
       this.lastCurveVSol.delete(a.mint);
       return;
     }
-    const priceSol = spotPriceSol(st.vSol, st.vTok);
+    // The reserve slot is lamports on a SOL curve and raw quote units on a
+    // stock-quoted one (2026-10-26: read as lamports it priced a $15k coin
+    // at $2 and dragged every chart bar there). Converted, or skipped while
+    // the quote rate is unknown — the direction below still compares raw.
+    const vSol = curveVSolLamports(st, quoteRates.solPerUnit);
+    if (vSol === null) return;
+    const priceSol = spotPriceSol(vSol, st.vTok);
     if (!Number.isFinite(priceSol) || priceSol <= 0) return;
     this.rememberPrice(a.mint, priceSol);
     // The side comes from the reserves MOVING, not from a guess: SOL going
@@ -5644,17 +5656,42 @@ export class SniperEngine {
 
   /** Tape + chart tick for a trade on an OPEN mint (tape-subscribed). */
   private recordTapeTrade(ev: PumpTradeEvent, n: LogNotification): void {
-    const priceSol = spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves);
+    // No rate for a stock-quoted curve yet → no tick. The rate is being
+    // fetched (quoteRates.solPerUnit asks for it); the next trade has it. A
+    // tick at a price in the wrong unit was the chart bug of 2026-10-26.
+    const v = this.tradeSol(ev);
+    if (!v) return;
     tape.record(ev.mint, {
       at: n.receivedAt,
       wallet: ev.user,
       isBuy: ev.isBuy,
-      sol: Number(ev.solAmount) / 1e9,
+      sol: v.sol,
       tokens: Number(ev.tokenAmount) / 1e6,
-      priceSol,
+      priceSol: v.priceSol,
     });
-    this.rememberPrice(ev.mint, priceSol);
-    this.chartTicks.push(ev.mint, n.receivedAt, priceSol, Number(ev.solAmount) / 1e9, ev.isBuy);
+    this.rememberPrice(ev.mint, v.priceSol);
+    this.chartTicks.push(ev.mint, n.receivedAt, v.priceSol, v.sol, ev.isBuy);
+  }
+
+  /** A pump trade's SOL figures whatever its curve is quoted in — see
+   *  quoteCurve.ts. The rate lookup is synchronous (memory only) because this
+   *  runs per trade on the firehose; it fetches in the background. */
+  private tradeSol(ev: PumpTradeEvent): TradeInSol | null {
+    return tradeInSol(ev, quoteRates.solPerUnit);
+  }
+
+  /** The first few stock-quoted launches of a session are named in the log
+   *  so "why is this coin not in New?" has an answer; after that they are
+   *  counted in `filtered` and nothing more. */
+  private quotedLaunchesLogged = 0;
+  private noteQuotedLaunch(ev: PumpCreateEvent): void {
+    const q = ev.quoteMint;
+    if (q === null) return;
+    quoteRates.want(q); // so the token page can name the quote token
+    if (this.quotedLaunchesLogged >= 3) return;
+    this.quotedLaunchesLogged++;
+    const name = quoteRates.symbolOf(q) ?? `${q.slice(0, 6)}…`;
+    this.log('info', `${ev.symbol || ev.mint.slice(0, 6)}: launched against ${name}, not SOL — the scanner tracks SOL curves only (the token page still works)`);
   }
 
   // ── Position update throttle ───────────────────────────────────────
@@ -5843,8 +5880,12 @@ export class SniperEngine {
     }
     for (const event of decoded) {
       if (event.kind === 'amm_migration') {
-        this.rememberAmmPool(event.pool, event.mint);
-        this.liveMigrations.note(event.mint, event.pool, event.solAmount, n.receivedAt);
+        this.rememberAmmPool(event.pool, event.mint, event.quoteMint);
+        // Seeded liquidity in SOL. On a quote-paired pool the event's figure
+        // is raw units of the quote token: converted when its rate is in
+        // memory, otherwise unknown — never a number in the wrong unit.
+        const seeded = event.quoteMint === null ? event.solAmount : rawToLamports(event.solAmount, quoteRates.solPerUnit(event.quoteMint));
+        this.liveMigrations.note(event.mint, event.pool, seeded, n.receivedAt, event.quoteMint);
         this.liveCurves.complete(event.mint);
         if (sAmm.shadowMigration) this.emitMigEvents(this.mig.onMigration(event.mint, event.pool, n.receivedAt));
         continue;
@@ -5855,7 +5896,20 @@ export class SniperEngine {
       // The swap as seen from the COIN (09-30): a pool holding the coin on
       // the quote side reports it upside down.
       const inv = this.ammInvertedDecimals.get(event.pool);
-      const sw = inv === undefined ? coinSwapView(event) : invertedSwapView(event, inv);
+      const poolQuote = this.ammPoolQuote.get(event.pool);
+      let sw: CoinSwapView;
+      if (poolQuote !== undefined) {
+        // A pool quoted in something other than SOL (2026-10-26: LUMINA's
+        // is quoted in SPX6900 — 8 decimals at $0.38 — and read as lamports
+        // its swaps priced the coin ~50× too high, so the chart bounced
+        // between that and the provider's bar). No rate in memory → no
+        // tick; quoteRates is fetching it for the next swap.
+        const rate = quoteRates.solPerUnit(poolQuote);
+        if (rate === null) continue;
+        sw = quoteSwapView(event, 6, rate);
+      } else {
+        sw = inv === undefined ? coinSwapView(event) : invertedSwapView(event, inv);
+      }
       // The launch row follows the coin onto its pool (2026-09-27). Its
       // price used to stop at the last CURVE trade — the graduation price —
       // so every cheap read of a migrated coin (a script's bot.price and
@@ -5922,13 +5976,18 @@ export class SniperEngine {
    * report 09-30: DiR577… showed $1,223.62 a token and a $1,223.62B cap.
    */
   private ammInvertedDecimals = new Map<string, number>();
+  /** PumpSwap pools quoted in something other than SOL (2026-10): pool →
+   *  quote mint. Absent = WSOL, the graduation default. Their swap figures
+   *  are raw quote units and go through data/quoteRates.ts. */
+  private ammPoolQuote = new Map<string, string>();
   private ammPoolChecks = new Set<string>();
 
   /**
    * A pool the market layer found (DexScreener, the token page). The
    * canonical graduation pool is known to be coin/WSOL; any other is read
-   * once to learn which side the coin is on, and a pool that is not a SOL
-   * pair for this coin is never mapped (its swaps would price nothing).
+   * once to learn which side the coin is on and what quotes it. A pool
+   * quoted in another token is mapped WITH that quote (its swaps convert);
+   * a pool where the coin is not the base of a SOL pair is never mapped.
    */
   private registerExternalPool(pool: string, mint: string): void {
     if (this.ammPoolToMint.has(pool) || this.ammPoolChecks.has(pool)) return;
@@ -5948,6 +6007,11 @@ export class SniperEngine {
         const quote = base58Encode(p.data.subarray(75, 107));
         if (base === mint && quote === SniperEngine.WSOL_MINT) {
           this.rememberAmmPool(pool, mint);
+        } else if (base === mint) {
+          // Quoted in another token — a graduated quote-paired coin
+          // (2026-10). Mapped with its quote so every swap converts.
+          this.rememberAmmPool(pool, mint, quote);
+          this.log('info', `amm tape: pool ${pool.slice(0, 8)}… for ${mint.slice(0, 8)}… is quoted in ${quoteRates.symbolOf(quote) ?? `${quote.slice(0, 6)}…`}, not SOL — its swaps are converted at that token's rate`);
         } else if (quote === mint && base === SniperEngine.WSOL_MINT) {
           // SPL / Token-2022 mint: decimals is the byte at offset 44.
           const decimals = m && m.data.length > 44 ? m.data[44] : 6;
@@ -5961,7 +6025,16 @@ export class SniperEngine {
       .finally(() => this.ammPoolChecks.delete(pool));
   }
 
-  private rememberAmmPool(pool: string, mint: string): void {
+  private rememberAmmPool(pool: string, mint: string, quoteMint: string | null = null): void {
+    if (quoteMint !== null) {
+      if (!this.ammPoolQuote.has(pool)) quoteRates.want(quoteMint); // the rate, before the first swap
+      this.ammPoolQuote.set(pool, quoteMint);
+      while (this.ammPoolQuote.size > AMM_POOL_MAP_CAP) {
+        const oldest = this.ammPoolQuote.keys().next().value;
+        if (oldest === undefined) break;
+        this.ammPoolQuote.delete(oldest);
+      }
+    }
     if (this.ammPoolToMint.has(pool)) return;
     this.ammPoolToMint.set(pool, mint);
     while (this.ammPoolToMint.size > AMM_POOL_MAP_CAP) {
@@ -6062,7 +6135,9 @@ export class SniperEngine {
     // every pump trade, tracked or not. automation returns at once when no
     // script is enabled or the curve is under 90 %.
     for (const ev of events) {
-      if (ev.kind === 'trade') automation.onCurveTrade(ev.mint, curveProgressPct(ev.virtualSolReserves), spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves));
+      if (ev.kind !== 'trade') continue;
+      const v = this.tradeSol(ev);
+      if (v) automation.onCurveTrade(ev.mint, curveProgressPct(v.vSol), v.priceSol);
     }
 
     const s = this.getSettings();
@@ -6084,17 +6159,27 @@ export class SniperEngine {
         // Feed-health: every trade's reserve delta must match its SOL amount.
         // A mismatch means events between this one and the previous one for
         // this mint were dropped — the live version of the tape-analysis check.
-        this.continuity.observe(ev.mint, ev.isBuy, ev.solAmount, ev.virtualSolReserves, n.slot);
-        if (dipOn) this.observeDip(ev, n.receivedAt);
-        if (labOn) this.observeLab(ev, n.receivedAt);
-        // Migration shadow's lead clock: first tick at ≥95% curve progress.
-        if (migOn) this.mig.onCurveTrade(ev.mint, ev.virtualSolReserves, n.receivedAt);
+        // Raw units on purpose: the invariant (reserve delta = amount) holds
+        // in whatever the curve is quoted in — lamports, or a stock token.
+        if (ev.quoteMint !== null && ev.quoteAmount !== null && ev.virtualQuoteReserves !== null) {
+          this.continuity.observe(ev.mint, ev.isBuy, ev.quoteAmount, ev.virtualQuoteReserves, n.slot);
+        } else {
+          this.continuity.observe(ev.mint, ev.isBuy, ev.solAmount, ev.virtualSolReserves, n.slot);
+        }
+        // The research shadows are SOL-curve models; a stock-quoted curve
+        // is not in their data and gets no row rather than a zero one.
+        if (ev.quoteMint === null) {
+          if (dipOn) this.observeDip(ev, n.receivedAt);
+          if (labOn) this.observeLab(ev, n.receivedAt);
+          // Migration shadow's lead clock: first tick at ≥95% curve progress.
+          if (migOn) this.mig.onCurveTrade(ev.mint, ev.virtualSolReserves, n.receivedAt);
+        }
         this.onTrade(ev, n);
       } else if (ev.kind === 'complete') {
         // Graduations reach the lab too: held shadow positions migrate to the
         // AMM UNRESOLVED — never booked as curve-tick exits (swarm finding).
         if (labOn) this.emitLabEvents(this.lab.onComplete(ev.mint, n.receivedAt));
-        this.onComplete(ev.mint);
+        this.onComplete(ev.mint, ev.quoteMint);
       }
     }
   }
@@ -6278,6 +6363,7 @@ export class SniperEngine {
         recorder.record('tape_create', {
           mint: ev.mint, name: ev.name, symbol: ev.symbol, uri: ev.uri,
           creator: ev.creator, user: ev.user, bondingCurve: ev.bondingCurve,
+          quoteMint: ev.quoteMint,
           sig: n.signature, slot: n.slot, receivedAt: n.receivedAt,
         });
         // Social-link signal (research: 8.9–17.4x graduation lift): resolved
@@ -6289,13 +6375,20 @@ export class SniperEngine {
         // and it works whether or not the token is one we are tracking.
         // The id lets a manual scan replaying these hours refuse the trades
         // this feed already recorded, instead of scoring them twice.
-        scout.note('solana', ev.user, ev.mint, ev.isBuy, Number(ev.solAmount) / 1e9, Number(ev.tokenAmount) / 1e6, n.receivedAt, tradeId(n.signature, ev.mint, ev.user, ev.isBuy));
+        // In SOL whatever the curve is quoted in; a stock-quoted trade whose
+        // rate is not known yet is recorded with its raw quote figures and
+        // no SOL ones — never a zero that reads as "nothing traded".
+        const v = this.tradeSol(ev);
+        if (v) scout.note('solana', ev.user, ev.mint, ev.isBuy, v.sol, Number(ev.tokenAmount) / 1e6, n.receivedAt, tradeId(n.signature, ev.mint, ev.user, ev.isBuy));
         recorder.record('tape_trade', {
           mint: ev.mint, user: ev.user, isBuy: ev.isBuy,
-          sol: Number(ev.solAmount) / 1e9, tokens: Number(ev.tokenAmount) / 1e6,
-          vSol: ev.virtualSolReserves.toString(), vTok: ev.virtualTokenReserves.toString(),
-          price: spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves),
-          curvePct: curveProgressPct(ev.virtualSolReserves),
+          sol: v?.sol ?? null, tokens: Number(ev.tokenAmount) / 1e6,
+          vSol: v?.vSol.toString() ?? null, vTok: ev.virtualTokenReserves.toString(),
+          price: v?.priceSol ?? null,
+          curvePct: v ? curveProgressPct(v.vSol) : null,
+          quoteMint: ev.quoteMint,
+          quoteAmount: ev.quoteMint !== null ? ev.quoteAmount?.toString() ?? null : undefined,
+          vQuote: ev.quoteMint !== null ? ev.virtualQuoteReserves?.toString() ?? null : undefined,
           isSmart: watchlist.has(ev.user),
           sig: n.signature, slot: n.slot, receivedAt: n.receivedAt,
         });
@@ -6349,6 +6442,17 @@ export class SniperEngine {
 
   private onCreate(ev: PumpCreateEvent, n: LogNotification): void {
     if (this.tokens.has(ev.mint)) return;
+    // Launched against a tokenized stock (pump.fun, 2026-10). Every SOL
+    // figure the flow window, the odds model and the runner judge read off
+    // such a curve is ZERO on the wire, and none of them is calibrated for
+    // a curve that moves with a stock price. Not tracked: the token page
+    // still prices and tapes it through the quote rate (quoteCurve.ts).
+    if (ev.quoteMint !== null) {
+      this.counters.seen++;
+      this.counters.filtered++;
+      this.noteQuotedLaunch(ev);
+      return;
+    }
     // A cached creator record that predates this launch is now short by one;
     // expire it so the next lookup asks again (one cache read otherwise).
     launchIntel.noteCreatorLaunch(ev.creator, ev.mint);
@@ -6466,26 +6570,33 @@ export class SniperEngine {
   }
 
   private onTrade(ev: PumpTradeEvent, n: LogNotification): void {
+    // The trade in SOL — the event's own figures on a SOL curve, the quote
+    // figures converted on a stock-quoted one, null while that rate is not
+    // known yet (then nothing below prices it; see quoteCurve.ts).
+    const v = this.tradeSol(ev);
     // Every trade, tracked or not: the reserves on the event are the curve's
     // progress and price, which is what the Graduating column ranks by.
-    this.liveCurves.note(ev.mint, ev.virtualSolReserves, ev.virtualTokenReserves, ev.creator, n.receivedAt);
+    if (v) this.liveCurves.note(ev.mint, v.vSol, ev.virtualTokenReserves, ev.creator, n.receivedAt);
     // FOMO: a wallet some crowd config is listening for, on any mint — a
     // set lookup for everyone else (2026-09-20).
-    if (copyTrade.crowdWants('solana', ev.user, n.receivedAt)) {
+    if (v && copyTrade.crowdWants('solana', ev.user, n.receivedAt)) {
       copyTrade.noteCrowdTrade({
         wallet: ev.user,
         mint: ev.mint,
         symbol: this.tokens.get(ev.mint)?.row.symbol ?? market.summaryIfCached(ev.mint)?.symbol ?? '',
         isBuy: ev.isBuy,
-        sol: Number(ev.solAmount) / 1e9,
-        priceSol: spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves),
+        sol: v.sol,
+        priceSol: v.priceSol,
         at: n.receivedAt,
         signature: n.signature,
         tradeAt: ev.timestamp > 0 ? ev.timestamp * 1_000 : null,
       });
     }
     const t = this.tokens.get(ev.mint);
-    if (!t) {
+    // A stock-quoted coin is never tracked (onCreate), and the tracked body
+    // below reads SOL fields that are zero on its events — so it takes the
+    // untracked path whatever happens to be in the map.
+    if (!t || ev.quoteMint !== null) {
       // A token the terminal has OPEN but this session never saw launch —
       // opened from Discover, or evicted past LAUNCH_LIST_CAP — still gets
       // its tape and chart ticks. Before this, only mints created during the
@@ -6493,6 +6604,9 @@ export class SniperEngine {
       if (this.ticksWanted(ev.mint)) this.recordTapeTrade(ev, n);
       return;
     }
+    // A SOL curve always converts (the event IS the SOL view); this is the
+    // type's guard, not a path anything takes.
+    if (!v) return;
     // Odds tape: the first ~130 s of every launch, bounded, regardless of
     // whether the flow window has decided — the runner judge reads it.
     if (n.receivedAt - t.row.detectedAt <= 130_000) {
@@ -6554,7 +6668,7 @@ export class SniperEngine {
     // Fenced: whatever goes wrong in here is logged (once a minute per mint)
     // and the trade handler carries on — the tape above is already recorded.
     try {
-      const priceSol = spotPriceSol(ev.virtualSolReserves, ev.virtualTokenReserves);
+      const priceSol = v.priceSol;
       this.rememberPrice(ev.mint, priceSol);
       // The order poller skips mints this feed is already ticking. It has to
       // know that for a fact, not by assuming a tracked mint is a live one —
@@ -6744,7 +6858,7 @@ export class SniperEngine {
     if (t.row.priceSol > 0) this.rememberPrice(t.row.mint, t.row.priceSol);
   }
 
-  private onComplete(mint: string): void {
+  private onComplete(mint: string, quoteMint: string | null = null): void {
     const t = this.tokens.get(mint);
     // Migration orders must fire even for a mint the tracker has already
     // dropped, so this runs before the early return.
@@ -6762,7 +6876,7 @@ export class SniperEngine {
     // Every pump migration lands in the pool derived from the mint, so its
     // swaps map back to this coin from here on — even when the amm feed's
     // own migration event was not decoded (its gate was closed at the time).
-    this.rememberAmmPool(canonicalPoolFor(mint), mint);
+    this.rememberAmmPool(canonicalPoolFor(mint, quoteMint ?? SniperEngine.WSOL_MINT), mint, quoteMint);
     if (!t) return;
     this.markCurveComplete(t);
     creators.recordCompletion(t.createEvent.creator);

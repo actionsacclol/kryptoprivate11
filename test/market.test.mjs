@@ -864,3 +864,32 @@ test('an odds bucket change counts as a display change; the same bucket does not
 });
 
 console.log(`market+security: ${passed} tests passed`);
+
+// ── Same-bucket unit check (2026-10-26) ───────────────────────────────
+// Two observers of the SAME trades agree on a bucket's close to within a
+// move; hundreds of times apart means one of them is in the wrong unit. The
+// case: a curve quoted in a tokenized stock read as lamports put the tape
+// ~700× under Birdeye, and "tape wins the bucket" drew a bar that flipped.
+
+test('unit mismatch: the tape hundreds of times under the provider on the SAME minutes', () => {
+  const provider = [K(60, 1000), K(120, 1100), K(180, 1050)];
+  const tapeSide = [K(120, 1.6), K(180, 1.5), K(240, 1.55)];
+  assert.equal(tape.tapeUnitMismatch(provider, tapeSide), true);
+  // …and the other way round (a provider in the wrong unit) is caught too.
+  assert.equal(tape.tapeUnitMismatch(tapeSide, provider), true);
+});
+
+test('unit mismatch: agreeing within a move — even a real 5× move — is not one', () => {
+  const provider = [K(60, 1000), K(120, 1100), K(180, 1050)];
+  assert.equal(tape.tapeUnitMismatch(provider, [K(120, 1120), K(180, 990), K(240, 1200)]), false);
+  assert.equal(tape.tapeUnitMismatch(provider, [K(120, 5000), K(180, 5200)]), false);
+});
+
+test('unit mismatch: fewer than two shared buckets cannot say, and the median ignores one odd bar', () => {
+  const provider = [K(60, 1000), K(120, 1100), K(180, 1050), K(240, 1000)];
+  assert.equal(tape.tapeUnitMismatch(provider, [K(240, 1)]), false, 'one shared bucket');
+  assert.equal(tape.tapeUnitMismatch(provider, [K(300, 1), K(360, 1)]), false, 'no overlap');
+  assert.equal(tape.tapeUnitMismatch(provider, [K(120, 1), K(180, 1060), K(240, 990)]), false, 'one bad bar in three');
+  assert.equal(tape.tapeUnitMismatch([], [K(120, 1)]), false);
+  assert.equal(tape.tapeUnitMismatch(provider, []), false);
+});

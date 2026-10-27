@@ -7,12 +7,12 @@
 //
 // ─── Sessions lapse quietly ──────────────────────────────────────────────
 //
-// A session lasts about two weeks and nothing announces the end of one. Left
+// A session lasts about 30 days and nothing announces the end of one. Left
 // alone, the first sign is a script's callouts starting to fail. So the age of
 // every session is on screen, anything close to the edge says so, and one
 // button renews all of them.
 //
-// The fourteen days is an OBSERVATION, not a promise pump publishes — so
+// The thirty days is an OBSERVATION, not a promise pump publishes — so
 // nothing here expires a session on its own. A 401 from their server is the
 // only authority, and `refreshProfile` already turns one into a sign-out.
 //
@@ -25,9 +25,14 @@
 // does the import and the sign-in in one step, and pump's public profile read
 // tells the lists below which unsigned wallets already have an account (Sign
 // in) and which do not (Make).
+//
+// An account with an email or social login is the exception: since
+// 2026-10-23 pump refuses a wallet sign-in for it (409, Privy), key or no key.
+// "Sign in with browser" opens the user's own Chrome or Edge on pump.fun and
+// keeps the session once the window is closed (system/pumpBrowserSignIn.ts).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BadgeCheck, Heart, HeartOff, KeyRound, Loader2, LogIn, LogOut, Pencil, PlayCircle, RefreshCw, UserMinus, UserPlus, Users } from 'lucide-react';
+import { AlertTriangle, BadgeCheck, Globe, Heart, HeartOff, KeyRound, Loader2, LogIn, LogOut, Pencil, PlayCircle, RefreshCw, UserMinus, UserPlus, Users, X } from 'lucide-react';
 import {
   PUMP_SESSION_DAYS,
   isWebOnlyAccount,
@@ -37,7 +42,7 @@ import {
   type PumpSessionView,
 } from '@shared/pumpAuth';
 import { namesFromList, nameListProblem, STATS_WINDOWS, STATS_WINDOW_LABEL, type CallerStats } from '@shared/pumpStats';
-import type { PumpAccountLookup } from '@shared/pumpProfile';
+import { BIO_WATERMARK, type PumpAccountLookup } from '@shared/pumpProfile';
 import type { SocialAction } from '@shared/pumpSocial';
 import { REFERRAL_NOTICE } from '@shared/pumpReferral';
 import { LookupNote, ProfileEditor } from '../components/terminal/PumpAccountsSection';
@@ -67,7 +72,7 @@ export function PumpAccountsPage() {
   const [importKey, setImportKey] = useState('');
   const [importLabel, setImportLabel] = useState('');
   /** What the last import brought in, shown until the next one. */
-  const [imported, setImported] = useState<{ walletId: string; lookup: PumpAccountLookup; signedIn: boolean } | null>(null);
+  const [imported, setImported] = useState<{ walletId: string; lookup: PumpAccountLookup; signedIn: boolean; privy: boolean } | null>(null);
 
   const refresh = useCallback(() => {
     void window.krypt.pump.status().then((r) => r.ok && r.data && setStatus(r.data));
@@ -80,11 +85,18 @@ export function PumpAccountsPage() {
   const sessions = status?.sessions ?? [];
   const byWallet = useMemo(() => new Map(sessions.map((s) => [s.walletId, s])), [sessions]);
   const signedIn = wallets.filter((w) => byWallet.has(w.id));
-  const missing = wallets.filter((w) => !byWallet.has(w.id));
-  const stale = sessions.filter((s) => sessionStale(s));
-  /** Any legacy sign-in-only accounts (the web sign-in that used to make them
-   *  was removed 2026-09-23 — nothing creates new ones). Shown so an old one
-   *  can still be signed out. */
+  /** Sessions that ended on their own — shown as invalid at the top, so they
+   *  are not also listed below as plain "Sign in" rows. */
+  const needs = (status?.needsSignIn ?? []).filter((n) => !byWallet.has(n.walletId));
+  const needIds = new Set(needs.map((n) => n.walletId));
+  const missing = wallets.filter((w) => !byWallet.has(w.id) && !needIds.has(w.id));
+  // A browser sign-in has no key behind it, so "Renew" cannot sign it in
+  // again — those are renewed with the browser button instead.
+  const staleAll = sessions.filter((s) => sessionStale(s));
+  const stale = staleAll.filter((s) => s.via !== 'web');
+  const staleWeb = staleAll.length - stale.length;
+  /** Accounts signed in through the browser whose wallet the app does not
+   *  hold (a pump-held wallet). */
   const webOnly = sessions.filter((s) => isWebOnlyAccount(s.walletId));
 
   // Ask pump which unsigned wallets already have an account. Keyed on the ids,
@@ -119,10 +131,59 @@ export function PumpAccountsPage() {
       // did: the wallet is imported either way.
       setImportKey('');
       setImportLabel('');
-      setImported({ walletId: r.data.walletId, lookup: r.data.lookup, signedIn: r.data.signedIn });
+      setImported({ walletId: r.data.walletId, lookup: r.data.lookup, signedIn: r.data.signedIn, privy: r.data.privy === true });
       if (r.data.signedIn) toast.success(r.message);
       else toast.error(r.message);
     });
+
+  // Resolves only when the browser window is closed, so the page waits with a
+  // Cancel button rather than a spinner nobody can stop.
+  const openBrowser = async (): Promise<void> => {
+    setBusy('browser');
+    try {
+      const r = await window.krypt.pump.browserSignIn();
+      if (!r.ok) {
+        toast.error(r.message);
+        return;
+      }
+      toast.success(r.message);
+      setImported(null);
+      if (r.data?.walletId) setEditing(r.data.walletId);
+    } finally {
+      setBusy(null);
+      refresh();
+    }
+  };
+  const browserSignIn = (): Promise<void> => openBrowser();
+
+  // Sign in with the wallet key; when pump answers that this account only
+  // takes its email or social login (main then lists it as 'browser'), go
+  // straight on to the browser sign-in rather than leaving a dead end.
+  const signInOrBrowser = async (walletId: string): Promise<boolean> => {
+    setBusy(`one:${walletId}`);
+    let r: Awaited<ReturnType<typeof window.krypt.pump.signIn>>;
+    try {
+      r = await window.krypt.pump.signIn(walletId);
+    } finally {
+      setBusy(null);
+    }
+    if (r.ok) {
+      toast.success(r.message);
+      refresh();
+      return true;
+    }
+    const st = await window.krypt.pump.status();
+    if (st.ok && st.data) setStatus(st.data);
+    if (st.data?.needsSignIn?.some((n) => n.walletId === walletId && n.reason === 'browser')) {
+      toast.info('pump.fun wants this account’s email or social login — opening your browser. Sign in there, then close the window.');
+      await openBrowser();
+      return false;
+    }
+    toast.error(r.message);
+    refresh();
+    return false;
+  };
+  const cancelBrowser = (): void => void window.krypt.pump.browserSignInCancel();
 
   // Refused in main while live execution is armed, same as the Wallet page.
   const makeTrading = (walletId: string): Promise<void> =>
@@ -146,16 +207,9 @@ export function PumpAccountsPage() {
   // name, bio and picture. A successful sign-in opens that account's editor:
   // a fresh account has none of the three, and doing it right away is the
   // point of making them one by one.
-  const signInOne = (walletId: string): Promise<void> =>
-    run(`one:${walletId}`, async () => {
-      const r = await window.krypt.pump.signIn(walletId);
-      if (!r.ok) {
-        toast.error(r.message);
-        return;
-      }
-      toast.success(r.message);
-      setEditing(walletId);
-    });
+  const signInOne = async (walletId: string): Promise<void> => {
+    if (await signInOrBrowser(walletId)) setEditing(walletId);
+  };
 
   const signOutOne = (walletId: string): Promise<void> =>
     run(`out:${walletId}`, async () => {
@@ -228,7 +282,61 @@ export function PumpAccountsPage() {
     >
       {/* Disclosed where accounts are made, as the trade fee is before a trade
           (shared/pumpReferral.ts, terms › Fees). */}
-      <p className="text-label leading-relaxed text-krypt-muted/80">{REFERRAL_NOTICE}</p>
+      <p className="text-label leading-relaxed text-krypt-muted/80">
+        {REFERRAL_NOTICE} Every account used here also keeps “{BIO_WATERMARK}” as the last line of its bio; the app
+        adds it after sign-in and puts it back within the hour if it is removed.
+      </p>
+      {needs.length > 0 && (
+        <Section
+          title="Signed out — sign in again"
+          description="These sessions ended on their own. Until they are signed in again, callouts, likes and follows from these accounts fail."
+        >
+          <Card className="space-y-1.5">
+            {needs.map((n) => {
+              const w = wallets.find((x) => x.id === n.walletId);
+              const browser = n.reason === 'browser';
+              return (
+                <div key={n.walletId} className="flex flex-wrap items-center gap-3 rounded-lg border border-arc-gold/30 bg-arc-gold/[0.06] px-3 py-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-arc-gold" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-value font-semibold text-white">
+                      {w?.label || 'Wallet'} <span className="text-arc-gold">· session invalid</span>
+                    </div>
+                    <div className="font-mono text-label text-krypt-muted">
+                      {shortAddr(n.address)}
+                      <span className="font-sans">
+                        {' · '}
+                        {browser
+                          ? 'this account signs in with email or a social login, so it needs the browser'
+                          : 'pump ended the session'}
+                        {n.at > 0 && ` · ${fmtAgo(n.at)}`}
+                      </span>
+                    </div>
+                  </div>
+                  {browser || !w ? (
+                    <PrimaryButton onClick={() => void browserSignIn()} disabled={busy !== null}>
+                      {busy === 'browser' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+                      Sign in with browser
+                    </PrimaryButton>
+                  ) : (
+                    <PrimaryButton onClick={() => void signInOrBrowser(n.walletId)} disabled={busy !== null}>
+                      {busy === `one:${n.walletId}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                      Retry
+                    </PrimaryButton>
+                  )}
+                  {busy === 'browser' && (
+                    <GhostButton onClick={cancelBrowser}>
+                      <X className="h-4 w-4" />
+                      Cancel
+                    </GhostButton>
+                  )}
+                </div>
+              );
+            })}
+          </Card>
+        </Section>
+      )}
+
       {sessions.length === 0 && (
         <Section title="Nothing signed in yet">
           <Card>
@@ -239,6 +347,31 @@ export function PumpAccountsPage() {
           </Card>
         </Section>
       )}
+
+      <Section
+        title="Sign in with email, Google or Apple"
+        description="For an account you sign in to on pump.fun with email or a social login. pump no longer lets those in with a wallet key, so you sign in on pump.fun in your own browser and the app keeps the session."
+      >
+        <Card className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <PrimaryButton onClick={() => void browserSignIn()} disabled={busy !== null}>
+              {busy === 'browser' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+              Sign in with browser
+            </PrimaryButton>
+            {busy === 'browser' && (
+              <GhostButton onClick={cancelBrowser}>
+                <X className="h-4 w-4" />
+                Cancel
+              </GhostButton>
+            )}
+            <span className="flex-1 text-label leading-relaxed text-krypt-muted/70">
+              {busy === 'browser'
+                ? 'Sign in on pump.fun in the window that opened, then CLOSE that window. The app reads the session when it closes.'
+                : "Opens Chrome (or Edge) on pump.fun in a profile of its own. If the account's wallet is one of yours here, it trades and posts as usual; if pump holds the wallet, it can post and like but not trade. Sessions last about a month, then sign in the same way again."}
+            </span>
+          </div>
+        </Card>
+      </Section>
 
       <Section
         title="Bring an existing account"
@@ -284,6 +417,17 @@ export function PumpAccountsPage() {
                 )}
                 {!imported.signedIn && <span className="text-arc-gold"> · imported, but not signed in yet</span>}
               </div>
+              {!imported.signedIn && imported.privy && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-label text-krypt-muted">
+                    This account has an email or social login, so pump only lets it in through the browser.
+                  </span>
+                  <GhostButton onClick={() => void browserSignIn()} disabled={busy !== null}>
+                    <Globe className="h-4 w-4" />
+                    Sign in with browser
+                  </GhostButton>
+                </div>
+              )}
               {imported.signedIn &&
                 (wallets.find((w) => w.id === imported.walletId)?.active ? (
                   <p className="text-label text-krypt-muted">
@@ -317,7 +461,8 @@ export function PumpAccountsPage() {
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-body text-krypt-muted">
               {signedIn.length} of {wallets.length} wallet{wallets.length === 1 ? '' : 's'} signed in{webOnly.length > 0 ? ` · ${webOnly.length} sign-in-only` : ''}
-              {stale.length > 0 && <span className="text-arc-gold"> · {stale.length} worth renewing</span>}
+              {staleAll.length > 0 && <span className="text-arc-gold"> · {staleAll.length} worth renewing</span>}
+              {staleWeb > 0 && <span className="text-krypt-muted/70"> ({staleWeb} through Sign in with browser)</span>}
             </span>
             <div className="flex-1" />
             {stale.length > 0 && (
@@ -414,10 +559,11 @@ export function PumpAccountsPage() {
           )}
 
           <p className="text-label leading-relaxed text-krypt-muted/70">
-            From 25 September pump.fun signs in with email or a social login on the web. To use such an account here,
-            export its wallet key on pump.fun (profile → View Wallet → Export Wallet) and import it under{' '}
-            <span className="text-white/80">Bring an existing account</span> below — that signs the account in through
-            pump's API and gives a wallet this app can trade and post from.
+            An account with an email or social login on pump.fun signs in with{' '}
+            <span className="text-white/80">Sign in with browser</span> above — pump refuses a wallet sign-in for it.
+            To also TRADE from it here, export its wallet key on pump.fun (profile → View Wallet → Export Wallet) and
+            import it under <span className="text-white/80">Bring an existing account</span>; the browser session then
+            moves onto that wallet.
           </p>
         </Card>
       </Section>

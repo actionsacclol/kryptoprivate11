@@ -50,8 +50,10 @@ import {
   type PumpAuthStatus,
   type PumpLoginBody,
   type PumpSession,
+  type PumpSignInNeeded,
   WEB_ACCOUNT_PREFIX,
 } from '@shared/pumpAuth';
+import { isPrivyRefusal } from '@shared/pumpBrowserSignIn';
 
 /** Built from the constant host; never from anything a caller supplies. */
 const urlFor = (route: string): string => `https://${PUMP_API_HOST}${route}`;
@@ -75,6 +77,16 @@ const storePath = (): string => path.join(app.getPath('userData'), 'pump-session
 
 /** walletId → session. One pump account per wallet. */
 const sessions = new Map<string, PumpSession>();
+/** walletId → a session that ended on its own (shared/pumpAuth.ts PumpSignInNeeded). No token. */
+const needs = new Map<string, PumpSignInNeeded>();
+
+/** A session ended without the user signing out. 'browser' is never
+ *  downgraded to 'expired': once pump has refused the wallet key, Retry
+ *  with it again cannot work. */
+function markNeeds(walletId: string, address: string, reason: PumpSignInNeeded['reason']): void {
+  const prev = needs.get(walletId);
+  needs.set(walletId, { walletId, address, reason: prev?.reason === 'browser' ? 'browser' : reason, at: Date.now() });
+}
 let loaded = false;
 let lastError: string | null = null;
 
@@ -143,6 +155,11 @@ function load(): void {
       if (s && s.walletId) sessions.set(s.walletId, s);
       else if (row.address) undecryptable += 1;
     }
+    for (const n of Array.isArray(raw.needsSignIn) ? (raw.needsSignIn as Record<string, unknown>[]) : []) {
+      if (n && typeof n.walletId === 'string' && typeof n.address === 'string' && !sessions.has(n.walletId)) {
+        needs.set(n.walletId, { walletId: n.walletId, address: n.address, reason: n.reason === 'browser' ? 'browser' : 'expired', at: typeof n.at === 'number' ? n.at : 0 });
+      }
+    }
     if (undecryptable > 0) {
       // A different machine, or a reset keychain. Not an error worth shouting
       // about, but not silently "never signed in" either.
@@ -157,7 +174,7 @@ function load(): void {
 function persist(): void {
   const p = storePath();
   try {
-    if (sessions.size === 0) {
+    if (sessions.size === 0 && needs.size === 0) {
       if (fs.existsSync(p)) fs.unlinkSync(p);
       return;
     }
@@ -176,11 +193,11 @@ function persist(): void {
     if (unsealed > 0) {
       logger.warn(`pump auth: no OS encryption available — ${unsealed} session(s) will not be remembered`);
     }
-    if (rows.length === 0) {
+    if (rows.length === 0 && needs.size === 0) {
       if (fs.existsSync(p)) fs.unlinkSync(p);
       return;
     }
-    fs.writeFileSync(p, JSON.stringify({ version: 2, sessions: rows }, null, 2), 'utf8');
+    fs.writeFileSync(p, JSON.stringify({ version: 2, sessions: rows, needsSignIn: [...needs.values()] }, null, 2), 'utf8');
   } catch (err) {
     logger.warn(`pump auth: could not save the sessions (${(err as Error).message})`);
   }
@@ -188,11 +205,15 @@ function persist(): void {
 
 export function status(): PumpAuthStatus {
   load();
+  // A wallet deleted since is not asked about (an empty list is not "all
+  // deleted" — the fail-open rule).
+  const ids = new Set(wallet.list().map((w) => w.id));
   return {
     ready: pumpLoginReady(),
     // Newest first, so the account someone just signed into is at the top.
     sessions: [...sessions.values()].sort((a, b) => b.at - a.at).map(viewOf),
     lastError,
+    needsSignIn: [...needs.values()].filter((n) => ids.size === 0 || ids.has(n.walletId) || n.walletId.startsWith(WEB_ACCOUNT_PREFIX)),
   };
 }
 
@@ -221,12 +242,14 @@ export function signOut(walletId?: string): { ok: boolean; message: string } {
     const n = sessions.size;
     sessions.clear();
     lapsed.clear();
+    needs.clear();
     lastError = null;
     persist();
     return { ok: true, message: n ? `Signed out of ${n} pump.fun account${n === 1 ? '' : 's'}` : 'Nothing to sign out of' };
   }
   const had = sessions.delete(walletId);
   lapsed.delete(walletId);
+  needs.delete(walletId);
   lastError = null;
   persist();
   return { ok: true, message: had ? 'Signed out of pump.fun' : 'That wallet was not signed in' };
@@ -280,13 +303,18 @@ function refusalOf(status: number, text: string, what: string): { why: string; c
 }
 
 /** One pass over the login routes. `noAccount` = pump has no account for the
- *  address yet, which register fixes and nothing else does. */
-async function login(body: PumpLoginBody): Promise<{ tok: string | null; why: string; noAccount: boolean }> {
+ *  address yet, which register fixes and nothing else does. `privy` = the
+ *  account has an email or social login, which closes wallet sign-in for it
+ *  (409 "Wallet belongs to an existing Privy account", 2026-10-23) — only a
+ *  browser sign-in gets in (pumpBrowserSignIn.ts). */
+async function login(body: PumpLoginBody): Promise<{ tok: string | null; why: string; noAccount: boolean; privy?: boolean }> {
   let why = 'pump.fun did not answer the sign-in';
   for (const route of LOGIN_ROUTES) {
     const res = await pumpAuthFetch(urlFor(route.path), {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      // Origin: /auth/login answers 400 "Missing Origin header" without it
+      // (2026-10-25); /auth/login/token does not mind. Same as register.
+      headers: { 'content-type': 'application/json', accept: 'application/json', origin: 'https://pump.fun' },
       body: JSON.stringify(route.rawJwt ? { ...body, rawJwt: true } : body),
       redirect: 'error', // a 30x out of an allowlisted host is the classic escape
       signal: AbortSignal.timeout(15_000),
@@ -300,6 +328,10 @@ async function login(body: PumpLoginBody): Promise<{ tok: string | null; why: st
       // Both routes answer a new address the same way; asking the other one
       // would only repeat it.
       if (res.status === 404 && r.code === PUMP_NO_ACCOUNT) return { tok: null, why, noAccount: true };
+      // Both routes refuse it alike (seen 10-23); the other route is no help.
+      if (isPrivyRefusal(res.status, why)) {
+        return { tok: null, why: PRIVY_MESSAGE, noAccount: false, privy: true };
+      }
       // 401 means the SIGNATURE was rejected, which the other route would
       // reject identically — only a missing or malformed route is worth a
       // second attempt.
@@ -320,6 +352,10 @@ async function login(body: PumpLoginBody): Promise<{ tok: string | null; why: st
   }
   return { tok: null, why, noAccount: false };
 }
+
+/** What the user is told when pump closed wallet sign-in for an account. */
+export const PRIVY_MESSAGE =
+  'This pump.fun account signs in with email or a social login, so pump refuses a wallet sign-in for it. Use "Sign in with browser" on the pump.fun accounts page.';
 
 /**
  * Make the pump account for this address (shared/pumpAuth.ts,
@@ -349,7 +385,7 @@ async function register(body: PumpLoginBody): Promise<{ ok: boolean; why: string
  * Signing in again with a wallet that already has a session replaces it, which
  * is how an expired one is refreshed.
  */
-export async function signIn(walletId: string): Promise<{ ok: boolean; message: string }> {
+export async function signIn(walletId: string): Promise<{ ok: boolean; message: string; privy?: boolean }> {
   load();
   if (!pumpLoginReady()) {
     const why = 'The pump.fun sign-in message is not known in this build, so signing in would fail at their end.';
@@ -385,9 +421,15 @@ export async function signIn(walletId: string): Promise<{ ok: boolean; message: 
     if (!r.tok) {
       lastError = r.why;
       logger.warn(`pump auth: sign-in failed — ${r.why}`);
-      return { ok: false, message: r.why };
+      // The page offers the browser for this wallet from now on.
+      if (r.privy) {
+        markNeeds(walletId, address, 'browser');
+        persist();
+      }
+      return { ok: false, message: r.why, privy: r.privy };
     }
     sessions.set(walletId, { address, walletId, token: r.tok, at: Date.now(), username: null, via: 'wallet' });
+    needs.delete(walletId);
     lastError = null;
     persist();
     // The signature is not logged. The MESSAGE is, because it is the thing
@@ -445,6 +487,20 @@ export function renewSession(walletId: string, now = Date.now()): Promise<boolea
         logger.info(`pump auth: renewed the session for wallet ${walletId}`);
       } else {
         logger.warn(`pump auth: could not renew the session for wallet ${walletId} — ${r.message}`);
+        // Two refusals that no amount of retrying changes: the account has an
+        // email login now (the browser sign-in is the way back), or the
+        // wallet was deleted. Stop asking every few hours. A wallet list that
+        // reads empty is not taken to mean "deleted" (fail-open rule).
+        const all = wallet.list();
+        const gone = all.length > 0 && !all.some((w) => w.id === walletId);
+        if (r.privy || gone) {
+          lapsed.delete(walletId);
+          if (gone) {
+            sessions.delete(walletId);
+            needs.delete(walletId);
+            persist();
+          }
+        }
       }
       return r.ok;
     })
@@ -514,6 +570,8 @@ export async function refreshProfile(walletId: string): Promise<void> {
       logger.info(`pump auth: the session for ${s.address.slice(0, 6)}… is no longer valid; signed out`);
       sessions.delete(walletId);
       if (s.via === 'wallet') lapsed.add(walletId);
+      // Shown on the accounts page as invalid, with Retry (or the browser).
+      markNeeds(walletId, s.address, s.via === 'web' ? 'browser' : 'expired');
       lastError = 'A pump.fun session expired. Sign in again.';
       persist();
       return;
@@ -556,13 +614,12 @@ export async function refreshProfile(walletId: string): Promise<void> {
  * Turn a pump.fun session token into a stored session, filed under whichever
  * account pump says it belongs to.
  *
- * NOT REACHED at runtime as of 2026-09-23: its only caller was the in-app
- * pump.fun sign-in window, which was removed that day because Google refuses
- * OAuth inside it. It is kept (and tested) purely as the basis for a future
- * web-session capture, should one be added. It is NOT a live fallback — a
- * pump.fun account made with email or a social login comes into the app today
- * through export-key → importAccount, which uses `claimWebSession` below, not
- * this. Delete both this and the `via:'web'` scaffolding if that stays true.
+ * Reached from pumpBrowserSignIn.ts (2026-10-25): the user signs in on
+ * pump.fun in their own Chrome or Edge and the app reads the session cookie
+ * from that profile. It is the only way in for an account with an email or
+ * social login, which pump refuses a wallet sign-in (409, Privy). The in-app
+ * window that used to call this was removed 2026-09-23 because Google refuses
+ * OAuth inside Electron.
  *
  * The token is NOT trusted for who it says it is. pump's own /auth/my-profile
  * is asked, with it, which address it belongs to; that answer decides where
@@ -601,6 +658,10 @@ export async function adoptWebSession(token: string): Promise<{ ok: boolean; mes
   // elsewhere replaces that row rather than living beside it.
   for (const [id, s] of sessions) if (s.address === address && id !== walletId) sessions.delete(id);
   sessions.set(walletId, { address, walletId, token: tok, at: Date.now(), username: null, via: 'web' });
+  // A web session has no key behind it; the keep-alive stops trying to sign
+  // this wallet in with one.
+  lapsed.delete(walletId);
+  needs.delete(walletId);
   lastError = null;
   persist();
   logger.info(`pump auth: kept a pump.fun web sign-in for ${address.slice(0, 6)}… (${own ? `wallet "${own.label || own.id}"` : 'sign-in-only account, no key held'})`);
@@ -630,6 +691,8 @@ export function claimWebSession(address: string, walletId: string): boolean {
   if (!s || s.address !== address || sessions.has(walletId)) return false;
   sessions.delete(from);
   sessions.set(walletId, { ...s, walletId });
+  needs.delete(from);
+  needs.delete(walletId);
   persist();
   logger.info(`pump auth: the sign-in-only account ${address.slice(0, 6)}… now belongs to an imported wallet`);
   return true;
@@ -683,6 +746,7 @@ export function refreshNamesSoon(now = Date.now()): void {
  */
 export function _reset(): void {
   sessions.clear();
+  needs.clear();
   loaded = false;
   lastError = null;
 }

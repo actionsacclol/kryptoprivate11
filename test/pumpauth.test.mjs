@@ -127,7 +127,12 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   // `userId` is pump's own account id, added 2026-09-22 so the caller stats
   // can be asked for. It is an identifier, not a credential — the token is
   // what proves anything, and it is still absent.
-  assert.deepEqual(v, { address: 'Addr1', walletId: 'w1', at: 5, username: 'me', userId: 'u7', via: 'wallet' }, 'a row from before 2026-09-23 reads as a wallet sign-in');
+  // `expiresAt` (10-25) is read from the token's exp claim — null here, the token is not a JWT.
+  assert.deepEqual(v, { address: 'Addr1', walletId: 'w1', at: 5, username: 'me', userId: 'u7', via: 'wallet', expiresAt: null }, 'a row from before 2026-09-23 reads as a wallet sign-in');
+  const exp = Math.floor(Date.now() / 1000) + 30 * 86_400;
+  const jwt = `eyJhbGciOiJIUzI1NiJ9.${Buffer.from(JSON.stringify({ exp })).toString('base64url')}.sig`;
+  assert.equal(viewOf({ ...s, token: jwt }).expiresAt, exp * 1000, 'pump’s own expiry, from the token');
+  assert.doesNotMatch(JSON.stringify(viewOf({ ...s, token: jwt })), /sig|eyJ/, 'only the date leaves, never the token');
   assert.equal(viewOf({ ...s, userId: undefined }).userId, null, 'an id pump never sent is null, not missing');
   assert.doesNotMatch(JSON.stringify(v), /SECRET/, 'and the credential is nowhere in it');
 

@@ -49,6 +49,8 @@ export interface LiveMigration {
   /** Lamports seeded into the pool, when the event said. */
   solSeeded: bigint | null;
   detectedAt: number;
+  /** The pool's quote mint when it is not SOL (2026-10). */
+  quoteMint?: string | null;
 }
 
 /** Curves remembered at most. Pump trades on a few thousand distinct mints
@@ -170,10 +172,10 @@ export class LiveMigrations {
   private list: LiveMigration[] = [];
   private readonly seen = new Set<string>();
 
-  note(mint: string, pool: string, solSeeded: bigint | null, detectedAt: number): void {
+  note(mint: string, pool: string, solSeeded: bigint | null, detectedAt: number, quoteMint: string | null = null): void {
     if (!mint || !pool || this.seen.has(mint)) return;
     this.seen.add(mint);
-    this.list.unshift({ mint, pool, solSeeded, detectedAt });
+    this.list.unshift({ mint, pool, solSeeded, detectedAt, quoteMint });
     if (this.list.length > LIVE_MIGRATIONS_CAP) {
       const gone = this.list.splice(LIVE_MIGRATIONS_CAP);
       for (const g of gone) this.seen.delete(g.mint);

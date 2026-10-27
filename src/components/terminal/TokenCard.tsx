@@ -4,6 +4,7 @@ import { imageSrc, windowExceedsAge, type StatsWindow, type TokenSummary } from 
 import { nativeSymbolOf } from '@shared/evm';
 import { cls, fmtAge, fmtChange, fmtNum, fmtPctOrDash, fmtUsd, scoreTone, shortAddr, toneFor } from '../../utils/format';
 import { ODDS_BUCKET_LABEL, oddsChipClass } from '../../utils/odds';
+import { cancelPrefetch, prefetchChart } from '../../state/chartPrefetch';
 
 // One Discover row. This is the screen a memecoin trader actually scans, so
 // the density is deliberate: everything in term.txt's token-card list that
@@ -181,6 +182,12 @@ function TokenCardInner({
       onOpen();
     }
   };
+  // The row under the pointer is the one most likely to be opened next:
+  // start its chart load now so the click paints real history at once
+  // (state/chartPrefetch.ts — rested, one at a time, Solana only).
+  const chain = token.chain ?? 'solana';
+  const onHover = chain === 'solana' ? () => prefetchChart(token.mint) : undefined;
+  const onLeave = chain === 'solana' ? cancelPrefetch : undefined;
 
   const curveLabel =
     token.bondingCurvePct === null ? '—' : token.bondingCurvePct >= 100 ? 'DEX' : fmtPctOrDash(token.bondingCurvePct, 0);
@@ -193,6 +200,8 @@ function TokenCardInner({
         tabIndex={0}
         onClick={onOpen}
         onKeyDown={onKey}
+        onMouseEnter={onHover}
+        onMouseLeave={onLeave}
         className="group card rounded-lg pl-2.5 pr-2 py-2 cursor-pointer transition-colors focus:outline-none focus:!border-krypt-purple/50 flex items-center gap-3"
       >
         {/* Identity — icon + name, grows to fill */}
@@ -292,6 +301,8 @@ function TokenCardInner({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={onKey}
+      onMouseEnter={onHover}
+      onMouseLeave={onLeave}
       // `.card`, not `.plate`: a list item must not carry a 34px blur shadow and
       // an eight-gradient pseudo-element when 160 of them are on screen. The
       // hover glow is dropped for the same reason — it repaints the shadow.

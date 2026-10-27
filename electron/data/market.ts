@@ -126,6 +126,10 @@ export interface TerminalContext {
    *  creator and detection time a summary would otherwise buy. Optional so a
    *  call-count harness built before it existed still attaches. */
   liveLaunch?(mint: string): LaunchRow | null;
+  /** The newest price the engine holds for a mint (its feed, tape or chain
+   *  read), SOL per token — the chart's seed bar when no provider has
+   *  answered yet. Optional for the same reason as `liveLaunch`. */
+  knownPriceSol?(mint: string): number | null;
   /** Register a PumpSwap pool so AMM swaps for it reach the tape. */
   registerPool(pool: string, mint: string): void;
   /**
@@ -396,6 +400,7 @@ function merge(base: TokenSummary, patch: TokenSummary): TokenSummary {
   out.poolAddress = pick(base.poolAddress, patch.poolAddress);
   out.poolQuoteMint = pick(base.poolQuoteMint, patch.poolQuoteMint);
   out.dexId = pick(base.dexId, patch.dexId);
+  out.curveQuote = pick(base.curveQuote, patch.curveQuote);
   out.devHoldingPct = pick(base.devHoldingPct, patch.devHoldingPct);
   out.top10Pct = pick(base.top10Pct, patch.top10Pct);
   out.sniperPct = pick(base.sniperPct, patch.sniperPct);
@@ -1313,7 +1318,8 @@ function liveMigrationRow(m: LiveMigration, coin: pumpChain.PumpChainCoin | null
     row.launchpad = 'pumpfun';
     row.dexId = 'pumpswap';
     row.poolAddress = m.pool;
-    row.poolQuoteMint = WSOL_MINT_ADDRESS;
+    row.poolQuoteMint = m.quoteMint ?? WSOL_MINT_ADDRESS;
+    if (m.quoteMint) row.curveQuote = { mint: m.quoteMint, symbol: null };
     row.bondingCurvePct = 100;
     row.fetchedAt = m.detectedAt;
   }
@@ -1871,6 +1877,46 @@ function chartProvidersParked(): boolean {
   return cooldownRemainingMs('geckoterminal') > 0 || cooldownRemainingMs('birdeye') > 0 || cooldownRemainingMs('pumpswap') > 0;
 }
 
+/** Where this module's lines go — injected like http.ts's, so the module
+ *  stays offline-testable. ipc.ts attaches the app log. */
+type MarketLog = (level: 'info' | 'warn' | 'error', line: string) => void;
+let marketLog: MarketLog = () => {};
+export function attachLog(fn: MarketLog): void {
+  marketLog = fn;
+}
+
+/** A full chart load slower than this is written to the log with where the
+ *  time went (2026-10-26, "sometimes over a second to load a chart") — so
+ *  the next report names a provider and a wait, not a feeling. */
+const SLOW_CHART_MS = 700;
+
+/**
+ * Provider history + tape, with the unit check between them. The tape wins
+ * every bucket both hold — unless the two disagree by more than any market
+ * move could explain on the SAME buckets, in which case the tape is in the
+ * wrong unit and is left out, with the note saying so. Before this the
+ * merge trusted the tape unconditionally, and a stock-quoted curve's tape
+ * at a two-thousandth of Birdeye's price drew a bar that flipped between
+ * the two (user report, 2026-10-26).
+ */
+function mergeGuarded(mint: string, history: Candle[], tapeRows: Candle[], limit: number): { candles: Candle[]; tapeDropped: boolean } {
+  if (!tapeRows.length) return { candles: history, tapeDropped: false };
+  if (tape.tapeUnitMismatch(history, tapeRows)) {
+    noteUnitMismatch(mint);
+    return { candles: tape.mergeCandles(history, [], limit), tapeDropped: true };
+  }
+  return { candles: tape.mergeCandles(history, tapeRows, limit), tapeDropped: false };
+}
+const UNIT_MISMATCH_NOTE =
+  'Live-feed candles left out: on the same minutes they disagree with the provider by more than 20× — a unit mismatch, not a move. Only the provider is drawn.';
+const unitMismatchLogged = new Set<string>();
+function noteUnitMismatch(mint: string): void {
+  if (unitMismatchLogged.has(mint)) return;
+  unitMismatchLogged.add(mint);
+  if (unitMismatchLogged.size > 200) unitMismatchLogged.clear();
+  marketLog('warn', `chart ${mint.slice(0, 8)}…: the live tape disagrees with the chart provider by over ${tape.UNIT_MISMATCH_RATIO}× on the same buckets — tape left out of the chart (a unit mismatch; is the curve quoted in SOL?)`);
+}
+
 const PROVIDER_LABEL: Record<'birdeye' | 'geckoterminal' | 'pumpswap', string> = {
   birdeye: 'Birdeye',
   geckoterminal: 'GeckoTerminal',
@@ -1899,13 +1945,75 @@ const PROVIDER_LABEL: Record<'birdeye' | 'geckoterminal' | 'pumpswap', string> =
  * so, rather than silently looking wrong.
  */
 export async function candles(mint: string, interval: CandleInterval, limit = 500): Promise<CandleSeries> {
-  const c = need();
-  const s = await summary(mint);
-  const solUsd = usable('jupiter') ? await jup.solUsd() : null;
-  const supply = s.circSupply;
-  const cacheKey = `${mint}:${interval}`;
+  const t0 = Date.now();
+  const trace: string[] = [];
+  try {
+    return await candlesInner(mint, interval, limit, trace);
+  } finally {
+    const ms = Date.now() - t0;
+    if (ms >= SLOW_CHART_MS) {
+      const parked = (['birdeye', 'geckoterminal', 'pumpswap', 'jupiter'] as const).filter((id) => cooldownRemainingMs(id) > 0);
+      marketLog('info', `chart ${mint.slice(0, 8)}… ${interval}: ${ms} ms — ${trace.join(' · ') || 'no stage recorded'}${parked.length ? ` · parked: ${parked.join(', ')}` : ''}`);
+    }
+  }
+}
 
-  const base: CandleSeries = {
+/** `ms` since `t0`, for the slow-chart trace. */
+const since = (t0: number): string => `${Date.now() - t0} ms`;
+
+async function candlesInner(mint: string, interval: CandleInterval, limit: number, trace: string[]): Promise<CandleSeries> {
+  const c = need();
+  const cacheKey = `${mint}:${interval}`;
+  const t0 = Date.now();
+
+  // The summary is consulted for ROUTING (still on its curve? which pool?)
+  // and the supply, and the copy already in memory answers both. A rebuild
+  // fans out to five providers and waits up to 1.5 s on the metadata file,
+  // and until 2026-10-26 every chart load sat behind one even when Birdeye
+  // needed nothing from it ("over a second to load a chart"). Rebuilt only
+  // when nothing is held, and even then Birdeye is asked at the same time.
+  // SOL/USD, for converting the tape — asked FIRST: a miss then sits at the
+  // head of Jupiter's queue instead of behind the summary's own Jupiter
+  // reads (the queue waits on each response; 2 s in the harness when it was
+  // asked after). Awaited only when there is a tape to convert.
+  const solUsdP: Promise<number | null> = usable('jupiter') ? jup.solUsd().catch(() => null) : Promise.resolve(null);
+  const cachedSummary = summaryIfCached(mint);
+  const summaryP: Promise<TokenSummary> = cachedSummary ? Promise.resolve(cachedSummary) : summary(mint);
+  if (!cachedSummary) void summaryP.then(() => trace.push(`summary rebuilt ${since(t0)}`), () => trace.push(`summary failed ${since(t0)}`));
+  else trace.push('summary cached');
+
+  // Our own tape, priced in SOL; converted (or honestly dropped) at the seam.
+  const tapeSol: Candle[] = tape.supports(interval) ? tape.candles(mint, interval, limit) : [];
+
+  // 1. Provider history at the REQUESTED interval. Precedence unchanged:
+  //    Birdeye when the user brought a key, else GeckoTerminal — but Birdeye
+  //    goes out NOW, beside the summary, not after it.
+  const birdeyeP: Promise<Candle[] | null> =
+    usable('birdeye') && be.supports(interval) ? be.ohlcv(c.data().birdeyeApiKey.trim(), mint, interval, limit, { priority: true }) : Promise.resolve(null);
+  const [solUsd, beRows] = await Promise.all([tapeSol.length ? solUsdP : Promise.resolve<number | null>(null), birdeyeP]);
+  let history: Candle[] | null = null;
+  let historySource: 'birdeye' | 'geckoterminal' | 'pumpswap' | null = null;
+  if (beRows?.length) {
+    history = beRows;
+    historySource = 'birdeye';
+    trace.push(`birdeye ${beRows.length} bars ${since(t0)}`);
+  } else if (usable('birdeye') && be.supports(interval)) {
+    trace.push(`birdeye none ${since(t0)}`);
+  }
+
+  // The supply for the market-cap scale: whatever is in memory. With
+  // Birdeye in hand the chart does not wait on a summary rebuild for it —
+  // the page fills the scale from its own summary when this is null.
+  const quickSupply = (): number | null => {
+    const cs = summaryIfCached(mint);
+    if (cs?.circSupply) return cs.circSupply;
+    const ch = pumpChain.readIfCached(mint);
+    if (ch && ch.supplyRaw > 0n) return Number(ch.supplyRaw) / 10 ** ch.decimals;
+    return null;
+  };
+  let supply: number | null = quickSupply();
+
+  const base = (): CandleSeries => ({
     mint,
     interval,
     unit: 'usd',
@@ -1913,17 +2021,15 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
     source: 'none',
     supplyForMcap: supply,
     note: null,
-  };
+  });
 
   const subMinute = interval === '1s' || interval === '5s' || interval === '15s';
 
-  // Our own tape, priced in SOL; converted (or honestly dropped) at the seam.
-  const tapeSol: Candle[] = tape.supports(interval) ? tape.candles(mint, interval, limit) : [];
   const tapeUsd: Candle[] | null = tape.convertSolCandles(tapeSol, solUsd);
 
   // A thin tape still deserves its "filling in" note; a real one does not.
   const fromTape = (): CandleSeries => ({
-    ...base,
+    ...base(),
     unit: tapeUsd ? 'usd' : 'sol',
     candles: tapeUsd ?? tapeSol,
     source: 'engine',
@@ -1932,6 +2038,32 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
         ? `Built from this app’s own live feed — only ${tapeSol.length} ${interval} candle${tapeSol.length === 1 ? '' : 's'} so far. It fills in as the token trades.`
         : 'Built from this app’s own live feed.',
   });
+
+  // Birdeye answered: the chart is built from it and the tape right here,
+  // without waiting on the summary at all (its supply, when it was not in
+  // memory, reaches the page from its own summary read).
+  if (history && historySource) {
+    const merged = mergeGuarded(mint, history, tapeUsd ?? [], limit);
+    const series: CandleSeries = {
+      ...base(),
+      candles: merged.candles,
+      source: merged.tapeDropped || !tapeUsd?.length ? historySource : 'merged',
+      note: merged.tapeDropped
+        ? UNIT_MISMATCH_NOTE
+        : tapeUsd?.length
+          ? `History via ${PROVIDER_LABEL[historySource]} · live edge from this app’s own feed.`
+          : tapeSol.length
+            ? 'Live-feed candles left out of this chart — the SOL/USD rate is unknown right now and mixing SOL-priced candles into a USD series would draw a false move.'
+            : null,
+    };
+    rememberChart(cacheKey, series);
+    return series;
+  }
+
+  // No Birdeye: the walk below needs the summary — on its curve or a pool,
+  // and which pool. From memory when it was there; awaited otherwise.
+  const s = await summaryP;
+  if (supply === null) supply = s.circSupply;
 
   // A pump token still on its launch curve has no pool for GeckoTerminal to
   // know about (`poolAddress` is the curve itself before migration); the
@@ -1943,17 +2075,6 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
   const stillOnCurve = s.launchpad === 'pumpfun' && s.bondingCurvePct !== null && s.bondingCurvePct < 100;
   const skipProviderWalk = stillOnCurve;
 
-  // 1. Provider history at the REQUESTED interval. Precedence unchanged:
-  //    Birdeye when the user brought a key, else GeckoTerminal.
-  let history: Candle[] | null = null;
-  let historySource: 'birdeye' | 'geckoterminal' | 'pumpswap' | null = null;
-  if (usable('birdeye') && be.supports(interval)) {
-    const rows = await be.ohlcv(c.data().birdeyeApiKey.trim(), mint, interval, limit, { priority: true });
-    if (rows?.length) {
-      history = rows;
-      historySource = 'birdeye';
-    }
-  }
   if (!history && !subMinute && !skipProviderWalk && usable('geckoterminal') && gt.supports(interval)) {
     const pools = await poolsFor(mint, s, { priority: true });
     const pool = pools[0]?.address ?? s.poolAddress;
@@ -1963,6 +2084,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
         history = rows;
         historySource = 'geckoterminal';
       }
+      trace.push(`gecko ${rows?.length ?? 'none'} ${since(t0)}`);
     }
   }
   // pump.fun's own candles (swap-api): the only keyless history a coin on
@@ -1977,14 +2099,16 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       history = rows;
       historySource = 'pumpswap';
     }
+    trace.push(`pumpswap ${rows?.length ?? 'none'} ${since(t0)}`);
   }
 
-  // 2. Merge, never either/or.
+  // 2. Merge, never either/or — with the unit check between the two.
   if (history && historySource) {
-    if (tapeUsd?.length) {
+    const merged = mergeGuarded(mint, history, tapeUsd ?? [], limit);
+    if (tapeUsd?.length && !merged.tapeDropped) {
       const series: CandleSeries = {
-        ...base,
-        candles: tape.mergeCandles(history, tapeUsd, limit),
+        ...base(),
+        candles: merged.candles,
         source: 'merged',
         note: `History via ${PROVIDER_LABEL[historySource]} · live edge from this app’s own feed.`,
       };
@@ -1992,13 +2116,15 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       return series;
     }
     const series: CandleSeries = {
-      ...base,
-      candles: history,
+      ...base(),
+      candles: merged.candles,
       source: historySource,
-      // Unit guard: a SOL-priced tape must not be mixed into a USD chart.
-      note: tapeSol.length
-        ? 'Live-feed candles left out of this chart — the SOL/USD rate is unknown right now and mixing SOL-priced candles into a USD series would draw a false move.'
-        : null,
+      note: merged.tapeDropped
+        ? UNIT_MISMATCH_NOTE
+        : // Unit guard: a SOL-priced tape must not be mixed into a USD chart.
+          tapeSol.length
+          ? 'Live-feed candles left out of this chart — the SOL/USD rate is unknown right now and mixing SOL-priced candles into a USD series would draw a false move.'
+          : null,
     };
     rememberChart(cacheKey, series);
     return series;
@@ -2015,7 +2141,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
       const rows = await gt.ohlcv(pool, '1m', limit, { priority: true });
       if (rows?.length) {
         const series: CandleSeries = {
-          ...base,
+          ...base(),
           candles: rows,
           source: 'geckoterminal',
           effectiveInterval: '1m',
@@ -2062,12 +2188,13 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
         // Do NOT re-remember: the provider half is still the old fetch, and
         // refreshing `at` would both lie about its age and stop candlesTail
         // from retrying the provider once its cooldown ends.
+        const merged = mergeGuarded(mint, cached.candles, tapeUsd, limit);
         return {
           ...cached,
           supplyForMcap: supply,
-          candles: tape.mergeCandles(cached.candles, tapeUsd, limit),
-          source: 'merged',
-          note: `${staleNote(age)} Live edge from this app’s own feed.`,
+          candles: merged.candles,
+          source: merged.tapeDropped ? cached.source : 'merged',
+          note: merged.tapeDropped ? `${staleNote(age)} ${UNIT_MISMATCH_NOTE}` : `${staleNote(age)} Live edge from this app’s own feed.`,
         };
       }
       if (cached.unit === 'sol') {
@@ -2116,7 +2243,7 @@ export async function candles(mint: string, interval: CandleInterval, limit = 50
   // ourselves from the feed.
   const onCurve = s.bondingCurvePct !== null && s.bondingCurvePct < 100;
   return {
-    ...base,
+    ...base(),
     note: onCurve && s.launchpad === 'pumpfun'
       ? `No candles yet — ${pumpCurveNote()} Start the engine (Start scanning) and keep this page open — Krypt will build the chart from its own live feed.`
       : onCurve
@@ -2190,11 +2317,14 @@ export async function candlesTail(mint: string, interval: CandleInterval, sinceT
           const solUsd = usable('jupiter') ? await jup.solUsd() : null;
           const tapeUsd = tape.convertSolCandles(tapeSol, solUsd);
           if (tapeUsd) {
-            series = {
-              ...series,
-              candles: tape.mergeCandles(series.candles, tapeUsd, series.candles.length + tapeUsd.length),
-              source: series.source === 'engine' ? 'engine' : 'merged',
-            };
+            const merged = mergeGuarded(mint, series.candles, tapeUsd, series.candles.length + tapeUsd.length);
+            if (!merged.tapeDropped) {
+              series = {
+                ...series,
+                candles: merged.candles,
+                source: series.source === 'engine' ? 'engine' : 'merged',
+              };
+            }
           }
         }
       }
@@ -2251,8 +2381,8 @@ function quickSeries(mint: string, interval: CandleInterval, limit: number): Can
   if (hit && !hit.degraded) {
     const age = Date.now() - hit.at;
     let rows = hit.series.candles;
-    if (hit.series.unit === 'usd' && tapeUsd?.length) rows = tape.mergeCandles(rows, tapeUsd, limit);
-    else if (hit.series.unit === 'sol' && tapeSol.length) rows = tape.mergeCandles(rows, tapeSol, limit);
+    if (hit.series.unit === 'usd' && tapeUsd?.length) rows = mergeGuarded(mint, rows, tapeUsd, limit).candles;
+    else if (hit.series.unit === 'sol' && tapeSol.length) rows = mergeGuarded(mint, rows, tapeSol, limit).candles;
     return {
       ...hit.series,
       candles: rows,
@@ -2314,9 +2444,20 @@ function seedSeries(
   solUsd: number | null,
   supply: number | null,
 ): CandleSeries | null {
+  const c = need();
   const chain = pumpChain.readIfCached(mint);
   const sum = cached<TokenSummary>(`market:summary:${mint}`);
-  const priceSol = chain?.priceSol ?? sum?.priceSol ?? null;
+  // The engine's newest price for the mint — its feed, tape or chain read —
+  // covers the tokens opened from a runner alert, a script or a position,
+  // which the chain cache (4 s) and the summary cache rarely still hold.
+  // Before 2026-10-26 those waited the full fast-path budget for a blank.
+  const engineKnown = (): number | null => {
+    const k = c.knownPriceSol?.(mint) ?? null;
+    if (k !== null && k > 0) return k;
+    const row = c.liveLaunch?.(mint)?.priceSol ?? null;
+    return row !== null && row > 0 ? row : null;
+  };
+  const priceSol = chain?.priceSol ?? engineKnown() ?? sum?.priceSol ?? null;
 
   let unit: 'usd' | 'sol';
   let price: number;

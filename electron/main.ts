@@ -735,9 +735,10 @@ async function bootstrap(): Promise<void> {
   // A pump.fun session that has expired is signed in again silently (wallet key is held); checked at launch and every 3 h.
   pumpAuth.startSessionKeepAlive();
   // Every pump.fun account's bio ends with the Krypt line (shared/pumpProfile.ts); checked at launch
-  // and every 6 h in case it was edited away on pump.fun.
+  // and hourly, so a line edited away on pump.fun is back within the hour. One public read per
+  // account per pass; a write only when the line is missing.
   setTimeout(() => void pumpProfile.ensureAllBioMarks(), 45_000).unref();
-  setInterval(() => void pumpProfile.ensureAllBioMarks(), 6 * 3_600_000).unref();
+  setInterval(() => void pumpProfile.ensureAllBioMarks(), 3_600_000).unref();
   // Load persisted orders BEFORE registerIpc(), which constructs the engine
   // and attaches the order host. Restored orders come back PAUSED by design
   // (see advOrders.ts §3) — the user resumes them deliberately.

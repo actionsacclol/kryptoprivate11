@@ -142,6 +142,13 @@ const coinExtra = new Map();
 const ipfsDocs = new Map();
 /** pump.fun answering 429 to its list routes — the outage the banner names. */
 let pumpDown = false;
+/** Milliseconds every summary-building route (Jupiter single, DexScreener
+ *  single, pump.fun coin) sits on before answering — a slow rebuild, for
+ *  the chart test that must not wait on one. */
+let summaryDelayMs = 0;
+const summaryDelay = async () => {
+  if (summaryDelayMs > 0) await new Promise((r) => setTimeout(r, summaryDelayMs));
+};
 /** The biggest chunk any request was asked for — the silent-truncation guard. */
 let widestBatch = 0;
 
@@ -210,6 +217,7 @@ function install() {
       const coinPrefix = ['/coins-v3/', '/coins-v2/', '/coins/'].find((x) => p.startsWith(x));
       if (coinPrefix) {
         bump('pump:coin');
+        await summaryDelay();
         const mint = decodeURIComponent(p.slice(coinPrefix.length));
         return json({ ...pumpCoin(mintIndex.get(mint) ?? 0), mint, ...(coinExtra.get(mint) ?? {}) });
       }
@@ -239,6 +247,7 @@ function install() {
         const q = url.searchParams.get('query') ?? '';
         const ids = q.split(',').filter(Boolean);
         bump(ids.length > 1 ? 'jup:batch' : 'jup:single');
+        if (ids.length === 1) await summaryDelay();
         return json(ids.map((m, i) => jupToken(m, mintIndex.get(m) ?? i)));
       }
       if (p.startsWith('/tokens/v2/recent')) {
@@ -265,6 +274,7 @@ function install() {
     if (host === 'api.dexscreener.com') {
       if (p.startsWith('/latest/dex/tokens/')) {
         bump('ds:single');
+        await summaryDelay();
         const mint = decodeURIComponent(p.split('/').pop());
         return json({ pairs: [dsPair(mint, mintIndex.get(mint) ?? 0)] });
       }
@@ -332,6 +342,17 @@ function install() {
       bump('ipfs');
       const doc = ipfsDocs.get(p.split('/ipfs/')[1] ?? '');
       return doc ? json(doc) : new Response('not found', { status: 404 });
+    }
+
+    // Birdeye's candle route (keyed; the chart's first provider when the
+    // user brought a key). Five minute bars ending now.
+    if (host === 'public-api.birdeye.so') {
+      bump('birdeye:ohlcv');
+      const nowS = Math.floor(Date.now() / 60_000) * 60;
+      return json({
+        success: true,
+        data: { items: Array.from({ length: 5 }, (_, i) => ({ unix_time: nowS - (4 - i) * 60, o: 0.000044, h: 0.000045, l: 0.000043, c: 0.000044, v: 100 })) },
+      });
     }
 
     bump(`other:${host}`);
@@ -987,6 +1008,47 @@ test('the chain supply caps circulating supply and the market cap', async () => 
   } finally {
     globalThis.fetch = prev;
     mintSupplyRaw.delete(mint);
+  }
+});
+
+// ── The chart does not wait on a summary rebuild (2026-10-26) ─────────
+// "Sometimes over a second to load a chart": candles() used to await
+// summary() — a five-provider fan-out plus a 1.5 s metadata wait on a cold
+// mint — before asking Birdeye for anything. Now Birdeye goes out beside it,
+// and a Birdeye answer is the chart. Last in the file: its background
+// summary rebuild finishes after the case does.
+
+test('a chart with a Birdeye key paints from Birdeye without waiting on the summary rebuild', async () => {
+  http.clearCache();
+  resetCounts();
+  const birdeyeCtx = {
+    ...baseCtx,
+    data: () => ({ ...baseCtx.data(), providers: { ...baseCtx.data().providers, birdeye: true }, birdeyeApiKey: 'harness-key' }),
+  };
+  market.attach(birdeyeCtx);
+  const mint = mintFor(7_700);
+  summaryDelayMs = 1_500;
+  try {
+    const t0 = Date.now();
+    const series = await market.candles(mint, '1m', 500);
+    const ms = Date.now() - t0;
+    summaryDelayMs = 0;
+    assert.equal(series.source, 'birdeye', `source ${series.source}: ${series.note}`);
+    assert.equal(series.candles.length, 5);
+    assert.ok(ms < 900, `answered in ${ms} ms while every summary route sat on 1.5 s`);
+    assert.equal(n('birdeye:ohlcv'), 1);
+    assert.equal(series.supplyForMcap, null, 'no summary in memory yet: the page scales from its own summary');
+    // The rebuild it started carries on; once it is in memory the next
+    // load has the supply and asks nothing new.
+    await market.summary(mint);
+    resetCounts();
+    const again = await market.candles(mint, '1m', 500);
+    assert.ok(again.supplyForMcap > 0, `supply from the now-cached summary, got ${again.supplyForMcap}`);
+    assert.equal(again.source, 'birdeye');
+    assert.equal(n('jup:single') + n('ds:single') + n('pump:coin'), 0, 'a second chart load rebuilds no summary');
+  } finally {
+    summaryDelayMs = 0;
+    market.attach(baseCtx);
   }
 });
 

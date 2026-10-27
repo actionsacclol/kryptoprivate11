@@ -211,6 +211,14 @@ export interface TokenSummary {
   /** Quote mint of `poolAddress`, when known. See TokenPool.quoteMint. */
   poolQuoteMint: string | null;
   dexId: string | null;
+  /**
+   * Set when the coin's pump.fun bonding curve is quoted in something other
+   * than SOL — a tokenized stock, since 2026-10. The app prices such a coin
+   * through the quote token's rate (or not at all), its live feed converts
+   * every trade, and the local builder will not trade it. `symbol` is the
+   * quote token's, when Jupiter has named it.
+   */
+  curveQuote: { mint: string; symbol: string | null } | null;
 
   /** Supply concentration, all 0..100. Null where unmeasured. */
   devHoldingPct: number | null;
@@ -311,6 +319,7 @@ export function emptySummary(mint: string): TokenSummary {
     poolAddress: null,
     poolQuoteMint: null,
     dexId: null,
+    curveQuote: null,
     devHoldingPct: null,
     top10Pct: null,
     sniperPct: null,

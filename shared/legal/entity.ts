@@ -98,10 +98,16 @@ export const LIABILITY_CAP_USD = 100;
 // balances on Ethereum, Base and Arbitrum through publicnode (Privacy). New
 // hosts receive requests and a fee applies where none did, so everyone is
 // asked once.
-export const TERMS_VERSION = '2026-10-03.1';
+// 2026-10-25.1: pump.fun accounts (Terms §8) — every account created or
+// signed in through the software keeps "Using krypt.cc/bot" as the last line
+// of its public bio, re-added if removed; Privacy says what the browser
+// sign-in for email/social accounts reads (pump's session cookie, from a
+// profile the software opens, nothing else). A change to the user's own
+// public profile, so everyone is asked once.
+export const TERMS_VERSION = '2026-10-25.1';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '3 October 2026';
+export const TERMS_EFFECTIVE_DATE = '25 October 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

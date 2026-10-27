@@ -561,7 +561,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
         lines: [
           'Funder: each wallet it pays must end up rent-exempt (about 0.0009 SOL), or that batch fails. A batch counts only once it is confirmed. At most 20 wallets per action, and the app only pays wallets it holds.',
           'Collect back sends everything above rent and fee headroom. Tokens are not moved, so sell them first.',
-          'pump.fun sessions are held per wallet, last about 14 days, and are encrypted at rest. The session token never leaves the app’s main process.',
+          'pump.fun sessions are held per wallet, last about 30 days, and are encrypted at rest. The session token never leaves the app’s main process.',
           'After sign-in, the app registers the account with pump, which likes, follows and callouts need. It then applies the kryptcc referral and puts Using krypt.cc/bot in the bio.',
           'Check my rewards shows what Merkl reports this wallet has earned on that chain. The app never shows a claim link or any third-party URL. If Merkl cannot be read, it shows a dash, not zero.',
         ],
@@ -737,7 +737,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
         lines: [
           'The kryptcc referral is applied right after sign-in. pump only accepts a referral within 24 hours of an account’s first sign-in, and never for an account older than its referral programme. Such accounts are left as they are.',
           'pump takes Krypt’s referral share out of the account’s reward in each daily payout round. pump sets the amounts. The referral cannot be switched off.',
-          'A pump session lasts about 14 days. After it lapses, rewards cannot be read until you renew it on the Sessions list.',
+          'A pump session lasts about 30 days. After it lapses, rewards cannot be read until you renew it on the Sessions list.',
         ],
       },
     ],
@@ -822,7 +822,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
           'The key is stored like any other: encrypted by the system keystore, never logged and never shown on screen. It counts toward your 15 wallets, and a key already in the app is refused.',
           'pump links an account to its wallet address. The app signs pump’s login message with the key, which logs in to that account. No transaction is sent and nothing is charged.',
           'Before signing in, the app looks up the address on pump’s public profile. It shows an existing account (name and followers), pump’s own placeholder record (sign in to use it), or no account (Create account). If the lookup fails, it shows unknown, never no account.',
-          'After sign-in the app registers the account, tries the kryptcc referral, and puts Using krypt.cc/bot in the bio if the bio is empty. A bio with text in it is not changed.',
+          'After sign-in the app registers the account, tries the kryptcc referral, and makes Using krypt.cc/bot the last line of the bio. Your own text stays above it. The app checks every hour and puts the line back if it was removed on pump.fun.',
         ],
       },
       {
@@ -830,7 +830,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
         lines: [
           'The in-app pump.fun web sign-in window was removed on 2026-09-23 because Google refuses sign-in inside an embedded browser. Exporting and importing the key is now the way in.',
           'Callouts, follows, likes and profile edits all go through pump’s API, which pump says the 25 September change does not affect.',
-          'A session lasts about 14 days. Sessions marks it with 3 days left, and Renew signs in again. pump ends a session by refusing it (a 401).',
+          'A session lasts about 30 days. Sessions marks it with 3 days left, and Renew signs in again. pump ends a session by refusing it (a 401).',
           'An older account usually answers the referral with accountPredatesProgram or applyWindowClosed, and is left as it is.',
           'Sign-in-only accounts from the old web window can still be signed out. No new ones can be created.',
         ],
@@ -1271,7 +1271,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       {
         heading: 'Sessions',
         lines: [
-          'A session lasts about 14 days. That is observed from pump’s own token, not a promise pump publishes, so the app never expires one itself.',
+          'A session lasts about 30 days. That is observed from pump’s own token, not a promise pump publishes, so the app never expires one itself.',
           'The only authority is pump’s server: a 401 on a profile read turns that session into a signed-out one.',
           'The Sessions list shows the days left on each, and flags any session with 3 days or less so nothing lapses mid-run.',
           'A lapsed session shows up first as a script’s callouts failing. Renew before that happens.',

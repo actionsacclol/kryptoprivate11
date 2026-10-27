@@ -216,3 +216,97 @@ const PK_D = Buffer.alloc(32, 4);
 }
 
 console.log('decoder tests passed');
+
+// ── TradeEvent on a QUOTE-paired curve, real mainnet fixture (2026-10-26) ──
+// pump.fun launches coins against tokenized stocks since 2026-10. On such a
+// curve the program writes ZERO into every SOL field and keeps the money in
+// `quote_*` fields, in the quote token's raw units. Read as SOL, that priced
+// a $15k coin at a few dollars and fought Birdeye for the chart bar (user
+// report). The fixture is a real buy on 5skM7cwc…pump, quoted in RDDT
+// (Backpack's tokenized Reddit stock, 6 decimals).
+{
+  const { readFileSync } = await import('node:fs');
+  const { base58Decode } = await import('./.b58.mjs');
+  const { decodeCpiEventData, CPI_EVENT_WRAPPER } = await import('./.decoder.mjs');
+  const fx = JSON.parse(readFileSync(new URL('./fixtures/trade-quote-rddt.json', import.meta.url), 'utf8'));
+  const raw = Buffer.from(fx.eventHex, 'hex');
+  assert.equal(raw.length, 405);
+  const ev = decodeEventData(raw.toString('base64'));
+  assert.equal(ev.kind, 'trade');
+  assert.equal(ev.mint, fx.mint);
+  assert.equal(ev.isBuy, fx.expect.isBuy);
+  assert.equal(ev.solAmount, BigInt(fx.expect.solAmount), 'the SOL amount is zero on the wire');
+  assert.equal(ev.virtualSolReserves, BigInt(fx.expect.virtualSolReserves), 'the SOL reserve is zero on the wire');
+  assert.equal(ev.virtualTokenReserves, BigInt(fx.expect.virtualTokenReserves));
+  assert.equal(ev.quoteMint, fx.quoteMint, 'the quote mint is read');
+  assert.equal(ev.quoteAmount, BigInt(fx.expect.quoteAmount));
+  assert.equal(ev.virtualQuoteReserves, BigInt(fx.expect.virtualQuoteReserves));
+  assert.equal(ev.realQuoteReserves, BigInt(fx.expect.realQuoteReserves));
+
+  // The same body through the emit_cpi path decodes identically.
+  const cpi = decodeCpiEventData(Buffer.concat([CPI_EVENT_WRAPPER, raw]));
+  assert.deepEqual(cpi, ev, 'cpi path = log path');
+
+  // A SOL curve's event carries the same tail with an all-zero quote mint
+  // (and pump could write WSOL there one day): both read as "SOL", null.
+  const at = raw.indexOf(Buffer.from(base58Decode(fx.quoteMint)));
+  assert.ok(at > 0, 'the quote mint bytes are in the fixture');
+  const zeroed = Buffer.from(raw);
+  zeroed.fill(0, at, at + 32);
+  const z = decodeEventData(zeroed.toString('base64'));
+  assert.equal(z.quoteMint, null, 'all-zero quote_mint = SOL');
+  assert.equal(z.quoteAmount, 140025n, 'the quote figures are still read (they mirror SOL on a SOL curve)');
+  const wsol = Buffer.from(raw);
+  Buffer.from(base58Decode('So11111111111111111111111111111111111111112')).copy(wsol, at);
+  assert.equal(decodeEventData(wsol.toString('base64')).quoteMint, null, 'WSOL quote_mint = SOL');
+  console.log('ok  trade on a quote-paired curve (real RDDT fixture)');
+}
+
+// ── A trade with an older, shorter tail is a SOL trade with no quote figures ──
+{
+  const payload = Buffer.concat([
+    disc('TradeEvent'), PK_A, u64(500000000n), u64(15000000000000n), Buffer.from([1]), PK_B,
+    u64(1721234567), u64(30500000000n), u64(1058000000000000n), u64(1), u64(2),
+  ]);
+  const ev = decodeEventData(payload.toString('base64'));
+  assert.equal(ev.quoteMint, null);
+  assert.equal(ev.quoteAmount, null);
+  assert.equal(ev.virtualQuoteReserves, null);
+  assert.equal(ev.realQuoteReserves, null);
+  console.log('ok  trade with a short tail: SOL, no quote figures, no guess');
+}
+
+// ── CreateEvent: quote_mint + virtual_quote_reserves off the real creates ──
+// 50 bytes follow is_mayhem_mode on the wire: is_cashback_enabled (1),
+// quote_mint (32), virtual_quote_reserves (8), creator_fee_bps (8),
+// is_holder_reward (1). Both real creates are SOL curves: a zero quote mint
+// and a quote reserve that mirrors the SOL one.
+{
+  const { readFileSync } = await import('node:fs');
+  const { base58Decode } = await import('./.b58.mjs');
+  const fx = JSON.parse(readFileSync(new URL('./fixtures/create-mayhem.json', import.meta.url), 'utf8'));
+  for (const k of ['mayhem', 'standard']) {
+    const ev = decodeEventData(fx[k].eventB64);
+    assert.equal(ev.quoteMint, null, `${k}: a SOL curve`);
+    assert.equal(ev.virtualQuoteReserves, ev.virtualSolReserves, `${k}: the quote reserve mirrors the SOL one`);
+  }
+  // RDDT written into the standard create's quote_mint slot: a quote launch.
+  const raw = Buffer.from(fx.standard.eventB64, 'base64');
+  const at = raw.length - 83 + 32 + 1 + 1;
+  const RDDT = 'RDDTGbhHwVXfyCvQMXzzowKjf5qrYBZAnehoXW83ooh';
+  Buffer.from(base58Decode(RDDT)).copy(raw, at);
+  raw.writeBigUInt64LE(45130918n, at + 32);
+  const q = decodeEventData(raw.toString('base64'));
+  assert.equal(q.quoteMint, RDDT);
+  assert.equal(q.virtualQuoteReserves, 45130918n);
+  assert.equal(q.isMayhem, false, 'the flag before it still reads');
+  // The engine: such a launch is not scanned, and every trade is converted
+  // before anything SOL-shaped reads it (quoteCurve.ts).
+  const eng = readFileSync(new URL('../electron/engine/engine.ts', import.meta.url), 'utf8');
+  assert.ok(/if \(ev\.quoteMint !== null\) \{\s*this\.counters\.seen\+\+;/.test(eng), 'onCreate skips a quote-paired launch');
+  assert.ok(/tradeInSol\(ev, quoteRates\.solPerUnit\)/.test(eng), 'trades go through the quote conversion');
+  assert.ok(/curveVSolLamports\(st, quoteRates\.solPerUnit\)/.test(eng), 'the curve-account tick converts too');
+  assert.ok(/quoteSwapView\(event, 6, rate\)/.test(eng) && /if \(rate === null\) continue;/.test(eng), 'PumpSwap swaps on a quoted pool convert, or tick nothing');
+  assert.ok(/this\.onComplete\(ev\.mint, ev\.quoteMint\)/.test(eng), 'a completion maps the pool derived with the quote');
+  console.log('ok  create: quote_mint + virtual_quote_reserves (real SOL creates, synthetic RDDT create)');
+}

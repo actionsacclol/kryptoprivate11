@@ -271,6 +271,14 @@ declare global {
         status: () => Promise<IpcResult<import('@shared/pumpAuth').PumpAuthStatus>>;
         /** Sign in with one of this app's wallets. */
         signIn: (walletId: string) => Promise<IpcResult<import('@shared/pumpAuth').PumpAuthStatus>>;
+        /**
+         * Sign in on pump.fun in the user's own Chrome or Edge (email, Google,
+         * Apple, GitHub) and keep that session. Resolves when the browser
+         * window is closed, so it can take minutes.
+         */
+        browserSignIn: () => Promise<IpcResult<{ walletId?: string; status: import('@shared/pumpAuth').PumpAuthStatus }>>;
+        /** Stop waiting for the browser sign-in; closes its window. */
+        browserSignInCancel: () => Promise<IpcResult>;
         /** One wallet's account, or every account when none is named. */
         signOut: (walletId?: string) => Promise<IpcResult<import('@shared/pumpAuth').PumpAuthStatus>>;
         /** Follow/unfollow a pump user or like/unlike a callout, as this wallet's account. */
@@ -293,6 +301,8 @@ declare global {
             walletId: string;
             publicKey: string;
             signedIn: boolean;
+            /** pump refused a wallet sign-in because the account has an email login. */
+            privy: boolean;
             lookup: import('@shared/pumpProfile').PumpAccountLookup;
             status: import('@shared/pumpAuth').PumpAuthStatus;
           }>

@@ -206,7 +206,7 @@ export const PUMP_GUIDE: SectionGuide = {
     'Under Already on pump.fun, press Sign in to log in to a wallet’s existing account as it is.',
     'Give the account a name. You can type one per line to name several at once.',
     'Already have a pump.fun account with followers? Use Bring an existing account and paste that wallet’s key.',
-    'A sign-in lasts about two weeks. The Sessions list shows how long each has left. Press Renew before it runs out.',
+    'A sign-in lasts about 30 days. The Sessions list shows how long each has left. Press Renew before it runs out.',
   ],
   careful: [
     'Callouts, follows and likes are public and under that account’s name.',

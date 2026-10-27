@@ -39,6 +39,19 @@ export interface PumpCreateEvent {
   /** pump's own `is_mayhem_mode`, carried by the event after token_program.
    *  Null on layouts that predate it — unknown, never "standard". */
   isMayhem: boolean | null;
+  /**
+   * The curve's quote token when it is NOT SOL (2026-10-26: pump launches
+   * coins against tokenized stocks — `quote_mint` after is_cashback_enabled).
+   * Null means SOL: the field is absent on older layouts, and all-zero or
+   * WSOL on every SOL-paired curve. Everything downstream that reads a
+   * "SOL" figure off a trade of a quote-paired coin reads ZERO (the program
+   * zeroes sol_amount / virtual_sol_reserves and fills the quote fields
+   * instead), so a non-null value here means "convert or skip, never price".
+   */
+  quoteMint: string | null;
+  /** `virtual_quote_reserves` at creation, raw units of the quote token.
+   *  Null when the layout predates it. */
+  virtualQuoteReserves: bigint | null;
 }
 
 export interface PumpTradeEvent {
@@ -55,6 +68,17 @@ export interface PumpTradeEvent {
    *  (shorter) event that predates the field. Used to identify the creator-vault
    *  slot during tx-template learning without any external lookup. */
   creator: string | null;
+  /**
+   * Quote token of the curve when it is NOT SOL — see PumpCreateEvent. On a
+   * quote-paired coin `solAmount`, `virtualSolReserves` and the real SOL
+   * reserve are all ZERO on the wire; the money is in the three quote fields
+   * below, in the quote token's raw units. Null = SOL (absent, zero or WSOL),
+   * and then the quote fields simply mirror the SOL ones.
+   */
+  quoteMint: string | null;
+  quoteAmount: bigint | null;
+  virtualQuoteReserves: bigint | null;
+  realQuoteReserves: bigint | null;
 }
 
 export interface PumpCompleteEvent {
@@ -62,6 +86,9 @@ export interface PumpCompleteEvent {
   user: string;
   mint: string;
   bondingCurve: string;
+  /** The curve's quote mint when it is NOT SOL (2026-10) — the pool it
+   *  graduates into is quoted in it. Null = SOL. */
+  quoteMint: string | null;
 }
 
 export type PumpEvent = PumpCreateEvent | PumpTradeEvent | PumpCompleteEvent;
@@ -75,6 +102,16 @@ class Reader {
   u8(): number {
     const v = this.buf.readUInt8(this.off);
     this.off += 1;
+    return v;
+  }
+  u16(): number {
+    const v = this.buf.readUInt16LE(this.off);
+    this.off += 2;
+    return v;
+  }
+  u32(): number {
+    const v = this.buf.readUInt32LE(this.off);
+    this.off += 4;
     return v;
   }
   u64(): bigint {
@@ -100,7 +137,22 @@ class Reader {
     this.off += len;
     return v;
   }
+  /** A `quote_mint` field as the app wants it: null for SOL. The program
+   *  writes all zeros on a SOL curve (observed on every current trade,
+   *  2026-10-26) and may one day write WSOL; both mean SOL. */
+  quoteMint(): string | null {
+    const raw = this.buf.subarray(this.off, this.off + 32);
+    this.off += 32;
+    if (raw.every((b) => b === 0)) return null;
+    const v = base58Encode(raw);
+    return v === WSOL_MINT ? null : v;
+  }
 }
+
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
+/** Bytes per Shareholder entry in a TradeEvent: pubkey + share_bps (u16). */
+const SHAREHOLDER_BYTES = 32 + 2;
 
 export interface DecodeOutcome {
   event: PumpEvent | null;
@@ -197,12 +249,21 @@ function decodeCreate(body: Buffer): PumpCreateEvent {
   // 2026-09-24 mayhem and standard curves both started at exactly 30 virtual
   // SOL, so the reserves-based guess this replaced never said mayhem once
   // (test/fixtures/create-mayhem.json). A byte other than 0/1 is not trusted.
+  let quoteMint: string | null = null;
+  let virtualQuoteReserves: bigint | null = null;
   if (r.remaining() >= 8 + 8 + 32 + 1) {
     r.u64(); // real_token_reserves
     r.u64(); // token_total_supply
     r.pubkey(); // token_program
     const b = r.u8();
     isMayhem = b === 1 ? true : b === 0 ? false : null;
+    // 2026-10 layout: is_cashback_enabled · quote_mint · virtual_quote_reserves
+    // · creator_fee_bps · is_holder_reward. Read only what is there.
+    if (r.remaining() >= 1 + 32 + 8) {
+      r.u8(); // is_cashback_enabled
+      quoteMint = r.quoteMint();
+      virtualQuoteReserves = r.u64();
+    }
   }
   return {
     kind: 'create',
@@ -216,6 +277,8 @@ function decodeCreate(body: Buffer): PumpCreateEvent {
     virtualTokenReserves,
     virtualSolReserves,
     isMayhem,
+    quoteMint,
+    virtualQuoteReserves,
   };
 }
 
@@ -233,6 +296,10 @@ function decodeTrade(body: Buffer): PumpTradeEvent {
   // fee_recipient(32), fee_basis_points(8), fee(8), creator(32), … We only want
   // the creator — it identifies the creator-vault slot during template learning.
   let creator: string | null = null;
+  let quoteMint: string | null = null;
+  let quoteAmount: bigint | null = null;
+  let virtualQuoteReserves: bigint | null = null;
+  let realQuoteReserves: bigint | null = null;
   if (r.remaining() >= 8 + 8 + 32 + 8 + 8 + 32) {
     r.u64(); // real_sol_reserves
     r.u64(); // real_token_reserves
@@ -240,6 +307,26 @@ function decodeTrade(body: Buffer): PumpTradeEvent {
     r.u64(); // fee_basis_points
     r.u64(); // fee
     creator = r.pubkey();
+    // The 2026-10 tail, read field by field and only while the bytes are
+    // there (pump's IDL, fetched from the chain 2026-10-26):
+    //   creator_fee_basis_points u64 · creator_fee u64 · track_volume bool ·
+    //   total_unclaimed_tokens u64 · total_claimed_tokens u64 ·
+    //   current_sol_volume u64 · last_update_timestamp i64 · ix_name string ·
+    //   mayhem_mode bool · cashback_fee_basis_points u64 · cashback u64 ·
+    //   buyback_fee_basis_points u64 · buyback_fee u64 ·
+    //   shareholders vec<{pubkey, u16}> · quote_mint pubkey · quote_amount u64 ·
+    //   virtual_quote_reserves u64 · real_quote_reserves u64 · …
+    // A coin paired with a tokenized stock has sol_amount and both SOL
+    // reserves at ZERO and its money here. Anything that stops short leaves
+    // the quote fields null, which the engine treats as "SOL" exactly as the
+    // older layouts were.
+    const quote = readTradeQuoteTail(r);
+    if (quote) {
+      quoteMint = quote.quoteMint;
+      quoteAmount = quote.quoteAmount;
+      virtualQuoteReserves = quote.virtualQuoteReserves;
+      realQuoteReserves = quote.realQuoteReserves;
+    }
   }
   return {
     kind: 'trade',
@@ -252,12 +339,62 @@ function decodeTrade(body: Buffer): PumpTradeEvent {
     virtualSolReserves,
     virtualTokenReserves,
     creator,
+    quoteMint,
+    quoteAmount,
+    virtualQuoteReserves,
+    realQuoteReserves,
   };
+}
+
+/** The quote fields at the end of a current TradeEvent, or null when the
+ *  bytes run out first (an older layout — SOL throughout). A short tail is
+ *  not drift, just an older event, so it never throws. */
+function readTradeQuoteTail(r: Reader): { quoteMint: string | null; quoteAmount: bigint; virtualQuoteReserves: bigint; realQuoteReserves: bigint } | null {
+  // creator_fee_basis_points · creator_fee · track_volume · total_unclaimed ·
+  // total_claimed · current_sol_volume · last_update_timestamp · string len
+  if (r.remaining() < 8 + 8 + 1 + 8 + 8 + 8 + 8 + 4) return null;
+  r.u64();
+  r.u64();
+  r.u8();
+  r.u64();
+  r.u64();
+  r.u64();
+  r.i64();
+  r.string(); // ix_name — its own guard throws on a length past the end
+  // mayhem_mode · cashback bps · cashback · buyback bps · buyback fee · vec len
+  if (r.remaining() < 1 + 8 + 8 + 8 + 8 + 4) return null;
+  r.u8();
+  r.u64();
+  r.u64();
+  r.u64();
+  r.u64();
+  const shareholders = r.u32();
+  if (shareholders > 64 || r.remaining() < shareholders * SHAREHOLDER_BYTES) return null;
+  for (let i = 0; i < shareholders; i++) {
+    r.pubkey();
+    r.u16();
+  }
+  if (r.remaining() < 32 + 8 + 8 + 8) return null;
+  const quoteMint = r.quoteMint();
+  const quoteAmount = r.u64();
+  const virtualQuoteReserves = r.u64();
+  const realQuoteReserves = r.u64();
+  return { quoteMint, quoteAmount, virtualQuoteReserves, realQuoteReserves };
 }
 
 function decodeComplete(body: Buffer): PumpCompleteEvent {
   const r = new Reader(body);
-  return { kind: 'complete', user: r.pubkey(), mint: r.pubkey(), bondingCurve: r.pubkey() };
+  const user = r.pubkey();
+  const mint = r.pubkey();
+  const bondingCurve = r.pubkey();
+  // timestamp (i64), then quote_mint — pump.fun since 2026-10; an older,
+  // shorter event is a SOL curve.
+  let quoteMint: string | null = null;
+  if (r.remaining() >= 8 + 32) {
+    r.i64();
+    quoteMint = r.quoteMint();
+  }
+  return { kind: 'complete', user, mint, bondingCurve, quoteMint };
 }
 
 const PROGRAM_DATA_PREFIX = 'Program data: ';

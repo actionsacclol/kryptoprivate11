@@ -1225,7 +1225,9 @@ export function registerIpc(): void {
     // A sign-in-only pump.fun account with this address moves onto the wallet.
     if (r.ok && r.publicKey) {
       const held = wallet.list().find((w) => w.publicKey === r.publicKey);
-      if (held) pumpAuth.claimWebSession(r.publicKey, held.id);
+      // The browser session moves onto the wallet; settled like every other
+      // sign-in, so its bio line and registration are not skipped.
+      if (held && pumpAuth.claimWebSession(r.publicKey, held.id)) void settlePumpAccount(held.id);
     }
     // Never the secret, and never its length — only that one arrived.
     logger.info(r.ok ? `wallet:import — a wallet was imported (${wallet.list().length} now), active is ${wallet.publicKey()}` : `wallet:import failed — ${r.message}`);
@@ -2220,6 +2222,7 @@ export function registerIpc(): void {
   // visible only in a live panel — a user who closed the app took the
   // evidence with them.
   httpLayer.attachLog(toLog);
+  market.attachLog(toLog);
   // pump.fun's Cloudflare check going up and coming down (2026-10-22).
   pumpWall.attachLog(toLog);
 
@@ -4165,12 +4168,10 @@ export function registerIpc(): void {
   });
 
   // The in-app pump.fun web sign-in window was removed 2026-09-23: Google
-  // refuses OAuth in an embedded browser AND in a debug-port Chrome, so it
-  // never worked for the login most people use. Accounts created on pump.fun
-  // (email/social) come in through export-key → importAccount instead, which
-  // signs in via pump's API login — the piece pump says the 25th does not
-  // change. claimWebSession (used by importAccount) stays for a legacy web
-  // session on disk; adoptWebSession is now unreachable — see its note.
+  // refuses OAuth in an embedded browser AND in a debug-port Chrome. Since
+  // 2026-10-23 pump also refuses a WALLET sign-in for any account that has an
+  // email or social login (409, Privy), so export-key → importAccount no
+  // longer gets those in either. The way in is pump:browserSignIn below.
 
   ipcMain.handle('pump:signIn', async (_e, walletId: unknown) => {
     const id = typeof walletId === 'string' ? walletId : '';
@@ -4180,6 +4181,22 @@ export function registerIpc(): void {
     // "Using krypt.cc/bot" line; not awaited, the sign-in answer does not wait.
     if (r.ok) void settlePumpAccount(id);
     return r.ok ? ok(r.message, pumpAuth.status()) : fail(r.message);
+  });
+
+  // Sign in on pump.fun in the user's own Chrome or Edge, then keep that
+  // session (system/pumpBrowserSignIn.ts). Takes nothing from the renderer:
+  // the URL is a constant and pump says which account the session is for.
+  // Resolves when the user closes the browser window, so it can take minutes.
+  ipcMain.handle('pump:browserSignIn', async () => {
+    const { signIn } = await import('./system/pumpBrowserSignIn');
+    const r = await signIn();
+    // Sign-in-only accounts too: every account used here gets the bio line.
+    if (r.ok && r.walletId) void settlePumpAccount(r.walletId);
+    return r.ok ? ok(r.message, { walletId: r.walletId, status: pumpAuth.status() }) : fail(r.message);
+  });
+  ipcMain.handle('pump:browserSignInCancel', async () => {
+    const { cancel } = await import('./system/pumpBrowserSignIn');
+    return cancel() ? ok('Cancelled') : fail('No browser sign-in is open');
   });
 
   // No wallet named = sign every account out. One named = just that one, so a
@@ -4248,13 +4265,14 @@ export function registerIpc(): void {
     // and imported here): that session becomes this wallet's. A wallet
     // signature would likely be refused for a linked address anyway.
     if (pumpAuth.claimWebSession(r.publicKey, held.id)) {
+      void settlePumpAccount(held.id);
       return ok('Imported — the pump.fun account you signed in to is now a full account on this wallet', {
         walletId: held.id, publicKey: r.publicKey, signedIn: true, lookup, status: pumpAuth.status(),
       });
     }
     const signed = await pumpAuth.signIn(held.id);
     if (signed.ok) void settlePumpAccount(held.id);
-    const result = { walletId: held.id, publicKey: r.publicKey, signedIn: signed.ok, lookup, status: pumpAuth.status() };
+    const result = { walletId: held.id, publicKey: r.publicKey, signedIn: signed.ok, privy: signed.privy === true, lookup, status: pumpAuth.status() };
     return signed.ok
       ? ok(lookup.kind === 'account' ? 'Imported and signed in to the existing account' : 'Imported and signed in', result)
       : ok(`The wallet was imported, but pump.fun sign-in failed: ${signed.message}`, result);

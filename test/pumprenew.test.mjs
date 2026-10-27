@@ -64,7 +64,7 @@ const URL_ = 'https://frontend-api-v3.pump.fun/auth/my-profile';
   assert.match(a, /RENEW_COOLDOWN_MS = 5 \* 60_000/);
   assert.match(a, /now - \(renewTriedAt\.get\(walletId\) \?\? 0\) < RENEW_COOLDOWN_MS/, 'a wallet is not signed in again in a loop');
   assert.match(a, /if \(await renewSession\(walletId\)\) return;[\s\S]*sessions\.delete\(walletId\)/, 'refreshProfile renews before it drops a session');
-  assert.match(a, /lapsed\.delete\(walletId\);\n  lastError = null;/, 'signing out forgets a lapsed wallet');
+  assert.match(a, /lapsed\.delete\(walletId\);\n  needs\.delete\(walletId\);\n  lastError = null;/, 'signing out forgets a lapsed wallet (and its signed-out notice)');
   assert.match(a, /export function startSessionKeepAlive/);
   const m = fs.readFileSync('electron/main.ts', 'utf8');
   assert.match(m, /pumpAuth\.startSessionKeepAlive\(\)/, 'main starts the keep-alive');

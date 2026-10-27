@@ -297,9 +297,10 @@ export function pumpSwapPoolFor(index: number, creator: string, baseMint: string
   return findProgramAddress([enc.encode('pool'), new Uint8Array([index & 0xff, (index >> 8) & 0xff]), key(creator), key(baseMint), key(quoteMint)], key(PUMP_AMM_PROGRAM));
 }
 /** The pool a graduated pump coin trades in: index 0, created by pump's
- *  pool authority for the mint, quoted in WSOL. Derived, never fetched. */
-export function pumpSwapCanonicalPoolFor(mint: string): string {
-  return pumpSwapPoolFor(0, pumpPoolAuthorityFor(mint), mint, WSOL_MINT);
+ *  pool authority for the mint, quoted in WSOL — or in the curve's quote
+ *  token for a coin launched against one (2026-10). Derived, never fetched. */
+export function pumpSwapCanonicalPoolFor(mint: string, quoteMint: string = WSOL_MINT): string {
+  return pumpSwapPoolFor(0, pumpPoolAuthorityFor(mint), mint, quoteMint);
 }
 /** pump-amm `["pool-v2", base_mint]` — the account every buy and sell must
  *  pass just before the buyback vault, whether or not it exists yet (the

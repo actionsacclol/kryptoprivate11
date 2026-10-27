@@ -51,6 +51,7 @@ import { canonicalPoolFor, parsePool } from '../engine/pumpSwapBuilder';
 import { parseCurve, type CurveState } from '../engine/txBuilder';
 import { cached, putCache } from './http';
 import { seedMintFacts } from './onchain';
+import * as quoteRates from './quoteRates';
 import { emptySummary, type TokenSummary } from '@shared/market';
 
 /** Fresh enough for a header that re-reads every five seconds, and short
@@ -103,6 +104,14 @@ export interface PumpChainCoin {
   /** Real SOL on the coin's side of the market: the curve's real reserve, or
    *  the pool's quote vault (its virtual reserve is not money). */
   liquiditySol: number | null;
+  /**
+   * The curve's quote token when it is NOT SOL (pump launches coins against
+   * tokenized stocks since 2026-10). The account's reserve slots then hold
+   * the quote token, so `priceSol` / `liquiditySol` above are computed
+   * through `solPerUnit` (data/quoteRates.ts) and are null until Jupiter
+   * has priced the quote token. Null = an ordinary SOL curve.
+   */
+  quote: { mint: string; symbol: string | null; solPerUnit: number | null } | null;
 }
 
 /** A mint the reader should try: pump's vanity suffix, the same gate the
@@ -136,10 +145,13 @@ export function parseMetaplex(data: Uint8Array): { name: string; symbol: string;
   return { name, symbol, uri };
 }
 
-/** Price of a curve coin from its virtual reserves, SOL per whole token. */
-export function curvePriceSol(vSol: bigint, vTok: bigint, decimals: number): number | null {
-  if (vTok <= 0n) return null;
-  const p = (Number(vSol) / 1e9) / (Number(vTok) / 10 ** decimals);
+/** Price of a curve coin from its virtual reserves, SOL per whole token.
+ *  `solPerUnit` is what one raw unit of the reserve is worth in SOL: a
+ *  lamport (1e-9) on a SOL curve, the quote token's rate on a quote-paired
+ *  one (data/quoteRates.ts). */
+export function curvePriceSol(vSol: bigint, vTok: bigint, decimals: number, solPerUnit = 1e-9): number | null {
+  if (vTok <= 0n || !(solPerUnit > 0)) return null;
+  const p = (Number(vSol) * solPerUnit) / (Number(vTok) / 10 ** decimals);
   return Number.isFinite(p) && p > 0 ? p : null;
 }
 
@@ -148,9 +160,9 @@ export function curvePriceSol(vSol: bigint, vTok: bigint, decimals: number): num
  * virtual quote reserve, over the base vault — the constant-product figure
  * twelve consecutive real swaps reproduced to the lamport (pumpSwapBuilder).
  */
-export function poolPriceSol(quoteLamports: bigint, virtualQuote: bigint, baseRaw: bigint, decimals: number): number | null {
-  if (baseRaw <= 0n) return null;
-  const p = (Number(quoteLamports + virtualQuote) / 1e9) / (Number(baseRaw) / 10 ** decimals);
+export function poolPriceSol(quoteLamports: bigint, virtualQuote: bigint, baseRaw: bigint, decimals: number, solPerUnit = 1e-9): number | null {
+  if (baseRaw <= 0n || !(solPerUnit > 0)) return null;
+  const p = (Number(quoteLamports + virtualQuote) * solPerUnit) / (Number(baseRaw) / 10 ** decimals);
   return Number.isFinite(p) && p > 0 ? p : null;
 }
 
@@ -202,6 +214,9 @@ export async function readMany(httpUrl: string, mints: string[]): Promise<Map<st
 
   // Pass one: curve, mint, metadata — three derived accounts per mint.
   const graduated: Array<{ mint: string; coin: PumpChainCoin }> = [];
+  // Curves quoted in something other than SOL: priced after the loop, once
+  // the quote token's rate is in hand (one memoised Jupiter read each).
+  const quoted: Array<{ mint: string; coin: PumpChainCoin }> = [];
   for (let i = 0; i < todo.length; i += MINTS_PER_CALL) {
     const chunk = todo.slice(i, i + MINTS_PER_CALL);
     const addrs = chunk.flatMap((m) => [bondingCurveFor(m), m, metadataFor(m)]);
@@ -249,9 +264,16 @@ export async function readMany(httpUrl: string, mints: string[]): Promise<Map<st
         pool: null,
         priceSol: null,
         liquiditySol: null,
+        quote: st.quoteMint !== null ? { mint: st.quoteMint, symbol: quoteRates.symbolOf(st.quoteMint), solPerUnit: null } : null,
       };
       if (st.complete) {
         graduated.push({ mint, coin });
+        return;
+      }
+      if (coin.quote) {
+        // The reserve slot holds the quote token, not lamports: dividing it
+        // by 1e9 read a $15k coin as a $2 one (2026-10-26). Priced below.
+        quoted.push({ mint, coin });
         return;
       }
       coin.priceSol = curvePriceSol(st.vSol, st.vTok, decimals);
@@ -261,14 +283,41 @@ export async function readMany(httpUrl: string, mints: string[]): Promise<Map<st
     });
   }
 
+  // Quote-paired curves: the quote reserve × SOL-per-raw-unit is a SOL
+  // reserve the ordinary price rule accepts. No rate (Jupiter parked, or a
+  // quote token it does not list) → the price stays null and the summary's
+  // providers fill the USD figure; never a figure in the wrong unit.
+  if (quoted.length) {
+    await Promise.all(
+      quoted.map(async ({ mint, coin }) => {
+        const q = coin.quote!;
+        const rate = await quoteRates.ensure(q.mint).catch(() => null);
+        if (rate) {
+          q.symbol = rate.symbol;
+          q.solPerUnit = rate.solPerUnit;
+          coin.priceSol = curvePriceSol(coin.curve.vSol, coin.curve.vTok, coin.decimals, rate.solPerUnit);
+          coin.liquiditySol = Number(coin.curve.realSol) * rate.solPerUnit;
+        }
+        putCache(key(mint), coin, CHAIN_TTL_MS);
+        out.set(mint, coin);
+      }),
+    );
+  }
+
   // Pass two, graduated coins only: the canonical pool and its two vaults.
   // The vault addresses are the pool's associated token accounts, derived
   // here and confirmed against the pool's own record below.
   for (let i = 0; i < graduated.length; i += MINTS_PER_CALL) {
     const chunk = graduated.slice(i, i + MINTS_PER_CALL);
     const addrs = chunk.flatMap(({ mint, coin }) => {
-      const pool = canonicalPoolFor(mint);
-      return [pool, ataFor(pool, WSOL_MINT, TOKEN_PROGRAM), ataFor(pool, mint, coin.tokenProgram)];
+      // The pool PDA includes the quote mint: a coin launched against a
+      // tokenized stock graduates into a pool quoted in it (2026-10-26:
+      // derived with WSOL, LUMINA's pool read as "none"). The quote vault
+      // is guessed as a classic ATA; a Token-2022 quote mismatches and the
+      // pool's own vault record is followed below.
+      const quoteMint = coin.curve.quoteMint ?? WSOL_MINT;
+      const pool = canonicalPoolFor(mint, quoteMint);
+      return [pool, ataFor(pool, quoteMint, TOKEN_PROGRAM), ataFor(pool, mint, coin.tokenProgram)];
     });
     const r = await getMultipleAccountInfo(httpUrl, addrs, 'processed');
     for (let k = 0; k < chunk.length; k++) {
@@ -287,8 +336,21 @@ export async function readMany(httpUrl: string, mints: string[]): Promise<Map<st
       }
       if (pool && quote !== null && base !== null) {
         coin.pool = { address: poolAddr, quoteLamports: quote, virtualQuote: pool.virtualQuote, baseRaw: base };
-        coin.priceSol = poolPriceSol(quote, pool.virtualQuote, base, coin.decimals);
-        coin.liquiditySol = Number(quote) / 1e9;
+        if (pool.quoteMint !== WSOL_MINT) {
+          // The pool keeps the curve's pair: a coin launched against a
+          // tokenized stock graduates into a pool quoted in it, and the
+          // vault holds that token's raw units, not lamports. Converted at
+          // the quote rate or left null — never divided by 1e9.
+          const rate = await quoteRates.ensure(pool.quoteMint).catch(() => null);
+          coin.quote = { mint: pool.quoteMint, symbol: rate?.symbol ?? quoteRates.symbolOf(pool.quoteMint), solPerUnit: rate?.solPerUnit ?? null };
+          if (rate) {
+            coin.priceSol = poolPriceSol(quote, pool.virtualQuote, base, coin.decimals, rate.solPerUnit);
+            coin.liquiditySol = Number(quote) * rate.solPerUnit;
+          }
+        } else {
+          coin.priceSol = poolPriceSol(quote, pool.virtualQuote, base, coin.decimals);
+          coin.liquiditySol = Number(quote) / 1e9;
+        }
       }
       // Cached even without a price: the identity half (name, symbol,
       // creator, complete) is still true, and a null price renders as an
@@ -328,12 +390,19 @@ export function toSummary(coin: PumpChainCoin, solUsd: number | null): TokenSumm
   // pump's own record reported it.
   s.bondingCurvePct = coin.curve.complete ? 100 : curveProgressTokenPct(coin.curve.vTok);
   if (coin.curve.complete) {
-    s.poolAddress = coin.pool?.address ?? canonicalPoolFor(coin.mint);
+    s.poolAddress = coin.pool?.address ?? canonicalPoolFor(coin.mint, coin.curve.quoteMint ?? WSOL_MINT);
     s.poolQuoteMint = WSOL_MINT;
     s.dexId = 'pumpswap';
   } else {
     s.poolAddress = bondingCurveFor(coin.mint);
     s.dexId = 'pumpfun-curve';
+  }
+  if (coin.quote) {
+    // Said on the summary so the page can show it and nothing downstream
+    // assumes SOL: the local builder refuses such a curve, pool watchers
+    // check `poolQuoteMint`, and the header names the quote token.
+    s.poolQuoteMint = coin.quote.mint;
+    s.curveQuote = { mint: coin.quote.mint, symbol: coin.quote.symbol };
   }
   s.liquidityUsd = coin.liquiditySol !== null && solUsd !== null && solUsd > 0 ? coin.liquiditySol * solUsd : null;
   s.sources = {};

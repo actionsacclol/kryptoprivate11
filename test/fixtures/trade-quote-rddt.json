@@ -1,0 +1,9 @@
+{
+  "note": "A real pump.fun TradeEvent (log payload, 405 bytes) on a curve QUOTED IN A TOKENIZED STOCK, harvested 2026-10-26 off mainnet. The coin is 5skM7cwc...pump ('Reddit Inc.'); its curve is paired with RDDT (Backpack Securities' tokenized Reddit stock, Token-2022, 6 decimals), not SOL. pump writes zero into every SOL field and keeps the money in the quote_* fields, in raw RDDT units. User report: the chart flipped between two prices because the app read these zeros/quote units as SOL.",
+  "mint": "5skM7cwcLWoDhFgE1844bCQHM949qwSbYkSPDBtBpump",
+  "quoteMint": "RDDTGbhHwVXfyCvQMXzzowKjf5qrYBZAnehoXW83ooh",
+  "quoteSymbol": "RDDT",
+  "quoteDecimals": 6,
+  "expect": { "solAmount": "0", "virtualSolReserves": "0", "quoteAmount": "140025", "virtualQuoteReserves": "45130918", "realQuoteReserves": "21332306", "virtualTokenReserves": "565822810781556", "isBuy": true },
+  "eventHex": "bddb7fd34ee661ee486ecceffd7cb32dc17df6a4b5786e01bb8c9c8786da6ca70f894e780d16f4cf0000000000000000fb5487039a010000014c979b21b0900bd51ee15a94812adb485868b08b5d9de675b61d4384719da1670013e06a0000000000000000000000007477a4e39c020200000000000000000074df91970b040100608ccc1dfce961b43b779c191505a6e2d3bf45d5a4db4618ad76c82d617545355f00000000000000330500000000000006e59711ef3f8a7c47064ad9b920ed2e73716e1b983cd5ae0c696a11a8af0e2864000000000000007905000000000000000000000000000000000000000000000000000000000000000000000000000000120000006275795f65786163745f71756f74655f696e000000000000000000000000000000000088130000000000009902000000000000000000000633c0293c82c342b1c63b27cd2e3eb124eafe40103ff7ff88596f809422ce6cf922020000000000a6a4b00200000000528145010000000064000000000000007905000000000000ecf41900000000000000000000000000"
+}

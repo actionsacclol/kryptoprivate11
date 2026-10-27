@@ -278,6 +278,36 @@ export function mergeCandles(provider: Candle[], tape: Candle[], limit = 600): C
 }
 
 /**
+ * Do the two sides disagree about the SAME buckets by more than any market
+ * move could explain? Both saw the same trades in those minutes, so their
+ * closes agree to within a few percent — unless one of them is in the
+ * wrong unit. The 2026-10-26 case: a curve quoted in a tokenized stock
+ * read as lamports put the tape ~700× under Birdeye, and the merge
+ * ("tape wins the bucket") then drew the provider's history with the
+ * tape's live edge at a two-thousandth of it — a bar flipping between two
+ * prices as each side re-asserted itself.
+ *
+ * Needs at least two shared buckets (one could be a partial bucket) and
+ * judges the MEDIAN ratio, so a single odd bar cannot trip it. A real 20×
+ * move is possible across buckets; it is not possible inside the same
+ * bucket as seen by two observers of the same trades.
+ */
+export const UNIT_MISMATCH_RATIO = 20;
+export function tapeUnitMismatch(provider: Candle[], tape: Candle[]): boolean {
+  const byTime = new Map<number, number>();
+  for (const k of provider) if (Number.isFinite(k.time) && k.close > 0) byTime.set(k.time, k.close);
+  const ratios: number[] = [];
+  for (const k of tape) {
+    const p = byTime.get(k.time);
+    if (p !== undefined && k.close > 0) ratios.push(k.close > p ? k.close / p : p / k.close);
+  }
+  if (ratios.length < 2) return false;
+  ratios.sort((a, b) => a - b);
+  const median = ratios[Math.floor(ratios.length / 2)];
+  return median > UNIT_MISMATCH_RATIO;
+}
+
+/**
  * Convert SOL-priced tape candles to USD (prices AND volume). Returns null
  * when the SOL/USD rate is unknown — the caller must then DROP the tape from
  * a USD merge rather than mix units (honest-null rule: never guess a rate).

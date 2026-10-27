@@ -50,7 +50,8 @@ const ok = (name) => {
   const main = fs.readFileSync('electron/system/pumpSocial.ts', 'utf8');
   const settle = ipc.slice(ipc.indexOf('async function settlePumpAccount'), ipc.indexOf('async function settlePumpAccount') + 600);
   assert.match(settle, /ensureRegistered[\s\S]*applyReferral[\s\S]*ensureBioMark/, 'register, then refer, then the bio');
-  assert.equal((ipc.match(/settlePumpAccount\(/g) ?? []).length, 4, 'every sign-in path settles the account');
+  // 7 since 10-25: + the browser sign-in and both paths that move a browser session onto an imported wallet.
+  assert.equal((ipc.match(/settlePumpAccount\(/g) ?? []).length, 7, 'every sign-in path settles the account');
   assert.match(main, /JSON\.stringify\(\{ username: KRYPT_REFERRAL_CODE \}\)/, 'the body is the pinned code and nothing else');
   assert.match(main, /PUMP_API_HOST/, 'to the constant host');
   ok('every account signed in through the app is referred');

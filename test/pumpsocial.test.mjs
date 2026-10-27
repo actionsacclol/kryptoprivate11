@@ -81,7 +81,7 @@ const UUID = 'ffe8057d-da74-49d4-94d9-933a68d1bf0f';
   const ipc = fs.readFileSync('electron/ipc.ts', 'utf8');
   const cal = fs.readFileSync('electron/engine/autoCallout.ts', 'utf8');
   assert.match(ipc, /async function settlePumpAccount[\s\S]{0,200}ensureRegistered/, 'sign-in registers');
-  assert.equal((ipc.match(/settlePumpAccount\(/g) ?? []).length, 4, 'all three sign-in paths settle (plus the definition)');
+  assert.equal((ipc.match(/settlePumpAccount\(/g) ?? []).length, 7, 'all six sign-in paths settle — wallet, many, import, browser, and both browser-session claims (plus the definition)');
   assert.equal((cal.match(/await ensureRegistered\(walletId\)/g) ?? []).length, 2, 'callouts and replies register first');
   ok('every sign-in path and every callout registers the account');
 }
