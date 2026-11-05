@@ -415,7 +415,7 @@
  "node test/migratedprice.test.mjs",
  "esbuild src/state/glass.ts --bundle --format=esm --platform=node --alias:@shared=./shared --outfile=test/.glass.mjs",
  "node test/glass.test.mjs",
- "esbuild test/vaultharness.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.vaultharness.mjs",
+ "esbuild test/vaultharness.ts --bundle --format=esm --platform=node --packages=external --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.vaultharness.mjs",
  "esbuild electron/system/totp.ts --bundle --format=esm --platform=node --outfile=test/.totp.mjs",
  "esbuild shared/qr.ts --bundle --format=esm --platform=node --outfile=test/.qr.mjs",
  "esbuild shared/securityPolicy.ts --bundle --format=esm --platform=node --outfile=test/.securitypolicy.mjs",

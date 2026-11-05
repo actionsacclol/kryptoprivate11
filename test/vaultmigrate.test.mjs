@@ -15,8 +15,13 @@ let passed = 0;
 const cases = [];
 const test = (name, fn) => cases.push({ name, fn });
 
+// Node never frees an imported module, and the crash loops restart hundreds of
+// times. So the harness leaves npm packages out of its bundle (--packages=external
+// in test-steps.json): they load once, and only the app's own modules, which hold
+// the state a restart has to reset, are made again. Bundled, this file passed 2 GB
+// of heap and died on the macOS runner.
 let gen = 0;
-const restart = async () => import(`./.vaultharness.mjs?v=${gen++}`);
+const restart =async () => import(`./.vaultharness.mjs?v=${gen++}`);
 
 const freshDir = () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'krypt-vault-'));
