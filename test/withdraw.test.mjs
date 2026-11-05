@@ -109,7 +109,8 @@ const transfer = (to, lamports) => SystemProgram.transfer({ fromPubkey: me.publi
   const page = fs.readFileSync(new URL('../src/pages/Wallet.tsx', import.meta.url), 'utf8');
   assert.ok(page.includes("const homeUnsaved = !!info?.exists && homeInput.trim() !== (info.homeAddress ?? '')"));
   assert.ok(page.includes('unsavedHome={homeUnsaved}'));
-  assert.ok(/const reason = unsavedHome\s*\n\s*\? /.test(page.replace(/\r\n/g, '\n')), 'the unsaved edit is the FIRST refusal reason');
+  const card = fs.readFileSync(new URL('../src/components/terminal/WithdrawPanel.tsx', import.meta.url), 'utf8');
+  assert.ok(/const reason = unsavedHome\s*\n\s*\? /.test(card.replace(/\r\n/g, '\n')), 'the unsaved edit is the FIRST refusal reason');
   const ipc = fs.readFileSync(new URL('../electron/ipc.ts', import.meta.url), 'utf8');
   const setHome = ipc.slice(ipc.indexOf("ipcMain.handle('wallet:setHome'"), ipc.indexOf("ipcMain.handle('wallet:withdraw'"));
   assert.ok(setHome.includes('confirmNative(e.sender,') && !setHome.includes('dialog.showMessageBox('), 'setHome asks on the window that sent it');

@@ -92,6 +92,14 @@ function migrateUnsafe(s: AppSettings, fromRevision: number): boolean {
     s.onboarded = false;
   }
 
+  if (fromRevision < 8) {
+    // 7.0.0 (2026-11-04): Helius only is off for everyone, once. It put the launch
+    // feed and the AMM tape on the key, about 130,000 credits an hour measured, and
+    // emptied a 1M plan in under eight hours while the old counter saw a fraction of
+    // it. Turned back on after this it stays on, at the cost the switch now states.
+    if (s.rpc) s.rpc.heliusOnlyFeed = false;
+  }
+
   s.settingsRevision = SETTINGS_REVISION;
   return true;
 }
@@ -137,6 +145,7 @@ function mergeState(loaded: Partial<AppSettings> | null): AppSettings {
   // stored once (its own field) and never duplicated into settings.json.
   const rpc = { ...d.rpc, ...(loaded.rpc ?? {}) };
   delete rpc.execHttpUrl;
+  delete rpc.ammWssUrl;
   // The Helius feed socket is derived too (key + heliusFeedSocket, appended
   // by resolveRpc). A resolved copy that reached the store — every RPC save
   // until 2026-09-08 — is dropped here, and duplicates with it.

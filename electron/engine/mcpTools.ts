@@ -76,7 +76,6 @@ export interface McpToolsHost {
   callouts(limit: number): Promise<unknown>;
   scoutBoard(chain: Chain, window: (typeof WINDOWS)[number], limit: number, onlyWorthALook: boolean): Promise<unknown>;
   scoutWallet(address: string, chain: Chain): Promise<unknown>;
-  copyConfigs(): Promise<unknown>;
   orders(): Promise<unknown>;
   trades(limit: number): Promise<unknown>;
   buy(mint: string, amount: number, paper: boolean, chain: Chain): Promise<{ ok: boolean; message: string }>;
@@ -352,11 +351,6 @@ export async function call(name: string, args: Record<string, unknown>): Promise
       }
       return done('This wallet’s record, and what a copier would have realised on its recent trips. Past results, not a forecast.', rec);
     }
-    case 'get_copy_configs':
-      return done(
-        'Copy trading setup and how each config is doing. Read only — arming one starts unattended spending and stays something the user does in the app.',
-        await h.copyConfigs(),
-      );
     case 'get_orders':
       return done('Advanced orders waiting to fire.', await h.orders());
     case 'get_krypto_sessions':

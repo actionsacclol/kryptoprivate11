@@ -90,7 +90,7 @@ export function TradePanel({
   //   • Paper — always allowed once a wallet exists; nothing is broadcast, so
   //     no funding/cap checks. This is the default and needs no ceremony.
   //   • Live buy — needs a funded wallet. The per-trade cap does NOT apply to a
-  //     buy you place by hand (it bounds orders, copy trade and fan-out), and
+  //     buy you place by hand (it bounds orders and fan-out), and
   //     the panel does not mention it — a manual size is the user's call.
   //   • Sell — never blocked by mode beyond needing a wallet; a paper sell
   //     simulates, a live sell is real. Refusing an exit is a trap the order

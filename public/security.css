@@ -1,0 +1,145 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: #0b0b14;
+  color: #e9e9f2;
+  font: 14px/1.5 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+main {
+  padding: 22px 24px 20px;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+h1.danger {
+  color: #ffb4a8;
+}
+
+p {
+  margin: 0 0 10px;
+  color: #b6b6c8;
+  font-size: 13px;
+}
+
+.secret {
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px solid #3a3a55;
+  border-radius: 10px;
+  background: #15151f;
+  color: #fff;
+  font: 15px/1.7 Consolas, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+canvas {
+  display: block;
+  margin: 10px auto 14px;
+  border-radius: 8px;
+}
+
+label {
+  display: block;
+  margin: 12px 0 4px;
+  color: #d6d6e4;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid #3a3a55;
+  border-radius: 8px;
+  outline: none;
+  background: #15151f;
+  color: #fff;
+  font: 14px Consolas, Menlo, monospace;
+}
+
+input:focus {
+  border-color: #8b7bf0;
+}
+
+.hint {
+  margin: 4px 0 0;
+  color: #8a8aa0;
+  font-size: 11px;
+}
+
+.error {
+  margin: 12px 0 0;
+  padding: 8px 11px;
+  border: 1px solid #7a3b3b;
+  border-radius: 8px;
+  background: #2a1414;
+  color: #ffc9c0;
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+button {
+  padding: 8px 15px;
+  border: 1px solid #3a3a55;
+  border-radius: 8px;
+  background: transparent;
+  color: #d6d6e4;
+  font: 600 13px 'Segoe UI', system-ui, sans-serif;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #1b1b2a;
+}
+
+button.primary {
+  border-color: #6d5ee0;
+  background: #5b4dcc;
+  color: #fff;
+}
+
+button.primary:hover {
+  background: #6a5be0;
+}
+
+button.primary.danger {
+  border-color: #a8483c;
+  background: #93392e;
+}
+
+button.link {
+  padding: 4px 2px;
+  border: none;
+  color: #a79cf2;
+  font-weight: 500;
+  font-size: 12px;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

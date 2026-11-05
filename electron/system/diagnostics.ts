@@ -127,7 +127,7 @@ const SECRET_KEYS = /(apikey|api[-_]key|token|secret|password|passphrase|private
 const KEYISH = /key$/i;
 const PUBLIC_KEYS = /^(public[-_]?key|pub[-_]?key)$/i;
 /** A URL can carry a key in its path or query, so URLs are scrubbed not dropped. */
-const URL_KEYS = /url$/i;
+const URL_KEYS = /urls?$/i;
 
 /** Strip an API key out of a URL while keeping the host, which is the useful part. */
 export function scrubUrl(value: string): string {
@@ -151,7 +151,9 @@ export function scrubUrl(value: string): string {
  * the diagnostic, without the value, which is the risk.
  */
 export function stripSecrets(value: unknown, key = ''): unknown {
-  if (Array.isArray(value)) return value.map((v) => stripSecrets(v));
+  // The key name carries into the array: a list of strings under `webhooks` is a
+  // list of secrets, and it used to pass through as plain strings.
+  if (Array.isArray(value)) return value.map((v) => stripSecrets(v, key));
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = stripSecrets(v, k);

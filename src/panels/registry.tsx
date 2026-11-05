@@ -26,7 +26,6 @@ import type { TradeHistoryRow } from '@shared/portfolio';
 import type { EvmFill } from '@shared/evm';
 import { mergeSnapshot, scriptChain, type ScriptSnapshot } from '@shared/automation';
 import type { ScriptStatValue } from '@shared/scriptProtocol';
-import { chainOf, leaderTooFast, type CopySnapshot } from '@shared/copytrade';
 import type { Alert } from '@shared/alerts';
 import type { Position } from '@shared/portfolio';
 import { tokenLinks, type TokenLink, type TokenLinkKind } from '@shared/tokenLinks';
@@ -1012,90 +1011,6 @@ function ScriptsBody(): ReactNode {
 }
 
 /**
- * Followed wallets, and what copying them has done for you.
- *
- * Two different numbers sit side by side on purpose: THEIR record and YOUR
- * copies. Only the second is your money, and conflating them is how a wallet
- * with a great record looks like a great result.
- *
- * The "too fast to copy" flag rides along from the leaderboard work: a wallet
- * whose trips finish inside a minute was over before a copy could join it,
- * however good its own record looks.
- */
-function CopyBody(): ReactNode {
-  const filter = usePanelChain();
-  const [snap, setSnap] = useState<CopySnapshot | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    void window.krypt.copy.list().then((r) => {
-      if (alive && r.ok && r.data) setSnap(r.data);
-    });
-    const off = window.krypt.engine.onEvent((ev) => {
-      if (ev.kind === 'copy') setSnap(ev.snapshot);
-    });
-    return () => {
-      alive = false;
-      off();
-    };
-  }, []);
-
-  if (!snap) return <Empty>Loading…</Empty>;
-  const configs = snap.configs.filter((c) => chainMatches(filter, chainOf(c)));
-  if (!configs.length) return <Empty>Not following anyone{filter === 'all' ? '' : ` on ${CHAIN_SHORT[filter]}`}.</Empty>;
-  return (
-    <Rows>
-      {configs.map((c) => {
-        const chain = chainOf(c);
-        const leader = snap.leaders[c.wallet];
-        // Your side: every config on this wallet, summed.
-        const mine = Object.values(snap.stats).filter((st) => {
-          const owner = snap.configs.find((x) => x.id === st.configId);
-          return owner && owner.wallet === c.wallet;
-        });
-        const copies = mine.reduce((a, st) => a + st.trades, 0);
-        const realized = mine.reduce((a, st) => a + st.realizedPnlSol, 0);
-        const closed = mine.reduce((a, st) => a + st.wins + st.losses, 0);
-        return (
-          <div key={c.id} className="rounded border border-white/5 bg-white/[0.02] px-2 py-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex min-w-0 items-center gap-1.5">
-                <span className={cls('shrink-0 rounded px-1 text-micro font-semibold uppercase', CHAIN_TAG[chain])}>{CHAIN_SHORT[chain]}</span>
-                <span className="truncate font-medium text-white/90">{c.label || `${c.wallet.slice(0, 6)}…`}</span>
-              </span>
-              <span className="flex shrink-0 items-center gap-1.5">
-                {c.mode === 'live' && <span className="rounded bg-rose-500/20 px-1 text-micro font-semibold uppercase text-rose-200">live</span>}
-                <span className={cls('h-1.5 w-1.5 rounded-full', c.enabled ? 'bg-emerald-400' : 'bg-krypt-muted/40')} aria-hidden="true" />
-              </span>
-            </div>
-            <div className="mt-1 flex items-center justify-between gap-2 text-micro text-krypt-muted">
-              {/* Yours, not theirs. */}
-              <span>
-                {copies} {copies === 1 ? 'copy' : 'copies'}
-                {closed > 0 ? ' · ' : ''}
-                {closed > 0 && (
-                  <span className={realized >= 0 ? 'text-emerald-300' : 'text-rose-300'}>
-                    {realized >= 0 ? '+' : ''}
-                    {realized.toFixed(3)}
-                  </span>
-                )}
-              </span>
-              {leader && leaderTooFast(leader) ? (
-                <span className="text-krypt-warn" title="Most of this wallet's round trips finish inside a minute — they were over before a copy could join them.">
-                  too fast to copy
-                </span>
-              ) : (
-                <span>{leader ? `${leader.roundTrips} trips` : '—'}</span>
-              )}
-            </div>
-          </div>
-        );
-      })}
-    </Rows>
-  );
-}
-
-/**
  * Alerts, armed and recently fired.
  *
  * Solana-side like the order engine — shared/alerts.ts carries no chain — so
@@ -1659,7 +1574,6 @@ export const PANELS: PanelSpec[] = [
   { id: 'orders', chainAware: true, title: 'Open orders', blurb: 'Stops, take profits and limits that are still armed.', layout: { x: 9, y: 14, w: 3, h: 8, minW: 3, minH: 5 }, Body: OrdersBody },
   { id: 'fills', chainAware: true, title: 'Recent fills', blurb: 'What actually executed, on every chain.', layout: { x: 0, y: 24, w: 4, h: 8, minW: 3, minH: 4 }, Body: FillsBody },
   { id: 'scripts', chainAware: true, title: 'Scripts', blurb: 'Every script, what it has spent today and whether it is armed.', layout: { x: 4, y: 24, w: 4, h: 8, minW: 3, minH: 4 }, Body: ScriptsBody },
-  { id: 'copy', chainAware: true, title: 'Copy trading', blurb: 'Followed wallets, and what copying them did for you.', layout: { x: 8, y: 24, w: 4, h: 8, minW: 3, minH: 4 }, Body: CopyBody },
   { id: 'alerts', chainAware: true, title: 'Alerts', blurb: 'Armed alerts and the ones that recently fired.', layout: { x: 9, y: 22, w: 3, h: 6, minW: 3, minH: 4 }, Body: AlertsBody },
   { id: 'observatory', chainAware: true, title: 'Observatory', blurb: 'Each chain’s scanner: watching or not, how far behind, what it has flagged.', layout: { x: 6, y: 14, w: 3, h: 8, minW: 3, minH: 5 }, Body: ObservatoryBody },
   { id: 'chart', HeaderControl: ChartHeaderControl, title: 'Chart', blurb: 'The last token you opened, on a 1-minute chart.', layout: { x: 0, y: 14, w: 6, h: 10, minW: 4, minH: 6 }, Body: ChartBody },

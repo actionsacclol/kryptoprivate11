@@ -99,7 +99,7 @@ export function TokenSearch({ onOpen }: { onOpen: (mint: string, chain?: ChainKi
   const isMint = MINT_RE.test(query.trim());
 
   return (
-    <div ref={boxRef} className="relative w-[340px]">
+    <div ref={boxRef} className="relative w-[340px] min-w-[120px]">
       <div className="relative">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-krypt-muted/60" />
         <input

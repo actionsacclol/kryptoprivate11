@@ -5,7 +5,7 @@
 // completely different jobs. The Hub asks one question instead: what are you
 // here to do. Each card is a workspace, and each card says what is actually
 // true about it right now rather than a static blurb — an engine that is not
-// running says so, and copy trading with nothing set up says that too.
+// running says so, and automation with nothing running says that too.
 //
 // Status lines are honest: unknown renders as an em dash, never 0, and a
 // number is only shown when it was actually read.
@@ -42,11 +42,10 @@ interface CardStatus {
 export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void; onOpenToken: (mint: string) => void }) {
   const { status, positions, settings, updateSettings } = useAppState();
   const toast = useToast();
-  const [copyCount, setCopyCount] = useState<number | null>(null);
   const [walletCount, setWalletCount] = useState<number | null>(null);
   // Running scripts, paper or live (user report 2026-09-20: a paper script
-  // was running and the card said "Nothing running" — it only counted
-  // followed wallets). Null until read; the kill switch means none run.
+  // was running and the card said "Nothing running"). Null until read; the
+  // kill switch means none run.
   const [scripts, setScripts] = useState<{ running: number; live: number; killed: boolean } | null>(null);
   // Krypto Trader sessions that are running: null = not read (a dash), never 0.
   const [traders, setTraders] = useState<{ running: number; live: number } | null>(null);
@@ -72,17 +71,6 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
   // a live surface — a stale count here is not worth a subscription.
   useEffect(() => {
     let alive = true;
-    // `copy.list()` answers with a CopySnapshot OBJECT, not an array — the
-    // followed wallets are in `configs`. Guarding on Array.isArray was never
-    // true, so this card showed an em dash forever: the dash is supposed to
-    // mean "we could not read it", and here it meant "read fine, guarded
-    // wrong". tsc cannot see it because Array.isArray narrows any[].
-    void window.krypt.copy
-      .list()
-      .then((r) => {
-        if (alive && r.ok && r.data && Array.isArray(r.data.configs)) setCopyCount(r.data.configs.length);
-      })
-      .catch(() => undefined);
     void window.krypt.wallet
       .list()
       .then((r) => {
@@ -122,11 +110,10 @@ export function Hub({ onOpen, onOpenToken }: { onOpen: (id: WorkspaceId) => void
         return { line: open > 0 ? `${open} open position${open === 1 ? '' : 's'}` : 'Ready', tone: open > 0 ? 'live' : 'idle' };
       }
       case 'automation': {
-        // Followed wallets AND running scripts, each only when it was read.
+        // Scripts and Krypto Trader sessions, each only when it was read.
         // An em dash still means "could not read it", never zero.
-        if (copyCount === null && scripts === null && traders === null) return { line: '—', tone: 'idle' };
+        if (scripts === null && traders === null) return { line: '—', tone: 'idle' };
         const parts: string[] = [];
-        if (copyCount !== null && copyCount > 0) parts.push(`${copyCount} wallet${copyCount === 1 ? '' : 's'} followed`);
         if (scripts !== null && scripts.running > 0) {
           const paper = scripts.running - scripts.live;
           parts.push(`${scripts.running} script${scripts.running === 1 ? '' : 's'} running${scripts.live === 0 ? ' (paper)' : paper > 0 ? ` (${scripts.live} live)` : ' (live)'}`);

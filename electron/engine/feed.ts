@@ -30,6 +30,9 @@ import WebSocket from 'ws';
 import { PUMP_PROGRAM_ID, type PumpEvent } from './pumpDecoder';
 import type { AmmEvent } from './ammDecoder';
 import { base58Decode } from '../chain/base58';
+import * as heliusBudget from '../system/heliusBudget';
+import { isBilledHeliusUrl } from '../../shared/credits';
+import { PUMP_AMM_PROGRAM_ID } from './ammDecoder';
 import { noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs, parseWireTransaction, resolveAccountKeys, type RawIx, MAX_SUPPORTED_TX_VERSION } from '../chain/rpcClient';
 import type { FeedSocketStatus, FeedState } from '@shared/types';
 
@@ -197,6 +200,8 @@ abstract class RpcSocket {
   /** Uncompressed bytes received. Helius bills websocket traffic by the
    *  byte (2 credits / 0.1 MB), so this is the billing counter. */
   bytes = 0;
+  /** Where this socket's bytes are counted, or null on a free endpoint. */
+  private readonly meterStream: string | null;
   readonly host: string;
   /** Provider tag stamped on notifications (`host`, or `host:block`). */
   readonly provider: string;
@@ -206,7 +211,9 @@ abstract class RpcSocket {
     providerSuffix: string,
     protected pool: SocketPool,
     timing: FeedTiming = {},
+    stream = 'Token watchers',
   ) {
+    this.meterStream = isBilledHeliusUrl(url) ? stream : null;
     this.host = hostOf(url);
     this.provider = providerSuffix ? `${this.host}:${providerSuffix}` : this.host;
     this.timing = { ...DEFAULT_TIMING, ...timing };
@@ -298,7 +305,9 @@ abstract class RpcSocket {
 
     ws.on('message', (raw) => {
       const receivedAt = Date.now();
-      this.bytes += frameLength(raw);
+      const frameBytes = frameLength(raw);
+      this.bytes += frameBytes;
+      if (this.meterStream) heliusBudget.addSocketBytes(this.meterStream, frameBytes);
       // Inbound traffic is proof of life. A busy node can delay a pong past
       // the deadline while streaming perfectly well; killing the firehose
       // socket for that and redialling was the 2026-09-03 storm shape
@@ -469,7 +478,13 @@ class FeedSocket extends RpcSocket {
     pool: SocketPool,
     timing: FeedTiming = {},
   ) {
-    super(url, '', pool, timing);
+    super(
+      url,
+      '',
+      pool,
+      timing,
+      programId === PUMP_PROGRAM_ID ? 'Launch feed' : programId === PUMP_AMM_PROGRAM_ID ? 'AMM tape' : 'Token watchers',
+    );
   }
 
   protected subscribeRequest(): { method: string; params: unknown[] } {

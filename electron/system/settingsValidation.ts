@@ -100,6 +100,7 @@ const BOUNDS: Record<string, { min: number; max: number; int?: boolean }> = {
   'evm.bnb.runnerAlerts.maxPerHour': { min: 1, max: 120, int: true },
   // Chat trading spends real SOL on a typed command.
   'bots.trading.maxBuySol': { min: 0.000001, max: 25 },
+  'bots.trading.hourlyCapSol': { min: 0.000001, max: 100 },
   // Terminal data settings. A refresh interval of 0 would hammer four
   // third-party APIs in a tight loop and get the user rate-limited into a
   // broken-looking app, so the floor is enforced here rather than in the UI.

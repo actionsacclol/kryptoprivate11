@@ -48,7 +48,6 @@ function setup(over = {}) {
     callouts: read('callouts'),
     scoutBoard: read('scoutBoard'),
     scoutWallet: read('scoutWallet'),
-    copyConfigs: read('copyConfigs'),
     orders: read('orders'),
     trades: read('trades'),
     buy: async (mint, amount, paper, chain) => {

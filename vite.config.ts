@@ -79,6 +79,18 @@ export default defineConfig(({ mode }) => {
             },
           },
         },
+        {
+          // The security window's preload: three calls and nothing else, so the
+          // window that handles passwords never loads the whole app API.
+          entry: 'electron/securityPreload.ts',
+          vite: {
+            build: {
+              outDir: 'dist-electron',
+              sourcemap,
+              rollupOptions: { output: stableNames },
+            },
+          },
+        },
       ]),
       rendererPlugin(),
     ],

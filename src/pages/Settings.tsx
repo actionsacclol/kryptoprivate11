@@ -9,6 +9,7 @@ import type { RouteId } from '../components/Sidebar';
 import { BotsPanel } from '../components/terminal/BotsPanel';
 import { AiSettingsPanel } from '../components/terminal/AiSettingsPanel';
 import { CreditMeter } from '../components/terminal/CreditMeter';
+import { feedCostText } from '@shared/credits';
 import { RpcKeyWarning } from '../components/terminal/RpcKeyWarning';
 import { EvmSettingsCard } from '../components/terminal/EvmSettingsCard';
 import { feePctLabel, holderFeePctLabel, referralPctLabel, referralProblem, TREASURY_ADDRESS, feesEnabled } from '@shared/fees';
@@ -259,7 +260,7 @@ export function SettingsPage({ onNavigate }: { onNavigate?: (r: RouteId) => void
                 checked={settings.rpc.heliusFeedSocket ?? false}
                 onChange={(v) => void updateSettings({ rpc: { ...settings.rpc, heliusFeedSocket: v } })}
                 label="Helius feed socket"
-                description="Adds the Helius websocket to the racing pool. MEASURED over 45s on the pump firehose: Helius delivered 92% of events FIRST, with the free sockets a median 150ms (mainnet-beta) and 578ms (publicnode) behind — decisive for sniping. It also costs ~800k credits/day at firehose rates, so it is a paid-plan switch, not a free-tier one."
+                description={`Adds the Helius websocket to the racing pool. MEASURED over 45s on the pump firehose: Helius delivered 92% of events FIRST, with the free sockets a median 150ms (mainnet-beta) and 578ms (publicnode) behind — decisive for sniping. ${feedCostText(settings.rpc.heliusMonthlyCredits ?? 0)}`}
               />
               <div className="mt-2">
                 <HeliusOnlyFeedSwitch />

@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { firehoseHoursFor, hoursRemaining, usedPct, type CreditUsage } from '@shared/credits';
+import { breakdownRows, feedCostText, hoursRemaining, usedPct, type CreditUsage } from '@shared/credits';
 import { cls } from '../../utils/format';
 
 // Helius credit usage, counted rather than estimated.
 //
-// This panel exists because the estimate it replaces was wrong by a factor of
-// twenty — a comment put the pump firehose at 33k pushes/hour when the
-// measured rate was 780,000. An estimate that wrong makes an expensive switch
-// look affordable, so the number is now counted and shown, and the app turns
-// the socket off by itself at the ceiling.
+// An estimate that is wrong makes an expensive switch look affordable, so the
+// number is counted and shown, split by socket and method, and the app turns the
+// Helius feed off by itself at the ceiling.
+
+const SHOWN_ROWS = 10;
 
 export function CreditMeter({ limit, onLimit }: { limit: number; onLimit: (v: number) => void }) {
   const [usage, setUsage] = useState<CreditUsage | null>(null);
@@ -27,6 +27,8 @@ export function CreditMeter({ limit, onLimit }: { limit: number; onLimit: (v: nu
 
   useEffect(() => setDraft(String(limit)), [limit]);
 
+  const rows = breakdownRows(usage?.breakdown);
+  const counted = rows.reduce((sum, r) => sum + r.credits, 0);
   const pct = usage ? usedPct(usage) : null;
   const left = usage ? hoursRemaining(usage, Date.now()) : null;
   const tone = pct === null ? 'text-krypt-muted' : pct > 90 ? 'text-rose-400' : pct > 60 ? 'text-arc-gold' : 'text-emerald-400';
@@ -74,13 +76,46 @@ export function CreditMeter({ limit, onLimit }: { limit: number; onLimit: (v: nu
         </button>
       </div>
 
-      {limit > 0 && (
-        <p className="mt-1.5 text-label leading-relaxed text-krypt-muted/60">
-          At the measured firehose rate (~780,000 pushes/hour, sampled 2026-08-24) this ceiling covers about{' '}
-          <span className="text-white/80">{firehoseHoursFor(limit).toFixed(1)} hours</span> of feed-socket runtime. The
-          socket switches itself off when the ceiling is reached.
-        </p>
+      {usage && (
+        <div className="mt-2">
+          <div className="text-label text-krypt-muted">Where they went</div>
+          {rows.length === 0 ? (
+            <p className="mt-0.5 text-label text-krypt-muted/60">Nothing counted yet.</p>
+          ) : (
+            <ul className="mt-0.5" data-testid="credit-breakdown">
+              {rows.slice(0, SHOWN_ROWS).map((r) => (
+                <li key={r.label} className="flex items-baseline justify-between gap-3 text-label">
+                  <span className="min-w-0 truncate text-krypt-muted">{r.label}</span>
+                  <span className="flex-shrink-0 font-mono text-white/80">
+                    {r.credits.toLocaleString()}{' '}
+                    <span className="text-krypt-muted">{((r.credits / counted) * 100).toFixed(0)}%</span>
+                  </span>
+                </li>
+              ))}
+              {rows.length > SHOWN_ROWS && (
+                <li className="flex items-baseline justify-between gap-3 text-label text-krypt-muted">
+                  <span>{rows.length - SHOWN_ROWS} more</span>
+                  <span className="font-mono">
+                    {rows
+                      .slice(SHOWN_ROWS)
+                      .reduce((sum, r) => sum + r.credits, 0)
+                      .toLocaleString()}
+                  </span>
+                </li>
+              )}
+            </ul>
+          )}
+          {usage.breakdown && counted < usage.used && (
+            <p className="mt-0.5 text-label text-krypt-muted/60">
+              Split counted since {new Date(usage.breakdown.since).toLocaleString()}. The total above includes earlier use.
+            </p>
+          )}
+        </div>
       )}
+
+      <p className="mt-1.5 text-label leading-relaxed text-krypt-muted/60">
+        Helius feed socket or Helius only: {feedCostText(limit)} The Helius feed switches itself off at the ceiling.
+      </p>
     </div>
   );
 }

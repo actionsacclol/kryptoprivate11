@@ -95,7 +95,6 @@ export const SCRIPT_METHODS = [
   'aioMove',
   'walletScores',
   'walletRecord',
-  'copyConfigs',
   'alerts',
   // Housekeeping the pages have and scripts did not (2026-09-27): one order
   // by id, the paused orders, one alert, the fired alerts, the templates.
@@ -112,7 +111,6 @@ export const SCRIPT_METHODS = [
   'positions',
   'orders',
   'runners',
-  'leaders',
   'wallet',
   'getState',
   'setState',
@@ -129,7 +127,6 @@ export const SCRIPT_EVENTS = [
   'runner',
   'position',
   'tick',
-  'leaderTrade',
   'order',
   'alert',
   'fill',
@@ -144,8 +141,6 @@ export const SCRIPT_EVENTS = [
   'devSell',
   /** The trading wallet's token accounts changed. */
   'holdings',
-  /** Copy trading opened, closed or skipped a copy. */
-  'copyFill',
   /** A runner flag expired off the list. */
   'runnerExpired',
 ] as const;
@@ -518,7 +513,6 @@ export function sandboxPageHtml(): string {
     }),
     walletScores: (opts) => call('walletScores', [opts && typeof opts === 'object' ? opts : {}]),
     walletRecord: (address) => call('walletRecord', [str(address === undefined ? '' : address)]),
-    copyConfigs: () => call('copyConfigs', []),
     alerts: () => call('alerts', []),
     cancelOrder: (id) => call('cancelOrder', [str(id === undefined ? '' : id)]),
     resumeOrders: () => call('resumeOrders', []),
@@ -532,7 +526,6 @@ export function sandboxPageHtml(): string {
     positions: () => call('positions', []),
     orders: (mint) => call('orders', mint === undefined ? [] : [mint]),
     runners: () => call('runners', []),
-    leaders: () => call('leaders', []),
     wallet: () => call('wallet', []),
     getState: () => call('getState', []),
     setState: (obj) => call('setState', [obj]),

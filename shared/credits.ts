@@ -2,11 +2,10 @@
 //
 // ─── Why this exists ──────────────────────────────────────────────────
 //
-// The pump firehose was measured on 2026-08-24 at **780,000 websocket pushes
-// per hour** (13,000 in a 60s sample, commitment `processed`). Helius bills
-// websocket traffic by BYTES — 2 credits per 0.1 MB uncompressed (checked
-// 2026-08-30) — which puts the firehose at ~21,000 credits an hour, so a
-// 1M-credit monthly allowance lasts about **two days** of continuous runtime.
+// Helius bills websocket traffic by BYTES: 2 credits per 0.1 MB uncompressed.
+// Measured 2026-11-04 (see MEASURED_FIREHOSE_PER_HOUR), the launch feed alone is
+// about 45,000 credits an hour and the AMM tape about 80,000, so with both on a
+// key a 1M-credit monthly allowance lasted one working day.
 //
 // The comment this replaces estimated 33k pushes/hour, and the version after
 // it billed a credit per push (37x too high). An estimate that wrong is worse
@@ -29,10 +28,32 @@ export interface CreditUsage {
   wsEvents: number;
   /** HTTP RPC calls billed to the key. */
   httpCalls: number;
+  /** Where the credits went. Missing on a count saved by an older version. */
+  breakdown?: CreditBreakdown;
+}
+
+/** Credits by socket and by RPC method, so "why did it run out" has an answer. */
+export interface CreditBreakdown {
+  /** Epoch ms this breakdown started. It can be younger than the window. */
+  since: number;
+  sockets: Record<string, number>;
+  methods: Record<string, number>;
+}
+
+export function emptyBreakdown(now: number): CreditBreakdown {
+  return { since: now, sockets: {}, methods: {} };
+}
+
+/** Largest first, sockets and methods together. */
+export function breakdownRows(b: CreditBreakdown | undefined): Array<{ label: string; credits: number }> {
+  if (!b) return [];
+  return [...Object.entries(b.sockets), ...Object.entries(b.methods)]
+    .map(([label, credits]) => ({ label, credits }))
+    .sort((x, y) => y.credits - x.credits);
 }
 
 export function emptyUsage(now: number): CreditUsage {
-  return { used: 0, limit: 0, windowStartedAt: now, wsEvents: 0, httpCalls: 0 };
+  return { used: 0, limit: 0, windowStartedAt: now, wsEvents: 0, httpCalls: 0, breakdown: emptyBreakdown(now) };
 }
 
 /** Helius bills per calendar month; a 30-day rolling window is close enough
@@ -49,15 +70,28 @@ export function rollWindow(u: CreditUsage, now: number): CreditUsage {
   return { ...emptyUsage(now), limit: u.limit };
 }
 
-export function record(u: CreditUsage, kind: 'ws' | 'http', count: number): CreditUsage {
+export function record(u: CreditUsage, kind: 'ws' | 'http', count: number, label?: string): CreditUsage {
   const n = Math.max(0, Math.floor(count));
   if (!n) return u;
-  return {
+  const next: CreditUsage = {
     ...u,
     used: u.used + n,
     wsEvents: kind === 'ws' ? u.wsEvents + n : u.wsEvents,
     httpCalls: kind === 'http' ? u.httpCalls + n : u.httpCalls,
   };
+  if (label && u.breakdown) {
+    const field = kind === 'ws' ? 'sockets' : 'methods';
+    next.breakdown = {
+      ...u.breakdown,
+      [field]: { ...u.breakdown[field], [label]: (u.breakdown[field][label] ?? 0) + n },
+    };
+  }
+  return next;
+}
+
+/** Sender is free on every Helius plan, so it never counts. */
+export function isBilledHeliusUrl(url: string): boolean {
+  return /helius/i.test(url) && !/sender\.helius/i.test(url);
 }
 
 /** A limit of 0 means "no guard" — the user has a plan that can take it. */
@@ -101,13 +135,24 @@ export function feedCreditsForBytes(bytes: number): number {
   return bytes > 0 ? bytes / FEED_BYTES_PER_CREDIT : 0;
 }
 
-/** Pump firehose in CREDITS per hour under byte billing: ~780,000 pushes an
- *  hour (measured 2026-08-24) at ~1.4 KB each ≈ 1.1 GB/h ÷ 51,200 ≈ 21k.
- *  The constant this replaces billed a credit per push (780k/h) — 37x too
- *  high once the billing unit was checked. */
-export const MEASURED_FIREHOSE_PER_HOUR = 21_000;
+/** The launch feed in credits per hour. Bytes on a public socket at `processed`
+ *  on 2026-11-04, at Helius's 2 credits per 0.1 MB: 51k over 60 s and 40k over
+ *  40 s. Short samples of a stream that moves with the market, so use it as a
+ *  size, not a promise. The figure before this was 21k, measured in August. */
+export const MEASURED_FIREHOSE_PER_HOUR = 45_000;
+
+/** The AMM tape: 80k over 30 s and 82k over 35 s, same day and method. */
+export const MEASURED_AMM_TAPE_PER_HOUR = 80_000;
 
 /** What a given allowance buys at the measured firehose rate, in hours. */
 export function firehoseHoursFor(limit: number): number {
   return limit > 0 ? limit / MEASURED_FIREHOSE_PER_HOUR : 0;
+}
+
+/** What a Helius launch feed costs, in words, for the switches that turn one on. */
+export function feedCostText(limit: number): string {
+  const allowance = limit > 0 ? limit : 1_000_000;
+  const hours = Math.round(firehoseHoursFor(allowance));
+  const rate = MEASURED_FIREHOSE_PER_HOUR.toLocaleString('en-US');
+  return `Costs about ${rate} Helius credits an hour while scanning, so ${allowance.toLocaleString('en-US')} credits last about ${hours} hours.`;
 }

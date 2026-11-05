@@ -6,13 +6,12 @@
 // it in Phantom and MetaMask. What it adds is the one total, in dollars, and
 // — next — buying on any chain from whatever it holds.
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, ArrowLeftRight, Check, Eye, Globe2, KeyRound, Layers, Loader2, PlayCircle, RefreshCw, ShieldAlert, Trash2, Wrench } from 'lucide-react';
+import { AlertTriangle, ArrowLeftRight, Check, Eye, Globe2, Layers, Loader2, PlayCircle, RefreshCw, ShieldAlert, Trash2, Wrench } from 'lucide-react';
 import { AIO_WALLET_VIDEO_URL } from '../guideVideos';
 import { TransferQuote, useQuoteClock } from '../components/terminal/TransferQuote';
 import { STATUS_LABEL, nativeSymbolOf, type BridgeQuote, type InFlight } from '@shared/bridge';
 import { Badge, Card, Copyable, GhostButton, Page, PrimaryButton, Section, Switch } from '../components/common';
 import { AIO_SPEEDS, AIO_SPEED_LABEL, AIO_SPEED_NOTE } from '@shared/aioSpeed';
-import { LiquidGlass } from '../components/LiquidGlass';
 import { useToast } from '../state/ToastProvider';
 import { useAppState } from '../state/AppStateProvider';
 import { useModal } from '../state/ModalProvider';
@@ -48,64 +47,6 @@ const CHAIN_TONE: Record<string, string> = {
 /** The phrase on screen. Only ever held in this component's state, dropped
  *  on close. No copy button: a phrase on the clipboard is a phrase any app
  *  can read. */
-function PhraseSheet({ phrase, firstTime, onDone, onClose }: { phrase: string; firstTime: boolean; onDone: () => void; onClose: () => void }) {
-  const [ticked, setTicked] = useState(false);
-  const words = phrase.split(' ');
-  // Escape closes, like every other dialog.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-  // No clipboard, by design: the words go on paper. Selecting, copying,
-  // cutting and the context menu are all refused on the sheet (swarm 2026-10-03).
-  const noCopy = (e: { preventDefault: () => void }): void => e.preventDefault();
-  return (
-    <div
-      className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/75"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="aio-phrase-title"
-      onCopy={noCopy}
-      onCut={noCopy}
-      onContextMenu={noCopy}
-    >
-      <LiquidGlass surface="sheet" className="w-full max-w-lg rounded-2xl border border-white/10 animate-pop-in">
-        <div className="p-6 space-y-4">
-          <div id="aio-phrase-title" className="flex items-center gap-2 text-lg font-semibold text-white">
-            <KeyRound className="h-5 w-5 text-arc-gold" /> {firstTime ? 'Write down your recovery phrase' : 'Your recovery phrase'}
-          </div>
-          <p className="text-xs text-krypt-muted leading-relaxed">
-            These {words.length} words ARE the wallet — on every chain. Write them on paper, in order, and keep them offline.
-            They also open this wallet in Phantom and MetaMask. Anyone who sees them can take everything in it; nobody, including
-            Krypt, can recover it without them.
-          </p>
-          <div className="grid grid-cols-3 gap-2">
-            {words.map((w, i) => (
-              <div key={i} className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/40 px-2.5 py-1.5 font-mono text-sm text-white select-none">
-                <span className="w-5 text-right text-label text-krypt-muted/60">{i + 1}</span>
-                {w}
-              </div>
-            ))}
-          </div>
-          <label className="flex items-start gap-2 text-xs text-white cursor-pointer">
-            <input type="checkbox" autoFocus checked={ticked} onChange={(e) => setTicked(e.target.checked)} className="mt-0.5" />
-            I have written all {words.length} words down, in this order, somewhere offline.
-          </label>
-          <div className="flex justify-end gap-2">
-            <GhostButton onClick={onClose}>{firstTime ? 'Later' : 'Close'}</GhostButton>
-            <PrimaryButton onClick={onDone} disabled={!ticked}>
-              <Check className="h-4 w-4" /> Done
-            </PrimaryButton>
-          </div>
-        </div>
-      </LiquidGlass>
-    </div>
-  );
-}
-
 /**
  * Move between the wallet's own chains — the Bridge engine on Relay, from
  * one of its addresses to another. Quote, check (the chain simulates the
@@ -550,7 +491,7 @@ function CompressCard({ info, onDone }: { info: AioWalletInfo; onDone: () => voi
     const names = chains.map((c) => AIO_CHAIN_LABEL[c]).join(' and ');
     const yes = await modal.confirm({
       title: `Go Live on ${names}`,
-      message: `Live signs and broadcasts REAL transactions on ${names} — for this and for anything else that trades there (your scripts and copy trading included) until you switch back to Paper in the top bar. Switch to Live?`,
+      message: `Live signs and broadcasts REAL transactions on ${names} — for this and for anything else that trades there (your scripts included) until you switch back to Paper in the top bar. Switch to Live?`,
       confirmLabel: 'Go Live',
       destructive: true,
     });
@@ -695,7 +636,6 @@ export function AioWalletPage() {
   const [busy, setBusy] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
-  const [sheet, setSheet] = useState<{ phrase: string; firstTime: boolean } | null>(null);
 
   const loadInfo = useCallback(async () => {
     const r = await window.krypt.aio.info();
@@ -732,10 +672,8 @@ export function AioWalletPage() {
     const r = await window.krypt.aio.create();
     setBusy(false);
     if (r.ok && r.data) {
-      const d = r.data as { info: AioWalletInfo; phrase?: string };
-      setInfo(d.info);
-      if (d.phrase) setSheet({ phrase: d.phrase, firstTime: true });
-      toast.success('All-in-One wallet created — write down its recovery phrase now');
+      setInfo(r.data.info);
+      toast.success('All-in-One wallet created');
     } else if (r.message !== 'Cancelled') toast.error(r.message);
   };
 
@@ -791,15 +729,8 @@ export function AioWalletPage() {
   // it), so the page asks nothing itself — one prompt, not two.
   const doReveal = async (): Promise<void> => {
     const r = await window.krypt.aio.reveal();
-    if (r.ok && typeof r.data === 'string') setSheet({ phrase: r.data, firstTime: false });
+    if (r.ok && r.data) setInfo(r.data);
     else if (r.message !== 'Cancelled') toast.error(r.message);
-  };
-
-  const doBackedUp = async (): Promise<void> => {
-    setSheet(null);
-    const r = await window.krypt.aio.backedUp();
-    if (r.ok && r.data) setInfo(r.data as AioWalletInfo);
-    else toast.error(r.message);
   };
 
   const doActivate = async (): Promise<void> => {
@@ -864,15 +795,6 @@ export function AioWalletPage() {
         </div>
       }
     >
-      {sheet && (
-        <PhraseSheet
-          phrase={sheet.phrase}
-          firstTime={sheet.firstTime}
-          onDone={() => void doBackedUp()}
-          onClose={() => setSheet(null)}
-        />
-      )}
-
       {info?.failure && (
         <div className="mb-6 rounded-xl border border-rose-400/30 bg-rose-500/5 px-4 py-3 flex items-start gap-3 text-xs text-rose-200">
           <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" /> {info.failure}

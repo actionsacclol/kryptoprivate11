@@ -455,9 +455,15 @@ export function Copyable({ value, label }: { value: string; label?: string }) {
   return (
     <button
       onClick={() => {
-        void navigator.clipboard.writeText(value);
-        setDone(true);
-        window.setTimeout(() => setDone(false), 1200);
+        // The tick only after it worked: this copies deposit addresses, and a false
+        // tick means pasting whatever was already on the clipboard.
+        void navigator.clipboard.writeText(value).then(
+          () => {
+            setDone(true);
+            window.setTimeout(() => setDone(false), 1200);
+          },
+          () => undefined,
+        );
       }}
       title={label ? `Copy ${label}` : 'Copy'}
       className="group inline-flex w-full items-center gap-2 rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm text-white transition hover:border-krypt-purple/40"

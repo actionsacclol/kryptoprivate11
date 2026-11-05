@@ -15,7 +15,6 @@ import {
 import type { AppSettings, EngineStatus, LaunchRow, PaperPosition } from '@shared/types';
 import { DEFAULT_SETTINGS } from '@shared/types';
 import { useToast } from './ToastProvider';
-import { isPanelWindow } from '../panels/windowId';
 
 // Central renderer state: hydrated once from engine:snapshot, then kept
 // live by the engine:event stream. The engine (main process) is the source
@@ -227,15 +226,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           // Engine notices (runner flags, fills, script and copy news) no
           // longer pop up top right — the user found them annoying, and the
           // Runner alerts / Recent fills / Scripts widgets carry the same news
-          // (2026-09-29). Main writes every one to the Console log. Only an
-          // error still pops: those are the "sell stuck, sell manually" and
-          // "disarmed" kind that must not wait for someone to look.
-          //
-          // Engine toasts describe the app as a whole and belong in the window
-          // that IS the app. A popped-out panel would otherwise queue every one
-          // of them behind a hidden viewport, and show them all at once if that
-          // viewport were ever revealed.
-          if (ev.level === 'error' && !isPanelWindow()) toastRef.current.error(ev.message);
+          // (2026-09-29). Main writes every one to the Console log. An error
+          // (the "sell stuck, sell manually" kind) becomes a card bottom left
+          // that stays until closed: see IssueStack, and ipc.ts for where.
           break;
         case 'log':
           break; // Console page reads the log channel directly

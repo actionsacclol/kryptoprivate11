@@ -4,7 +4,8 @@
 // encrypted with Electron safeStorage (Windows DPAPI / macOS Keychain),
 // ciphertext in userData/evm-wallets.json, several wallets held, exactly
 // ONE active, only the active one signs. The key is decrypted transiently
-// inside signTransaction(), after the policy has passed, and scrubbed.
+// inside signTransaction(), after the policy has passed, and scrubbed. With an
+// app password set the key is under the vault's key instead (system/vault.ts).
 //
 // Kept apart from the Solana wallet on purpose: a different curve
 // (secp256k1), a different address shape, a different file. Sharing the
@@ -16,6 +17,9 @@ import path from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { getAddress, type Address, type Hex } from 'viem';
 import { logger } from '../system/logger';
+import { bakPath, durableWrite, readBackup, type BackupMode } from '../system/durableWrite';
+import * as vault from '../system/vault';
+import { aad } from '../system/vaultCrypto';
 import { client } from './client';
 import { CHAINS } from './chains';
 import { checkEvmTx, type EvmPolicy } from './policy';
@@ -66,6 +70,35 @@ export function failure(): string | null {
   return loadFailure;
 }
 
+function parseText(text: string | null): EvmWalletsFile | null {
+  if (text === null) return null;
+  try {
+    return parseFile(JSON.parse(text), ROBINHOOD_CHAIN_ID);
+  } catch {
+    return null;
+  }
+}
+
+/** Damaged or gone, with a previous generation that reads: run from it
+ *  read-only, so every wallet can still sign and sell. */
+function fallBackToBackup(why: string): EvmWalletsFile | null {
+  const bak = parseText(readBackup(file()));
+  if (!bak) return null;
+  loadFailure = `${why}. Running from the previous copy (${bakPath(file())}): your wallets can trade and sell, but nothing will be saved until this is resolved.`;
+  logger.error(`evm wallet: ${loadFailure}`);
+  cache = bak;
+  return cache;
+}
+
+function failClosed(why: string): EvmWalletsFile {
+  const fromBak = fallBackToBackup(why);
+  if (fromBak) return fromBak;
+  loadFailure = why;
+  logger.error(`evm wallet: ${loadFailure}`);
+  cache = emptyFile(ROBINHOOD_CHAIN_ID);
+  return cache;
+}
+
 function loadFile(): EvmWalletsFile {
   if (cache) return cache;
   const p = file();
@@ -73,35 +106,26 @@ function loadFile(): EvmWalletsFile {
   try {
     text = fs.readFileSync(p, 'utf8');
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-      loadFailure = `${p} could not be read (${(e as Error).message})`;
-      logger.error(`evm wallet: ${loadFailure}`);
-      cache = emptyFile(ROBINHOOD_CHAIN_ID);
-      return cache;
-    }
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return failClosed(`${p} could not be read (${(e as Error).message})`);
   }
   if (text === null) {
+    const fromBak = fallBackToBackup(`${p} is missing`);
+    if (fromBak) return fromBak;
+    if (vault.isOn()) return failClosed(`${p} is missing, and an app password is set, so it should exist`);
     cache = emptyFile(ROBINHOOD_CHAIN_ID);
     return cache;
   }
   try {
     const parsed = parseFile(JSON.parse(text), ROBINHOOD_CHAIN_ID);
-    if (!parsed) {
-      loadFailure = `${p} is not a wallet file this version understands`;
-      logger.error(`evm wallet: ${loadFailure}`);
-      cache = emptyFile(ROBINHOOD_CHAIN_ID);
-      return cache;
-    }
+    if (!parsed) return failClosed(`${p} is not a wallet file this version understands`);
     cache = parsed;
   } catch (e) {
-    loadFailure = `${p} is corrupt (${(e as Error).message})`;
-    logger.error(`evm wallet: ${loadFailure}`);
-    cache = emptyFile(ROBINHOOD_CHAIN_ID);
+    return failClosed(`${p} is corrupt (${(e as Error).message})`);
   }
   return cache;
 }
 
-function persist(next: EvmWalletsFile): void {
+function persist(next: EvmWalletsFile, backup: BackupMode = 'keep'): void {
   // A file we could not read is a file we must not overwrite: it holds the
   // only copy of every key. Every mutator checks blockedByFailure() first, so
   // reaching this is a programming error — throw, like the Solana store.
@@ -109,17 +133,14 @@ function persist(next: EvmWalletsFile): void {
     logger.warn(`evm wallet: not saving — ${loadFailure}`);
     throw new Error(`Wallet file is read-only this session: ${loadFailure}`);
   }
-  const p = file();
-  const tmp = `${p}.tmp`;
-  fs.mkdirSync(path.dirname(p), { recursive: true });
   // `activeId` is written alongside `active` for one reason: yesterday's
   // build reads ONLY `activeId`, and a file without it makes that build heal
   // to the OLDEST wallet — silently changing who signs after a rollback. One
   // redundant key keeps a downgrade honest. Robinhood's choice is the one
   // mirrored, because that is the chain the single-signer build served.
-  const onDisk = { ...next, activeId: next.active.robinhood };
-  fs.writeFileSync(tmp, JSON.stringify(onDisk, null, 2), { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, p);
+  // The version says which encryption the secrets use (see system/wallet.ts).
+  const onDisk = { ...next, version: vault.writesKv1() ? 2 : 1, activeId: next.active.robinhood };
+  durableWrite(file(), JSON.stringify(onDisk, null, 2), { backup });
   // Only a wallet that is on disk may be listed (or become the active
   // signer). If the write above throws, memory stays as it was, so a key that
   // exists nowhere but RAM is never shown as something the user can fund.
@@ -146,13 +167,71 @@ function load(chain: EvmChainKind): EvmStoredWallet | null {
 const toHex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 
 function decryptSecret(w: EvmStoredWallet): Hex {
+  if (vault.isKv1(w.secretEnc)) {
+    const raw = vault.open(w.secretEnc, aad.evm(w.address));
+    try {
+      return `0x${raw.toString('hex')}` as Hex;
+    } finally {
+      raw.fill(0);
+    }
+  }
   const buf = Buffer.from(w.secretEnc, 'base64');
   const hex = safeStorage.decryptString(buf);
   return `0x${hex.replace(/^0x/, '')}` as Hex;
 }
 
-function encryptSecret(pk: Hex): string {
+function encryptSecret(pk: Hex, address: string): string {
+  if (vault.writesKv1()) {
+    const raw = Buffer.from(pk.replace(/^0x/, ''), 'hex');
+    try {
+      return vault.seal(raw, aad.evm(address));
+    } finally {
+      raw.fill(0);
+    }
+  }
   return safeStorage.encryptString(pk.replace(/^0x/, '')).toString('base64');
+}
+
+function keyProblem(w: EvmStoredWallet): string | null {
+  try {
+    if (getAddress(privateKeyToAccount(decryptSecret(w)).address) !== getAddress(w.address)) return `${w.label} (${w.address}): the stored key does not match its address`;
+    return null;
+  } catch (err) {
+    return `${w.label} (${w.address}): the stored key cannot be decrypted (${(err as Error).message})`;
+  }
+}
+
+/** Every wallet whose key this machine cannot use. See system/wallet.ts. */
+export function unusableKeys(): string[] {
+  return loadFile().wallets.map(keyProblem).filter((p): p is string => p !== null);
+}
+
+/** Re-encrypt every key in the current write mode and prove it. Throws. */
+export function resealAll(): void {
+  if (loadFailure) throw new Error(loadFailure);
+  const f = loadFile();
+  const wallets = f.wallets.map((w) => {
+    const problem = keyProblem(w);
+    if (problem) throw new Error(problem);
+    return { ...w, secretEnc: encryptSecret(decryptSecret(w), w.address) };
+  });
+  persist({ ...f, wallets }, 'scrub');
+  const back = parseText(fs.readFileSync(file(), 'utf8'));
+  if (!back || back.wallets.length !== wallets.length) throw new Error('evm-wallets.json did not read back after re-encrypting');
+  for (const w of back.wallets) {
+    const problem = keyProblem(w);
+    if (problem) throw new Error(problem);
+  }
+}
+
+export function reloadFromDisk(): void {
+  cache = null;
+  loadFailure = null;
+}
+
+/** Plaintext keys for the encrypted backup file only. */
+export function keysForBackup(): Array<{ label: string; address: string; privateKey: Hex; createdFor: EvmChainKind | null }> {
+  return loadFile().wallets.map((w) => ({ label: w.label, address: w.address, privateKey: decryptSecret(w), createdFor: w.createdFor ?? null }));
 }
 
 // ── Public reads ──────────────────────────────────────────────────────
@@ -238,7 +317,7 @@ export function generate(label = '', forChain?: EvmChainKind, allowSwitch = true
   const pk = generatePrivateKey();
   const account = privateKeyToAccount(pk);
   const name = label ? cleanLabel(label, f.wallets.length + 1) : nextLabel(f, forChain);
-  const record = { id: newId(), label: name, address: account.address, secretEnc: encryptSecret(pk), createdAt: Date.now() };
+  const record = { id: newId(), label: name, address: account.address, secretEnc: encryptSecret(pk, account.address), createdAt: Date.now() };
   const res = addRecord(f, record, forChain, allowSwitch);
   if (!res.ok) return { ok: false, message: res.message };
   persist(res.file);
@@ -269,7 +348,7 @@ export function importSecret(input: string, label = '', forChain?: EvmChainKind,
   }
   const f = loadFile();
   const name = label ? cleanLabel(label, f.wallets.length + 1) : nextLabel(f, forChain);
-  const record = { id: newId(), label: name, address: account.address, secretEnc: encryptSecret(pk), createdAt: Date.now() };
+  const record = { id: newId(), label: name, address: account.address, secretEnc: encryptSecret(pk, account.address), createdAt: Date.now() };
   const res = addRecord(f, record, forChain, allowSwitch);
   if (!res.ok) return { ok: false, message: res.message };
   persist(res.file);
@@ -295,7 +374,7 @@ export function ensureFromPrivateKey(key: Uint8Array, label: string): { ok: bool
   const f = loadFile();
   const held = f.wallets.find((w) => w.address.toLowerCase() === account.address.toLowerCase());
   if (held) return { ok: true, message: `${held.label} is already in your wallet list`, id: held.id, address: held.address, existed: true };
-  const record = { id: newId(), label: cleanLabel(label, f.wallets.length + 1), address: account.address, secretEnc: encryptSecret(pk), createdAt: Date.now() };
+  const record = { id: newId(), label: cleanLabel(label, f.wallets.length + 1), address: account.address, secretEnc: encryptSecret(pk, account.address), createdAt: Date.now() };
   const res = addWallet(f, record);
   if (!res.ok) return { ok: false, message: res.message };
   persist(res.file);
@@ -342,39 +421,33 @@ export function remove(id?: string): { ok: boolean; message: string } {
   const target = f.wallets.find((w) => w.id === targetId);
   const res = removeFromStore(f, targetId);
   if (!res.ok) return { ok: false, message: res.message };
-  persist(res.file);
+  // `scrub`: a backup still holding the key would make this removal a lie.
+  persist(res.file, 'scrub');
   if (target) for (const k of [...balances.keys()]) if (k.endsWith(`:${target.address.toLowerCase()}`)) balances.delete(k);
   if (!res.file.wallets.length) balances = new Map();
   return { ok: true, message: res.message };
 }
 
-/** Plaintext export of every key, for MetaMask / Rabby. The caller has
- *  shown the warning dialog; this just writes the file. */
-export function exportAllToFile(destPath: string): { ok: boolean; message: string; count: number } {
-  const f = loadFile();
-  if (!f.wallets.length) return { ok: false, message: 'No wallets to export', count: 0 };
+/** Plaintext export of ONE key, for MetaMask / Rabby. The caller has taken the
+ *  user through the warning, the proof and the typed confirmation. */
+export function exportKeyToFile(walletId: string, destPath: string): { ok: boolean; message: string } {
+  const w = loadFile().wallets.find((x) => x.id === walletId);
+  if (!w) return { ok: false, message: 'No such wallet' };
   try {
-    const lines: string[] = [
-      '# Krypto Bot — Robinhood Chain and BNB Smart Chain wallets (one key, same address on both)',
-      '# PRIVATE KEYS, plaintext',
-      '# Anyone with this file can spend these wallets. Delete it once imported.',
+    const text = [
+      '# Krypto Bot — private key for Robinhood Chain and BNB Smart Chain (same address on both)',
+      '# PRIVATE KEY, plaintext',
+      '# Anyone with this file can spend this wallet. Delete it once imported.',
       '# Import into MetaMask / Rabby: Add account → Import private key.',
-      `# Chains: Robinhood Chain (id ${ROBINHOOD_CHAIN_ID}) and BNB Smart Chain (id ${EVM_CHAIN_META.bnb.id}) — the same key works on both`,
+      `# Chains: Robinhood Chain (id ${ROBINHOOD_CHAIN_ID}) and BNB Smart Chain (id ${EVM_CHAIN_META.bnb.id})`,
       '',
-    ];
-    for (const w of f.wallets) {
-      let pk: Hex | null = null;
-      try {
-        pk = decryptSecret(w);
-        lines.push(`${w.label}\t${w.address}\t${pk}`);
-      } finally {
-        pk = null;
-      }
-    }
-    fs.writeFileSync(destPath, lines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
-    return { ok: true, message: `Exported ${f.wallets.length} wallet(s)`, count: f.wallets.length };
+      `${w.label}\t${w.address}\t${decryptSecret(w)}`,
+      '',
+    ].join('\n');
+    durableWrite(destPath, text, { backup: 'none' });
+    return { ok: true, message: `Exported ${w.label} to ${destPath}` };
   } catch (err) {
-    return { ok: false, message: `Export failed: ${(err as Error).message}`, count: 0 };
+    return { ok: false, message: `Export failed: ${(err as Error).message}` };
   }
 }
 

@@ -29,7 +29,6 @@ import {
   summarise,
   tradeId,
 } from './.walletscout.mjs';
-import { COPY_LATENCY_FLOOR_MS } from './.copyshared.mjs';
 import * as scout from './.walletscoutstore.mjs';
 
 let passed = 0;
@@ -401,11 +400,7 @@ const wallet = (days, over = {}) => ({
 // until the user says otherwise, and the rule that matters most: an UNKNOWN
 // number never hides a wallet.
 {
-  // One fact, two readers: the Scout's "holds over a minute" switch and copy
-  // trading's too-fast flag are the same threshold, and a copier told a wallet
-  // is fast enough to follow while the copy page calls it too fast to follow
-  // would be the app disagreeing with itself.
-  assert.equal(SCOUT_SLOW_ENOUGH_MS, COPY_LATENCY_FLOOR_MS, 'the Scout filter and the copy latency floor are the same number');
+  assert.equal(SCOUT_SLOW_ENOUGH_MS, 60_000, 'a median hold under a minute is too fast to follow');
   assert.equal(SCOUT_REACHABLE_MIN_PCT, 25, 'the same 25% the unreachable flag uses');
   assert.deepEqual(SCOUT_FILTERS, ['hideBots', 'ranked', 'reachable', 'slowEnough', 'regular']);
   for (const k of SCOUT_FILTERS) {

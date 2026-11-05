@@ -321,7 +321,7 @@ export function ScriptsPage() {
 ${kept}`}${s.enabled && s.kind === 'code' ? ' It is running, so it restarts fresh.' : ''}`
         : `Reset every script (paper and live) — stats, saved state, logs, memory — and clear every paper trade on every chain?
 
-${kept} Live trades and copy trading are not touched. A copy of the old paper record is saved as paper-positions.backup.json.`,
+${kept} Live trades are not touched. A copy of the old paper record is saved as paper-positions.backup.json.`,
       confirmLabel: s ? 'Reset script' : 'Reset everything',
       destructive: true,
     });
@@ -970,7 +970,9 @@ function defaultActionFor(type: RuleActionType): RuleAction {
 function RulesEditor({ draft, setDraft, templates }: { draft: Draft; setDraft: (d: Draft) => void; templates: Array<{ id: string; name: string }> }) {
   const r = draft.rules;
   const setRules = (patch: Partial<Draft['rules']>): void => setDraft({ ...draft, rules: { ...r, ...patch } });
-  const scopes = SCOPES_FOR_TRIGGER[r.trigger];
+  // A rule saved on the old "Followed wallet traded" trigger (removed
+  // 2026-11-04) still has to open, so it can be pointed at another one.
+  const scopes = SCOPES_FOR_TRIGGER[r.trigger] ?? ['any'];
   // A chain that cannot measure a fact must not offer a condition on it: an
   // unknown never satisfies a rule, so such a rule would look armed and never
   // once fire. Same for actions with no implementation on the rail.
@@ -1253,7 +1255,6 @@ function VariableGuide({ guideChain = 'solana' as ChainKind }: { guideChain?: Ch
     ['market', 'Market data — the providers, the Launch tab’s scan and the Links panel (when cached)'],
     ['position', 'Position (when held)'],
     ['runner', 'Runner flag'],
-    ['leader', 'Followed wallet'],
     ['order', 'Advanced order'],
     ['alert', 'Alert'],
     ['any', 'Always'],

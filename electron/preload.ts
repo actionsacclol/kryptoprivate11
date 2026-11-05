@@ -10,7 +10,6 @@ import type { AppSettings, EngineEvent } from '@shared/types';
 import type { CandleInterval, DiscoverColumn, StatsWindow } from '@shared/market';
 import type { NewOrderRequest } from '@shared/orders';
 import type { NewAlertRequest } from '@shared/alerts';
-import type { CopyConfig } from '@shared/copytrade';
 import type { ChainKind, EvmChainKind } from '@shared/evm';
 
 const api = {
@@ -140,9 +139,26 @@ const api = {
     refreshBalance: () => ipcRenderer.invoke('wallet:refreshBalance'),
     refreshAll: () => ipcRenderer.invoke('wallet:refreshAll'),
     holdings: () => ipcRenderer.invoke('wallet:holdings'),
-    backup: () => ipcRenderer.invoke('wallet:backup'),
-    exportAll: () => ipcRenderer.invoke('wallet:export'),
+    exportKey: (id?: string) => ipcRenderer.invoke('wallet:exportKey', id),
     remove: (id?: string) => ipcRenderer.invoke('wallet:remove', id),
+  },
+  // The Security page. Status and buttons only: everything secret happens in the
+  // security window, which this page cannot see or press.
+  security: {
+    status: () => ipcRenderer.invoke('security:status'),
+    setPassword: () => ipcRenderer.invoke('security:setPassword'),
+    changePassword: () => ipcRenderer.invoke('security:changePassword'),
+    removePassword: () => ipcRenderer.invoke('security:removePassword'),
+    newRecoveryCode: () => ipcRenderer.invoke('security:newRecoveryCode'),
+    enable2fa: () => ipcRenderer.invoke('security:enable2fa'),
+    disable2fa: () => ipcRenderer.invoke('security:disable2fa'),
+    requestReset2fa: () => ipcRenderer.invoke('security:requestReset2fa'),
+    cancelReset2fa: () => ipcRenderer.invoke('security:cancelReset2fa'),
+    finishReset2fa: () => ipcRenderer.invoke('security:finishReset2fa'),
+    setIdle: (minutes: number) => ipcRenderer.invoke('security:setIdle', minutes),
+    lockNow: () => ipcRenderer.invoke('security:lockNow'),
+    exportBackup: () => ipcRenderer.invoke('security:exportBackup'),
+    importBackup: () => ipcRenderer.invoke('security:importBackup'),
   },
   // The All-in-One wallet (2026-10-01): one recovery phrase, every chain.
   aio: {
@@ -152,7 +168,6 @@ const api = {
     /** Read-only: every derivation path the phrase could mean, with balances. */
     scanPhrase: (phrase: string) => ipcRenderer.invoke('aio:scanPhrase', phrase),
     reveal: () => ipcRenderer.invoke('aio:reveal'),
-    backedUp: () => ipcRenderer.invoke('aio:backedUp'),
     repair: () => ipcRenderer.invoke('aio:repair'),
     activate: () => ipcRenderer.invoke('aio:activate'),
     remove: () => ipcRenderer.invoke('aio:remove'),
@@ -233,6 +248,11 @@ const api = {
     /** Post a test message to this chain's saved runner webhook. */
     testWebhook: (chain: string) => ipcRenderer.invoke('runners:testWebhook', chain),
   },
+  issues: {
+    list: () => ipcRenderer.invoke('issues:list'),
+    close: (id: string) => ipcRenderer.invoke('issues:close', id),
+    closeAll: () => ipcRenderer.invoke('issues:closeAll'),
+  },
   alerts: {
     list: () => ipcRenderer.invoke('alerts:list'),
     create: (req: NewAlertRequest) => ipcRenderer.invoke('alerts:create', req),
@@ -252,13 +272,6 @@ const api = {
     resetBundled: (id: string) => ipcRenderer.invoke('automation:resetBundled', id),
     /** Pick a .js file; its text comes back as a draft, never a path. */
     openFile: () => ipcRenderer.invoke('automation:openFile'),
-  },
-  copy: {
-    list: () => ipcRenderer.invoke('copy:list'),
-    save: (config: Partial<CopyConfig>) => ipcRenderer.invoke('copy:save', config),
-    remove: (id: string) => ipcRenderer.invoke('copy:remove', id),
-    resetStats: (wallet: string) => ipcRenderer.invoke('copy:resetStats', wallet),
-    resetPaper: (configId?: string) => ipcRenderer.invoke('copy:resetPaper', configId),
   },
   portfolio: {
     summary: (opts?: { stale?: boolean }) => ipcRenderer.invoke('portfolio:summary', opts),
@@ -451,7 +464,7 @@ const api = {
       assign: (chain: string, id: string) => ipcRenderer.invoke('evm:wallet:assign', chain, id),
       rename: (chain: string, id: string, label: string) => ipcRenderer.invoke('evm:wallet:rename', chain, id, label),
       remove: (chain: string, id?: string) => ipcRenderer.invoke('evm:wallet:remove', chain, id),
-      exportAll: () => ipcRenderer.invoke('evm:wallet:export'),
+      exportKey: (chain: string, id?: string) => ipcRenderer.invoke('evm:wallet:exportKey', chain, id),
       refreshBalance: (chain: EvmChainKind) => ipcRenderer.invoke('evm:wallet:refreshBalance', chain),
       refreshAll: (chain: EvmChainKind) => ipcRenderer.invoke('evm:wallet:refreshAll', chain),
     },

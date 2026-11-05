@@ -241,16 +241,6 @@ export const MCP_TOOLS: McpToolSpec[] = [
     destructive: false,
   },
   {
-    name: 'get_copy_configs',
-    title: 'Copy trading setup',
-    description:
-      'The copy-trading configs and how each is doing: who is followed, direction, paper or live, whether it is armed, and its record. Read only — arming a config starts unattended spending and stays something the user does in the app.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    tier: 'read',
-    readOnly: true,
-    destructive: false,
-  },
-  {
     name: 'get_orders',
     title: 'Open orders',
     description: 'Advanced orders waiting to fire — stop losses, take profits, trailing stops and limits — with what each is watching for.',

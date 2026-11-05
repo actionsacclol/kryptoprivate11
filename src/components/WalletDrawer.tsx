@@ -14,7 +14,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { LiquidGlass } from './LiquidGlass';
-import { Bookmark, BookmarkCheck, Copy, Download, Loader2, X } from 'lucide-react';
+import { ArrowUpRight, Bookmark, BookmarkCheck, Copy, Download, Loader2, X } from 'lucide-react';
+import { KRYPTO_MIRROR_NAME, KRYPTO_MIRROR_URL, KRYPTO_MIRROR_URL_SHORT } from '../kryptoMirror';
 import { EVM_CHAIN_META } from '@shared/evm';
 import {
   MIN_TRIPS_FOR_RANK,
@@ -121,14 +122,12 @@ export interface WalletDrawerProps {
   /** The board's row, so the drawer opens on it at once while the record loads. */
   row: ScoutRow | null;
   saved: boolean;
-  following: boolean;
   onClose: () => void;
   onToggleSave: (address: string) => void;
-  onFollow: (address: string, direction?: 'copy' | 'reverse') => void;
   onCopyAddress: (address: string) => void;
 }
 
-export function WalletDrawer({ chain, address, window: win, row, saved, following, onClose, onToggleSave, onFollow, onCopyAddress }: WalletDrawerProps) {
+export function WalletDrawer({ chain, address, window: win, row, saved, onClose, onToggleSave, onCopyAddress }: WalletDrawerProps) {
   const [wallet, setWallet] = useState<ScoutWallet | null>(null);
   const [loading, setLoading] = useState(false);
   const [symbols, setSymbols] = useState<Record<string, string>>({});
@@ -376,25 +375,14 @@ export function WalletDrawer({ chain, address, window: win, row, saved, followin
                 {saved ? <BookmarkCheck className="h-3.5 w-3.5" /> : <Bookmark className="h-3.5 w-3.5" />}
                 {saved ? 'Saved' : 'Save'}
               </button>
-              {chain === 'solana' &&
-                (following ? (
-                  <span className="rounded-lg border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-1.5 text-body text-krypt-purple" title="Already on the Copy Trading page — paper, and switched off until you arm it">
-                    Following
-                  </span>
-                ) : (
-                  <>
-                    <button onClick={() => onFollow(address)} className="rounded-lg border border-krypt-purple/60 bg-krypt-purple/15 px-3 py-1.5 text-body text-white transition hover:bg-krypt-purple/25" title="Add to copy trading — paper, and switched off until you arm it">
-                      Follow on paper
-                    </button>
-                    <button
-                      onClick={() => onFollow(address, 'reverse')}
-                      className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-1.5 text-body text-amber-200 transition hover:bg-amber-400/20"
-                      title="Reverse copy — buy when they sell, sell when they buy back, with its own take-profit, stop-loss and max hold. Paper, switched off until you arm it. Nothing has measured this bet."
-                    >
-                      Reverse on paper
-                    </button>
-                  </>
-                ))}
+              <button
+                onClick={() => void window.krypt.app.openExternal(KRYPTO_MIRROR_URL)}
+                className="flex items-center gap-1.5 rounded-lg border border-krypt-purple/60 bg-krypt-purple/15 px-3 py-1.5 text-body text-white transition hover:bg-krypt-purple/25"
+                title={`Copy trading lives in its own app now. Opens ${KRYPTO_MIRROR_URL_SHORT} in your browser.`}
+              >
+                Copy it with {KRYPTO_MIRROR_NAME}
+                <ArrowUpRight className="h-3.5 w-3.5" />
+              </button>
             </div>
             </LiquidGlass>
           </motion.aside>

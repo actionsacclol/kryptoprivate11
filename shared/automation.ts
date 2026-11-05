@@ -2,8 +2,7 @@
 // JavaScript — both running under the same budget, the same gates and the
 // same order pipeline as a hand-placed trade.
 //
-// The shape follows copy trading, for the same reasons: a script starts in
-// PAPER mode and disabled; every trade it makes goes through the engine's
+// A script starts in PAPER mode and disabled; every trade it makes goes through the engine's
 // buy/sell path (fees injected, signer policy, breakers, loss guard); a live
 // script never survives a restart armed; and every refusal is recorded with
 // its reason, so the paper record can inform a real decision.
@@ -294,7 +293,6 @@ export type RuleTrigger =
   | 'runner'
   | 'position'
   | 'tick'
-  | 'leader_trade'
   | 'order'
   | 'alert'
   | 'schedule';
@@ -305,7 +303,6 @@ export const RULE_TRIGGERS: Array<{ id: RuleTrigger; label: string; hint: string
   { id: 'runner', label: 'Runner flagged', hint: 'The scanner flagged a launch as a potential runner', event: 'runner' },
   { id: 'position', label: 'Open position', hint: 'Checked every few seconds over what this script holds, and on every fill', event: 'position' },
   { id: 'tick', label: 'Price tick', hint: 'The price of a token this script holds or subscribed to moved (at most once a second per token)', event: 'tick' },
-  { id: 'leader_trade', label: 'Followed wallet traded', hint: 'A wallet followed on the Copy Trading page bought or sold', event: 'leaderTrade' },
   { id: 'order', label: 'Order changed', hint: 'One of your advanced orders triggered, filled, failed, expired or was cancelled', event: 'order' },
   { id: 'alert', label: 'Alert fired', hint: 'One of your price / market-cap / volume alerts fired', event: 'alert' },
   { id: 'schedule', label: 'Daily at a time', hint: 'Once a day at HH:MM local time', event: 'schedule' },
@@ -416,12 +413,6 @@ export type RuleField =
   | 'holdMinutes'
   | 'drawdownFromPeakPct'
   | 'costSol'
-  // followed wallet
-  | 'leaderWallet'
-  | 'leaderLabel'
-  | 'leaderSide'
-  | 'leaderSol'
-  | 'leaderSoldPct'
   // order
   | 'orderKind'
   | 'orderState'
@@ -436,7 +427,7 @@ export type RuleField =
   | 'weekday';
 
 export type FieldKind = 'number' | 'boolean' | 'text' | 'list';
-export type FieldScope = 'token' | 'market' | 'runner' | 'position' | 'leader' | 'order' | 'alert' | 'any';
+export type FieldScope = 'token' | 'market' | 'runner' | 'position' | 'order' | 'alert' | 'any';
 
 export interface FieldSpec {
   id: RuleField;
@@ -587,11 +578,6 @@ export const RULE_FIELDS: FieldSpec[] = [
   { id: 'holdMinutes', label: 'Held (min)', kind: 'number', scope: 'position', unit: 'minutes', hint: 'Minutes since the position opened', nullWhen: 'not held' },
   { id: 'drawdownFromPeakPct', label: 'Drawdown from peak %', kind: 'number', scope: 'position', unit: 'percent, 0 or more', hint: 'How far price is below its peak since entry', nullWhen: 'not held, or no price' },
   { id: 'costSol', label: 'Cost (SOL)', kind: 'number', scope: 'position', unit: 'SOL', hint: 'Paid for what is still held', nullWhen: 'not held' },
-  { id: 'leaderWallet', label: 'Followed wallet', kind: 'text', scope: 'leader', unit: 'address', hint: '', nullWhen: 'not a followed-wallet event' },
-  { id: 'leaderLabel', label: 'Followed wallet label', kind: 'text', scope: 'leader', unit: 'text', hint: 'The label you gave it on Copy Trading', nullWhen: 'not a followed-wallet event' },
-  { id: 'leaderSide', label: 'Followed wallet side', kind: 'text', scope: 'leader', unit: 'buy · sell', hint: '', nullWhen: 'not a followed-wallet event' },
-  { id: 'leaderSol', label: 'Followed wallet SOL', kind: 'number', scope: 'leader', unit: 'SOL', hint: 'SOL they paid or received', nullWhen: 'not a followed-wallet event' },
-  { id: 'leaderSoldPct', label: 'Followed wallet sold %', kind: 'number', scope: 'leader', unit: 'percent of their bag', hint: 'On a sell: the share of their holding they sold', nullWhen: 'a buy, or the share could not be read' },
   { id: 'orderKind', label: 'Order kind', kind: 'text', scope: 'order', unit: 'limit_buy · limit_sell · take_profit · stop_loss · trailing_stop · sell_on_dev_sell · sell_on_migration · buy_on_migration', hint: '', nullWhen: 'not an order event' },
   { id: 'orderState', label: 'Order state', kind: 'text', scope: 'order', unit: 'triggered · filled · failed · cancelled · expired · paused', hint: '', nullWhen: 'not an order event' },
   { id: 'orderAmount', label: 'Order amount', kind: 'number', scope: 'order', unit: 'SOL (buys) or % (sells)', hint: '', nullWhen: 'not an order event' },
@@ -610,7 +596,6 @@ export const SCOPES_FOR_TRIGGER: Record<RuleTrigger, FieldScope[]> = {
   runner: ['token', 'market', 'runner', 'position', 'any'],
   position: ['token', 'market', 'position', 'any'],
   tick: ['token', 'market', 'position', 'any'],
-  leader_trade: ['token', 'market', 'leader', 'position', 'any'],
   order: ['token', 'market', 'order', 'position', 'any'],
   alert: ['token', 'market', 'alert', 'position', 'any'],
   schedule: ['any'],
@@ -787,7 +772,7 @@ export function defaultRules(chain: ChainKind = 'solana'): RuleSet {
 }
 
 /** The chain a script runs on. A script stored before chains existed is
- *  Solana — the same "absent = solana" reading copy trading uses. */
+ *  Solana — "absent = solana". */
 export function scriptChain(s: { chain?: ChainKind }): ChainKind {
   return s.chain ?? 'solana';
 }
@@ -1121,15 +1106,6 @@ export interface ScriptCreator {
   lastLaunchAt: number | null;
   /** True when the source paginated out — `launches` is then a floor. */
   truncated: boolean;
-}
-
-export interface LeaderFacts {
-  wallet: string;
-  label: string;
-  side: 'buy' | 'sell';
-  sol: number;
-  priceSol: number;
-  soldFraction: number | null;
 }
 
 export interface OrderFacts {
@@ -1596,16 +1572,6 @@ export function scriptLinksFromSummary(
   };
 }
 
-export function withLeader(c: RuleContext, l: LeaderFacts): RuleContext {
-  c.leaderWallet = l.wallet;
-  c.leaderLabel = l.label;
-  c.leaderSide = l.side;
-  c.leaderSol = num(l.sol);
-  c.leaderSoldPct = l.side === 'sell' && l.soldFraction !== null && Number.isFinite(l.soldFraction) ? Math.round(l.soldFraction * 100) : null;
-  if (c.priceSol === null && l.priceSol > 0) c.priceSol = l.priceSol;
-  return c;
-}
-
 export function withOrder(c: RuleContext, o: OrderFacts): RuleContext {
   c.orderKind = o.kind;
   c.orderState = o.state;
@@ -2002,7 +1968,7 @@ export interface ApiSpec {
 /** The whole `bot` object. The harness, the dispatcher and the docs all
  *  follow this table. */
 export const SCRIPT_API: ApiSpec[] = [
-  { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval, migration, curveHigh, devSell, holdings, copyFill, runnerExpired. Handlers for one script run one at a time. One is checked at 3 s; if it is still awaiting bot calls it gets more time, up to 30 s — a stuck one is killed and counts as an error.', action: false },
+  { local: true, method: 'on', signature: "bot.on(event, async (payload) => {})", returns: 'void', notes: 'Register a handler. Events: launch, launchUpdate, runner, position, tick, order, alert, fill, schedule, interval, migration, curveHigh, devSell, holdings, runnerExpired. Handlers for one script run one at a time. One is checked at 3 s; if it is still awaiting bot calls it gets more time, up to 30 s — a stuck one is killed and counts as an error.', action: false },
   { method: 'every', signature: 'bot.every(seconds, async () => {})', returns: 'Promise<number> (the seconds used)', notes: 'A timer. 5 s minimum, 3600 max.', action: false },
   { method: 'at', signature: "bot.at('HH:MM', async () => {})", returns: 'Promise<string>', notes: 'Once a day at that local time.', action: false },
   { method: 'buy', signature: 'await bot.buy(mint, sol, address? | { wallet?, slippagePct?, lane?, topUp? })', returns: '{ok, message}', notes: '{topUp: true}: fund a short chain from the All-in-One wallet first (live, max 3 % cost). EVM: 0x address, no {lane}, keeps gas to sell. {lane: \x27lean\x27} (2026-09-29) sends THIS trade at the live median priority with no fee floor, no Jito or Helius tip and the public lane only: about 0.00001 SOL a side instead of the 0.001 / 0.002 floors, which on a 0.02 SOL bag were most of the loss. It lands in seconds, not the first slot, so it suits timed exits and patient entries, never a snipe or a rug exit. A lean sell that fails to land is retried once on the fast lane. The smallest live buy is 0.03 SOL on the fast lane and 0.0025 SOL on the lean one. Trading wallet only. Through the app’s own pipeline in the script’s mode (paper or live). Refused (ok:false, with the reason) when over THIS SCRIPT’S budget — max per trade, buys per day, open positions, actions per minute — or while live is blocked (not armed, execution off, a breaker). The app’s manual per-trade cap does NOT apply: a script’s own budget is the authority on its size. The third argument is either another of your own wallet ADDRESSES (see bot.wallets) to buy with that wallet — refused until you accept “Trading from your other wallets” on the Scripts page — or an options object: {wallet} is that same address, {slippagePct} (0.1–50) replaces the execution setting’s slippage for THIS buy only (also on BNB / Robinhood); the other wallets keep the setting, so slippagePct together with wallet is refused rather than silently dropped. The app does not space these out or cap how many of your wallets touch a coin: the script does what it is written to, inside its own budget. Paper spends nothing.', action: true },
@@ -2055,7 +2021,7 @@ export const SCRIPT_API: ApiSpec[] = [
   { method: 'discover', signature: "await bot.discover('new' | 'graduating' | 'migrated' | 'trending', limit?)", returns: 'Market[]', notes: 'The Discover page’s columns, as the app is showing them right now: brand-new launches, coins nearing graduation, coins that migrated to a pool, and trending. Up to 80 rows (default 20), same summary objects as bot.market. On BNB and Robinhood the chain’s own Discover. A round trip; costs an action. What the app is watching, not a recommendation.', action: false, charged: true },
   { method: 'callouts', signature: 'await bot.callouts(limit?)', returns: 'Callout[] | null', notes: 'pump.fun’s public callouts feed, newest first, up to 50 (default 20): [{id, mint, chain, name, symbol, at, thesis, calledAtMcapUsd, mcapUsdNow, calloutPriceUsd, multiple, caller: {address, username, …}, coinCallouts, …}]. pump’s own feed, as it stands — the numbers are the callers’ claims about themselves; coinCallouts is how many callouts the COIN has, not the caller’s record. Null (not an empty list) when pump is not answering. A round trip; costs an action. Solana only.', action: false, charged: true },
   { method: 'coinCallouts', signature: 'await bot.coinCallouts(mint)', returns: 'Callout[] | null', notes: 'Every callout on ONE pump.fun coin, newest first: callers still holding (up to 100) plus callers who fully sold (up to 50), each the same Callout shape as bot.callouts with the caller’s own position in caller (holds, costUsd, realizedUsd…) and `at` = when they called. Your own calls are in it too — filter on caller.wallet. multiple is null (pump serves no current cap here). Null (not an empty list) when pump is not answering; [] means nobody has called it. A round trip (cached 30 s); costs an action. Solana only.', action: false, charged: true },
-  { method: 'history', signature: 'await bot.history(limit?)', returns: 'Fill[]', notes: 'Every fill this install has made — by hand, by orders, by copy trading, by any script — newest first, up to 200 (default 50): [{at, mint, symbol, side, requested, solDelta, tokenDelta, feeSol, signature, state, …}]. solDelta is the chain’s own lamport delta (fees, tips and slippage included), null while unreconciled; paper fills are included and marked. Free. On BNB / Robinhood: that chain’s fills as {at, mint, symbol, side, hash, requested, nativeDelta, state}.', action: false },
+  { method: 'history', signature: 'await bot.history(limit?)', returns: 'Fill[]', notes: 'Every fill this install has made — by hand, by orders, by any script — newest first, up to 200 (default 50): [{at, mint, symbol, side, requested, solDelta, tokenDelta, feeSol, signature, state, …}]. solDelta is the chain’s own lamport delta (fees, tips and slippage included), null while unreconciled; paper fills are included and marked. Free. On BNB / Robinhood: that chain’s fills as {at, mint, symbol, side, hash, requested, nativeDelta, state}.', action: false },
   { method: 'holdings', signature: 'await bot.holdings()', returns: 'Holding[]', notes: 'Every token the active trading wallet holds right now — including bags this script did not open and cannot sell: [{mint, tokenAccount, amountRaw, uiAmount, decimals, symbol, programId, warning}]. warning names why a bag may not be sellable (a Token-2022 permanent delegate, a transfer hook); null means the mint was checked and carries nothing suspicious. Answered from the last chain read when it is under 2 s old, else a fresh one. REJECTS (throws) when the wallet could not be read — unknown is not empty, the same rule as bot.positions — so wrap it in try/catch and try again next pass. Costs an action. On BNB and Robinhood it is that chain’s own holdings, with amountRaw, decimals, tokenAccount and programId null and warning "not checked on this chain".', action: false, charged: true },
   { method: 'solUsd', signature: 'await bot.solUsd()', returns: 'number | null', notes: 'SOL in USD, as the app’s price provider last said it (shared, cached). Null when no provider answered. Free.', action: false },
   { method: 'nativeUsd', signature: 'await bot.nativeUsd()', returns: 'number | null', notes: 'SOL, ETH or BNB in USD (this chain). Free.', action: false },
@@ -2083,13 +2049,11 @@ export const SCRIPT_API: ApiSpec[] = [
   },
   { method: 'walletScores', signature: "await bot.walletScores({ window?, limit?, onlyWorthALook? })", returns: '{onRecord, filtered, rows: ScoutRow[]}', notes: 'The Wallet Scout board for this script’s chain, ranked by Copy score — what a FOLLOWER would have realised mirroring each wallet at a 2 s lag and 1.5 %/side, not what the wallet made. window: day · week · month · all (default week); limit up to 50 (default 20); onlyWorthALook applies the board’s five filters. Rows: {address, buys, sells, roundTrips, wins, losses, pnl, volume, returnPct, winRatePct, medianHoldMs, lastSeen, ranked, looksAutomated, fTrips, fPnl, copyScore, …}. The app’s own research found no group of wallets profitable to copy: this ranks least-bad, and is not an edge. Free (in memory).', action: false },
   { method: 'walletRecord', signature: 'await bot.walletRecord(address)', returns: '{wallet, saved} | null', notes: 'One wallet’s Scout record on this script’s chain — its trades, trips, and the checks behind its Copy score — plus whether it is saved. Null when the app has never seen the address. Free.', action: false },
-  { method: 'copyConfigs', signature: 'await bot.copyConfigs()', returns: '{configs, stats, liveExecutable, liveBlockedReason}', notes: 'The Copy Trading page’s configs — who is followed, direction, paper or live, armed or not — and each one’s record. Read only: arming one starts unattended spending and stays something the user does in the app. Free.', action: false },
   { method: 'alerts', signature: 'await bot.alerts()', returns: 'Alert[]', notes: 'Every alert on the Alerts page — yours and the ones scripts created — with kind, threshold, whether it repeats, and when it last fired. Free. Solana only.', action: false },
   { method: 'analyze', signature: 'await bot.analyze(mint)', returns: 'Analysis', notes: 'The AI second opinion from the token page: {score, verdict, summary, bullish, bearish, provider, model, at}. It spends YOUR key (Settings → AI) on every uncached call, so it is capped at 20 per hour per script and cached 10 minutes per token, and it counts as an action. Only public on-chain facts about the token are sent — never a wallet or a key. Rejects with the reason when AI is off or capped. Solana only.', action: true },
   { method: 'positions', signature: 'await bot.positions()', returns: 'Position[]', notes: 'Every position THIS SCRIPT opened, in its mode, as the same facts object plus held=true, pnlPct, pnlSol, holdMinutes, drawdownFromPeakPct, costSol. Bags the user opened by hand are not listed and cannot be sold.', action: false },
   { method: 'orders', signature: 'await bot.orders(mint?)', returns: 'Order[]', notes: 'Solana only ([] on EVM). {id, mint, symbol, kind, state, triggerBasis, triggerValue, amount, interrupted}. All orders, or the token’s. interrupted = paused because the app stopped while it was executing (its trade may have landed): never re-place one without checking the wallet.', action: false },
   { method: 'runners', signature: 'await bot.runners()', returns: 'Token[]', notes: 'Launches the scanner currently flags as runners.', action: false },
-  { method: 'leaders', signature: 'await bot.leaders()', returns: 'Array<{wallet, label, enabled, mode}>', notes: 'Wallets followed on the Copy Trading page.', action: false },
   { method: 'wallet', signature: 'await bot.wallet()', returns: '{sol: number | null, address: string | null}', notes: "This script's chain's trading wallet — `sol` is that chain's own coin. Null when unknown.", action: false },
   { method: 'wallets', signature: 'await bot.wallets()', returns: 'Array<{address, label, active}>', notes: 'This chain\x27s wallets. Every wallet this app holds a key for (at most ten, the main one included — the Wallet list), so a script can name one to trade with. `active` marks the main wallet. Addresses and labels only — never a key or an id.', action: false },
   { method: 'getState', signature: 'await bot.getState()', returns: 'object', notes: 'This script’s saved state.', action: false },
@@ -2121,7 +2085,6 @@ export const SCRIPT_EVENTS_DOC: EventSpec[] = [
   { event: 'runner', payload: 'Token + runnerOddsPct', when: 'the scanner flagged a potential runner' },
   { event: 'position', payload: 'Token + position fields (held=true)', when: 'every ~5 s for each position the script holds, and on every fill' },
   { event: 'tick', payload: 'Token + position fields; priceSol is the tick', when: 'the price moved on a token the script holds, watched or subscribed to; at most once a second per token' },
-  { event: 'leaderTrade', payload: 'Token + leaderWallet, leaderLabel, leaderSide, leaderSol, leaderSoldPct', when: 'a wallet followed on Copy Trading bought or sold' },
   { event: 'order', payload: 'Token + orderKind, orderState, orderAmount', when: 'one of your advanced orders triggered, filled, failed, expired, was cancelled or was paused — including, when the script starts, each order on a coin it holds that came back paused from a restart' },
   { event: 'alert', payload: 'Token + alertKind, alertThreshold', when: 'one of your alerts fired' },
   { event: 'fill', payload: '{mint, side, ok}', when: 'one of this script’s own trades landed or failed' },
@@ -2134,7 +2097,6 @@ export const SCRIPT_EVENTS_DOC: EventSpec[] = [
   { event: 'curveHigh', payload: 'Token + curvePct, curveLevel (90 | 93 | 95 | 97), priceSol (this trade), isMayhem', when: 'a pump.fun curve first reached 90, 93, 95 or 97 % (SOL side, the same scale as curvePct) — every Solana script hears every coin, held or not, at most four times per coin. The coin you want to be holding when its curve completes (2026-09-30). isMayhem null = the app could not tell; a mayhem curve’s percentage is not a completion measure' },
   { event: 'devSell', payload: 'Token + devSoldSol, devSoldTokens', when: 'the creator wallet SOLD on a coin this script holds or subscribed to (bot.subscribe / bot.watch); creatorSold on the facts is true from then on. Solana (pump.fun curve) only' },
   { event: 'holdings', payload: '{at, holdings: Holding[]}', when: 'the trading wallet’s token accounts were re-read and differ from the last read — after any fill, yours or a script’s (the same rows bot.holdings returns). Solana only' },
-  { event: 'copyFill', payload: '{id, configId, wallet, mint, symbol, side, mode, state, theirSol, ourSol, pnlSol, reason, direction, at}', when: 'copy trading opened, closed or skipped a copy (state open · closed · skipped; side buy, or sell for a mirrored exit) — the leader’s own trade is the separate leaderTrade event. Scripts on the copy’s chain only' },
   { event: 'runnerExpired', payload: 'Token', when: 'a runner flag aged off the list (15 minutes after the flag) — the last moment a runner script still has the flag’s facts' },
 ];
 
@@ -2196,24 +2158,6 @@ bot.on('position', async (p) => {
     tookHalf.add(p.mint);
     const r = await bot.sell(p.mint, 50);
     bot.log(\`take half \${p.symbol}: \${r.message}\`);
-  }
-});`,
-  },
-  {
-    name: 'Mirror a followed wallet, my size',
-    description: 'When a wallet you follow buys, buy a fixed size; when it sells, sell the same share of yours.',
-    code: `// Follow one wallet's buys and sells at my own size.
-const LEADER = 'PasteTheWalletAddressHere';
-
-bot.on('leaderTrade', async (t) => {
-  if (t.leaderWallet !== LEADER) return;
-  if (t.leaderSide === 'buy') {
-    if (t.held) return;                                  // one position per token
-    const r = await bot.buy(t.mint, 0.03);
-    bot.log(\`copied buy \${t.symbol}: \${r.message}\`);
-  } else if (t.held && t.leaderSoldPct !== null) {
-    const r = await bot.sell(t.mint, t.leaderSoldPct);
-    bot.log(\`copied sell \${t.leaderSoldPct}% \${t.symbol}: \${r.message}\`);
   }
 });`,
   },
@@ -2286,7 +2230,6 @@ export function fieldGuideText(): string {
     ['market', 'Market data — the providers, the Launch tab’s scan and the Links panel (when cached)'],
     ['position', 'Position (when held by this script)'],
     ['runner', 'Runner flag'],
-    ['leader', 'Followed wallet'],
     ['order', 'Advanced order'],
     ['alert', 'Alert'],
     ['any', 'Always'],
@@ -2346,7 +2289,7 @@ ${api}
 
 ## The facts object ("Token" / "Position")
 
-Every event except \`fill\`, \`schedule\`, \`interval\`, \`holdings\` and \`copyFill\` (whose payloads are described in the events list above) receives one object with these fields (null = unknown):
+Every event except \`fill\`, \`schedule\`, \`interval\` and \`holdings\` (whose payloads are described in the events list above) receives one object with these fields (null = unknown):
 
 ${fieldGuideText()}
 

@@ -187,7 +187,6 @@ try {
       r.push(await P('wallet.holdings', () => window.krypt.wallet.holdings()));
       r.push(await P('wallet.list', () => window.krypt.wallet.list()));
       r.push(await P('live.state', () => window.krypt.live.state()));
-      r.push(await P('copy.list', () => window.krypt.copy.list()));
       r.push(await P('watchlist.get', () => window.krypt.watchlist.get()));
       r.push(await P('automation.list', () => window.krypt.automation.list()));
       r.push(await P('recorder.stats', () => window.krypt.recorder.stats()));

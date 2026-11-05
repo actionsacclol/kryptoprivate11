@@ -4,23 +4,52 @@
 // action that matters: when the budget is spent, TURN THE EXPENSIVE SOCKET
 // OFF rather than letting it run into an overage bill.
 //
-// Counting is derived from the feed pool's own per-socket BYTE totals, so
-// nothing in the hot path does extra work — each socket already knows the
-// length of every frame it parsed. Helius bills websocket traffic at
-// 2 credits per 0.1 MB uncompressed (shared/credits.ts), not per push.
+// Every socket on a Helius URL reports its frames' lengths here, and every HTTP
+// call its method. Helius bills websocket traffic at 2 credits per 0.1 MB
+// uncompressed (shared/credits.ts), not per push. This used to bill only the
+// launch feed and the token tape, so with the AMM tape on the key too it read
+// 955k when Helius had already cut the socket off, and the ceiling never fired.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { emptyUsage, feedCreditsForBytes, overBudget, record, rollWindow, type CreditUsage } from '@shared/credits';
+import {
+  emptyBreakdown,
+  emptyUsage,
+  feedCreditsForBytes,
+  isBilledHeliusUrl,
+  overBudget,
+  record,
+  rollWindow,
+  type CreditBreakdown,
+  type CreditUsage,
+} from '@shared/credits';
 
 let file = '';
 let usage: CreditUsage = emptyUsage(Date.now());
 let dirty = false;
-/** Last byte total seen per socket, so we bill the DELTA, not the total. */
-const lastByteCount = new Map<string, number>();
-/** Credits owed but under one whole credit, per socket. `record` floors, so
+/** Bytes received per stream and not yet turned into credits. */
+const pendingBytes = new Map<string, number>();
+/** Credits owed but under one whole credit, per stream. `record` floors, so
  *  without this a socket delivering small frames would never be billed. */
 const fractionalCarry = new Map<string, number>();
+let meterTimer: ReturnType<typeof setInterval> | null = null;
+
+/** A saved file is only ever trusted for numbers. */
+function readBreakdown(raw: unknown): CreditBreakdown {
+  const numbers = (o: unknown): Record<string, number> => {
+    const out: Record<string, number> = {};
+    if (o && typeof o === 'object') {
+      for (const [k, v] of Object.entries(o)) if (typeof v === 'number' && v >= 0 && k.length <= 60) out[k] = v;
+    }
+    return out;
+  };
+  const r = (raw ?? {}) as Partial<CreditBreakdown>;
+  return {
+    since: typeof r.since === 'number' ? r.since : Date.now(),
+    sockets: numbers(r.sockets),
+    methods: numbers(r.methods),
+  };
+}
 
 export function init(userDataDir: string, limit: number): void {
   file = path.join(userDataDir, 'helius-credits.json');
@@ -32,12 +61,22 @@ export function init(userDataDir: string, limit: number): void {
       windowStartedAt: typeof raw.windowStartedAt === 'number' ? raw.windowStartedAt : Date.now(),
       wsEvents: typeof raw.wsEvents === 'number' ? raw.wsEvents : 0,
       httpCalls: typeof raw.httpCalls === 'number' ? raw.httpCalls : 0,
+      breakdown: readBreakdown(raw.breakdown),
     };
   } catch {
     usage = { ...emptyUsage(Date.now()), limit };
   }
   usage = rollWindow(usage, Date.now());
   persist();
+  // On its own timer: the token tape and confirmations spend credits with the
+  // scanner stopped, when the engine's timers are not running.
+  if (!meterTimer) {
+    meterTimer = setInterval(() => {
+      settleSockets();
+      flush();
+    }, 1_000);
+    meterTimer.unref?.();
+  }
 }
 
 export function setLimit(limit: number): void {
@@ -49,39 +88,42 @@ export function current(): CreditUsage {
   return { ...usage };
 }
 
-/**
- * Bill the bytes a Helius socket has delivered since we last looked:
- * 2 credits per 0.1 MB (bytes / 51,200), fractions carried forward.
- *
- * `stats` is the feed pool's own list. Only sockets whose URL is a Helius one
- * are billed — the free endpoints cost nothing and must not inflate the
- * number the user is being warned about.
- */
-export function billFeed(stats: Array<{ url: string; bytes: number }>): void {
-  const now = Date.now();
-  usage = rollWindow(usage, now);
-  for (const s of stats) {
-    if (!/helius/i.test(s.url)) continue;
-    const seen = lastByteCount.get(s.url) ?? 0;
-    // A reconnect resets the socket's counter; treat a drop as a fresh start
-    // rather than billing a negative delta.
-    const delta = s.bytes >= seen ? s.bytes - seen : s.bytes;
-    lastByteCount.set(s.url, s.bytes);
-    if (delta <= 0) continue;
-    const owed = (fractionalCarry.get(s.url) ?? 0) + feedCreditsForBytes(delta);
+/** One frame from a Helius socket. Called per frame, so it only adds. */
+export function addSocketBytes(stream: string, bytes: number): void {
+  pendingBytes.set(stream, (pendingBytes.get(stream) ?? 0) + bytes);
+}
+
+/** Turn the bytes received so far into credits: 2 per 0.1 MB (bytes / 51,200),
+ *  fractions carried forward. */
+export function settleSockets(): void {
+  if (pendingBytes.size === 0) return;
+  usage = rollWindow(usage, Date.now());
+  for (const [stream, bytes] of pendingBytes) {
+    const owed = (fractionalCarry.get(stream) ?? 0) + feedCreditsForBytes(bytes);
     const whole = Math.floor(owed);
-    fractionalCarry.set(s.url, owed - whole);
+    fractionalCarry.set(stream, owed - whole);
     if (whole > 0) {
-      usage = record(usage, 'ws', whole);
+      usage = record(usage, 'ws', whole, stream);
       dirty = true;
     }
   }
+  pendingBytes.clear();
 }
 
-export function billHttp(calls = 1): void {
+export function billHttp(calls = 1, method = 'other'): void {
   usage = rollWindow(usage, Date.now());
-  usage = record(usage, 'http', calls);
+  usage = record(usage, 'http', calls, method);
   dirty = true;
+}
+
+/** Count an HTTP call if this URL costs credits. Metering must never break a trade. */
+export function meterHttp(url: string, method: string, calls = 1): void {
+  if (!isBilledHeliusUrl(url)) return;
+  try {
+    billHttp(calls, method);
+  } catch {
+    /* see above */
+  }
 }
 
 /** True the first time the budget is exceeded, so the caller acts once. */
@@ -98,6 +140,7 @@ export function shouldCutOff(): boolean {
 
 export function persist(): void {
   if (!file) return;
+  settleSockets();
   try {
     fs.writeFileSync(file, JSON.stringify(usage), 'utf8');
     dirty = false;
@@ -119,8 +162,8 @@ export function flush(): void {
 }
 
 export function reset(): void {
-  usage = { ...emptyUsage(Date.now()), limit: usage.limit };
-  lastByteCount.clear();
+  usage = { ...emptyUsage(Date.now()), limit: usage.limit, breakdown: emptyBreakdown(Date.now()) };
+  pendingBytes.clear();
   fractionalCarry.clear();
   announced = false;
   persist();

@@ -36,6 +36,9 @@ import path from 'node:path';
 import { app, safeStorage } from 'electron';
 import * as wallet from './wallet';
 import { logger } from './logger';
+import { durableWrite } from './durableWrite';
+import * as vault from './vault';
+import { aad } from './vaultCrypto';
 import { pumpAuthFetch, pumpFetch, PumpWallError, setSessionRenewer } from '../data/pumpWall';
 import {
   loginBodyProblem,
@@ -97,8 +100,9 @@ let lastError: string | null = null;
  * not persisted rather than written in the clear, and the user signs in again
  * next run.
  */
-function encryptToken(tok: string): string | null {
+function encryptToken(tok: string, address: string): string | null {
   try {
+    if (vault.writesKv1()) return vault.seal(Buffer.from(tok, 'utf8'), aad.pumpToken(address));
     if (!safeStorage.isEncryptionAvailable()) return null;
     return safeStorage.encryptString(tok).toString('base64');
   } catch {
@@ -106,9 +110,10 @@ function encryptToken(tok: string): string | null {
   }
 }
 
-function decryptToken(blob: unknown): string | null {
+function decryptToken(blob: unknown, address: unknown): string | null {
   if (typeof blob !== 'string' || !blob) return null;
   try {
+    if (vault.isKv1(blob)) return typeof address === 'string' ? vault.open(blob, aad.pumpToken(address)).toString('utf8') || null : null;
     if (!safeStorage.isEncryptionAvailable()) return null;
     return safeStorage.decryptString(Buffer.from(blob, 'base64')) || null;
   } catch {
@@ -117,7 +122,7 @@ function decryptToken(blob: unknown): string | null {
 }
 
 function sessionFrom(raw: Record<string, unknown>): PumpSession | null {
-  const tok = decryptToken(raw.token);
+  const tok = decryptToken(raw.token, raw.address);
   if (!tok || typeof raw.address !== 'string' || !raw.address) return null;
   return {
     address: raw.address,
@@ -171,7 +176,14 @@ function load(): void {
   }
 }
 
-function persist(): void {
+/** Re-encrypt the sessions in the current write mode. A session that fails
+ *  costs a sign-in, never a key, so this does not hold a migration up. */
+export function resealAll(): void {
+  load();
+  persist('scrub');
+}
+
+function persist(backup: 'keep' | 'scrub' = 'keep'): void {
   const p = storePath();
   try {
     if (sessions.size === 0 && needs.size === 0) {
@@ -181,7 +193,7 @@ function persist(): void {
     const rows: Array<Record<string, unknown>> = [];
     let unsealed = 0;
     for (const s of sessions.values()) {
-      const sealed = encryptToken(s.token);
+      const sealed = encryptToken(s.token, s.address);
       // Never write a token in the clear. A session that cannot be sealed
       // still works for this run; it just will not survive a restart.
       if (!sealed) {
@@ -197,7 +209,7 @@ function persist(): void {
       if (fs.existsSync(p)) fs.unlinkSync(p);
       return;
     }
-    fs.writeFileSync(p, JSON.stringify({ version: 2, sessions: rows, needsSignIn: [...needs.values()] }, null, 2), 'utf8');
+    durableWrite(p, JSON.stringify({ version: 2, sessions: rows, needsSignIn: [...needs.values()] }, null, 2), { backup });
   } catch (err) {
     logger.warn(`pump auth: could not save the sessions (${(err as Error).message})`);
   }

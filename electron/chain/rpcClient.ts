@@ -4,6 +4,7 @@
 
 import { base58Encode } from './base58';
 import { classifyRpcFailure, credentialsMessage, safeHost } from '../../shared/rpcErrors';
+import { clearIssuesWithPrefix, raiseIssue } from '../system/appIssues';
 import * as heliusBudget from '../system/heliusBudget';
 
 export interface AccountInfo {
@@ -85,6 +86,13 @@ export function noteRpcRejection(url: string, status: number): void {
   const code = String(status) as '401' | '403';
   const prev = rejected.get(host);
   rejected.set(host, { at: Date.now(), code });
+  raiseIssue({
+    id: `rpc-key:${host}`,
+    level: 'error',
+    title: 'Your RPC key was refused',
+    body: credentialsMessage(host, code),
+    action: { label: 'Open Settings', route: 'settings' },
+  });
   // One sentence per host per TTL, not one per failed call.
   if (!prev || Date.now() - prev.at > REJECT_TTL_MS) {
     const line = credentialsMessage(host, code);
@@ -130,19 +138,49 @@ export function rpcCredentialsRejected(): { host: string; code: '401' | '403'; m
 /** Editing the RPC settings is a new key: forget every rejection. */
 export function clearRpcRejections(): void {
   rejected.clear();
+  clearIssuesWithPrefix('rpc-key:');
+  // The refusals below were about the old key too.
+  socketSpentAt.clear();
+  socketParkedUntil.delete(HELIUS_HOST);
 }
 
-/** Helius bills HTTP RPC as well as the websocket. A meter that counted only
- *  the socket showed a fraction of real spend, so the ceiling never bit and
- *  the number on the Settings page was not the user's usage. */
-function billIfHelius(httpUrl: string): void {
-  if (!/helius/i.test(httpUrl)) return;
-  try {
-    heliusBudget.billHttp(1);
-  } catch {
-    /* metering must never break a trade */
-  }
+// ── A keyed socket refused because the plan is out of credits ─────────
+//
+// Not a rejected key: ordinary requests on the same key can still answer, so the
+// HTTP endpoint stays in use (2026-11-04, getSlot 200 and the handshake 429). Only
+// a socket picker asks this, and it goes back to the public socket meanwhile.
+const HELIUS_HOST = 'mainnet.helius-rpc.com';
+const socketSpentAt = new Map<string, number>();
+const SOCKET_SPENT_TTL_MS = 15 * 60_000;
+
+export function markSocketSpent(url: string): void {
+  socketSpentAt.set(safeHost(url), Date.now());
 }
+
+export function clearSocketSpent(url: string): void {
+  socketSpentAt.delete(safeHost(url));
+}
+
+export function isSocketSpent(url: string): boolean {
+  const at = socketSpentAt.get(safeHost(url));
+  return at !== undefined && Date.now() - at < SOCKET_SPENT_TTL_MS;
+}
+
+/** Told when a request carrying a key is refused with a 429, so the reason can be
+ *  found out. A socket never reads the refusal's body. */
+let keyedRefusalSink: ((url: string) => void) | null = null;
+
+export function setKeyedRefusalSink(fn: (url: string) => void): void {
+  keyedRefusalSink = fn;
+}
+
+function noteKeyedRefusal(url: string): void {
+  if (/api-key=|[?&]token=/i.test(url)) keyedRefusalSink?.(url);
+}
+
+// Helius bills HTTP RPC as well as the websocket. A meter that counted only the
+// socket showed a fraction of real spend, so the ceiling never bit and the number
+// on the Settings page was not the user's usage. See heliusBudget.meterHttp.
 
 // ── Rate-limit memory per host, and per METHOD ────────────────────────
 //
@@ -263,6 +301,7 @@ export function noteSocketRateLimit(url: string, errText: string): boolean {
   const prev = socketParkedUntil.get(host) ?? 0;
   const until = Date.now() + SOCKET_PARK_MS;
   if (until > prev) socketParkedUntil.set(host, until);
+  noteKeyedRefusal(url);
   return true;
 }
 
@@ -569,7 +608,7 @@ export async function isChallengeResponse(res: {
 
 async function callOnce<T>(httpUrl: string, method: string, params: unknown[]): Promise<RpcResult<T>> {
   await acquire(httpUrl, method);
-  billIfHelius(httpUrl);
+  heliusBudget.meterHttp(httpUrl, method);
   try {
     const res = await fetch(httpUrl, {
       method: 'POST',
@@ -585,6 +624,7 @@ async function callOnce<T>(httpUrl: string, method: string, params: unknown[]): 
         const body = await peekBody(res);
         const scoped = headerNumber(res, 'x-ratelimit-method-limit') === 0 || methodScopedText(body);
         noteRateLimit(httpUrl, retryAfterOf(res), scoped ? method : null);
+        if (/max usage/i.test(body)) noteKeyedRefusal(httpUrl);
         return { ok: false, message: 'RPC HTTP 429' };
       }
       if (res.status === 403) {
@@ -1085,6 +1125,7 @@ export async function getTransaction(httpUrl: string, signature: string): Promis
  * returned in request order; an element that errored is null.
  */
 export async function getTransactions(httpUrl: string, signatures: string[]): Promise<RpcResult<Array<RawTransaction | null>>> {
+  heliusBudget.meterHttp(httpUrl, 'getTransaction', signatures.length);
   if (signatures.length === 0) return { ok: true, message: 'ok', data: [] };
   const firstId = nextId;
   nextId += signatures.length;
@@ -1110,6 +1151,7 @@ export async function getTransactions(httpUrl: string, signatures: string[]): Pr
         const text = await peekBody(res);
         const scoped = headerNumber(res, 'x-ratelimit-method-limit') === 0 || methodScopedText(text);
         noteRateLimit(httpUrl, retryAfterOf(res), scoped ? 'getTransaction' : null);
+        if (/max usage/i.test(text)) noteKeyedRefusal(httpUrl);
       }
       return { ok: false, message: `RPC HTTP ${res.status}` };
     }

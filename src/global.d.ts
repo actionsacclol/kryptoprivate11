@@ -33,7 +33,6 @@ import type { OrderTemplate } from '@shared/orderTemplates';
 import type { NewOrderRequest, OrdersSnapshot } from '@shared/orders';
 import type { AlertsSnapshot, NewAlertRequest } from '@shared/alerts';
 import type { PortfolioSummary, TradeHistoryRow } from '@shared/portfolio';
-import type { CopyConfig, CopySnapshot } from '@shared/copytrade';
 import type { EvmScanLaunch, EvmScanStatus } from '@shared/evmScan';
 import type { EvmRunnerFlag } from '@shared/evmRunners';
 import type { RunnerModel } from '@shared/evmRunners';
@@ -202,18 +201,34 @@ declare global {
         refreshAll: () => Promise<IpcResult<WalletSummary[]>>;
         holdings: () => Promise<IpcResult<WalletHolding[]>>;
         backup: () => Promise<IpcResult>;
-        exportAll: () => Promise<IpcResult<{ count: number }>>;
+        exportKey: (id?: string) => Promise<IpcResult<{ warnings: string[] }>>;
         remove: (id?: string) => Promise<IpcResult<WalletInfo>>;
+      };
+      /** The Security page: status and buttons. Secrets stay in the security window. */
+      security: {
+        status: () => Promise<IpcResult<import('@shared/securityPolicy').SecurityStatus>>;
+        setPassword: () => Promise<IpcResult<{ warnings: string[] }>>;
+        changePassword: () => Promise<IpcResult<{ warnings: string[] }>>;
+        removePassword: () => Promise<IpcResult<{ warnings: string[] }>>;
+        newRecoveryCode: () => Promise<IpcResult<{ warnings: string[] }>>;
+        enable2fa: () => Promise<IpcResult<{ warnings: string[] }>>;
+        disable2fa: () => Promise<IpcResult<{ warnings: string[] }>>;
+        requestReset2fa: () => Promise<IpcResult<{ warnings: string[] }>>;
+        cancelReset2fa: () => Promise<IpcResult<{ warnings: string[] }>>;
+        finishReset2fa: () => Promise<IpcResult<{ warnings: string[] }>>;
+        setIdle: (minutes: number) => Promise<IpcResult<{ warnings: string[] }>>;
+        lockNow: () => Promise<IpcResult<{ warnings: string[] }>>;
+        exportBackup: () => Promise<IpcResult<{ warnings: string[] }>>;
+        importBackup: () => Promise<IpcResult<{ warnings: string[] }>>;
       };
       /** The All-in-One wallet: one recovery phrase, every chain (shared/aio.ts). */
       aio: {
         info: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
-        /** The phrase comes back ONCE, for the backup screen. */
-        create: (label?: string) => Promise<IpcResult<{ info: import('@shared/aio').AioWalletInfo; phrase?: string }>>;
+        /** The phrase is shown in the security window and never comes back here. */
+        create: (label?: string) => Promise<IpcResult<{ info: import('@shared/aio').AioWalletInfo }>>;
         import: (phrase: string, label?: string, choice?: { solana: string; evm: string } | null) => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
         scanPhrase: (phrase: string) => Promise<IpcResult<{ solana: import('@shared/aio').AioScanRow[]; evm: import('@shared/aio').AioScanRow[] }>>;
-        reveal: () => Promise<IpcResult<string>>;
-        backedUp: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
+        reveal: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
         repair: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
         activate: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
         remove: () => Promise<IpcResult<import('@shared/aio').AioWalletInfo>>;
@@ -413,22 +428,17 @@ declare global {
          *  is read from the store, never sent from here. */
         testWebhook: (chain: ChainKind) => Promise<IpcResult<void>>;
       };
+      issues: {
+        list: () => Promise<IpcResult<import('@shared/issues').AppIssue[]>>;
+        close: (id: string) => Promise<IpcResult<void>>;
+        closeAll: () => Promise<IpcResult<void>>;
+      };
       alerts: {
         list: () => Promise<IpcResult<AlertsSnapshot>>;
         create: (req: NewAlertRequest) => Promise<IpcResult<AlertsSnapshot>>;
         remove: (id: string) => Promise<IpcResult<AlertsSnapshot>>;
         mute: (id: string, muted: boolean) => Promise<IpcResult<AlertsSnapshot>>;
         clearFired: () => Promise<IpcResult<AlertsSnapshot>>;
-      };
-      copy: {
-        list: () => Promise<IpcResult<CopySnapshot>>;
-        save: (config: Partial<CopyConfig>) => Promise<IpcResult<CopySnapshot>>;
-        remove: (id: string) => Promise<IpcResult<CopySnapshot>>;
-        /** Start a followed wallet's own record over; configs and copies stay. */
-        resetStats: (wallet: string) => Promise<IpcResult<CopySnapshot>>;
-        /** Clear PAPER results — one config, or all when omitted. Settings,
-         *  live history, leader records and real holdings are untouched. */
-        resetPaper: (configId?: string) => Promise<IpcResult<CopySnapshot>>;
       };
       automation: {
         list: () => Promise<IpcResult<import('@shared/automation').ScriptSnapshot>>;
@@ -620,7 +630,7 @@ declare global {
           assign: (chain: EvmChainKind, id: string) => Promise<IpcResult<EvmWalletInfo>>;
           rename: (chain: EvmChainKind, id: string, label: string) => Promise<IpcResult<EvmWalletInfo>>;
           remove: (chain: EvmChainKind, id?: string) => Promise<IpcResult<EvmWalletInfo>>;
-          exportAll: () => Promise<IpcResult<{ count: number }>>;
+          exportKey: (chain: string, id?: string) => Promise<IpcResult<{ warnings: string[] }>>;
           refreshBalance: (chain: EvmChainKind) => Promise<IpcResult<EvmWalletInfo>>;
           refreshAll: (chain: EvmChainKind) => Promise<IpcResult<EvmWalletSummary[]>>;
         };

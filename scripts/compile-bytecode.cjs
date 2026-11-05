@@ -13,7 +13,7 @@
 //
 // Left as plain JS on purpose:
 //   • main.js  — 3-line bootstrap, no secrets, and it is Electron's entry.
-//   • preload.js, scriptPreload.js — Electron loads a preload BY PATH, not via
+//   • preload.js, scriptPreload.js, securityPreload.js — Electron loads a preload BY PATH, not via
 //     our require. A sandboxed preload (the script sandbox) has no Node
 //     `require` at all, so a bytenode stub throws on its first line and the
 //     bridge is never installed — every code script then fails to start with
@@ -42,7 +42,7 @@ const path = require('node:path');
 
 try {
 const dir = path.join(__dirname, '..', 'dist-electron');
-const SKIP = new Set(['main.js', 'preload.js', 'scriptPreload.js']);
+const SKIP = new Set(['main.js', 'preload.js', 'scriptPreload.js', 'securityPreload.js']);
 
 let count = 0;
 for (const f of fs.readdirSync(dir)) {

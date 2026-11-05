@@ -29,7 +29,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { COPY_LATENCY_FLOOR_MS } from '@shared/copytrade';
 import { FOLLOWER_FILL_STALE_MS, FOLLOWER_LAG_MS, followerNetReturnPct } from '@shared/walletScore';
 import {
   MIN_TRIPS_FOR_RANK,
@@ -41,6 +40,7 @@ import {
   type ScoutDay,
   type ScoutWallet,
   type ScoutTrip,
+  SCOUT_SLOW_ENOUGH_MS,
 } from '@shared/walletScout';
 
 const FILE = 'wallet-scout.json';
@@ -432,7 +432,7 @@ export function note(
     b.holds.push(holdMs);
     if (b.holds.length > MAX_HOLDS) b.holds.shift();
     bucket.measured = (bucket.measured ?? 0) + 1;
-    if (holdMs < COPY_LATENCY_FLOOR_MS) bucket.fast = (bucket.fast ?? 0) + 1;
+    if (holdMs < SCOUT_SLOW_ENOUGH_MS) bucket.fast = (bucket.fast ?? 0) + 1;
 
     // The follower's trip: mirrored on the FINAL close, both legs at the
     // first print after the lag. No entry print before the leader was out

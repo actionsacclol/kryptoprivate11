@@ -83,7 +83,10 @@ export function parseFile(raw: unknown, now: number, mintId: () => string): Wall
     return migrateLegacy(obj as unknown as LegacyWalletFile, now, mintId());
   }
 
-  if (obj.version !== 2 || !Array.isArray(obj.wallets)) return null;
+  // 3 is the same shape with `kv1:` secrets (app password on). In memory it is
+  // always 2: the version on disk is stamped from the vault's state at write.
+  // An older build refuses 3, read-only, rather than failing to sign.
+  if ((obj.version !== 2 && obj.version !== 3) || !Array.isArray(obj.wallets)) return null;
   const wallets: StoredWallet[] = [];
   for (const w of obj.wallets as unknown[]) {
     const parsed = parseWallet(w);

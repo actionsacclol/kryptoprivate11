@@ -104,11 +104,8 @@ export const WALLET_READ_LIMIT = 200;
 /**
  * Hold time under which a wallet is "too fast to copy".
  *
- * The same number as `COPY_LATENCY_FLOOR_MS` in shared/copytrade.ts and the
- * same reasoning: the median leader holds six seconds, their edge is latency,
- * and latency is the one thing a follower cannot copy
- * (docs/wallet-convergence-2026-09-14.md). The two constants are pinned equal
- * by test — they are one fact with two readers, not two settings.
+ * The median leader holds six seconds, their edge is latency, and latency is
+ * the one thing a follower cannot copy (docs/wallet-convergence-2026-09-14.md).
  */
 export const SCOUT_SLOW_ENOUGH_MS = 60_000;
 /** Reachable share under which a follower was locked out of most trips — the

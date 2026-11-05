@@ -33,7 +33,7 @@ const from = (marker) => {
   const orderTick = body.indexOf('advOrders.onTick({');
   assert.ok(firstTape > 0 && mainTape > firstTape && orderTick > 0, 'both records and the order tick are in onTrade');
   assert.ok(mainTape < orderTick, 'the tape is recorded before the orders evaluate');
-  assert.ok(body.indexOf("this.noteEvalError('orders/alerts/copy', ev.mint, err);") > orderTick, 'the evaluation is fenced');
+  assert.ok(body.indexOf("this.noteEvalError('orders/alerts', ev.mint, err);") > orderTick, 'the evaluation is fenced');
   assert.equal((body.match(/this\.recordTapeTrade\(ev, n\);/g) || []).length, 2, 'exactly two tape records (early return + main body) — not a duplicate');
   ok('curve trades: tape first, orders fenced');
 }
@@ -46,7 +46,7 @@ const from = (marker) => {
   const tick = body.indexOf('advOrders.onTick({ mint, priceSol, mcapUsd: null });');
   assert.ok(tape > 0 && tick > 0, 'both in the AMM handler');
   assert.ok(tape < tick, 'the tape is recorded before the orders evaluate');
-  assert.ok(body.indexOf("this.noteEvalError('orders/alerts/copy', mint, err);") > tick, 'the evaluation is fenced');
+  assert.ok(body.indexOf("this.noteEvalError('orders/alerts', mint, err);") > tick, 'the evaluation is fenced');
   ok('graduated tokens: tape first, orders fenced');
 }
 

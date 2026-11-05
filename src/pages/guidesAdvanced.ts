@@ -69,7 +69,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       {
         heading: 'What Max SOL / trade limits',
         lines: [
-          'It limits advanced orders and copy trading. A script uses its own budget instead. Going over the limit refuses the trade; it is never quietly reduced.',
+          'It limits advanced orders. A script uses its own budget instead. Going over the limit refuses the trade; it is never quietly reduced.',
           'Manual trades are not capped: the trade panel, Discover and Runners quick buy, and hotkeys spend exactly what you entered, minus the exit reserve.',
           'Discover’s quick-buy field starts at 0.1 SOL or your cap, whichever is smaller.',
           'A buy order written above the cap is refused when you create it, and again if it fires.',
@@ -264,7 +264,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
           'Engine, Wallet, Session PnL: scanner state and uptime, balance with live trade counts, and realised PnL for this session.',
           'Open positions, Open orders, Recent fills: what is open, what is still armed, and what actually executed, on every chain.',
           'Live launches, Runner alerts, Observatory: new tokens as the scanner sees them, this session’s runner flags, and whether each chain’s scanner is running and how far behind it is.',
-          'Scripts, Script monitor, Copy trading, Alerts: script spend and armed state, one script’s own stats and log, followed wallets, and armed or recently fired alerts.',
+          'Scripts, Script monitor, Alerts: script spend and armed state, one script’s own stats and log, and armed or recently fired alerts.',
           'Chart, Links, Callouts, Games (Snake, Flappy Crypto, Dino, Tetris).',
           'Every panel starts on the first time an install sees it, including panels added in an update. A panel you switch off stays off.',
         ],
@@ -325,7 +325,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
           'Scored and flagged: pump.fun creates only. They come from log subscriptions raced across every socket, plus a standby block feed that takes over if pump’s logs go quiet.',
           'PumpSwap: trades after graduation are decoded for prices and the trade list. The post-graduation standby block feed is off by default because it pulls about 11 GB/h.',
           'LaunchLab (LetsBonk): one program-wide subscription with exact curve progress, but trades arrive without a trader address.',
-          'Meteora DBC (Believe and others): only the token you have open is watched, at most 3 pools at once. There is no launch-time bundle analysis and no copy trading on this rail.',
+          'Meteora DBC (Believe and others): only the token you have open is watched, at most 3 pools at once. There is no launch-time bundle analysis on this rail.',
           'Boop: program-wide and fully decoded with real trader addresses, but the rail is nearly dormant. Raydium: new AMM v4 and CPMM pools are seen as they are created, with a trade list (no trader address) for the pool you open.',
           'These rails feed Discover, charts and trade lists. The odds model and runner flags are pump.fun only. Pons (Robinhood; graduates to Uniswap v4 at 4.2 ETH) and four.meme (BNB; graduates to PancakeSwap v2 at 18 BNB) have their own Observatory pages.',
         ],
@@ -430,7 +430,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
         lines: [
           'bot: median hold under 10 s with at least 10 round trips. Listed after humans; hidden by No bots.',
           'thin: under 5 closed trips. unreachable: a copier could have taken under 25 % of the trips checked. concentrated: 4 or more trips per coin. partial: the copy numbers cover less than half of the window’s trips.',
-          'Under a minute: the share of trips opened and closed within 60 s, shown red at 50 % or more. Holds over a minute hides wallets whose median hold is under 60 s, the same minimum copy trading uses.',
+          'Under a minute: the share of trips opened and closed within 60 s, shown red at 50 % or more. Holds over a minute hides wallets whose median hold is under 60 s.',
           'The typical top wallet holds about six seconds. Its edge is speed, which a copier cannot copy: the app takes about 1.4 s to land a trade, plus feed delay.',
         ],
       },
@@ -511,7 +511,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       'Import a key with Import key or Import. It accepts base58 or a JSON byte array, as a 64-byte keypair or a 32-byte seed. A key already in the list is refused.',
       'To change which wallet signs, switch the top bar to Paper first. Picking another wallet and Make main are refused while live execution is armed. Removing a wallet disarms first and also signs its pump.fun account out.',
       'Set Safety rails for each wallet. Max balance cap defaults to 2 SOL (0–100) and only warns. Withdrawal address changes must be confirmed in a system dialog.',
-      'Back up from Backup & removal. Back up keypair writes a Solana CLI JSON file. Export all (Phantom) writes every private key to a plain-text file.',
+      'Back up from Backup & removal. Back up all keys writes one encrypted file with every key in this profile, under a password you choose, and Import a backup on the Security page reads it. Export this key writes one wallet\'s private key to a plain file, for Phantom or the Solana CLI, after a warning, your proof, and typing EXPORT PLAINTEXT.',
       'Send SOL to your other wallets with Funder → Fund wallets (12 transfers per transaction), and bring it back with Collect back (one transaction per wallet). Both need live armed.',
       'Sign each wallet in to pump.fun from Sol Wallet → pump.fun accounts or Automation → pump.fun accounts. Each wallet has one account, and all of them can be signed in at once.',
       'On Robinhood Wallet or BNB Wallet, press Check my rewards to see what Merkl reports that wallet has earned on that chain. Nothing is sent until you press it.',
@@ -568,7 +568,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       },
     ],
     careful: [
-      'Nobody can recover a lost key. Export all writes every private key in plain text: keep that file offline and delete it once the keys are imported somewhere else.',
+      'Nobody can recover a lost key. Export this key writes that private key in plain text: keep the file offline and delete it once the key is imported somewhere else.',
       'Importing a wallet you use elsewhere puts it under this app’s signer. Prefer a fresh wallet, and fund it only with what you can afford to lose.',
       'Auto-sell on stop or crash (off by default) sells every token in the wallet at up to 15% slippage, including tokens the app never bought.',
       'If a withdrawal-address confirmation appears when you did not ask for one, press Cancel.',
@@ -594,7 +594,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
           'HTTP (account lookups) and WebSocket (launch feed) use free public endpoints by default. Extra WebSocket endpoints all run at once and the first to deliver an event wins.',
           'The Helius key is used for trade simulation, sending, confirmation, send-time fee estimates, and holder and token-account reads. Launch scanning and plain reads stay on public endpoints. The free Helius plan allows about 10 requests a second, and the app stays under that.',
           'Execution endpoint carries live buys, sells, confirmations and send-time fee estimates. Mint checks, balances and holder reads stay on the HTTP endpoint, so you do not pay for bulk traffic.',
-          'Helius feed socket is off by default. In a test it delivered 92% of events first, but it uses about 800k credits a day. When the monthly credit limit (default 1,000,000) is used up, the app turns the socket off.',
+          'Helius feed socket is off by default. In a test it delivered 92% of events first, but it uses about 1,000,000 credits a day. When the monthly credit limit (default 1,000,000) is used up, the app turns the socket off.',
           'Standby block feed is on by default and downloads about 5.5 GB/h while scanning. The post-graduation version is off by default and downloads about 11 GB/h. Turn both off on a metered connection.',
           'RPC changes made while the scanner is running apply on the next start. Commitment is processed or confirmed.',
         ],
@@ -672,7 +672,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       {
         heading: 'When Auto-callout posts',
         lines: [
-          'Only after a live buy you placed by hand has confirmed. Scripts, copy trades and advanced orders never trigger it, so it cannot use up pump’s one callout before a script’s own post.',
+          'Only after a live buy you placed by hand has confirmed. Scripts and advanced orders never trigger it, so it cannot use up pump’s one callout before a script’s own post.',
           'Paper buys, failed buys and buys below Skip buys under do not post. Buying more of a coin you already called does not post a reply.',
           'For a launch, it posts from the launch wallet’s account 30 seconds after the dev buy, only if the dev buy is worth more than the USD minimum. If the SOL price is unknown, nothing is posted. It needs callout text written.',
           'A refusal is logged to the Console. It is not retried and does not pop up a message. A failed callout never marks the trade as failed.',
@@ -912,63 +912,34 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
     ],
   },
   automation: {
-    what: 'Automation holds everything that trades off something other than your click: Copy Simple, Copy Trading, Scripts, Auto-callout, pump.fun accounts, AI connection and Farming (not built yet). Copy Simple and Copy Trading edit the same copy configs in one store and one engine (at most 25 configs). Scripts are rules or sandboxed JavaScript that ask the engine to act, and each ask is checked against that script’s own budget. The AI connection is a loopback MCP server that takes intents, not transactions. All of them go through the same buy/sell pipeline as the buttons, so the same fees, signer policy and breakers apply.',
+    what: 'Automation holds everything that trades off something other than your click: Krypto Trader, Scripts, Auto-callout, pump.fun accounts, AI connection and Farming (not built yet). The Copy Trading row is a pointer: copy trading moved to its own app, Krypto Mirror. Scripts are rules or sandboxed JavaScript that ask the engine to act, and each ask is checked against that script’s own budget. The AI connection is a loopback MCP server that takes intents, not transactions. All of them go through the same buy/sell pipeline as the buttons, so the same fees, signer policy and breakers apply.',
     steps: [
-      'Find a wallet on the Wallet Scout. Sort by Copy score over the default 7-day window and use the No bots, Enough trades, You could have copied, Holds over a minute and Trades most days filters.',
-      'Press Follow on paper in the Scout drawer, or paste the address into Copy Simple. Either way the config is saved as paper.',
-      'Open the same row on Copy Trading to set Direction (Copy / Reverse / FOMO), Copy with (the signing wallet), filters, its own exits and the three limits: Daily loss limit, Daily trade limit and Copies per minute.',
-      'For signals a copy config cannot express, write a script. Use a leaderTrade rule or handler for followed wallets, or launchUpdate / runner for the scanner.',
+      'Write a script for the signal you want: launchUpdate or runner for the scanner, position and tick for what it holds.',
       'Set each script’s budget before its logic: Max per trade, Buys per day, Daily loss stop, Open positions, Actions / min.',
-      'Run everything on paper. Read Recent copies (skips included), the latency panel and each script’s log.',
-      'Arm live one config or script at a time. Saving as live leaves it disarmed, and arming is a separate confirmed click.',
+      'Run everything on paper and read each script’s log.',
+      'Arm live one script at a time. Saving as live leaves it disarmed, and arming is a separate confirmed click.',
       'Keep the Scripts kill switch in reach. It turns every script off, and none can be enabled until it is lifted.',
     ],
     details: [
       {
-        heading: 'Directions',
-        lines: [
-          'Copy: buys when they buy and mirrors their sells as a share of what you hold. Its own take-profit, stop-loss and max hold are off unless you set them (blank = off).',
-          'Reverse: their sell is your entry and their buy-back is a 100% exit. The position also closes on its own exits, which default to +25% / −20% / 30 min.',
-          'FOMO: follows a set of wallets and buys when Wallets to trigger (default 3) distinct wallets buy the same coin Within (default 180 s). Solana only.',
-          'FOMO exits when the share of trigger wallets set in Exit when the crowd leaves (default 50%) has sold, or on its own exits (same 25 / 20 / 30 defaults).',
-          'Trailing stop is opt-in on every direction and is measured from the peak since entry.',
-          'Bounds: take-profit 1–1000%, stop-loss 1–95%, max hold 1–1440 min, trailing 1–95%.',
-        ],
-      },
-      {
-        heading: 'Paper is the default, and it is harsh',
-        lines: [
-          'Both Copy Simple and Copy Trading create paper configs. A live config comes back disarmed after a restart.',
-          'A paper copy fills at the price after your configured Delay, not at the leader’s price.',
-          'A paper round trip pays 1.5% on each side (pump’s 1% plus Krypt’s 0.5%).',
-          'Paper follows the live staleness rules. An entry more than 60 s old (plus your delay) is refused, and so is an entry the leader already exited before it went out.',
-          'Paper and live stats are scored separately. A row is governed by the mode it was opened in, not by what the config is set to now.',
-        ],
-      },
-      {
         heading: 'The same pipeline everywhere',
         lines: [
-          'Copies, script trades and AI-connection trades all reach the engine’s own buy/sell path. Fees are injected at signing.',
+          'Script trades and AI-connection trades all reach the engine’s own buy/sell path. Fees are injected at signing.',
           'Every filter refusal is recorded as a skipped row or log line with its reason, so a scorecard never hides what a filter kept you out of.',
-          'An unknown fact never passes a filter. A copy filter whose fact cannot be read refuses the copy, and a rule condition on an unknown value does not hold.',
+          'An unknown fact never passes a filter. A rule condition on an unknown value does not hold.',
           'Scripts can only sell positions that script opened. bot.positions() and the held field refer to that script’s own positions.',
         ],
       },
       {
         heading: 'Limits you set',
         lines: [
-          'Copy config defaults: 0.05 fixed size, Max per trade 0.1, Min liquidity $5,000, Max slippage 15%, Daily loss limit 0.25, Daily trade limit 20, Copies per minute 10.',
-          'Copy config bounds: Max per trade up to 25, delay 0–60 s, daily trades 1–500, copies per minute 1–120, proportional size up to 500%.',
           'Script defaults: Max per trade 0.05, Buys per day 20, Daily loss stop 0.5, Open positions 5, Actions / min 30.',
           'AI connection defaults: Max per buy 0.1, Max in an hour 0.5, Trades a minute 4.',
         ],
       },
     ],
     careful: [
-      'The app’s own research found that copying wallets loses money on average. The best Copy score decile still lost about 1–3% per copied trade, and adding wallets to a crowd (FOMO) made the follower’s result worse: −15% to −32% after 60 min.',
-      'Reverse has never been measured. It is a bet that the coin keeps going after the leader leaves.',
-      'A live config or script keeps spending on its own while you are away. The daily limits are the only thing that stops it.',
-      'Switching a copy config from live to paper does not close a live position it already opened. The leader’s later sells are recorded as not executed, and the tokens stay in your wallet.',
+      'A live script keeps spending on its own while you are away. The daily limits are the only thing that stops it.',
     ],
   },
   'aio-wallet': {
@@ -1023,91 +994,37 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       },
     ],
     careful: [
-      'Only the coin-page Buy and bot.buy({ topUp: true }) top up. Quick buys, hotkeys, copy trading, Krypto Trader and the AI connection need money already on the chain — or the float.',
+      'Only the coin-page Buy and bot.buy({ topUp: true }) top up. Quick buys, hotkeys, Krypto Trader and the AI connection need money already on the chain — or the float.',
       'Relay delivers the far side. The app checks the order before signing — recipient, chain, coin, minimum out, refund address, deadline, and the order id recomputed from them — but the delivery itself is Relay’s.',
       'USDC arriving on Solana is turned into SOL by the USDC auto-swap (0.5% fee). Switch it off on the Sol Wallet page to keep USDC.',
-      'Compress does not exclude coins held by copy trading.',
     ],
   },
   'copy-trading': {
-    what: 'Each followed Solana wallet gets its own live-socket subscription. Its swaps are decoded from the transaction’s own balance changes, so trades routed through Jupiter, Raydium or Meteora are seen, not just pump.fun curve trades. On Robinhood Chain and BNB, followed wallets are seen only through that chain’s scanner poll, and only their launchpad-curve trades (Pons, four.meme). A copy config has its own signing wallet (Copy with), sizing, filters, delay, exits and limits. Copy Simple asks three things and derives the whole config from them, and Copy Trading shows every field of the same config.',
+    what: 'Copy trading left this app on 2026-11-04 and lives on in Krypto Mirror, a separate download with its own wallets, settings and data folder. This app no longer watches followed wallets, and nothing here buys or sells off another wallet’s trades. The Wallet Scout and its Copy score stay, as a record of what wallets did.',
     steps: [
-      'Rank candidates on the Wallet Scout by Copy score, which estimates what a follower would have made, not what the wallet made. Open the drawer and check the Reachable count and the bot, thin, unreachable and concentrated flags.',
-      'Follow on paper from the Scout or from Copy Simple. Copy Simple sets fixed sizing at your per-trade size (0.05 / 0.1 / 0.25 / 0.5, or up to 5), Max per trade equal to that size, a daily loss limit of 10× the size, copy sells on, and paper.',
-      'Open the config on Copy Trading. Set Copy with (a wallet other than your active one if you want), Sizing (fixed, or % of their size with Max per trade as the ceiling), Delay and Max slippage.',
-      'Add filters: Their trade at least / at most, Max buys per token (1 = buy once), Never copy these tokens / creators (up to 100 each), Min / Max market cap, Token at least / at most (minutes old), and Mirror sells of at least (% of their bag).',
-      'Clear any fact-based filter you do not need (Min liquidity, market cap, Min Krypt score, token age, creator blocklist, Pump.fun only). With none set, the token-facts lookup is skipped entirely.',
-      'Watch Where a copy’s time goes and Recent copies for a few days. Recent copies includes the copies your filters rejected.',
-      'Arm live only once the paper record justifies it. Live refuses a copy over the live per-trade ceiling and while live execution is blocked.',
+      'Open Automation, then Copy Trading, and download Krypto Mirror. The link is krypt.cc/mirror.',
+      'Add your follows again there. They do not carry over.',
+      'Check your Portfolio here for coins copy trading bought, and sell by hand what you do not want to keep.',
     ],
     details: [
       {
-        heading: 'How sells are mirrored',
+        heading: 'What stayed here',
         lines: [
-          'A live copy stores the exact token amount its confirmed buy delivered and sells exactly that quantity, not a percentage of a balance shared with other bags.',
-          'The amount a sell moved is read first from the fill’s own token change. If that has not reconciled within 8 s, it is read from a before/after balance.',
-          'If the leader’s sold fraction cannot be decoded, the app reads their current holding: sold ÷ (after + sold). If that also fails, nothing is sold, and you get an error toast and a skipped row.',
-          'A sell that arrives while your buy is still in flight is parked. If your buy was not yet submitted, it is abandoned. If it was already sent, the parked sell closes the position as soon as it opens.',
-          'A leader sell more than 15 min old is not mirrored. It is recorded, and you still hold the position.',
-          'While live copies are open, a balance sweep runs every 90 s. A copy is closed if its coin has left the wallet (with a 90 s grace after the buy), claimed quantities are cut down to what the chain holds, and a closed row still holding more than 0.5% is flagged as a leftover.',
+          'The Wallet Scout, its Copy score and your saved wallets are unchanged.',
+          'Trades copy trading already made stay in your Trades history, and an old copytrade.json is left on disk unread.',
         ],
       },
       {
-        heading: 'Missed trades and recovery',
+        heading: 'What changed for scripts and the AI connection',
         lines: [
-          'A transaction that arrives as a signature only (the logs transport) is read back with up to six attempts, with gaps of 120 / 300 / 800 / 2000 / 5000 ms.',
-          'A trade that is never readable is counted as unreadable on the wallet’s status line, and it was not copied.',
-          'Gap recovery fetches up to 25 recent signatures from the last 30 min, drops any already seen, and replays them oldest first. It runs when a subscription reconnects and as a routine check every 5 min per wallet (one wallet per 60 s tick).',
-          'A recovered trade is still subject to the age rules: an entry more than 60 s old (plus your delay) or a sell more than 15 min old is recorded, not traded. Recovered trades are left out of the latency figures.',
-        ],
-      },
-      {
-        heading: 'Copy latency panel',
-        lines: [
-          'Where a copy’s time goes shows the median over this session’s copies, paper and live, measured from the leader’s own block time.',
-          'Columns: Their fill → ours, Heard about it (detect), Read the tx (read-back), Decode, Checks (with the token-facts lookup counted separately inside it), Your delay, Our order (build + land).',
-          'A stage that did not happen shows a dash, never zero. Paper has no order stage, and the tx transport has no read-back.',
-          'Under five timed copies, the panel says the sample is too small to read. The Console carries one timing line per copy.',
-          'Helius transactionSubscribe (tx transport, paid plans) delivers the whole transaction with the notification and removes the read-back stage.',
-          'Both subscriptions use confirmed commitment. processed would save about 400 ms but can report a transaction that never lands.',
-        ],
-      },
-      {
-        heading: 'FOMO internals',
-        lines: [
-          'The crowd comes from Followed wallets, Saved Scout wallets, Tracked wallets, or Top Scout wallets by Copy score (Top N, default 25, range 2–200). Each set is re-read every 30 s.',
-          'Every trade on the pump curve firehose is checked against the union of all enabled FOMO sets, cached for 30 s, so a wallet nobody watches costs only one lookup.',
-          'A wallet heard on both the firehose and its own subscription counts once. At most one entry fires per coin per window, and never while a position in that coin is open.',
-          'The entry goes through the normal filters, sizing and delay. Proportional sizing uses the crowd’s average buy, and the row lists the wallets that triggered it.',
-          'Bounds: 2–50 wallets, window 10–3600 s, crowd exit 1–100%.',
-        ],
-      },
-      {
-        heading: 'The Copy score',
-        lines: [
-          'A follower’s entry and exit are each priced at the first trade at or after the leader’s time + 2 s. Each side pays 1.5%. Slippage is not modelled, so the figures are generous.',
-          'A trip is unreachable if the leader was out before the follower was due (too fast), if no trade came before they sold (no entry), or if no exit trade came within 10 min (no exit).',
-          'The five checks and their weights: follower median return (3), follower win rate (2), reachable trips (2), active days (1), coins per trip (1).',
-          'There is no score under five closed trips or three resolved checks. A −3% median maps to about 60, so a mid-range score is where the best measured wallets land.',
-          'Holds under 60 s are treated as uncopyable, and a wallet is flagged too fast when 50% or more of at least 5 trips were that short.',
-        ],
-      },
-      {
-        heading: 'What it cannot mirror',
-        lines: [
-          'Transfers, liquidity moves and claims are not swaps and are ignored. A leader who moves tokens to another wallet and sells from there triggers no sell.',
-          'Round trips faster than your detect-to-land time are over before your copy lands.',
-          'On EVM chains, only curve trades are seen, and nothing is seen while that chain’s scanner is stopped. FOMO does not run on EVM chains.',
-          'Leader sells of tokens bought before you started watching count on their record but are never scored.',
+          'The Followed wallet traded trigger and the leader variables are gone. A rule saved on that trigger never fires, and needs another trigger before it can be saved again.',
+          'The leaderTrade and copyFill events no longer fire, bot.leaders and bot.copyConfigs no longer exist, and the AI connection no longer has get_copy_configs.',
         ],
       },
     ],
     careful: [
-      'Copying loses on average in this app’s own data: 9.3 M trades, no follower decile was positive, and the best lost about 1–3% per trade. A high Copy score means least bad, not profitable.',
-      'Every fact-based filter blocks the copy when the fact is unknown. The default $5,000 Min liquidity alone refuses any coin whose liquidity cannot be read.',
-      'A sell smaller than Mirror sells of at least is not mirrored, and the rest of that position waits for their next sell.',
-      'If a confirmed mirrored sell moves less than it asked for, the copy stays open for the remainder. Watch for leftover flags.',
-      'Scripts are the only way to trade from several of your own wallets. The app does not space those trades or cap wallets per coin. Buying the same coin from many of your wallets can be wash trading.',
+      'Nothing sells a coin copy trading bought any more: no mirrored sells and no copy exits. An advanced order you placed on it still runs.',
+      'Krypto Mirror charges a flat 0.5% on each live buy and sell. The $KRYPTO holder waiver does not apply there.',
     ],
   },
   'scripts-deep': {
@@ -1150,12 +1067,11 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       {
         heading: 'Events',
         lines: [
-          'The events are launch, launchUpdate, runner, position, tick, leaderTrade, order, alert, fill, schedule, interval, migration, devSell, holdings, copyFill and runnerExpired. A script’s handlers run one at a time.',
-          'migration fires for every coin that graduates; devSell only for coins the script holds or subscribed to; holdings whenever the wallet’s token accounts change; copyFill when copy trading opens, closes or skips a copy; runnerExpired when a flag ages off the list.',
+          'The events are launch, launchUpdate, runner, position, tick, order, alert, fill, schedule, interval, migration, devSell, holdings and runnerExpired. A script’s handlers run one at a time.',
+          'migration fires for every coin that graduates; devSell only for coins the script holds or subscribed to; holdings whenever the wallet’s token accounts change; runnerExpired when a flag ages off the list.',
           'launchUpdate fires at most once per 2 s per token. The event queue holds 50 events and drops launch chatter first.',
           'launchUpdate keeps firing only while a coin is tracked: during the 15 s evaluation window, for 15 min after a runner flag, while held, or while subscribed or watched. Call bot.subscribe(mint) on a runner you plan to act on.',
           'position fires about every 5 s for each held position and on every fill. tick fires at most once a second per token.',
-          'leaderTrade carries leaderWallet, leaderLabel, leaderSide, leaderSol and leaderSoldPct for wallets followed on Copy Trading.',
         ],
       },
       {
@@ -1223,7 +1139,7 @@ export const ADVANCED_GUIDES: Record<string, AdvancedGuide> = {
       {
         heading: 'Tools',
         lines: [
-          'Read: get_wallet, get_positions, get_token, find_tokens, get_wallet_scores, get_wallet_record, get_copy_configs, get_orders, get_trade_history, get_chart, get_token_links, get_runner_alerts, get_callouts, get_krypto_sessions, get_trader_sessions, get_trader_session (session_id).',
+          'Read: get_wallet, get_positions, get_token, find_tokens, get_wallet_scores, get_wallet_record, get_orders, get_trade_history, get_chart, get_token_links, get_runner_alerts, get_callouts, get_krypto_sessions, get_trader_sessions, get_trader_session (session_id).',
           'Trade: buy_token (mint, amount, chain), sell_token (mint, percent 1–100, chain), place_order (stop_loss, take_profit, trailing_stop, limit_buy, limit_sell; limit orders do not accept a percent trigger), krypto_mode_trade, trader_act, cancel_orders.',
           'trader_act (session_id, action hold/buy/sell, sol or percent of the session’s bag, reason, expected_seq) acts only for a Krypto Trader session you set to MCP while it runs. It is checked in order: the connection may trade; the session is MCP-driven and running; a live session needs a live connection; expected_seq matches (stale data is refused); the connection’s limits; then the session’s own limits. A hold uses no trade slot.',
           'No tool creates, funds, starts, resumes or changes a Krypto Trader session. buy_token and place_order are refused on a coin a live session trades from that wallet.',

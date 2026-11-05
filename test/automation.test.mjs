@@ -155,7 +155,6 @@ function makeHost(over = {}) {
     subscribeTicks: (mint) => calls.subscribed.push(mint),
     pin: (mint, on) => calls.pins.push({ mint, on }),
     runners: () => over.runners ?? [],
-    leaders: () => [{ wallet: 'Lead', label: 'Sharky', enabled: true, mode: 'paper' }],
     notify: (_t, body) => calls.notifies.push(body),
     // The chain's settled fills (2026-09-28): a test calls `h.settle(fill)`
     // to model a stop-loss order's sell landing and reconciling.
@@ -210,7 +209,6 @@ function makeHost(over = {}) {
     solUsd: async () => over.solUsd ?? null,
     walletScores: (chain, window, limit, only) => ({ onRecord: 0, filtered: only, rows: [], chain, window, limit }),
     walletRecord: (address, chain) => over.walletRecord?.[address] ?? null,
-    copyConfigs: () => ({ configs: [], stats: {}, liveExecutable: false, liveBlockedReason: 'not armed' }),
     alerts: () => over.alerts ?? [],
     cancelOrder: (id) => {
       calls.housekeeping.push({ method: 'cancelOrder', id });
@@ -1290,23 +1288,10 @@ test('a tick reaches only scripts that hold or subscribed to the token, at most 
   assert.match(lines[0].line, /tick COPY 0\.002/);
 });
 
-test('a followed wallet trade reaches leader_trade rules with its facts; a code script gets leaderTrade', async () => {
-  const h = setup();
-  const s = saved(rulesScript({}, { trigger: 'leader_trade', conditions: [{ field: 'leaderSide', op: 'eq', value: 'buy' }, { field: 'leaderSol', op: 'gte', value: 0.5 }], actions: [{ type: 'buy', sol: 0.02 }] }));
-  auto.setEnabled(s.id, true);
-  const c = saved(codeScript({ name: 'lt' }));
-  auto.setEnabled(c.id, true);
-  await tick();
-  auto.onSandboxMessage(c.id, { t: 'ready' });
-  auto.onLeaderTrade({ mint: MINT, symbol: 'COPY', wallet: 'Lead', label: 'Sharky', side: 'buy', sol: 1, priceSol: 0.001, soldFraction: null });
-  auto.onLeaderTrade({ mint: MINT2, symbol: 'TWO', wallet: 'Lead', label: 'Sharky', side: 'sell', sol: 0.2, priceSol: 0.001, soldFraction: 0.4 });
-  await tick(30);
-  assert.deepEqual(h.calls.buys, [{ mint: MINT, sol: 0.02, mode: 'paper' }], 'only the buy of 1 SOL fired the rule');
-  const evs = h.calls.dispatched.filter((d) => d.name === 'leaderTrade');
-  assert.equal(evs.length, 2);
-  assert.equal(evs[0].payload.leaderLabel, 'Sharky');
-  assert.equal(evs[1].payload.leaderSoldPct, 40);
-  assert.equal(evs[1].payload.leaderSide, 'sell');
+test('a rule saved on the removed followed-wallet trigger is refused on save, not crashed on', () => {
+  // Copy trading left on 2026-11-04. A user's automation.json can still hold one.
+  assert.equal(validateRules({ ...defaultRules(), trigger: 'leader_trade' }).ok, false, 'pick another trigger');
+  assert.equal(validateRules({ ...defaultRules(), trigger: 'launch', conditions: [{ field: 'leaderSide', op: 'eq', value: 'buy' }] }).ok, false, 'an old leader condition is an unknown field');
 });
 
 test('order snapshots become order events only when a state CHANGES to a terminal state', async () => {
@@ -1594,7 +1579,7 @@ test('a disabled script gets no answers, and a market lookup costs an action', a
   assert.match(off.error, /disabled/);
 });
 
-test('watch pins and streams; alert, template, wallet, leaders, runners and disable all go through the host', async () => {
+test('watch pins and streams; alert, template, wallet, runners and disable all go through the host', async () => {
   const h = setup({ runners: [{ mint: MINT, name: 'x', symbol: 'COPY', creator: 'c', flaggedAt: 1, windowS: 60, bucket: 'top', observedPct: 33, basePct: 5, n: 10 }] });
   const c = saved(codeScript({ mode: 'live' }));
   auto.setEnabled(c.id, true);
@@ -1606,7 +1591,6 @@ test('watch pins and streams; alert, template, wallet, leaders, runners and disa
     [2, 'alert', [{ mint: MINT, kind: 'mcap_above', threshold: 100000 }]],
     [3, 'applyTemplate', [MINT, 'tpl1']],
     [4, 'wallet', []],
-    [5, 'leaders', []],
     [6, 'runners', []],
     [7, 'templates', []],
     [8, 'unwatch', [MINT]],
@@ -1619,7 +1603,6 @@ test('watch pins and streams; alert, template, wallet, leaders, runners and disa
   assert.equal(h.calls.alerts[0].kind, 'mcap_above');
   assert.deepEqual(h.calls.templates, [{ mint: MINT, id: 'tpl1', by: { placedBy: `script:${c.id}`, sellShare: 1 } }], 'tagged, and scaled to the whole bag the script owns');
   assert.equal(by(4).value.sol, 1.5);
-  assert.equal(by(5).value[0].label, 'Sharky');
   assert.equal(by(6).value[0].runnerOddsPct, 33);
   assert.deepEqual(by(7).value, [{ id: 'tpl1', name: 'Default' }]);
   auto.onSandboxMessage(c.id, { t: 'call', id: 9, method: 'disable', args: ['done for today'] });
@@ -1633,7 +1616,7 @@ test('validation of the wider surface: schedule needs a time, fields match their
   assert.equal(validateRules({ ...defaultRules(), trigger: 'schedule', atHHMM: '25:00', actions: [{ type: 'sell_all' }] }).ok, false, 'bad time');
   assert.equal(validateRules({ ...defaultRules(), trigger: 'schedule', atHHMM: '23:55', conditions: [], actions: [{ type: 'sell_all' }] }).ok, true);
   assert.equal(validateRules({ ...defaultRules(), trigger: 'schedule', atHHMM: '23:55', conditions: [], actions: [{ type: 'buy', sol: 0.1 }] }).ok, false, 'a schedule has no token to buy');
-  assert.equal(validateRules({ ...defaultRules(), trigger: 'launch', conditions: [{ field: 'leaderSide', op: 'eq', value: 'buy' }] }).ok, false, 'leader facts only on leader trades');
+  assert.equal(validateRules({ ...defaultRules(), trigger: 'launch', conditions: [{ field: 'orderKind', op: 'eq', value: 'buy' }] }).ok, false, 'order facts only on leader trades');
   assert.equal(validateRules({ ...defaultRules(), trigger: 'tick', conditions: [{ field: 'drawdownFromPeakPct', op: 'gte', value: 20 }], actions: [{ type: 'sell', pct: 100 }] }).ok, true);
   assert.equal(validateRules({ ...defaultRules(), actions: [{ type: 'take_profit', gainPct: 0, sellPct: 50 }] }).ok, false);
   assert.equal(validateRules({ ...defaultRules(), actions: [{ type: 'alert', kind: 'nope', threshold: 1 }] }).ok, false);
@@ -1809,7 +1792,7 @@ test('a trigger its chain never fires is refused too', () => {
     assert.match(r.message, /never happens on BNB Smart Chain/);
   }
   // The ones both rails really do fire.
-  for (const t of ['launch', 'launch_update', 'position', 'leader_trade', 'schedule', 'tick', 'runner']) {
+  for (const t of ['launch', 'launch_update', 'position', 'schedule', 'tick', 'runner']) {
     assert.equal(triggerAvailableOn(t, 'bnb'), true, `${t} should be available on BNB`);
   }
   assert.equal(triggerAvailableOn('tick', 'solana'), true, 'Solana keeps every trigger');
@@ -2933,7 +2916,6 @@ test('every other read: validated, the network ones charged, the in-memory ones 
   auto.onSandboxMessage(s.id, { t: 'call', id: 12, method: 'walletRecord', args: [''] });
   auto.onSandboxMessage(s.id, { t: 'call', id: 13, method: 'search', args: ['   '] });
   auto.onSandboxMessage(s.id, { t: 'call', id: 14, method: 'alerts', args: [] });
-  auto.onSandboxMessage(s.id, { t: 'call', id: 15, method: 'copyConfigs', args: [] });
   auto.onSandboxMessage(s.id, { t: 'call', id: 16, method: 'trades', args: [MINT, 0] });
   await tick();
   assert.equal(by(1).value.rows[0].pct, 10);
@@ -2961,9 +2943,8 @@ test('every other read: validated, the network ones charged, the in-memory ones 
   assert.equal(by(13).ok, false);
   assert.match(by(13).error, /pass some text/);
   assert.equal(by(14).value[0].kind, 'price_above');
-  assert.equal(by(15).value.liveBlockedReason, 'not armed');
   assert.equal(h.calls.reads.find((r) => r.method === 'trades').limit, 1, 'a zero limit is held to 1');
-  // The network reads were charged; history, solUsd, walletScores, walletRecord, copyConfigs and alerts were not.
+  // The network reads were charged; history, solUsd, walletScores, walletRecord and alerts were not.
   const charged = auto.snapshot().scripts.find((x) => x.id === s.id);
   assert.ok(charged, 'snapshot has the script');
   const h2 = setup({ ...over, holdings: null });
@@ -3041,7 +3022,7 @@ test('the 2026-09-27 reads are sandbox methods, documented, and say what they co
   // holdings answers on every chain (the EVM bridge's holdings); since 6.0
   // history does too (an EVM script reads its chain's fills) — v6 audit.
   const solanaOnly = ['launchIntel', 'holders', 'trades', 'candles', 'search', 'callouts', 'alerts'];
-  const anyChain = ['discover', 'holdings', 'history', 'solUsd', 'walletScores', 'walletRecord', 'copyConfigs'];
+  const anyChain = ['discover', 'holdings', 'history', 'solUsd', 'walletScores', 'walletRecord'];
   for (const m of [...solanaOnly, ...anyChain]) {
     assert.ok(SCRIPT_METHODS.includes(m), `${m} is callable`);
     const a = SCRIPT_API.find((x) => x.method === m);
@@ -3058,7 +3039,7 @@ test('the 2026-09-27 reads are sandbox methods, documented, and say what they co
   for (const a of SCRIPT_API) if (!a.action && /costs an action/i.test(a.notes)) assert.equal(a.charged, true, `${a.method} is flagged charged`);
   assert.ok(SCRIPT_API_DOC.includes('// Reads that leave the machine'), 'the reference separates charged reads from free ones');
   assert.ok(/REJECTS \(throws\)/.test(SCRIPT_API.find((x) => x.method === 'holdings').notes), 'holdings says it rejects on an unreadable wallet — what the dispatcher does');
-  for (const m of ['history', 'solUsd', 'walletScores', 'walletRecord', 'copyConfigs', 'alerts']) assert.ok(/Free/.test(SCRIPT_API.find((x) => x.method === m).notes), `${m} says it is free`);
+  for (const m of ['history', 'solUsd', 'walletScores', 'walletRecord', 'alerts']) assert.ok(/Free/.test(SCRIPT_API.find((x) => x.method === m).notes), `${m} says it is free`);
   assert.ok(/never inferred/.test(SCRIPT_API.find((x) => x.method === 'security').notes), 'security says the held shares are measured, not inferred');
   assert.ok(/complete=false/.test(SCRIPT_API.find((x) => x.method === 'launchIntel').notes), 'launchIntel says what incomplete means');
   // The harness exposes each one.
@@ -3299,7 +3280,7 @@ test('bot.settings is scrubbed: no key, token, URL or referrer crosses, and "a k
   assert.deepEqual(s, { a: 1, nested: { fine: 'y', list: ['ok'] } });
 });
 
-test('new events: migration to every Solana script, devSell to holders and subscribers, holdings pushed, copyFill diffed by state, runnerExpired from the list', async () => {
+test('new events: migration to every Solana script, devSell to holders and subscribers, holdings pushed, runnerExpired from the list', async () => {
   const h = setup();
   const c = saved(codeScript({ budget: liveBudget }));
   auto.setEnabled(c.id, true);
@@ -3346,29 +3327,6 @@ test('new events: migration to every Solana script, devSell to holders and subsc
   assert.equal(named('holdings')[0].payload.at, 77);
   assert.equal(named('holdings')[0].payload.holdings[0].warning, null);
   assert.match(named('holdings')[0].payload.holdings[1].warning, /unknown/);
-  // Copy fills: a new row, a state change, never a repeat; another chain's row never reaches a Solana script.
-  const row = { id: 'ct1', configId: 'cfg', mode: 'paper', wallet: 'Lead', mint: MINT, symbol: 'COPY', at: 5, theirSol: 2, ourSol: 0.05, entryPriceSol: 1e-8, exitPriceSol: null, closedAt: null, pnlSol: null, state: 'open', reason: null };
-  const snap = (recent) => ({ configs: [], stats: {}, recent, liveExecutable: false, liveBlockedReason: null, watch: {}, leaders: {} });
-  // The FIRST snapshot is reloaded history and only seeds the diff — it used
-  // to push up to 100 stale rows into every script's 50-slot queue (audit
-  // 2026-09-27). A repeat of it raises nothing either.
-  auto.onEngineEvent({ kind: 'copy', snapshot: snap([row]) });
-  auto.onEngineEvent({ kind: 'copy', snapshot: snap([row]) });
-  await tick(30);
-  assert.equal(named('copyFill').length, 0, 'the first snapshot seeds; a repeat is silent');
-  auto.onEngineEvent({ kind: 'copy', snapshot: snap([{ ...row, state: 'closed', pnlSol: 0.01 }, { ...row, id: 'ct2', kind: 'exit', parentId: 'ct1', state: 'closed' }, { ...row, id: 'ct3', chain: 'bnb', state: 'skipped', reason: 'budget' }]) });
-  await tick(30);
-  assert.equal(named('copyFill').length, 2, 'a changed row and a new row; the BNB row is not a Solana script’s');
-  const closed = named('copyFill').find((d) => d.payload.id === 'ct1');
-  assert.equal(closed.payload.state, 'closed');
-  assert.equal(closed.payload.pnlSol, 0.01);
-  assert.equal(closed.payload.side, 'buy');
-  assert.equal(closed.payload.configId, 'cfg');
-  assert.equal(named('copyFill').find((d) => d.payload.id === 'ct2').payload.side, 'sell', 'a mirrored exit is a sell');
-  assert.ok(!named('copyFill').some((d) => d.payload.id === 'ct3'), 'a BNB row is not a Solana script’s');
-  auto.onEngineEvent({ kind: 'copy', snapshot: snap([{ ...row, state: 'closed', pnlSol: 0.01 }]) });
-  await tick(30);
-  assert.equal(named('copyFill').length, 2, 'the same state again is not an event');
   // Runner expiry: flagged, then gone from the list.
   const flag = { mint: MINT3, name: 'x', symbol: 'RUN', creator: 'c', flaggedAt: Date.now(), windowS: 60, bucket: 'top', observedPct: 30, basePct: 5, n: 100 };
   auto.onEngineEvent({ kind: 'runner', runner: flag });
@@ -3392,7 +3350,7 @@ test('new events: migration to every Solana script, devSell to holders and subsc
   for (const e of SCRIPT_EVENTS) assert.ok(SCRIPT_EVENTS_DOC.some((d) => d.event === e), `${e} is documented`);
   for (const d of SCRIPT_EVENTS_DOC) assert.ok(SCRIPT_EVENTS.includes(d.event), `${d.event} exists`);
   const on = SCRIPT_API.find((a) => a.method === 'on');
-  for (const e of ['migration', 'curveHigh', 'devSell', 'holdings', 'copyFill', 'runnerExpired']) assert.ok(on.notes.includes(e), `bot.on lists ${e}`);
+  for (const e of ['migration', 'curveHigh', 'devSell', 'holdings', 'runnerExpired']) assert.ok(on.notes.includes(e), `bot.on lists ${e}`);
 });
 
 

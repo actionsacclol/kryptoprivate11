@@ -79,10 +79,8 @@ import * as ledger from './ledger';
 import * as scout from './walletScout';
 import { applyScoutFilters, rankScout, scoutFiltersAllOn, summarise, tradeId } from '@shared/walletScout';
 import * as paperBook from './paperBook';
-import * as walletWatcher from './walletWatcher';
 import { PAPER_FILL_MODEL, paperToPosition, modelledPaperFill, paperHistoryRows } from '@shared/paper';
 import * as alerts from './alerts';
-import * as copyTrade from './copyTrade';
 import * as kryptoHolding from './kryptoHolding';
 import { KRYPTO_TOKEN, isValidMint } from '@shared/krypto';
 import { DUST_SELL_USD, planDustSell, type DustPlan } from '@shared/dustSell';
@@ -95,6 +93,9 @@ import * as launchLabWatcher from './launchLabWatcher';
 import * as boopWatcher from './boopWatcher';
 import * as raydiumWatcher from './raydiumWatcher';
 import * as heliusBudget from '../system/heliusBudget';
+import { feedCostText } from '@shared/credits';
+import { clearIssue, raiseIssue } from '../system/appIssues';
+import { isSocketSpent } from '../chain/rpcClient';
 import * as priorityFeed from './priorityFeed';
 import * as portfolio from './portfolio';
 import { buildShadowPlan } from './sender';
@@ -114,7 +115,7 @@ import { traderClaimFor } from './traderClaims';
  *
  * The requested amount is a wish: the exit-headroom trim can shrink it, and
  * anything that books a cost basis off the request is wrong by asked ÷ sent
- * (copy trade audit, copy-8). The authoritative number is still the chain's
+ * (audit, copy-8). The authoritative number is still the chain's
  * lamport delta, which the ledger reads back asynchronously — this is what to
  * use until it does, and it is undefined on every path that never broadcast.
  */
@@ -227,45 +228,18 @@ function isDustHolding(h: { amountRaw: string; uiAmount: number }): boolean {
 }
 
 const PROGRAM_CHECK_INTERVAL_MS = 10 * 60_000;
-/**
- * How often copy trading re-reads the balances its open positions live in.
- *
- * "Recheck balances periodically and flag leftovers even when the ledger
- * says closed" — the fourth of the four fixes asked for on 2026-09-15. A
- * leftover does not change between one minute and the next, and the sweep
- * takes at most a handful of reads per pass, so this is deliberately slow.
- */
-const COPY_SWEEP_INTERVAL_MS = 90_000;
-
-/**
- * A chain timestamp (unix SECONDS) as ms, or null when it is not credible.
- *
- * Pump's TradeEvent carries the Clock's `unix_timestamp`. It is free and
- * exact — but it is also a number off the wire, and a nonsense one must not
- * be allowed to make every trade look ancient, because copyTrade refuses a
- * stale entry. Anything before the program existed or in the future is
- * "unknown", which every caller already treats as "do not judge the age".
- */
-const CHAIN_TIME_FLOOR_MS = Date.UTC(2021, 0, 1);
-function chainTimeMs(seconds: number | null | undefined): number | null {
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return null;
-  const ms = seconds * 1_000;
-  if (ms < CHAIN_TIME_FLOOR_MS || ms > Date.now() + 60 * 60_000) return null;
-  return ms;
-}
 /** The one hard pause the engine may lift by itself, once the decoder has been
  *  re-checked against chain. Layout-drift pauses are a different signal with a
  *  different remedy and are NOT auto-cleared. */
 const PROGRAM_UPGRADE_PAUSE = 'Pump program was redeployed — decoder must be re-verified';
 
-/** What main hands the engine so copy trading can reach the EVM rail. */
+/** What main hands the engine so it can reach the EVM rail. */
 export interface EvmCopyBridge {
   buy(chain: EvmChainKind, token: string, amountNative: number, walletId?: string, opts?: { slippagePct?: number }): Promise<{ ok: boolean; message: string; signature?: string; pending?: boolean; spentSol?: number }>;
   /** `amountRaw` sells EXACTLY that many base units and the percent is
-   *  ignored — the rail has taken an exact size since the BNB audit, and
-   *  copy trading is the caller that knows one (2026-09-15). */
+   *  ignored — the rail has taken an exact size since the BNB audit. */
   sell(chain: EvmChainKind, token: string, pct: number, walletId?: string, amountRaw?: string, opts?: { slippagePct?: number }): Promise<{ ok: boolean; message: string; signature?: string }>;
-  /** Why a LIVE copy cannot go out on this chain right now, or null. */
+  /** Why a LIVE trade cannot go out on this chain right now, or null. */
   blocked(chain: EvmChainKind): string | null;
   maxLive(chain: EvmChainKind): number | null;
   /** Last price the Observatory saw for the token, native per token; null if unknown. */
@@ -274,22 +248,6 @@ export interface EvmCopyBridge {
    *  paper fill's read (2026-10-03). Optional: without it paper uses `price`. */
   priceFresh?(chain: EvmChainKind, token: string): Promise<number | null>;
   facts(chain: EvmChainKind, token: string): Promise<{ liquidityUsd: number | null; marketCapUsd: number | null; kryptScore: number | null; isPumpfun: boolean }>;
-  /** A leader's current token balance, whole units — the rescue read for a
-   *  sell whose size the log did not carry. Optional: a rail that cannot
-   *  answer leaves such a sell unmirrored, as it was before. */
-  holdingOf?(chain: EvmChainKind, owner: string, token: string): Promise<number | null>;
-  /** What THIS install holds of a token on the chain, in base units, with
-   *  the token's decimals — the number a mirrored sell is sized from and
-   *  settled against. Null when it cannot be read; never zero for an
-   *  unreadable balance. */
-  tokensOf?(chain: EvmChainKind, token: string, walletId?: string): Promise<{ raw: string; decimals: number } | null>;
-  /** Base units a confirmed transaction moved, from the EVM ledger's
-   *  reconciliation of that hash. Waits for it; null if it never settles. */
-  fillTokens?(chain: EvmChainKind, hash: string): Promise<{ raw: string; decimals: number } | null>;
-  /** The ledger's record of a BUY of `token` around `atMs`, for recovering
-   *  the quantity of a copy opened before quantities were tracked. Refuses
-   *  an ambiguous match. */
-  buyFill?(chain: EvmChainKind, token: string, atMs: number, walletId?: string): Promise<{ raw: string; decimals: number } | null>;
   /** What this install holds on the chain right now, for a script's own
    *  position list. Optional: a rail that cannot answer leaves a live EVM
    *  script with an EMPTY list, which refuses an exit rather than offering it
@@ -317,21 +275,10 @@ export interface EvmCopyBridge {
    *  absent leaves a script's `walletSol` UNKNOWN rather than showing it the
    *  Solana balance, which is a different number about a different chain. */
   wallet?(chain: EvmChainKind): { native: number | null; address: string | null } | null;
-  /**
-   * Is this chain's leader feed running, and when did it last poll?
-   *
-   * A followed wallet on an EVM chain is only seen through that chain's
-   * SCANNER, which the user starts. An armed copy config on a stopped
-   * scanner watches nothing at all, silently.
-   */
-  leaderFeed?(chain: EvmChainKind): { running: boolean; lastPollAt: number | null } | null;
-  /**
-   * Make sure that feed is running, because a config was just enabled on it.
-   * Returns null when it is (or has just been started), or why it cannot be.
-   * Idempotent — an already-running scanner is a no-op.
-   */
-  ensureLeaderFeed?(chain: EvmChainKind): string | null;
 }
+
+/** How long the scanner can be without a feed before it says so bottom left. */
+const FEED_DOWN_ISSUE_MS = 60_000;
 
 export class SniperEngine {
   private feed: FeedManager | null = null;
@@ -460,8 +407,12 @@ export class SniperEngine {
       },
       (line) => this.log('warn', line),
       // A refused key is not a blip to bury in the log: it is a setting the
-      // user has to correct, so it gets a toast and a desktop notice.
-      (line) => this.announce('error', line),
+      // user has to correct, so it gets a desktop notice. The bottom-left card
+      // comes from noteRpcRejection, which knows when it stops being true.
+      (line) => {
+        this.log('error', line);
+        this.notify('Krypto Bot', line);
+      },
     );
 
     // The per-mint socket serves TWO masters: held positions (scanner) and
@@ -474,8 +425,9 @@ export class SniperEngine {
         const key = (rpc.heliusApiKey ?? '').trim();
         if (!key) return rpc.wssUrl;
         const keyed = `wss://mainnet.helius-rpc.com/?api-key=${key}`;
-        // A key the endpoint has already refused would just reconnect-loop.
-        return isEndpointRejected(keyed) ? rpc.wssUrl : keyed;
+        // A key the endpoint has already refused would just reconnect-loop, and
+        // so would a socket refused for want of credits.
+        return isEndpointRejected(keyed) || isSocketSpent(keyed) ? rpc.wssUrl : keyed;
       },
       execHttpUrl: () => this.getSettings().rpc.execHttpUrl ?? '',
       commitment: () => this.getSettings().rpc.commitment,
@@ -487,66 +439,6 @@ export class SniperEngine {
         if (!this.running && n.logs.some((l) => l.includes(PUMP_AMM_PROGRAM_ID))) this.onAmmLogs(n);
       },
       onAccount: (a) => this.onCurveAccount(a),
-      billHttp: (calls) => heliusBudget.billHttp(calls),
-      log: (level, line) => this.log(level, line),
-    });
-
-    // Every FOLLOWED WALLET gets its own subscription, so copy trading sees
-    // a leader wherever it trades — Jupiter into Raydium, Meteora, Orca, the
-    // pump AMM — not only on the pump.fun curve firehose (2026-09-06). The
-    // swap is read from the wallet's balance deltas, so no per-DEX decoder
-    // is needed. Same socket picker as the priority feed; runs with the
-    // scanner stopped, because paper copying costs nothing.
-    walletWatcher.attach({
-      wssUrl: () => {
-        const rpc = this.getSettings().rpc;
-        const key = (rpc.heliusApiKey ?? '').trim();
-        if (!key) return rpc.wssUrl;
-        const keyed = `wss://mainnet.helius-rpc.com/?api-key=${key}`;
-        return isEndpointRejected(keyed) ? rpc.wssUrl : keyed;
-      },
-      httpUrl: () => {
-        const rpc = this.getSettings().rpc;
-        return rpc.execHttpUrl ?? rpc.httpUrl;
-      },
-      onSwap: ({ wallet: leader, swap, signature, at, tradeAt, timing }) => {
-        // The leader's fill IS a price for that mint, and often the only
-        // one this app has for a token the launch feed never carried.
-        this.rememberPrice(swap.mint, swap.priceSol);
-        const symbol = this.tokens.get(swap.mint)?.row.symbol ?? market.summaryIfCached(swap.mint)?.symbol ?? '';
-        copyTrade.onWalletTrade({
-          wallet: leader,
-          mint: swap.mint,
-          symbol,
-          isBuy: swap.isBuy,
-          sol: swap.sol,
-          priceSol: swap.priceSol,
-          soldFraction: swap.soldFraction,
-          tokens: swap.tokens,
-          at,
-          // When they actually traded, from the block. A transaction the
-          // watcher recovered after a socket gap can be minutes old, and
-          // copyTrade refuses to enter on one and says how late an exit is.
-          tradeAt,
-          signature,
-          // What hearing about it cost. The copier adds its own stages and
-          // the signer's, and logs one line per copy (2026-09-21).
-          delivery: timing,
-        });
-        // User scripts see the same trade (Automation → Scripts, "Followed wallet traded").
-        automation.onLeaderTrade({
-          mint: swap.mint,
-          symbol,
-          wallet: leader,
-          label: copyTrade.all().find((c) => c.wallet === leader)?.label ?? '',
-          side: swap.isBuy ? 'buy' : 'sell',
-          sol: swap.sol,
-          priceSol: swap.priceSol,
-          soldFraction: swap.soldFraction,
-        });
-        const share = swap.soldFraction !== null ? ` (${Math.round(swap.soldFraction * 100)}% of their bag)` : '';
-        this.log('info', `copy: ${leader.slice(0, 6)}… ${swap.isBuy ? 'bought' : 'sold'} ${swap.sol.toFixed(3)} SOL of ${symbol || swap.mint.slice(0, 8)}${share} (via ${swap.programs.length ? swap.programs.map((p) => p.slice(0, 4)).join('/') : 'chain'})`);
-      },
       log: (level, line) => this.log(level, line),
     });
 
@@ -757,203 +649,6 @@ export class SniperEngine {
       void this.refreshKrypto();
       this.kryptoTimer = setInterval(() => void this.refreshKrypto(), 120_000);
     }
-
-    copyTrade.attach({
-      buy: async (mint, sol, opts) => {
-        // Robinhood Chain / BNB: the rail, by way of the bridge main wired.
-        if (opts?.chain && opts.chain !== 'solana') {
-          if (!this.evmCopy) return { ok: false, message: 'EVM copy trading is not available in this build' };
-          return this.evmCopy.buy(opts.chain, mint, sol, opts.walletId);
-        }
-        // A config that names its own wallet buys through the per-wallet
-        // pipeline (the same one a fan-out uses: every gate, fee and record,
-        // signed by THAT wallet). The active wallet keeps the manual path.
-        if (opts?.walletId) {
-          const lr = await this.labBuy(opts.walletId, mint, sol);
-          return { ok: lr.ok, message: lr.message, signature: lr.signature ?? undefined, pending: lr.stage === 'pending', spentSol: lr.costSol ?? undefined };
-        }
-        // `slippagePct` is the config's own `maxSlippagePct`, which until now
-        // had no execution path at all — every copy went out at the global
-        // execution slippage whatever the follower was set to (copy-7).
-        const r = await this.testTrade(mint, sol, false, { slippagePct: opts?.slippagePct });
-        const pending = r.stage === 'pending';
-        // A broadcast that has not confirmed is not a failure: the tokens may
-        // already be ours, and reporting it as "skipped" left a real position
-        // off the copy record entirely (copy-5).
-        // What it COST is the chain's number, never the size we asked for
-        // (house rule). The ledger reconciles a fresh fill in the background,
-        // so this is usually still unknown here — and `sentSol` is then the
-        // honest second best: the amount actually submitted, after the
-        // per-trade cap and the exit-headroom trim. Undefined means "I do not
-        // know", which leaves copyTrade on its own fallback rather than
-        // inventing a number.
-        const priced = r.signature ? this.reconciledFill(r.signature) : null;
-        return {
-          ok: r.ok,
-          message: r.message,
-          signature: r.signature,
-          pending,
-          spentSol: priced?.spentSol ?? r.sentSol,
-          fillPriceSol: priced?.priceSol ?? undefined,
-          // The signer already measures itself (TradeTiming); passing two of
-          // its numbers through is what lets a copy's timing line separate
-          // building the transaction from waiting for the chain.
-          timing: r.timing ? { build: r.timing.build, confirm: r.timing.confirm } : undefined,
-        };
-      },
-      // A mirrored sell is the same order a user places by hand: the full
-      // pipeline, sized as a share of what THIS wallet holds now. It is only
-      // reported done when it confirmed — a broadcast that is still pending
-      // is not a fill, and calling it one is how the history came to say
-      // "closed" over a bag that was still there (2026-09-08).
-      sell: async (mint, pct, opts) => {
-        if (opts?.chain && opts.chain !== 'solana') {
-          if (!this.evmCopy) return { ok: false, message: 'EVM copy trading is not available in this build' };
-          return this.evmCopy.sell(opts.chain, mint, pct, opts.walletId, opts.tokensRaw);
-        }
-        if (opts?.walletId) {
-          const labShare = pct >= 100 ? pct : ((await this.pctForTokens(mint, opts.tokensRaw, opts.walletId)) ?? pct);
-          const lr = await this.labSell(opts.walletId, mint, labShare);
-          if (lr.ok) return { ok: true, message: lr.message, signature: lr.signature ?? undefined };
-          return { ok: false, message: lr.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${lr.message})` : lr.message, signature: lr.signature ?? undefined };
-        }
-        // An exact quantity beats a percentage of the whole account: the
-        // copier knows how many base units the copy holds, and this converts
-        // that to the share of the CURRENT balance it really is, to two
-        // decimal places, instead of the copier guessing from cost basis and
-        // rounding to a whole percent. An unreadable balance falls back to
-        // the percentage the copier computed, which is what used to be sent;
-        // and at 100 % there is nothing to convert — "all of it" is all of
-        // it — so a full exit costs no extra read.
-        const share = pct >= 100 ? pct : ((await this.pctForTokens(mint, opts?.tokensRaw)) ?? pct);
-        const r = await this.manualSell(mint, share, { slippagePct: opts?.slippagePct });
-        if (r.ok) return { ok: true, message: r.message, signature: r.signature };
-        return {
-          ok: false,
-          message: r.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${r.message})` : r.message,
-          signature: r.signature,
-        };
-      },
-      liveBlockedReason: (chain) => (chain && chain !== 'solana' ? (this.evmCopy ? this.evmCopy.blocked(chain) : 'EVM copy trading is not available in this build') : this.executionBlockedReason()),
-      // The entry breakers, which `liveBlockedReason` deliberately omits so an
-      // exit is never trapped. Without this a copy could OPEN a position
-      // during a decoder hard-pause or on a stale feed (copy-11). Same wording
-      // and same source as the automation and advanced-order hosts.
-      buyBlockedReason: (chain) => {
-        if (chain && chain !== 'solana') return null; // the rail has no entry breakers; `blocked` above is the gate
-        const pause = this.running ? this.entriesPauseReason() : null;
-        return pause ? `entries are paused (${pause})` : null;
-      },
-      // House rule 2: a budget is a refusal, not a clamp. copyTrade refuses a
-      // copy over this and records the size it refused (copy-8).
-      maxLiveSol: (chain) => (chain && chain !== 'solana' ? (this.evmCopy?.maxLive(chain) ?? null) : this.getSettings().execution.maxLiveSol),
-      // What the ACTIVE wallet paid for its whole holding of the mint, so a
-      // mirrored "they sold 40%" is scaled to the copier's share of our bag
-      // instead of taking 40% of hand-bought size too (copy-2).
-      ourCostBasisSol: (mint, chain) => (chain && chain !== 'solana' ? null : this.ourCostBasisSol(mint)),
-      // The leader's CURRENT holding — the rescue path for a sell whose size
-      // the transaction did not carry. One read, and the fraction it yields
-      // is exact rather than assumed. EVM has its own balance reader; a rail
-      // without one answers null, which leaves the sell unmirrored exactly
-      // as before.
-      leaderHolding: async (leader, mint, chain) => {
-        if (chain && chain !== 'solana') return this.evmCopy?.holdingOf?.(chain, leader, mint) ?? null;
-        const s2 = this.getSettings();
-        try {
-          const r = await getTokenBalanceForMint(s2.rpc.execHttpUrl ?? s2.rpc.httpUrl, leader, mint);
-          return r.ok && typeof r.data === 'number' ? r.data : null;
-        } catch {
-          return null;
-        }
-      },
-      // What the copy WALLET holds of a mint, in base units. The copier
-      // sizes an exit from it, settles one against it, and the leftover
-      // sweep compares its own book to it. Null is "unreadable", which the
-      // copier reads as unknown — never as zero.
-      walletTokens: async (mint, opts) => {
-        if (opts?.chain && opts.chain !== 'solana') {
-          return (await this.evmCopy?.tokensOf?.(opts.chain, mint, opts.walletId)) ?? null;
-        }
-        const owner = opts?.walletId ? wallet.publicKeyOf(opts.walletId) : wallet.publicKey();
-        if (!owner) return null;
-        const s2 = this.getSettings();
-        try {
-          const r = await getTokenBalanceRawForMint(s2.rpc.execHttpUrl ?? s2.rpc.httpUrl, owner, mint);
-          if (!r.ok || !r.data) return null;
-          return { raw: r.data.raw.toString(), decimals: r.data.decimals ?? 0 };
-        } catch {
-          return null;
-        }
-      },
-      // Base units a confirmed fill actually moved, from the ledger's own
-      // reconciliation of that signature — the transaction's token delta,
-      // not an inference from a balance. Waits for it, because the copier
-      // calling this is always off the hot path.
-      fillTokens: async (signature, opts) => {
-        if (opts?.chain && opts.chain !== 'solana') {
-          return (await this.evmCopy?.fillTokens?.(opts.chain, signature)) ?? null;
-        }
-        return this.awaitFillTokens(signature);
-      },
-      // The ledger's record of a copy's buy, for a row opened before the
-      // quantity was tracked. Ambiguity is REFUSED in both implementations:
-      // the number sizes a real sell, and unknown is already safe.
-      buyFill: async (mint, atMs, opts) => {
-        if (opts?.chain && opts.chain !== 'solana') {
-          return (await this.evmCopy?.buyFill?.(opts.chain, mint, atMs, opts.walletId)) ?? null;
-        }
-        return this.ledgerBuyFill(mint, atMs, opts?.walletId);
-      },
-      priceSol: (mint, chain) =>
-        chain && chain !== 'solana' ? (this.evmCopy?.price(chain, mint) ?? null) : (this.tokens.get(mint)?.row.priceSol ?? this.lastKnownPriceSol.get(mint) ?? null),
-      tokenFacts: async (mint, chain) => {
-        if (chain && chain !== 'solana') {
-          return this.evmCopy ? this.evmCopy.facts(chain, mint) : { liquidityUsd: null, marketCapUsd: null, kryptScore: null, isPumpfun: false };
-        }
-        const t = this.tokens.get(mint);
-        // Liquidity and market cap are NOT on a launch row — a curve token has
-        // no USD basis in the hot path — so both come from the market layer
-        // whether or not the launch feed carried the mint. Returning null for
-        // every feed token (as this did until 2026-09-09) refused every copy
-        // on the whole pump rail, because copyTrade's filters fail closed and
-        // the shipped default is a $5,000 liquidity floor (copy-4b). Cached
-        // first, a round trip when cold — the same two sources automation's
-        // `marketCached` / `market` pair uses, so the two agree on a mint.
-        const sum = market.summaryIfCached(mint) ?? (await market.summary(mint));
-        return {
-          liquidityUsd: sum.liquidityUsd,
-          marketCapUsd: sum.marketCapUsd,
-          // Our own live score when the feed is tracking the launch; the
-          // market layer's otherwise. Unknown stays null — the filter then
-          // refuses rather than guessing.
-          kryptScore: t ? (t.row.score?.total ?? sum.kryptScore) : sum.kryptScore,
-          isPumpfun: t ? true : sum.launchpad === 'pumpfun',
-          // For the age and creator filters (2026-09-21): a feed token's own
-          // launch time and creator, else what the market layer knows. Null
-          // is unknown, and those filters refuse rather than guess.
-          createdAt: t ? t.row.detectedAt : sum.createdAt,
-          creator: (t ? t.row.creator : null) || sum.creator || null,
-        };
-      },
-      log: (level, line) => this.log(level, line),
-      toast: (level, message) => this.emit({ kind: 'toast', level, message }),
-      changed: () => this.emit({ kind: 'copy', snapshot: copyTrade.snapshot() }),
-      watchStatus: () => walletWatcher.status(),
-      // Solana wallets are watched one subscription each; an EVM leader is
-      // seen through its chain's scanner poll, and a config on a stopped one
-      // is a follower watching nothing.
-      // FOMO crowd sources (2026-09-20). Solana only: the crowd is heard on
-      // the pump curve firehose and the followed wallets' subscriptions.
-      scoutSaved: (chain) => (chain === 'solana' ? scout.savedList('solana') : []),
-      trackedWallets: (chain) => (chain === 'solana' ? watchlist.all().map((w) => w.address) : []),
-      scoutTop: (chain, n) =>
-        chain === 'solana'
-          ? rankScout(scout.wallets('solana').map((w) => summarise(w, 'week')).filter((r) => r.copyScore !== null), 'copyScore')
-              .slice(0, Math.max(1, n))
-              .map((r) => r.address)
-          : [],
-      leaderFeed: (chain) => (chain === 'solana' ? null : (this.evmCopy?.leaderFeed?.(chain) ?? null)),
-    });
 
     // User scripts and rules. Same pipeline as a hand-placed order — a
     // script's buy IS testTrade, its sell IS manualSell — under the
@@ -1201,10 +896,6 @@ export class SniperEngine {
         const rec = scout.wallets(chain).find((x) => x.address === key) ?? null;
         return rec ? { wallet: rec, saved: scout.isSaved(chain, key) } : null;
       },
-      copyConfigs: () => {
-        const snap = this.copySnapshot();
-        return { configs: snap.configs, stats: snap.stats, liveExecutable: snap.liveExecutable, liveBlockedReason: snap.liveBlockedReason };
-      },
       alerts: () => alerts.all(),
       // Housekeeping the pages have (2026-09-27): each is the page button's
       // own engine call, so a script and a click do the same thing.
@@ -1355,7 +1046,6 @@ export class SniperEngine {
       subscribeTicks: () => undefined,
       pin: (mint, on) => this.emit({ kind: 'pin', mint, on }),
       runners: () => this.runnersSnapshot(),
-      leaders: () => copyTrade.all().map((c) => ({ wallet: c.wallet, label: c.label, enabled: c.enabled, mode: c.mode, chain: c.chain ?? 'solana' })),
       notify: (title, body) => this.notify(title, body),
       // A script posting a callout. By default the ACTIVE Solana wallet's
       // account — the wallet the script trades with, so the one holding the
@@ -1456,7 +1146,6 @@ export class SniperEngine {
         this.chartTicks.push(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
         advOrders.onTick({ mint: t.mint, priceSol: t.priceSol, mcapUsd: null });
         alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: null });
-        copyTrade.markToMarket(t.mint, t.priceSol);
       },
       log: (level, line) => this.log(level, line),
     });
@@ -1482,7 +1171,6 @@ export class SniperEngine {
         this.chartTicks.push(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
         advOrders.onTick({ mint: t.mint, priceSol: t.priceSol, mcapUsd: null });
         alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: t.curvePct });
-        copyTrade.markToMarket(t.mint, t.priceSol);
       },
       log: (level, line) => this.log(level, line),
     });
@@ -1510,7 +1198,6 @@ export class SniperEngine {
         this.chartTicks.push(t.mint, t.at, t.priceSol, t.sol, t.isBuy);
         advOrders.onTick({ mint: t.mint, priceSol: t.priceSol, mcapUsd: null });
         alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: t.curvePct });
-        copyTrade.markToMarket(t.mint, t.priceSol);
       },
       onCurveComplete: (mint) => {
         this.log('info', `DBC: ${mint.slice(0, 8)}… completed its curve`);
@@ -1552,7 +1239,6 @@ export class SniperEngine {
         // had a curve completed nothing, and an alert keyed on graduation
         // must not fire because a pool merely exists.
         alerts.onTick({ mint: t.mint, priceSol: t.priceSol, curvePct: null });
-        copyTrade.markToMarket(t.mint, t.priceSol);
       },
       onPool: (p) => {
         recorder.record('raydium_pool', { kind: p.kind, pool: p.pool, mint: p.mint, solQuoted: p.solQuoted, priceSol: p.priceSol, solInPool: p.solInPool, sig: p.signature });
@@ -1644,50 +1330,7 @@ export class SniperEngine {
     this.lab.reset();
     this.labCreator.clear();
     this.lastFeedHealthRecordAt = Date.now();
-    // Feed insurance: a blockSubscribe standby that decodes emit_cpi inner
-    // instructions and loses every race while pump still emits logs. Hosts
-    // come from a hardcoded list (shared/types BLOCK_FEED_WSS_URLS); the
-    // validator refuses anything else, so this cannot be pointed elsewhere.
-    const blockUrls = (s.rpc.blockFeed ?? true) ? [s.rpc.blockWssUrl || DEFAULT_BLOCK_FEED_WSS_URL] : [];
-    this.feed = new FeedManager(
-      feedUrls,
-      s.rpc.commitment,
-      {
-        onLogs: (n) => this.onLogs(n),
-        onState: (state, detail) => {
-          this.feedState = state;
-          this.log('info', `feed: ${state} (${detail})`);
-          this.pushStatus();
-        },
-        onSubscribeError: (host, message) => this.log('warn', `feed: ${host} rejected subscribe — ${message}`),
-      },
-      PUMP_PROGRAM_ID,
-      {},
-      blockUrls.length ? { urls: blockUrls, decodeInner: decodeCpiEventData } : undefined,
-    );
-    this.feed.start();
-    // Post-migration capture: one socket (primary WSS only — this is a data
-    // asset, not a race) on the pump-amm program, recording raw event
-    // payloads for offline decoding. Its state never touches feedState.
-    // The amm block standby is a separate opt-in (~3 MB/s): publicnode
-    // delivers nothing for the pAMM program id, so it filters on the
-    // global-config account every swap touches instead.
-    const ammBlockUrls = s.rpc.blockFeedAmm === true ? blockUrls : [];
-    this.ammFeed = new FeedManager(
-      [feedUrls[0]],
-      s.rpc.commitment,
-      {
-        onLogs: (n) => this.onAmmLogs(n),
-        onState: (state, detail) => this.log('info', `amm tape: ${state} (${detail})`),
-      },
-      PUMP_AMM_PROGRAM_ID,
-      {},
-      ammBlockUrls.length ? { urls: ammBlockUrls, decodeInner: decodeCpiAmmEventData, mentions: PUMP_AMM_GLOBAL_CONFIG } : undefined,
-    );
-    this.ammFeed.start();
-    // New Raydium pools for the Migrated column: two subscriptions that sit
-    // idle between creations (see raydiumWatcher.ts).
-    raydiumWatcher.startCreations();
+    this.openFeeds(feedUrls);
 
     // Priority feed: attached in the constructor (it also serves the terminal's
     // open tokens); the 1 s priorityTick below keeps it pointed at held mints.
@@ -1700,6 +1343,7 @@ export class SniperEngine {
       this.shadowSummaryTick();
       this.priorityTick();
       this.creditTick();
+      this.feedDownTick();
       this.pushStatus();
     }, 1_000);
     // Program-upgrade watchdog: verify Pump's deployment slot against the
@@ -1846,11 +1490,11 @@ export class SniperEngine {
    * gated, and confirmation falls back to HTTP polling with no socket.
    */
   suspendSockets(why: string): void {
+    this.socketsSuspended = true;
     this.log('info', `sockets suspended (${why})`);
     this.feed?.stop();
     this.ammFeed?.stop();
     priorityFeed.stop();
-    walletWatcher.stop();
     dbcWatcher.stopAll();
     launchLabWatcher.stopAll();
     boopWatcher.stopAll();
@@ -1861,10 +1505,10 @@ export class SniperEngine {
    *  one burst against a ten-connection budget. Order matters: the things a
    *  user could be about to act on come first. */
   resumeSockets(): void {
+    this.socketsSuspended = false;
     this.log('info', 'sockets resuming');
     const steps: Array<() => void> = [
       () => this.priorityTick(),
-      () => this.syncCopyWatch(),
       () => {
         if (this.running) this.feed?.start();
       },
@@ -1901,6 +1545,9 @@ export class SniperEngine {
     this.chartTicks.clear();
     if (!this.running) return { ok: false, message: 'Engine is not running' };
     this.running = false;
+    // Stopped on purpose, so having no feed is no longer a problem.
+    clearIssue('feed-down');
+    this.feedDownSince = null;
     this.feed?.stop();
     this.ammFeed?.stop();
     this.ammFeed = null;
@@ -1974,6 +1621,107 @@ export class SniperEngine {
 
   /** The single gate for opening new positions. Returns null when entries
    *  are allowed, otherwise the human-readable reason (fail closed). */
+  /** The scanner's own sockets. Their URLs are fixed when they are built, which is
+   *  why a key saved while running used to change nothing until the next start. */
+  private openFeeds(feedUrls: string[]): void {
+    const s = this.getSettings();
+    this.openedFeedSignature = this.feedSignature();
+    // Feed insurance: a blockSubscribe standby that decodes emit_cpi inner
+    // instructions and loses every race while pump still emits logs. Hosts
+    // come from a hardcoded list (shared/types BLOCK_FEED_WSS_URLS); the
+    // validator refuses anything else, so this cannot be pointed elsewhere.
+    const blockUrls = (s.rpc.blockFeed ?? true) ? [s.rpc.blockWssUrl || DEFAULT_BLOCK_FEED_WSS_URL] : [];
+    this.feed = new FeedManager(
+      feedUrls,
+      s.rpc.commitment,
+      {
+        onLogs: (n) => this.onLogs(n),
+        onState: (state, detail) => {
+          this.feedState = state;
+          this.feedDetail = detail;
+          this.log('info', `feed: ${state} (${detail})`);
+          this.pushStatus();
+        },
+        onSubscribeError: (host, message) => this.log('warn', `feed: ${host} rejected subscribe — ${message}`),
+      },
+      PUMP_PROGRAM_ID,
+      {},
+      blockUrls.length ? { urls: blockUrls, decodeInner: decodeCpiEventData } : undefined,
+    );
+    this.feed.start();
+    // Post-migration capture: one socket (primary WSS only — this is a data
+    // asset, not a race) on the pump-amm program, recording raw event
+    // payloads for offline decoding. Its state never touches feedState.
+    // The amm block standby is a separate opt-in (~3 MB/s): publicnode
+    // delivers nothing for the pAMM program id, so it filters on the
+    // global-config account every swap touches instead.
+    const ammBlockUrls = s.rpc.blockFeedAmm === true ? blockUrls : [];
+    this.ammFeed = new FeedManager(
+      [s.rpc.ammWssUrl ?? feedUrls[0]],
+      s.rpc.commitment,
+      {
+        onLogs: (n) => this.onAmmLogs(n),
+        onState: (state, detail) => this.log('info', `amm tape: ${state} (${detail})`),
+      },
+      PUMP_AMM_PROGRAM_ID,
+      {},
+      ammBlockUrls.length ? { urls: ammBlockUrls, decodeInner: decodeCpiAmmEventData, mentions: PUMP_AMM_GLOBAL_CONFIG } : undefined,
+    );
+    this.ammFeed.start();
+    // New Raydium pools for the Migrated column: two subscriptions that sit
+    // idle between creations (see raydiumWatcher.ts).
+    raydiumWatcher.startCreations();
+  }
+
+  private feedSignature(): string {
+    const r = this.getSettings().rpc;
+    return JSON.stringify([r.wssUrl, r.ammWssUrl, r.extraWssUrls ?? [], r.blockFeed, r.blockFeedAmm, r.blockWssUrl]);
+  }
+
+  /** Point the running scanner at what the settings now say, if that has changed.
+   *  Only the launch and amm feeds and the Raydium creation sockets: a pool watcher
+   *  or the token tape keeps its socket, which reads the settings when it redials. */
+  syncFeeds(why: string): void {
+    if (!this.running || this.feedSignature() === this.openedFeedSignature) return;
+    this.log('info', `feeds reconnecting (${why})`);
+    this.feed?.stop();
+    this.ammFeed?.stop();
+    raydiumWatcher.stopCreations();
+    this.continuity.reset();
+    const r = this.getSettings().rpc;
+    this.openFeeds([r.wssUrl, ...(r.extraWssUrls ?? [])]);
+    this.pushStatus();
+  }
+
+  /** Helius will not serve the feed: back to the public sockets, now rather than at
+   *  the next start. True if that changed anything. */
+  leaveHeliusFeed(why: string): boolean {
+    const before = this.feedSignature();
+    this.disableHeliusFeed?.();
+    const moved = this.feedSignature() !== before;
+    if (moved) this.syncFeeds(why);
+    return moved;
+  }
+
+  /** "Attuning" for a minute says nothing: say it bottom left, in words. */
+  private feedDownTick(): void {
+    const now = Date.now();
+    if (this.feedState === 'live' || this.socketsSuspended) {
+      if (this.feedDownSince !== null && this.feedState === 'live') clearIssue('feed-down');
+      this.feedDownSince = null;
+      return;
+    }
+    this.feedDownSince ??= now;
+    if (now - this.feedDownSince < FEED_DOWN_ISSUE_MS) return;
+    raiseIssue({
+      id: 'feed-down',
+      level: 'error',
+      title: 'The scanner has no feed',
+      body: `Not connected for over a minute, so no new launches are coming in. Last status: ${this.feedDetail}`,
+      action: { label: 'Open Settings', route: 'settings' },
+    });
+  }
+
   private entriesPauseReason(): string | null {
     if (this.hardPauseReason) return this.hardPauseReason;
     if (this.feedState !== 'live') return 'Feed is not live';
@@ -2279,7 +2027,7 @@ export class SniperEngine {
       return { ok: false, stage: 'validate', message: 'Enable live execution in settings before a real trade' };
     }
     // Real-money breakers gate every user-facing BUY (quick buy, trade panel,
-    // hotkeys, orders, copy trade). Tripping one disarms → Paper.
+    // hotkeys, orders). Tripping one disarms → Paper.
     if (wantBroadcast) {
       const breaker = this.liveBreakerReason();
       if (breaker) {
@@ -2288,7 +2036,7 @@ export class SniperEngine {
       }
     }
     // The per-trade cap bounds execution that happens WITHOUT a click at that
-    // moment — advanced orders, copy trade, fan-out, the automation path. A
+    // moment — advanced orders, fan-out, the automation path. A
     // trade the user is placing by hand right now is their call at whatever
     // size they typed (2026-09-02, user's call: "if the trade is above their
     // cap that shouldn't matter, it's them doing it manually"). The simulation
@@ -2296,7 +2044,7 @@ export class SniperEngine {
     //
     // House rule 2: a budget is a REFUSAL, not a clamp. This used to be a
     // silent `Math.min`, which is the parity break the copy-trade audit found
-    // (copy-8): copyTrade, advOrders and the script budgets all refuse over
+    // (copy-8): advOrders and the script budgets all refuse over
     // the cap and say so, while a buy that reached here was quietly shrunk and
     // then recorded at a size it never traded. Every unattended caller already
     // checks the cap before it gets here, so this is the backstop and it
@@ -2375,9 +2123,8 @@ export class SniperEngine {
       mint,
       amount: capped,
       denominatedInSol: true,
-      // A caller that states its own tolerance is honoured (copy trading's
-      // per-follower `maxSlippagePct`, which had no execution path at all
-      // before 2026-09-09). Everything else takes the execution setting.
+      // A caller that states its own tolerance is honoured (`maxSlippagePct`).
+      // Everything else takes the execution setting.
       slippagePct: opts.slippagePct !== undefined && opts.slippagePct > 0 ? opts.slippagePct : s.execution.liveSlippagePct,
       priorityFeeSol: opts.feeLane === 'lean' ? this.leanPriorityFeeSol() : this.priorityFeeSolFor('buy'),
       httpUrl,
@@ -3402,7 +3149,7 @@ export class SniperEngine {
     return dbcWatcher.watchedMints();
   }
 
-  // ── Copy trading (term.txt §11) ──────────────────────────────────
+  // ── What a script holds ──────────────────────────────────────────
 
   /** The price the engine already knows for a mint, no lookups: the feed
    *  row, the last-known map, the tape, or the chain read's cache. Null when
@@ -3546,54 +3293,6 @@ export class SniperEngine {
     return r;
   }
 
-  copySnapshot(): import('@shared/copytrade').CopySnapshot {
-    return copyTrade.snapshot();
-  }
-
-  upsertCopyConfig(
-    input: Omit<import('@shared/copytrade').CopyConfig, 'id' | 'createdAt'> & { id?: string },
-  ): { ok: boolean; message: string } {
-    const r = copyTrade.upsert(input);
-    this.syncCopyWatch();
-    return r;
-  }
-
-  removeCopyConfig(id: string): { ok: boolean; message: string } {
-    const r = copyTrade.remove(id);
-    this.syncCopyWatch();
-    return r;
-  }
-
-  /** Start a followed wallet's own record over. */
-  resetCopyLeader(wallet: string): { ok: boolean; message: string } {
-    return copyTrade.resetLeader(wallet);
-  }
-
-  /** Clear PAPER copy results — one config, or all of them. Settings, live
-   *  history, leader records and real holdings are untouched. */
-  resetCopyPaper(configId?: string): { ok: boolean; message: string } {
-    const r = copyTrade.resetPaper(configId);
-    return { ok: r.ok, message: r.message };
-  }
-
-  /** Point the wallet watcher at exactly the wallets with an enabled copy
-   *  config. Called after every config change and once at boot, after the
-   *  configs are loaded. */
-  syncCopyWatch(): void {
-    walletWatcher.setWallets([...copyTrade.activeWallets()]);
-    // An EVM leader has no subscription of its own: it is seen through that
-    // chain's scanner poll. Following one while the scanner is stopped is a
-    // config that watches nothing and says nothing about it — so enabling one
-    // starts the feed it needs. Idempotent, and it never STOPS a feed: the
-    // user may have started that scanner themselves.
-    for (const chain of copyTrade.activeChains()) {
-      if (chain === 'solana') continue;
-      const why = this.evmCopy?.ensureLeaderFeed?.(chain) ?? null;
-      if (why) this.log('warn', `copy: following a wallet on ${chain} needs that chain's scanner, which will not start — ${why}`);
-    }
-    this.syncCopySweep();
-  }
-
   /**
    * How often the $KRYPTO holding behind the holder rate is re-read.
    *
@@ -3622,47 +3321,6 @@ export class SniperEngine {
     this.kryptoHolder = now;
   }
 
-  private copySweepTimer: NodeJS.Timeout | null = null;
-  private copySweepBusy = false;
-
-  /**
-   * Run the copy balance sweep exactly while there is something to sweep.
-   *
-   * Not tied to `start()`: copy trading follows a wallet whether or not the
-   * scanner is running, and a LIVE config comes back from a restart DISARMED
-   * while its positions come back open — which is precisely where a leftover
-   * would sit unnoticed.
-   */
-  private syncCopySweep(): void {
-    const wanted = copyTrade.needsSweep();
-    if (wanted && !this.copySweepTimer) {
-      this.copySweepTimer = setInterval(() => void this.copySweepTick(), COPY_SWEEP_INTERVAL_MS);
-      void this.copySweepTick();
-    } else if (!wanted && this.copySweepTimer) {
-      clearInterval(this.copySweepTimer);
-      this.copySweepTimer = null;
-    }
-  }
-
-  /** One pass: recover any quantity the book is missing, then compare what
-   *  it thinks it holds against what the chains say. Never overlaps itself —
-   *  a slow RPC must not stack passes on an endpoint already parked. */
-  private async copySweepTick(): Promise<void> {
-    if (this.copySweepBusy) return;
-    this.copySweepBusy = true;
-    try {
-      await copyTrade.backfillQuantities();
-      await copyTrade.sweepBalances();
-    } catch (e) {
-      this.log('warn', `copy balance sweep: ${(e as Error).message}`);
-    } finally {
-      this.copySweepBusy = false;
-    }
-    // Everything it was watching may have just closed. Stop rather than wake
-    // every 90 s to find nothing.
-    if (this.copySweepTimer && !copyTrade.needsSweep()) this.syncCopySweep();
-  }
-
   // ── Alerts (term.txt §17) ────────────────────────────────────────
 
   /** Desktop notification. Injected by main so the engine stays testable. */
@@ -3673,10 +3331,11 @@ export class SniperEngine {
   }
 
   /**
-   * Copy trading on Robinhood Chain and BNB goes through the EVM rail, which
+   * Trading on Robinhood Chain and BNB goes through the EVM rail, which
    * the engine does not import (it stays free of viem and testable in Node).
-   * Main wires the rail in here; without it an EVM copy is refused, never
-   * silently routed to Solana.
+   * Main wires the rail in here; without it an EVM trade is refused, never
+   * silently routed to Solana. (The name is older than scripts and Krypto
+   * Trader, the bridge's callers now: copy trading was its first.)
    */
   private evmCopy: EvmCopyBridge | null = null;
   setEvmCopy(bridge: EvmCopyBridge | null): void {
@@ -3970,35 +3629,6 @@ export class SniperEngine {
   }
 
   /**
-   * What the active wallet paid for everything it still holds of `mint`, SOL.
-   *
-   * copyTrade scales a mirrored sell by the copier's share of this, so that
-   * "they sold 40 % of their bag" does not sell 40 % of a hand-bought bag and
-   * of whatever an order ladder is still holding (copy-2).
-   *
-   * Null only when there is nothing to measure at all: no wallet, no
-   * reconciled buy, or nothing left of the position.
-   *
-   * A basis built from SOME of the fills is deliberately still returned. It
-   * reads as "we paid less than we did", so our share of it looks larger and
-   * the ratio moves toward 1 — and 1 is exactly what copyTrade falls back to
-   * when this answers null. A partial basis is therefore never worse than no
-   * basis, and usually much better. Refusing on any unreadable fill would
-   * also blind a mint PERMANENTLY, since `unreconciled` is a terminal state:
-   * one failed transaction would restore the copy-2 bug for that token for
-   * the life of the ledger.
-   */
-  private ourCostBasisSol(mint: string): number | null {
-    const b = this.basisFor(mint);
-    if (!b) return null;
-    if (!(b.spentSol > 0) || !(b.tokensBought > 0)) return null;
-    const held = b.tokensBought - b.tokensSold;
-    if (!(held > 0)) return null;
-    // Average cost of the tokens still held, not of everything ever bought.
-    return (b.spentSol / b.tokensBought) * Math.min(held, b.tokensBought);
-  }
-
-  /**
    * The average price this wallet actually entered `mint` at, SOL per token,
    * or null when it holds none / the fills cannot be priced yet.
    *
@@ -4014,63 +3644,6 @@ export class SniperEngine {
     const paid = b.entrySpentSol > 0 ? b.entrySpentSol : b.spentSol;
     const avg = paid / b.tokensBought;
     return Number.isFinite(avg) && avg > 0 ? avg : null;
-  }
-
-  /**
-   * One fill, priced from the chain — only once the ledger has reconciled it.
-   * A fresh broadcast is `pending` for a few seconds, and this answers null
-   * for the whole of that: an unreconciled fill has no cost and no fill price,
-   * and inventing either is exactly the failure the ledger exists to prevent.
-   */
-  private reconciledFill(signature: string): { spentSol: number; priceSol: number | null } | null {
-    const f = ledger.all().find((x) => x.signature === signature);
-    if (!f || f.state !== 'reconciled' || f.solDeltaLamports === null) return null;
-    const spentSol = Math.abs(f.solDeltaLamports) / 1e9;
-    if (!(spentSol > 0)) return null;
-    let priceSol: number | null = null;
-    if (f.tokenDeltaRaw !== null && f.decimals !== null) {
-      try {
-        const tokens = Math.abs(Number(BigInt(f.tokenDeltaRaw)) / 10 ** f.decimals);
-        if (tokens > 0) priceSol = spentSol / tokens;
-      } catch {
-        /* an unreadable raw delta leaves the price unknown, never zero */
-      }
-    }
-    return { spentSol, priceSol };
-  }
-
-  /**
-   * What share of a wallet's CURRENT balance `tokensRaw` base units are, as a
-   * percentage to two decimals — or null when there is nothing to size
-   * against, in which case the caller keeps the percentage it already had.
-   *
-   * The sell rail is percentage-of-balance all the way down (the local
-   * builder, the Jupiter route and the relayer all take "NN%"), so this is
-   * the join between a caller that knows a QUANTITY — copy trading, which
-   * knows exactly how many tokens a copy holds — and a pipeline that takes a
-   * share. Doing the conversion here, against a balance read at request
-   * time, is the difference between selling the copy's tokens and selling
-   * whatever fraction a cost-basis ratio happened to work out to.
-   */
-  private async pctForTokens(mint: string, tokensRaw?: string, walletId?: string): Promise<number | null> {
-    if (!tokensRaw || !/^\d+$/.test(tokensRaw)) return null;
-    let want: bigint;
-    try {
-      want = BigInt(tokensRaw);
-    } catch {
-      return null;
-    }
-    if (want <= 0n) return null;
-    const owner = walletId ? wallet.publicKeyOf(walletId) : wallet.publicKey();
-    if (!owner) return null;
-    const s = this.getSettings();
-    const r = await getTokenBalanceRawForMint(s.rpc.execHttpUrl ?? s.rpc.httpUrl, owner, mint).catch(() => null);
-    if (!r || !r.ok || !r.data || r.data.raw <= 0n) return null;
-    if (want >= r.data.raw) return 100;
-    // Rounded UP. The failure this exists to fix is systematically selling
-    // short, and one basis point of overshoot is cheaper than a remainder.
-    const bps = (want * 10_000n + r.data.raw - 1n) / r.data.raw;
-    return Math.max(0.01, Math.min(100, Number(bps) / 100));
   }
 
   /**
@@ -4113,61 +3686,13 @@ export class SniperEngine {
     });
   }
 
-  /**
-   * The ledger's record of a BUY of `mint` this install made around `atMs`,
-   * in base units — how a copy row opened before quantities were tracked
-   * recovers its own size.
-   *
-   * The copy's buy IS a fill here: the ledger reconciled that transaction's
-   * own token delta when it landed. Matching is deliberately strict, because
-   * the number goes on to size a real sell:
-   *
-   *   • one reconciled buy of that mint by that wallet → that is the one;
-   *   • several → the closest to `atMs`, and only if it is inside five
-   *     minutes AND a clear minute closer than the runner-up;
-   *   • anything else → null, which leaves the copy on the old percentage
-   *     path rather than on a quantity from somebody else's trade.
-   */
-  private ledgerBuyFill(mint: string, atMs: number, walletId?: string): { raw: string; decimals: number } | null {
-    const owner = walletId ? wallet.publicKeyOf(walletId) : wallet.publicKey();
-    if (!owner) return null;
-    const near = ledger
-      .all()
-      .filter(
-        (f) =>
-          f.mint === mint &&
-          f.side === 'buy' &&
-          f.state === 'reconciled' &&
-          f.tokenDeltaRaw !== null &&
-          f.decimals !== null &&
-          // A fill from before multi-wallet carries no owner. It belongs to
-          // whichever wallet was active then, which we cannot know, so it is
-          // only trusted for the active signer.
-          (f.wallet === owner || (f.wallet === null && owner === wallet.publicKey())),
-      )
-      .sort((a, b) => Math.abs(a.at - atMs) - Math.abs(b.at - atMs));
-    if (!near.length) return null;
-    if (near.length > 1) {
-      const best = Math.abs(near[0].at - atMs);
-      const next = Math.abs(near[1].at - atMs);
-      if (best > 5 * 60_000 || next - best < 60_000) return null;
-    }
-    try {
-      const raw = BigInt(near[0].tokenDeltaRaw as string);
-      const abs = raw < 0n ? -raw : raw;
-      return abs > 0n ? { raw: abs.toString(), decimals: near[0].decimals as number } : null;
-    } catch {
-      return null;
-    }
-  }
-
   // ── Advanced orders (term.txt §2) ────────────────────────────────
   //
   // The engine owns the two things advOrders cannot know for itself: whether
   // execution is currently permitted, and what a token is worth right now.
 
   /** Why an order cannot execute, in the user's words. Null = it can. */
-  private executionBlockedReason(): string | null {
+  executionBlockedReason(): string | null {
     const s = this.getSettings();
     if (!s.execution.liveEnabled) return 'live execution is off in settings';
     if (!this.armed) return 'the engine is not armed';
@@ -4329,10 +3854,7 @@ export class SniperEngine {
         // launch feed never carries (anything migrated, or everything when
         // the scanner is stopped). Mints on our own tape are already ticked
         // by onTrade at full rate.
-        // Open copies ride the same poll: a copied Raydium token gets no
-        // tick from any feed, so this is what marks it to market.
-        const copyMints = new Set(copyTrade.openMints());
-        const mints = [...new Set([...advOrders.armedMints(), ...alerts.armedMints(), ...copyMints])].filter(
+        const mints = [...new Set([...advOrders.armedMints(), ...alerts.armedMints()])].filter(
           (m) => !this.curveFeedIsTicking(m),
         );
         if (!mints.length) {
@@ -4354,7 +3876,6 @@ export class SniperEngine {
             this.priceGap.delete(mint);
             this.rememberPrice(mint, sum.priceSol);
             advOrders.onTick({ mint, priceSol: sum.priceSol, mcapUsd: sum.marketCapUsd });
-            if (copyMints.has(mint)) copyTrade.markToMarket(mint, sum.priceSol);
           } else if (withOrders.has(mint)) {
             this.notePriceGap(mint, sum?.symbol ?? '');
           }
@@ -4636,43 +4157,12 @@ export class SniperEngine {
     // Switched mid-read: answer the caller, but this is not the new
     // wallet's list — never keep or broadcast it as such.
     if (owner !== wallet.publicKey()) return { ok: true, message: 'ok', data };
-    // A copy row is opened by a buy and closed by a mirrored sell, so a
-    // manual sell — or a stop-loss, or a take-profit rung — used to leave it
-    // "open" forever (user report, 2026-09-13: three fully sold positions
-    // still showing open). Here, rather than in the portfolio build, because
-    // this is the one place a SUCCESSFUL holdings read lands: it costs no
-    // extra request, it runs for every caller, and it cannot fire on a read
-    // that failed — a failed read is not an empty wallet.
-    this.reconcileCopyRows(owner, data);
     const prev = this.lastHoldings;
     const changed =
       !prev || prev.owner !== owner || prev.data.length !== data.length || prev.data.some((h, i) => h.mint !== data[i].mint || h.amountRaw !== data[i].amountRaw);
     this.lastHoldings = { at, owner, data };
     if (changed) this.emit({ kind: 'holdings', data, at });
     return { ok: true, message: 'ok', data };
-  }
-
-  /** Close live copy rows whose tokens have left the wallet this read is
-   *  for. Scoped to the configs that actually sign with it: a config pinned
-   *  to another wallet is not described by these holdings. */
-  private reconcileCopyRows(owner: string, data: WalletHolding[]): void {
-    const mine = new Set<string>();
-    for (const c of copyTrade.all()) {
-      if ((c.chain ?? 'solana') !== 'solana') continue;
-      const signer = c.walletId ? wallet.publicKeyOf(c.walletId) : wallet.publicKey();
-      if (signer === owner) mine.add(c.id);
-    }
-    if (mine.size === 0) return;
-    copyTrade.reconcileHoldings(new Set(data.filter((h) => h.uiAmount > 0).map((h) => h.mint)), { configIds: mine });
-    // …and the other direction: a copy the book calls CLOSED that the wallet
-    // still holds tokens for. A mirrored sell is a share of a balance and can
-    // come back short, and until 2026-09-15 nothing compared the two — a user
-    // had 83,236 NON sitting outside every position view because the record
-    // said the copy was done (report, 2026-09-15). Same read, no extra cost.
-    copyTrade.reconcileQuantities(
-      new Map(data.filter((h) => h.uiAmount > 0).map((h) => [h.mint, { raw: h.amountRaw, decimals: h.decimals }])),
-      { configIds: mine },
-    );
   }
 
   /** What a held mint's own bytes say about its sellability — a Token-2022
@@ -5952,10 +5442,9 @@ export class SniperEngine {
           this.rememberPrice(mint, priceSol);
           advOrders.onTick({ mint, priceSol, mcapUsd: null });
           alerts.onTick({ mint, priceSol, curvePct: 100 });
-          copyTrade.markToMarket(mint, priceSol);
         }
       } catch (err) {
-        this.noteEvalError('orders/alerts/copy', mint, err);
+        this.noteEvalError('orders/alerts', mint, err);
       }
       if (!sAmm.shadowStratLab) continue;
       this.emitLabEvents(this.lab.onAmmTrade(mint, sw.priceSol, n.receivedAt));
@@ -6577,21 +6066,6 @@ export class SniperEngine {
     // Every trade, tracked or not: the reserves on the event are the curve's
     // progress and price, which is what the Graduating column ranks by.
     if (v) this.liveCurves.note(ev.mint, v.vSol, ev.virtualTokenReserves, ev.creator, n.receivedAt);
-    // FOMO: a wallet some crowd config is listening for, on any mint — a
-    // set lookup for everyone else (2026-09-20).
-    if (v && copyTrade.crowdWants('solana', ev.user, n.receivedAt)) {
-      copyTrade.noteCrowdTrade({
-        wallet: ev.user,
-        mint: ev.mint,
-        symbol: this.tokens.get(ev.mint)?.row.symbol ?? market.summaryIfCached(ev.mint)?.symbol ?? '',
-        isBuy: ev.isBuy,
-        sol: v.sol,
-        priceSol: v.priceSol,
-        at: n.receivedAt,
-        signature: n.signature,
-        tradeAt: ev.timestamp > 0 ? ev.timestamp * 1_000 : null,
-      });
-    }
     const t = this.tokens.get(ev.mint);
     // A stock-quoted coin is never tracked (onCreate), and the tracked body
     // below reads SOL fields that are zero on its events — so it takes the
@@ -6691,37 +6165,8 @@ export class SniperEngine {
       // Scripts holding or subscribed to the coin hear the creator's sell
       // as a `devSell` event (2026-09-27), with what was sold.
       if (creatorSold) automation.onDevSell(ev.mint, { sol: Number(ev.solAmount) / 1e9, tokens: Number(ev.tokenAmount) / 1e6, priceSol });
-      copyTrade.markToMarket(ev.mint, priceSol);
-      // Copy trading needs BOTH sides from a followed wallet — the
-      // smart-money block further down only fires on first buys.
-      if (copyTrade.activeWallets().has(ev.user)) {
-        // The wallet watcher delivers this same trade a moment later from
-        // the leader's own subscription; the signature dedupes the pair.
-        copyTrade.onWalletTrade({
-          wallet: ev.user,
-          mint: ev.mint,
-          symbol: t.row.symbol,
-          isBuy: ev.isBuy,
-          sol: Number(ev.solAmount) / 1e9,
-          priceSol,
-          // The token count the log DOES carry. `soldFraction` is still
-          // unknown on this rail (a log has no pre-balance), but with the
-          // count copyTrade can recover the fraction from one balance read
-          // instead of waiting for the wallet watcher's getTransaction —
-          // which always loses this race. On an exit that wait is the whole
-          // cost (user report, 2026-09-13).
-          tokens: Number(ev.tokenAmount) / 1e6,
-          at: n.receivedAt,
-          // The pump event carries the chain's own clock for the trade, so
-          // this rail dates itself with no extra read at all. It was the last
-          // one that could not, which left it the one path a stale delivery
-          // could still enter on (2026-09-15).
-          tradeAt: chainTimeMs(ev.timestamp),
-          signature: n.signature,
-        });
-      }
     } catch (err) {
-      this.noteEvalError('orders/alerts/copy', ev.mint, err);
+      this.noteEvalError('orders/alerts', ev.mint, err);
     }
 
     // Smart-money signal runs even for decided/unheld tokens (a watched wallet
@@ -7448,14 +6893,6 @@ export class SniperEngine {
   }
 
   private creditTick(): void {
-    const stats = this.feed?.getDetails() ?? [];
-    heliusBudget.billFeed(stats.map((s) => ({ url: s.url, bytes: s.bytes })));
-    // The priority feed is Helius when a key exists, and must be billed then —
-    // it is cheap, not free, and a budget that ignored it would be a lie. On
-    // the public fallback socket there is nothing to bill.
-    if ((this.getSettings().rpc.heliusApiKey ?? '').trim()) {
-      heliusBudget.billFeed([{ url: 'helius:priority', bytes: priorityFeed.byteCount() }]);
-    }
     if (heliusBudget.shouldCutOff()) {
       const u = heliusBudget.current();
       this.log(
@@ -7463,13 +6900,26 @@ export class SniperEngine {
         `Helius credit budget spent (${u.used.toLocaleString()} of ${u.limit.toLocaleString()}) — feed socket disabled. Raise or clear the ceiling in Settings to continue.`,
       );
       // Persist the decision so a restart does not silently resume spending.
-      this.disableHeliusFeed?.();
+      this.leaveHeliusFeed('Helius credit budget spent');
+      raiseIssue({
+        id: 'helius-budget',
+        level: 'warn',
+        title: 'Your Helius credit limit was reached',
+        body:
+          `By this app's count, ${u.used.toLocaleString()} of the ${u.limit.toLocaleString()} credits you allowed are used, ` +
+          `so the Helius feed is off to avoid a bill and the scanner is on the public sockets. Leave it off unless your plan can carry it: ${feedCostText(u.limit)}`,
+        action: { label: 'Open Settings', route: 'settings' },
+      });
     }
     heliusBudget.flush();
   }
 
   /** Injected by the host so the engine does not import the settings store. */
   disableHeliusFeed: (() => void) | null = null;
+  private openedFeedSignature = '';
+  private feedDetail = 'starting';
+  private feedDownSince: number | null = null;
+  private socketsSuspended = false;
 
   /** Re-push status to the renderer. The mode bit (execution.liveEnabled)
    *  lives in settings, outside the engine, and status.liveActive is armed

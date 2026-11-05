@@ -35,8 +35,7 @@ export const ROUTE_LOADERS = {
   launches: () => import('./pages/Launches'),
   positions: () => import('./pages/Portfolio'),
   paper: () => import('./pages/Positions'),
-  wallets: () => import('./pages/Wallets'),
-  copysimple: () => import('./pages/CopySimple'),
+  mirror: () => import('./pages/KryptoMirror'),
   trader: () => import('./pages/KryptoTrader'),
   execution: () => import('./pages/Execution'),
   history: () => import('./pages/History'),
@@ -55,6 +54,7 @@ export const ROUTE_LOADERS = {
   console: () => import('./pages/Console'),
   settings: () => import('./pages/Settings'),
   profiles: () => import('./pages/Profiles'),
+  security: () => import('./pages/Security'),
   about: () => import('./pages/About'),
   // Not a nav route: reached by an 0x address plus the chain it lives on.
   evmToken: () => import('./pages/EvmToken'),

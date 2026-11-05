@@ -1,7 +1,7 @@
 {
   "name": "krypto-terminal",
   "productName": "Krypto Bot",
-  "version": "6.2.0",
+  "version": "7.0.0",
   "description": "A free, local-first Solana memecoin trading terminal. Discover, analyse and trade — with a live launch scanner and automation engine built in. Part of the Krypt free tools suite.",
   "main": "dist-electron/main.js",
   "author": {
@@ -53,10 +53,7 @@
     "test:skins:e2e": "node test/skins.e2e.mjs",
     "test:pumpchain:e2e": "node test/pumpchain.e2e.mjs",
     "test:scout:e2e": "node test/scout.e2e.mjs",
-    "test:reverse:e2e": "node test/reverse.e2e.mjs",
-    "test:fomo:e2e": "node test/fomo.e2e.mjs",
     "test:chartcolour:e2e": "node test/chartcolour.e2e.mjs",
-    "test:copysimple:e2e": "node test/copysimple.e2e.mjs",
     "test:pumpchain:live": "esbuild test/pumpchain.entry.ts --bundle --format=esm --platform=node --alias:@shared=./shared --external:@solana/web3.js --external:undici --external:ws --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.pumpchain.mjs && esbuild shared/krypto.ts --bundle --format=esm --platform=node --outfile=test/.krypto.mjs && node test/pumpchain.live.mjs",
     "test:linkintel": "esbuild electron/data/linkIntel.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.linkintel.main.mjs && node test/linkintel.live.mjs",
     "test:gradorders": "esbuild electron/engine/engine.ts --bundle --format=esm --platform=node --alias:electron=./test/electronstub.engine.mjs --alias:@shared=./shared --external:ws --external:undici --banner:js=\"import{createRequire}from 'module';const require=createRequire(import.meta.url);\" --outfile=test/.engine.mjs && esbuild shared/types.ts --bundle --format=esm --platform=node --outfile=test/.sharedtypes.mjs && node test/gradorders.live.mjs"

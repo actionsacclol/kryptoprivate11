@@ -30,6 +30,7 @@ import { createPublicClient, http, type PublicClient } from 'viem';
 import { CHAINS } from './chains';
 import { resolveEvmRpcUrl, type EvmChainKind, type EvmChainSettings, type EvmRpcCapability } from '@shared/evm';
 import { logger } from '../system/logger';
+import { clearIssue, raiseIssue } from '../system/appIssues';
 
 type ChainSettingsGetter = (chain: EvmChainKind) => Pick<EvmChainSettings, 'rpcUrl' | 'apiKey'>;
 let getChainSettings: ChainSettingsGetter = () => ({ rpcUrl: '', apiKey: '' });
@@ -108,6 +109,7 @@ function isCapRejected(url: string, cap: EvmRpcCapability): boolean {
 
 /** Called when the user edits the key or the URL — a new one deserves a try. */
 export function clearRpcRejection(chain: EvmChainKind): void {
+  clearIssue(`evm-key:${chain}`);
   rejectedUntil.clear();
   capRejectedUntil.clear();
   transportFails.clear();
@@ -305,6 +307,19 @@ function gatedFetchFor(chain: EvmChainKind, url: string, cap: EvmRpcCapability |
   const dropEndpoint = (status: number | string): void => {
     rejectedUntil.set(url, Date.now() + REJECT_FOR_MS);
     forgetClientsFor(url);
+    // One of the chain's built-in endpoints is nothing to do with the user's key,
+    // and telling them to check a key they never set sent them looking for nothing.
+    if (isChainOwnUrl(chain, url)) {
+      logger.warn(`evm ${chain}: a built-in RPC endpoint answered ${status}, using another for 15 minutes (not your key)`);
+      return;
+    }
+    raiseIssue({
+      id: `evm-key:${chain}`,
+      level: 'error',
+      title: `Your ${CHAINS[chain].meta.shortName} RPC endpoint was refused`,
+      body: `It answered ${status}. Using the public endpoint for 15 minutes. Check the key or URL in Settings.`,
+      action: { label: 'Open Settings', route: 'settings' },
+    });
     logger.warn(`evm ${chain}: the configured RPC endpoint answered ${status} — falling back to the public endpoint for 15 minutes (check your key in Settings)`);
   };
   return async (input, init) => {

@@ -104,10 +104,14 @@ export const LIABILITY_CAP_USD = 100;
 // sign-in for email/social accounts reads (pump's session cookie, from a
 // profile the software opens, nothing else). A change to the user's own
 // public profile, so everyone is asked once.
-export const TERMS_VERSION = '2026-10-25.1';
+// 2026-11-04.1: the optional app password and authenticator codes (Privacy,
+// Terms §responsibility). If you set a password and lose both it and its recovery
+// code, nobody can open your keys and the funds are lost. That is a new way to
+// lose money, so everyone is asked once.
+export const TERMS_VERSION = '2026-11-04.1';
 
 /** Shown as "Last updated" on every document. Keep in step with TERMS_VERSION. */
-export const TERMS_EFFECTIVE_DATE = '25 October 2026';
+export const TERMS_EFFECTIVE_DATE = '4 November 2026';
 
 /** Minimum age. A trading tool is not a general-purpose utility: it moves real
  *  money, so this is 18 rather than the 13 a plain utility would use. */

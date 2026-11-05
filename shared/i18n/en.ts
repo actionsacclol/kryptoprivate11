@@ -110,7 +110,7 @@ export const en = {
 
   // ── engine status (bottom of the sidebar) ──────────────────────────
   'status.scanning': 'Scanning',
-  'status.attuning': 'Attuning',
+  'status.attuning': 'Connecting',
   'status.dormant': 'Dormant',
 
   // ── settings sections ──────────────────────────────────────────────

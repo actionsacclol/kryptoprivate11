@@ -7,6 +7,8 @@
 //  - The 32-byte ed25519 secret is encrypted with Electron safeStorage,
 //    which uses the OS keystore (Windows DPAPI, macOS Keychain), tied to
 //    the user account. The ciphertext lives in userData/wallets.json.
+//    With an app password set it is encrypted under the vault's key instead
+//    (vault.ts), and each record says which by its own format.
 //  - SEVERAL wallets may be held; exactly ONE is active and it is the only
 //    one that can sign. Everything downstream (engine, liveSigner, sweep)
 //    calls the same `publicKey()` / `signVersionedTransaction()` it always
@@ -14,9 +16,9 @@
 //    wallets must not become a new way for the signer to misbehave.
 //  - The bookkeeping rules live in walletStore.ts, with no key material, so
 //    they can be tested offline.
-//  - A v1 `wallet.json` is migrated on first read. The old file is LEFT IN
-//    PLACE: it holds a copy of a key, and deleting it as a side effect of an
-//    upgrade is not a risk worth taking.
+//  - A v1 `wallet.json` is migrated on first read. The old file is left in
+//    place until an app password is set: it holds a copy of a key, and a
+//    password that left an open copy behind would be a false claim.
 //  - The PUBLIC key is stored/returned in the clear (it's public).
 //  - The secret is decrypted ONLY transiently, inside this module, and is
 //    never sent to the renderer, written to a log, or put in a config value.
@@ -33,6 +35,9 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { Keypair, VersionedTransaction } from '@solana/web3.js';
 import { base58Encode, base58Decode } from '../chain/base58';
 import { logger } from './logger';
+import { bakPath, durableWrite, overwriteAndRemove, readBackup, type BackupMode } from './durableWrite';
+import * as vault from './vault';
+import { aad } from './vaultCrypto';
 import { getBalance } from '../chain/rpcClient';
 import { checkOutflow, type ApprovedSend, type SignPolicy } from './signPolicy';
 import {
@@ -120,10 +125,33 @@ function readWalletsFile(p: string): { ok: true; file: WalletsFile | null } | { 
   }
 }
 
+function parseText(text: string | null): WalletsFile | null {
+  if (text === null) return null;
+  try {
+    return parseFile(JSON.parse(text), Date.now(), newId);
+  } catch {
+    return null;
+  }
+}
+
+/** The file is damaged or gone, but the previous generation reads. Run from it
+ *  READ-ONLY: every wallet can still sign and sell, and nothing is written over
+ *  the damaged file until a person has looked at it. */
+function fallBackToBackup(why: string): WalletsFile | null {
+  const bak = parseText(readBackup(file()));
+  if (!bak) return null;
+  loadFailure = `${why}. Running from the previous copy (${bakPath(file())}): your wallets can trade and sell, but nothing will be saved until this is resolved.`;
+  logger.error(`wallet store: ${loadFailure}`);
+  cache = bak;
+  return cache;
+}
+
 function loadFile(): WalletsFile {
   if (cache) return cache;
   const current = readWalletsFile(file());
   if (!current.ok) {
+    const fromBak = fallBackToBackup(current.why);
+    if (fromBak) return fromBak;
     // Keep the bytes. A later version, or the user with a text editor, can
     // still recover keys from them; an overwrite could not be undone.
     loadFailure = `${current.why}. Your keys are still in that file — the app will not write to it until this is resolved.`;
@@ -134,6 +162,17 @@ function loadFile(): WalletsFile {
   if (current.file) {
     loadFailure = null;
     cache = current.file;
+    return cache;
+  }
+  // Gone, when it was there before: the last save always leaves a file, so this
+  // is not a first run. Never read as "no wallets", and with a password on it
+  // never reaches the old unprotected file below either.
+  const fromBak = fallBackToBackup(`${file()} is missing`);
+  if (fromBak) return fromBak;
+  if (vault.isOn()) {
+    loadFailure = `${file()} is missing, and an app password is set, so it should exist. Nothing will be written until this is resolved.`;
+    logger.error(`wallet store: ${loadFailure}`);
+    cache = emptyFile();
     return cache;
   }
   // No wallets.json. A pre-multi-wallet install may still have the old
@@ -161,12 +200,12 @@ function load(): StoredWallet | null {
   return activeWallet(loadFile());
 }
 
-function persist(f: WalletsFile): void {
+function persist(f: WalletsFile, backup: BackupMode = 'keep'): void {
   // Never write over a file we failed to read: that is how keys are lost.
   if (loadFailure) throw new Error(`refusing to write wallets.json — ${loadFailure}`);
-  const tmp = `${file()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(f, null, 2), 'utf8');
-  fs.renameSync(tmp, file());
+  // The version on disk says which encryption the secrets use, so an older
+  // build refuses a password-protected file instead of failing to sign from it.
+  durableWrite(file(), JSON.stringify({ ...f, version: vault.writesKv1() ? 3 : 2 }, null, 2), { backup });
   cache = f;
 }
 
@@ -187,15 +226,109 @@ function commit(result: { file: WalletsFile; ok: boolean; message: string }): { 
 const toHex = (b: Uint8Array): string => Buffer.from(b).toString('hex');
 const fromHex = (h: string): Uint8Array => new Uint8Array(Buffer.from(h, 'hex'));
 
-/** Decrypt the secret transiently. Callers must not persist or log it. */
+/** Decrypt the secret transiently. Callers must not persist or log it. Each
+ *  record says how it was sealed. Throws while the vault is locked. */
 function decryptSecret(w: StoredWallet): Uint8Array {
+  if (vault.isKv1(w.secretEnc)) return new Uint8Array(vault.open(w.secretEnc, aad.solana(w.publicKey)));
   const buf = Buffer.from(w.secretEnc, 'base64');
   const hex = safeStorage.decryptString(buf);
   return fromHex(hex);
 }
 
-function encryptSecret(secret: Uint8Array): string {
+function encryptSecret(secret: Uint8Array, publicKey: string): string {
+  if (vault.writesKv1()) return vault.seal(secret, aad.solana(publicKey));
   return safeStorage.encryptString(toHex(secret)).toString('base64');
+}
+
+/** Why this wallet's key cannot be used, or null. Decrypts in this module and
+ *  scrubs; the plaintext goes nowhere. */
+function keyProblem(w: StoredWallet): string | null {
+  let secret: Uint8Array | null = null;
+  try {
+    secret = decryptSecret(w);
+    if (secret.length !== 32) return `${w.label} (${w.publicKey}): the stored key has the wrong length`;
+    if (base58Encode(ed25519.getPublicKey(secret)) !== w.publicKey) return `${w.label} (${w.publicKey}): the stored key does not match its address`;
+    return null;
+  } catch (err) {
+    return `${w.label} (${w.publicKey}): the stored key cannot be decrypted (${(err as Error).message})`;
+  } finally {
+    secret?.fill(0);
+  }
+}
+
+/** Every wallet whose key this machine cannot actually use. The list and the
+ *  balances look perfectly normal when Windows has lost the key, so without
+ *  this a user keeps funding an address nothing can sign for. */
+export function unusableKeys(): string[] {
+  return loadFile().wallets.map(keyProblem).filter((p): p is string => p !== null);
+}
+
+/**
+ * Re-encrypt every key in the current write mode and prove the result. Throws
+ * on any problem, and the caller's migration then puts the old files back.
+ */
+export function resealAll(): void {
+  if (loadFailure) throw new Error(loadFailure);
+  const f = loadFile();
+  const wallets = f.wallets.map((w) => {
+    const problem = keyProblem(w);
+    if (problem) throw new Error(problem);
+    const secret = decryptSecret(w);
+    try {
+      return { ...w, secretEnc: encryptSecret(secret, w.publicKey) };
+    } finally {
+      secret.fill(0);
+    }
+  });
+  // `scrub`: the previous generation would otherwise keep the old encryption.
+  persist({ ...f, wallets }, 'scrub');
+  const back = readWalletsFile(file());
+  if (!back.ok || !back.file || back.file.wallets.length !== wallets.length) throw new Error('wallets.json did not read back after re-encrypting');
+  for (const w of back.file.wallets) {
+    const problem = keyProblem(w);
+    if (problem) throw new Error(problem);
+  }
+}
+
+/** Forget the cache and read the file again, after a migration put it back. */
+export function reloadFromDisk(): void {
+  cache = null;
+  loadFailure = null;
+}
+
+/**
+ * The old single-wallet file, once a password is on. If its key is in the list
+ * the file goes, because it is an unprotected copy. If not, the key moves into
+ * the vault rather than being lost, and the file goes. Unreadable means left
+ * alone and reported. Returns a problem to show, or null.
+ */
+export function absorbLegacyFile(): string | null {
+  const p = legacyFile();
+  if (!fs.existsSync(p)) return null;
+  const parsed = parseText(fs.readFileSync(p, 'utf8'));
+  const old = parsed?.wallets[0];
+  if (!old) return `${p} could not be read and was left in place. It may hold an unprotected copy of a key.`;
+  const held = loadFile().wallets.some((w) => w.publicKey === old.publicKey);
+  if (!held) {
+    let secret: Uint8Array | null = null;
+    try {
+      secret = decryptSecret(old);
+      if (base58Encode(ed25519.getPublicKey(secret)) !== old.publicKey) throw new Error('the key does not match its address');
+      vault.addOrphan(old.publicKey, secret, 'wallet.json');
+    } catch (err) {
+      return `${p} could not be opened (${(err as Error).message}) and was left in place. It may hold an unprotected copy of a key.`;
+    } finally {
+      secret?.fill(0);
+    }
+  }
+  overwriteAndRemove(p);
+  logger.warn(`wallet store: removed the old single-wallet file${held ? '' : ' after moving its key into the vault'}`);
+  return null;
+}
+
+/** Plaintext keys for the encrypted backup file only. Caller scrubs `secret`. */
+export function keysForBackup(): Array<{ label: string; publicKey: string; secret: Uint8Array; homeAddress: string | null; maxBalanceSol: number }> {
+  return loadFile().wallets.map((w) => ({ label: w.label, publicKey: w.publicKey, secret: decryptSecret(w), homeAddress: w.homeAddress, maxBalanceSol: w.maxBalanceSol }));
 }
 
 export function exists(): boolean {
@@ -259,7 +392,7 @@ export function generate(label = ''): { ok: boolean; message: string; publicKey?
     id: newId(),
     label: label ? cleanLabel(label, f.wallets.length + 1) : nextLabel(f),
     publicKey,
-    secretEnc: encryptSecret(secret),
+    secretEnc: encryptSecret(secret, publicKey),
     homeAddress: null,
     maxBalanceSol: DEFAULT_MAX_BALANCE_SOL,
     createdAt: Date.now(),
@@ -296,7 +429,7 @@ export function importSecret(input: string, label = ''): { ok: boolean; message:
     id: newId(),
     label: label ? cleanLabel(label, f.wallets.length + 1) : nextLabel(f),
     publicKey,
-    secretEnc: encryptSecret(secret),
+    secretEnc: encryptSecret(secret, publicKey),
     homeAddress: null,
     maxBalanceSol: DEFAULT_MAX_BALANCE_SOL,
     createdAt: Date.now(),
@@ -327,7 +460,7 @@ export function ensureFromSeed(seed: Uint8Array, label: string): { ok: boolean; 
     id,
     label: cleanLabel(label, f.wallets.length + 1),
     publicKey,
-    secretEnc: encryptSecret(seed),
+    secretEnc: encryptSecret(seed, publicKey),
     homeAddress: null,
     maxBalanceSol: DEFAULT_MAX_BALANCE_SOL,
     createdAt: Date.now(),
@@ -414,65 +547,52 @@ export async function refreshBalance(httpUrl: string): Promise<{ ok: boolean; me
   return { ok: true, message: 'ok', balanceSol: r.data / LAMPORTS_PER_SOL };
 }
 
-/** Write a Solana-compatible keypair JSON (64-byte array) to a path the user
- *  chose, so they can recover the wallet in any Solana wallet. This is the
- *  ONLY path the secret leaves the app, straight to a file the user picked —
- *  never through the renderer or a log. */
 /**
- * Export every wallet to a plain text file, as base58 private keys.
+ * Export ONE wallet to a plain text file, as a base58 private key.
  *
  * base58 of the 64-byte secret key is the format Phantom, Solflare and Backpack
- * accept under "Import Private Key" — so this is the "get my keys out and into
- * a normal wallet" path, as opposed to backupToFile's Solana-CLI JSON array.
- *
- * This writes SECRET KEYS IN PLAINTEXT by design — that is the whole point of an
- * export — so the file leads with a warning and the caller confirms first.
+ * accept under "Import Private Key". This writes a SECRET KEY IN PLAINTEXT by
+ * design, so the file leads with a warning and the caller has already taken the
+ * user through the warning, the proof and the typed confirmation. A file holding
+ * every key is what the encrypted backup is for (keyExport.ts).
  */
-export function exportAllToFile(destPath: string): { ok: boolean; message: string; count: number } {
-  const file = loadFile();
-  if (!file.wallets.length) return { ok: false, message: 'No wallets to export', count: 0 };
-  const lines: string[] = [
-    'Krypto Bot — wallet export',
-    '',
-    '!!! PRIVATE KEYS IN PLAINTEXT !!!',
-    'Anyone with this file can spend these wallets. Keep it offline, never share',
-    'it, and delete it once you have imported the keys. Krypt cannot recover a',
-    'key that leaks.',
-    '',
-    'To import into Phantom / Solflare / Backpack: Add wallet -> Import Private',
-    'Key -> paste the "Private key" line below.',
-    '',
-    '='.repeat(64),
-    '',
-  ];
-  let count = 0;
-  const secrets: Uint8Array[] = [];
+export function exportKeyToFile(walletId: string, destPath: string): { ok: boolean; message: string } {
+  const w = loadFile().wallets.find((x) => x.id === walletId);
+  if (!w) return { ok: false, message: 'No such wallet' };
+  let secret: Uint8Array | null = null;
+  const keypair = new Uint8Array(64);
   try {
-    for (const w of file.wallets) {
-      const secret = decryptSecret(w);
-      secrets.push(secret);
-      const pub = base58Decode(w.publicKey);
-      const keypair = new Uint8Array(64);
-      keypair.set(secret, 0);
-      keypair.set(pub, 32);
-      lines.push(`[${w.label}]`);
-      lines.push(`Public key:  ${w.publicKey}`);
-      lines.push(`Private key: ${base58Encode(keypair)}`);
-      lines.push('');
-      keypair.fill(0);
-      count += 1;
-    }
-    fs.writeFileSync(destPath, lines.join('\n'), 'utf8');
-    return { ok: true, message: `Exported ${count} wallet(s) to ${destPath}`, count };
+    secret = decryptSecret(w);
+    keypair.set(secret, 0);
+    keypair.set(base58Decode(w.publicKey), 32);
+    const text = [
+      'Krypto Bot — private key',
+      '',
+      '!!! PRIVATE KEY IN PLAINTEXT !!!',
+      'Anyone with this file can spend this wallet. Keep it offline, never share',
+      'it, and delete it once you have imported the key. Krypt cannot recover a',
+      'key that leaks.',
+      '',
+      'To import into Phantom / Solflare / Backpack: Add wallet -> Import Private',
+      'Key -> paste the "Private key" line below.',
+      '',
+      `[${w.label}]`,
+      `Public key:  ${w.publicKey}`,
+      `Private key: ${base58Encode(keypair)}`,
+      '',
+    ].join('\n');
+    durableWrite(destPath, text, { backup: 'none' });
+    return { ok: true, message: `Exported ${w.label} to ${destPath}` };
   } catch (err) {
-    return { ok: false, message: `Export failed: ${(err as Error).message}`, count: 0 };
+    return { ok: false, message: `Export failed: ${(err as Error).message}` };
   } finally {
-    for (const s of secrets) s.fill(0);
+    secret?.fill(0);
+    keypair.fill(0);
   }
 }
 
-export function backupToFile(destPath: string): { ok: boolean; message: string } {
-  const w = load();
+export function backupToFile(destPath: string, walletId?: string): { ok: boolean; message: string } {
+  const w = walletId ? loadFile().wallets.find((x) => x.id === walletId) : load();
   if (!w) return { ok: false, message: 'No wallet' };
   try {
     const secret = decryptSecret(w);
@@ -480,7 +600,7 @@ export function backupToFile(destPath: string): { ok: boolean; message: string }
     const keypair = new Uint8Array(64);
     keypair.set(secret, 0);
     keypair.set(pub, 32);
-    fs.writeFileSync(destPath, JSON.stringify(Array.from(keypair)), 'utf8');
+    durableWrite(destPath, JSON.stringify(Array.from(keypair)), { backup: 'none' });
     secret.fill(0);
     keypair.fill(0);
     return { ok: true, message: `Backed up to ${destPath}` };
@@ -715,7 +835,8 @@ export function remove(id?: string): { ok: boolean; message: string } {
   const target = f.wallets.find((w) => w.id === targetId);
   const res = removeFromStore(f, targetId);
   if (!res.ok) return { ok: false, message: res.message };
-  persist(res.file);
+  // `scrub`: a backup still holding the key would make this removal a lie.
+  persist(res.file, 'scrub');
   if (target) balances.delete(target.publicKey);
   if (!res.file.wallets.length) {
     // An EMPTY v2 file is written, never deleted.
@@ -727,7 +848,7 @@ export function remove(id?: string): { ok: boolean; message: string } {
     // removes their wallet, restarts, and it is back. An empty file parses
     // fine, so the fallback never fires and the removal sticks.
     balances = new Map();
-    persist(res.file);
+    persist(res.file, 'scrub');
   }
   return { ok: true, message: res.message };
 }

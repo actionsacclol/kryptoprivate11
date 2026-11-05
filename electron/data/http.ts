@@ -21,6 +21,7 @@
 import { humanWait } from '@shared/market';
 import type { ProviderId } from '@shared/market';
 import { describeBody } from './refusals';
+import { clearIssue, raiseIssue } from '../system/appIssues';
 import { isPumpHost, pumpFetch, PumpWallError, wallMessage, wallRemainingMs } from './pumpWall';
 
 // Re-exported so the classifier's table can be pinned by the same test that
@@ -76,6 +77,43 @@ const HOSTS: Record<HttpProviderId, string> = {
   relay: 'api.relay.link',
   'relay-status': 'api.relay.link',
 };
+
+const usesApiKey = (headers: Record<string, string> | undefined): boolean =>
+  !!headers && Object.keys(headers).some((h) => /api-key/i.test(h));
+
+const KEY_PROVIDER_NAMES: Partial<Record<HttpProviderId, string>> = { birdeye: 'Birdeye', jupiter: 'Jupiter' };
+
+/** A call made with the user's own key was turned down: a spent allowance when
+ *  `parkedMs` is given, otherwise a refused key if the status says so. A provider
+ *  used without a key has nothing the user could fix. */
+function noteKeyTrouble(
+  id: HttpProviderId,
+  headers: Record<string, string> | undefined,
+  status: number,
+  detail: string,
+  parkedMs: number | null,
+): void {
+  if (!usesApiKey(headers)) return;
+  const name = KEY_PROVIDER_NAMES[id] ?? id;
+  const said = detail ? `: ${detail}` : '';
+  if (parkedMs !== null) {
+    raiseIssue({
+      id: `provider-key:${id}`,
+      level: 'warn',
+      title: `${name}: your allowance is used up`,
+      body: `HTTP ${status}${said}. ${name} calls are paused for ${Math.round(parkedMs / 3_600_000)} hours. Add credit, or change the key in Settings.`,
+      action: { label: 'Open Settings', route: 'settings' },
+    });
+  } else if (status === 401 || status === 403) {
+    raiseIssue({
+      id: `provider-key:${id}`,
+      level: 'error',
+      title: `${name} refused your API key`,
+      body: `HTTP ${status}${said}. Check the key in Settings.`,
+      action: { label: 'Open Settings', route: 'settings' },
+    });
+  }
+}
 
 /**
  * Jupiter is the one provider with two hosts, and the choice is the user's
@@ -1164,6 +1202,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         if (isQuotaExhausted(res.status, detail)) {
           transportFailures += 1;
           const parkedMs = park(id, null, true, path);
+          noteKeyTrouble(id, opts.headers, res.status, detail, parkedMs);
           msg = `${id}: allowance spent — ${detail || `HTTP ${res.status}`}. Paused ${Math.round(parkedMs / 3_600_000)}h; top up the plan or switch it off in Settings.`;
           void res.body?.cancel().catch(() => undefined);
         } else if (res.status === 429) {
@@ -1175,6 +1214,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         } else {
           // A 5xx is the provider being broken, not the provider answering.
           if (res.status >= 500) transportFailures += 1;
+          noteKeyTrouble(id, opts.headers, res.status, detail, null);
           msg = `${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`;
         }
         s.errors += 1;
@@ -1196,6 +1236,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         transportFailures += 1;
         const spent = isQuotaExhausted(res.status, verdict.detail ?? '');
         const parkedMs = park(id, spent ? null : res.headers.get('retry-after'), spent, path);
+        if (spent) noteKeyTrouble(id, opts.headers, res.status, verdict.detail ?? '', parkedMs);
         const msg = spent
           ? `${id}: allowance spent — ${verdict.detail ?? `HTTP ${res.status}`}. Paused ${Math.round(parkedMs / 3_600_000)}h; top up the plan or switch it off in Settings.`
           : `${id}: rate limited (HTTP ${res.status}${verdict.detail ? ` — ${verdict.detail}` : ''}) — pausing ${Math.ceil(parkedMs / 1000)}s`;
@@ -1227,6 +1268,7 @@ export async function getJson<T>(id: HttpProviderId, path: string, opts: FetchOp
         failStreak.delete(scope);
       }
       quotaParked.delete(id);
+      if (usesApiKey(opts.headers)) clearIssue(`provider-key:${id}`);
       softParkFromHeaders(id, res.headers, path);
       const ms = Date.now() - started;
       s.samples.push(ms);

@@ -106,12 +106,10 @@ test('websocket traffic is billed by the byte: 2 credits per 0.1 MB', () => {
 });
 
 test('the measured firehose rate is what a budget is judged against', () => {
-  // 780k pushes/h × ~1.4 KB ÷ 51,200 B/credit ≈ 21k credits/h: 1M credits
-  // is about 48 hours of firehose — still a non-starter for a month, but
-  // not the 1.3 hours the per-push arithmetic claimed.
-  assert.equal(MEASURED_FIREHOSE_PER_HOUR, 21_000);
+  // Bytes on a public socket, 2026-11-04: 40k to 51k credits/h for the launch feed.
+  assert.equal(MEASURED_FIREHOSE_PER_HOUR, 45_000);
   const hours = firehoseHoursFor(1_000_000);
-  assert.ok(Math.abs(hours - 47.6) < 0.1, `got ${hours}`);
+  assert.ok(Math.abs(hours - 22.2) < 0.1, `got ${hours}`);
   assert.equal(firehoseHoursFor(0), 0);
 });
 

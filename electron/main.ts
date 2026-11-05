@@ -12,6 +12,8 @@ import { failure as evmWalletFailure } from './evm/evmWallet';
 import * as evmRail from './evm/rail';
 import * as bots from './system/bots';
 import * as heliusBudget from './system/heliusBudget';
+import * as heliusHealth from './system/heliusHealth';
+import { setKeyedRefusalSink } from './chain/rpcClient';
 import * as discord from './system/discord';
 import { guardWebContents, applyCsp, guardWebviews } from './system/webSecurity';
 import { logger } from './system/logger';
@@ -32,7 +34,6 @@ import * as paperBook from './engine/paperBook';
 import * as bridgeStore from './engine/bridgeStore';
 import * as sendBook from './system/sendBook';
 import * as alertStore from './engine/alerts';
-import * as copyTrade from './engine/copyTrade';
 import * as automation from './engine/automation';
 import { BUNDLED_SCRIPTS } from './engine/bundledScripts';
 import * as kryptoMode from './engine/kryptoMode';
@@ -46,6 +47,10 @@ import * as pumpProfile from './system/pumpProfile';
 import * as pumpAuth from './system/pumpAuth';
 import { pickUserDataDir, LEGACY_PROFILE_NAMES } from './system/profileContinuity';
 import * as profiles from './system/profiles';
+import * as aioWallet from './system/aioWallet';
+import * as lockGate from './system/lockGate';
+import { allowPromptClose } from './system/securityPrompt';
+import * as securityState from './system/securityState';
 
 // ──────────────────────────────────────────────────────────────────────
 // Crash guard — installed before anything else can throw
@@ -195,6 +200,8 @@ if (!gotLock) {
   profiles.markRunning();
   app.on('will-quit', () => profiles.clearRunning());
   app.on('second-instance', () => {
+    // Locked: the second launch brings the password window forward, not the app.
+    if (lockGate.focusIfLocked()) return;
     showMainWindow();
 
   // Discover's columns all wait on the same few provider listings, and
@@ -218,6 +225,12 @@ if (!gotLock) {
  */
 if (process.env.KRYPT_DEBUG_PORT && !app.isPackaged) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.KRYPT_DEBUG_PORT);
+}
+// The same door, from the other side: a shortcut edited to add one of these turns
+// a shipped build into something another program can drive. Nothing in the app
+// ever passes them, so a packaged run that has one was not started by us.
+if (app.isPackaged && ['remote-debugging-port', 'remote-debugging-pipe', 'load-extension', 'disable-web-security'].some((s) => app.commandLine.hasSwitch(s))) {
+  app.exit(1);
 }
 
 // Taskbar identity on Windows. Measured on 2026-09-03: the window's own
@@ -308,6 +321,9 @@ app.on('child-process-gone', (_e, details) => {
 // Measured 2026-09-09. So: put them down on the way out, bring them back
 // staggered. Nothing here touches positions, orders or the ability to exit.
 powerMonitor.on('suspend', () => {
+  // Asking for the engine would BUILD it, and before the password goes in
+  // nothing may exist that could sign.
+  if (!lockGate.isBooted()) return;
   try {
     getEngine().suspendSockets('system suspend');
   } catch {
@@ -315,6 +331,7 @@ powerMonitor.on('suspend', () => {
   }
 });
 powerMonitor.on('resume', () => {
+  if (!lockGate.isBooted()) return;
   // Wi-Fi is not up the instant the screen is, and a redial into a dead
   // interface just burns a reconnect attempt. Wait, with jitter so several
   // machines on one network do not wake in lockstep either.
@@ -364,6 +381,7 @@ function bootstrapFailed(e: unknown): void {
 }
 
 let mainWindow: BrowserWindow | null = null;
+let mainWindowEverOpened = false;
 
 function showMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -508,6 +526,7 @@ function showMainWindow(): BrowserWindow {
       .catch((err) => logger.error(`loadFile failed: ${err}`));
   }
   mainWindow = win;
+  mainWindowEverOpened = true;
   return win;
 }
 
@@ -606,6 +625,7 @@ const PANEL_ID_RE = /^[a-zA-Z0-9_-]{1,40}$/;
 
 function openPanelWindow(panelId: string): { ok: boolean; message: string } {
   if (!PANEL_ID_RE.test(panelId)) return { ok: false, message: 'Unknown panel' };
+  if (lockGate.focusIfLocked()) return { ok: false, message: 'Krypto Bot is locked' };
   const existing = panelWindows.get(panelId);
   if (existing && !existing.isDestroyed()) {
     if (existing.isMinimized()) existing.restore();
@@ -716,6 +736,7 @@ function closePanelWindow(win: BrowserWindow | null): boolean {
  *  window happens to be first — a notification click, or a coin opened from a
  *  popped-out panel. */
 function focusMainWindow(): BrowserWindow | null {
+  if (lockGate.focusIfLocked()) return null;
   const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
   if (!win) return null;
   if (win.isMinimized()) win.restore();
@@ -725,6 +746,15 @@ function focusMainWindow(): BrowserWindow | null {
 }
 
 async function bootstrap(): Promise<void> {
+  // Before anything. With an app password set, nothing below runs until it has
+  // been entered: no network, no engine, no IPC, no bots, no scripts, and the key
+  // that opens the wallets is not in memory. With no password this returns at
+  // once and opens no window.
+  if (!(await lockGate.run())) {
+    app.quit();
+    return;
+  }
+  lockGate.markBooted();
   // Keep-alive for every outbound fetch (see system/netAgent.ts) — before
   // anything opens a connection.
   installNetAgent();
@@ -761,7 +791,6 @@ async function bootstrap(): Promise<void> {
   sendBook.init(app.getPath('userData'));
   paperBook.init(app.getPath('userData'));
   alertStore.init(app.getPath('userData'));
-  copyTrade.init(app.getPath('userData'));
   // User scripts and rules. Live ones come back disabled; paper ones
   // resume once the engine exists (startEnabled, below registerIpc).
   automation.init(app.getPath('userData'));
@@ -792,9 +821,10 @@ async function bootstrap(): Promise<void> {
     const stores: { what: string; why: string | null }[] = [
       { what: 'wallet', why: wallet.failure() },
       { what: 'EVM wallet', why: evmWalletFailure() },
+      { what: 'All-in-One wallet', why: aioWallet.failure() },
+      { what: 'security settings', why: securityState.problem() },
       { what: 'settings', why: store.failure() },
       { what: 'trade ledger', why: ledger.failure() },
-      { what: 'copy trading', why: copyTrade.failure() },
       { what: 'scripts and rules', why: automation.failure() },
       { what: 'advanced orders', why: advOrders.failure() },
       // Bot sessions: a live one holds real tokens only its record can tell
@@ -824,24 +854,6 @@ async function bootstrap(): Promise<void> {
   }
 
   // The configs are loaded: point the wallet watcher at the enabled ones.
-  getEngine().syncCopyWatch();
-  // A sell the leader made while our buy was still in flight is an
-  // instruction that has to survive the process, not just the async gap —
-  // otherwise a crash or a quit at the wrong moment leaves the position open
-  // with nothing left remembering it was meant to close (user report,
-  // 2026-09-13). Fresh ones are mirrored now; ones from a long-closed app are
-  // recorded as skipped, loudly, rather than traded on hours late.
-  {
-    const resumed = copyTrade.resumePendingExits();
-    if (resumed.fired > 0) {
-      logger.warn(`${resumed.fired} copy exit(s) parked before shutdown are being mirrored now`);
-    }
-    if (resumed.expired > 0) {
-      logger.warn(
-        `${resumed.expired} copy exit(s) were too old to mirror after the restart — those positions are still held`,
-      );
-    }
-  }
   if (advOrders.pausedCount() > 0) {
     logger.warn(
       `${advOrders.pausedCount()} advanced order(s) restored PAUSED after restart — resume them from the Orders page`,
@@ -854,6 +866,7 @@ async function bootstrap(): Promise<void> {
   loadPanelBounds();
   setWindowHost(windowHost());
   registerIpc();
+  lockGate.startIdleWatch();
   // Follow anything still in flight between chains.
   //
   // Every two minutes, and deliberately not on the priority lane: PHASE2's
@@ -1029,6 +1042,14 @@ async function bootstrap(): Promise<void> {
     // it would otherwise keep billing the key it was cut off for.
     store.update({ rpc: { ...cur.rpc, heliusFeedSocket: false, heliusOnlyFeed: false } });
   };
+  heliusHealth.attach({
+    key: () => store.load().rpc.heliusApiKey ?? '',
+    limit: () => store.load().rpc.heliusMonthlyCredits ?? 0,
+    leaveHeliusFeed: () => getEngine().leaveHeliusFeed('Helius has no credits left'),
+  });
+  setKeyedRefusalSink((url) => heliusHealth.noteRefusal(url));
+  // Once at launch, so a dead key says so even if nothing has needed it yet.
+  setTimeout(() => void heliusHealth.checkNow(), 5_000);
   // Reuse any pump account-layout template learned by a previous run — see
   // txBuilder.ts. Learning it costs ~200 RPC reads a free endpoint will not serve.
   initTemplateStore(app.getPath('userData'));
@@ -1128,8 +1149,8 @@ function updateDiscord(): void {
  *
  * A sandbox is told apart by its session, not by counting: the main window
  * declares no `partition`, so it is the only window on the default session,
- * and this fires only when none of those is left. The app has no tray and
- * never hides the main window (`.hide()` appears nowhere), so "no
+ * and this fires only when none of those is left. The app has no tray, and the
+ * idle lock (system/lockGate.ts) hides windows rather than closing them, so "no
  * default-session window" means the user really did close the app. macOS is
  * left alone for the same reason `window-all-closed` was: the app lives on
  * in the Dock there.
@@ -1148,6 +1169,9 @@ function quitIfOnlySandboxesRemain(): void {
 }
 
 app.on('window-all-closed', () => {
+  // The password window closes before the app's window exists, and that is not
+  // the user quitting: quitting there is a Quit press, which bootstrap handles.
+  if (!mainWindowEverOpened) return;
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -1155,6 +1179,10 @@ app.on('window-all-closed', () => {
 
 let quitDrained = false;
 app.on('before-quit', (e) => {
+  allowPromptClose();
+  // Quit at the password window: nothing below exists yet, and asking for the
+  // engine here would build one.
+  if (!lockGate.isBooted()) return;
   // Scripts next: their sandboxes are windows, and a script must not fire
   // into a closing engine.
   void automation.shutdown();

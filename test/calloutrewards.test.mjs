@@ -51,7 +51,9 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   const ipc = src('../electron/ipc.ts');
   const wd = ipc.slice(ipc.indexOf("ipcMain.handle('calloutRewards:withdrawUsdc'"), ipc.indexOf("ipcMain.handle('swap:execute'"));
   assert.match(wd, /await withdrawUsdc\(.*, \{ walletId, amountRaw \}\);/, 'the renderer names a wallet and an amount — never a destination');
-  assert.ok(!/homeAddress/.test(wd.slice(0, wd.indexOf('logger.warn'))), 'no destination is read or passed on this side');
+  // The proof window shows the stored address, so the user reads what they approve.
+  // Past that, nothing on this side reads or passes one.
+  assert.ok(!/homeAddress/.test(wd.slice(wd.indexOf('usdcProof.ok'), wd.indexOf('logger.warn'))), 'no destination is read or passed on this side');
   const tw = src('../electron/engine/tokenWithdraw.ts');
   assert.match(tw, /homeAddress \?\? null/, 'the builder reads the STORED withdrawal address');
   assert.match(tw, /intent: 'withdraw-token' as const, maxTransferLamports: 0, withdrawMint: mint/, 'and signs under the narrow token-withdraw rule, no SOL allowed');

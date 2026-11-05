@@ -3,8 +3,7 @@
 // most of them). User ask, 2026-09-24: "it can get messy when testing scripts".
 //
 // Clears the paper book on every chain and starts every PAPER script over.
-// Live trades, live scripts and copy trading's own paper record are not
-// touched; copy trading has its own reset on its page.
+// Live trades and live scripts are not touched.
 
 import { Eraser } from 'lucide-react';
 import { GhostButton } from './common';
@@ -19,7 +18,7 @@ export function ResetPaperButton({ onDone, className }: { onDone?: () => void; c
       title: 'Reset paper trades',
       message:
         'Clear every paper position and every closed paper trade, on every chain, and start each paper script over (its positions, buys today and loss today)?\n\n' +
-        'Kept: live trades, live scripts, your settings, and copy trading’s paper record (it has its own reset). ' +
+        'Kept: live trades, live scripts and your settings. ' +
         'A copy of the old paper record is saved as paper-positions.backup.json in the app’s data folder.',
       confirmLabel: 'Reset paper trades',
       destructive: true,

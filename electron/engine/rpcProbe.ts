@@ -23,6 +23,8 @@
 // wire. It is also why this cannot run itself — it is only ever a button.
 
 
+import { meterHttp } from '../system/heliusBudget';
+
 export interface ProbeResult {
   /** What this endpoint is FOR, in the user's words. */
   label: string;
@@ -61,6 +63,7 @@ async function rpc(url: string, method: string, params: unknown[]): Promise<{ ms
     // Plain fetch, so the global undici agent (netAgent.ts, 60 s keep-alive)
     // is in play — measuring a cold connection every time would report a
     // number no real order ever meets.
+    meterHttp(url, method);
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

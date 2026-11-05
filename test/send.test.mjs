@@ -225,7 +225,7 @@ const transferIx = (amount, program, to = them) => {
   for (const ch of ['wallet:import', 'evm:wallet:import', 'aio:import', 'pump:importAccount']) {
     const at = ipc.indexOf(`ipcMain.handle('${ch}'`);
     assert.ok(at > 0, ch);
-    const body = ipc.slice(at, at + 900);
+    const body = ipc.slice(at, at + 1500);
     const gate = body.indexOf('confirmImport(e.sender,');
     const store = body.search(/importSecret\(|importPhrase\(/);
     assert.ok(gate > 0 && gate < store, `${ch}: the native confirmation comes before the key is stored`);

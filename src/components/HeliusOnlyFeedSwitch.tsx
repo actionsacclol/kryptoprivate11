@@ -9,11 +9,13 @@
 
 import { Switch } from './common';
 import { useAppState } from '../state/AppStateProvider';
+import { feedCostText } from '@shared/credits';
 
 export function HeliusOnlyFeedSwitch() {
   const { settings, updateSettings } = useAppState();
   const hasKey = (settings.rpc.heliusApiKey ?? '').trim().length > 0;
   const on = settings.rpc.heliusOnlyFeed ?? false;
+  const limit = settings.rpc.heliusMonthlyCredits ?? 0;
   return (
     <Switch
       checked={on && hasKey}
@@ -22,7 +24,7 @@ export function HeliusOnlyFeedSwitch() {
       label="Helius only (no public sockets)"
       description={
         hasKey
-          ? 'Runs the launch feed and every token watcher on your Helius socket alone: the public WebSockets and the publicnode block standby are not opened. For a VPN or shared IP where the free endpoints refuse connections. Every push is billed to your key (~800k credits a day at firehose rates — a paid-plan switch); the credit ceiling above turns it back off. Account lookups (HTTP) are unchanged. Takes effect the next time the scanner starts.'
+          ? `Runs the launch feed and token watchers on your Helius socket alone: the public launch sockets and the publicnode block standby are not opened. The AMM tape stays on a public socket because it costs about twice as much. For a VPN or shared IP where the free endpoints refuse connections. ${feedCostText(limit)} The credit ceiling turns it back off. Account lookups (HTTP) are unchanged.`
           : 'Needs a Helius API key (Settings → Solana RPC).'
       }
     />

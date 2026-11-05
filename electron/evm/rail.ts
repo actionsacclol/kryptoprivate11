@@ -226,7 +226,7 @@ export const wallet = {
     void announceAll();
     return r;
   },
-  exportAll: evmWallet.exportAllToFile,
+  exportKey: evmWallet.exportKeyToFile,
   refreshBalance: async (chain: EvmChainKind) => (enabled(chain) ? evmWallet.refreshBalance(chain) : { ok: false, message: offMessage(chain) }),
   refreshAll: async (chain: EvmChainKind) => {
     if (enabled(chain)) await evmWallet.refreshAll(chain);
@@ -327,7 +327,7 @@ export interface TradeOpts {
   amountRaw?: string;
   /** Refuse if the route is no longer the one that was quoted. */
   expectVenue?: EvmVenue;
-  /** Sign as this wallet instead of the chain's active one (copy trading, 2026-09-11). */
+  /** Sign as this wallet instead of the chain's active one (2026-09-11). */
   walletId?: string;
 }
 
@@ -398,18 +398,13 @@ export async function sell(chain: EvmChainKind, token: string, pct: number, simu
 }
 
 
-// ── Token quantities, for copy trading (2026-09-15) ───────────────────
+// ── Token quantities ───────────────────────────────────────────────────
 //
-// A mirrored copy sell is sized from the base units the copy holds and
-// settled against what actually moved — see copyTrade.ts. `sell` has taken
-// an exact `amountRaw` since the BNB audit; these are the three reads that
-// let the copier produce one, and they are the EVM half of the fix that
-// stopped a copy being marked closed over tokens that never left.
-//
-// Every one of them answers null rather than zero when it cannot read.
-// Unreadable is not empty, and a zero here would close a live position.
+// `sell` has taken an exact `amountRaw` since the BNB audit. These reads answer
+// null rather than zero when they cannot read: unreadable is not empty, and a
+// zero here would close a live position.
 
-/** The address a copy config signs with on this chain: its own wallet, or
+/** The address a trade signs with on this chain: the wallet it names, or
  *  the chain's active one. Null when neither resolves. */
 function signerFor(chain: EvmChainKind, walletId?: string): Address | null {
   const a = walletId ? evmWallet.addressOf(walletId) : evmWallet.address(chain);
@@ -427,7 +422,7 @@ async function decimalsOf(chain: EvmChainKind, token: Address): Promise<number |
 }
 
 /** Base units of `token` a wallet holds right now, with the token's
- *  decimals. What a copy exit is sized from and swept against. */
+ *  decimals. */
 export async function tokensOf(chain: EvmChainKind, token: string, walletId?: string): Promise<{ raw: string; decimals: number } | null> {
   if (!enabled(chain) || !isEvmAddress(token)) return null;
   const owner = signerFor(chain, walletId);
@@ -441,65 +436,10 @@ export async function tokensOf(chain: EvmChainKind, token: string, walletId?: st
   }
 }
 
-/** Base units of `token` ANOTHER address holds — the rescue read for a
- *  leader sell whose size the log did not carry, in whole units. */
-export async function holdingOf(chain: EvmChainKind, owner: string, token: string): Promise<number | null> {
-  if (!enabled(chain) || !isEvmAddress(token) || !isEvmAddress(owner)) return null;
-  const addr = token.toLowerCase() as Address;
-  try {
-    const [raw, decimals] = await Promise.all([balanceOf(chain, addr, owner.toLowerCase() as Address), decimalsOf(chain, addr)]);
-    return decimals === null ? null : rawToAmount(raw, decimals);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Base units a confirmed transaction moved, once the ledger has reconciled
- * it. Waits, because the caller is always off the hot path; null when the
- * hash never settles or its delta could not be read.
- */
-export function fillTokens(chain: EvmChainKind, hash: string, timeoutMs = 30_000): Promise<{ raw: string; decimals: number } | null> {
-  const readOf = (f: EvmFill | undefined): { raw: string; decimals: number } | null => {
-    if (!f || f.state !== 'reconciled' || f.tokenDeltaRaw === null || f.decimals === null) return null;
-    try {
-      const raw = BigInt(f.tokenDeltaRaw);
-      const abs = raw < 0n ? -raw : raw;
-      return abs > 0n ? { raw: abs.toString(), decimals: f.decimals } : null;
-    } catch {
-      return null;
-    }
-  };
-  const want = hash.toLowerCase();
-  const find = (): EvmFill | undefined => ledger.all().find((f) => f.chain === chain && f.hash.toLowerCase() === want);
-  const known = find();
-  if (known && known.state !== 'pending') return Promise.resolve(readOf(known));
-  // A hash the ledger has never heard of is not going to settle here. Wait
-  // only briefly for the record to appear, rather than the full window.
-  const wait = known ? timeoutMs : 5_000;
-  return new Promise((resolve) => {
-    let off: (() => void) | null = null;
-    let done = false;
-    const finish = (v: { raw: string; decimals: number } | null): void => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      off?.();
-      resolve(v);
-    };
-    const timer = setTimeout(() => finish(readOf(find())), wait);
-    off = ledger.onSettled((f) => {
-      if (f.chain === chain && f.hash.toLowerCase() === want) finish(readOf(f));
-    });
-    const again = find();
-    if (again && again.state !== 'pending') finish(readOf(again));
-  });
-}
-
 /**
  * A transaction's settled ledger row — tokens AND native moved, from its
- * receipt (Krypto Trader books its own fills from this, 2026-09-25). Waits
- * like `fillTokens`; null when the hash never settles here. The row may be
+ * receipt (Krypto Trader books its own fills from this, 2026-09-25). Waits;
+ * null when the hash never settles here. The row may be
  * 'unreconciled' (its deltas could not be read): the caller decides.
  */
 export function settledFill(chain: EvmChainKind, hash: string, timeoutMs = 30_000): Promise<EvmFill | null> {
@@ -528,39 +468,6 @@ export function settledFill(chain: EvmChainKind, hash: string, timeoutMs = 30_00
     const again = find();
     if (again && again.state !== 'pending') finish(again);
   });
-}
-
-/**
- * The ledger's record of a BUY of `token` around `atMs`, in base units — how
- * a copy row opened before quantities were tracked recovers its own size.
- *
- * Strict on purpose: the number goes on to size a real sell. One reconciled
- * buy is the answer; several are only an answer when one is clearly the
- * closest; anything else is null, which leaves that copy on the old
- * percentage path rather than on a quantity from a different trade.
- */
-export function buyFill(chain: EvmChainKind, token: string, atMs: number, walletId?: string): { raw: string; decimals: number } | null {
-  if (!isEvmAddress(token)) return null;
-  const owner = signerFor(chain, walletId);
-  if (!owner) return null;
-  const addr = token.toLowerCase();
-  const near = ledger
-    .forWallet(chain, owner)
-    .filter((f) => f.token === addr && f.side === 'buy' && f.state === 'reconciled' && f.tokenDeltaRaw !== null && f.decimals !== null)
-    .sort((a, b) => Math.abs(a.at - atMs) - Math.abs(b.at - atMs));
-  if (!near.length) return null;
-  if (near.length > 1) {
-    const best = Math.abs(near[0].at - atMs);
-    const next = Math.abs(near[1].at - atMs);
-    if (best > 5 * 60_000 || next - best < 60_000) return null;
-  }
-  try {
-    const raw = BigInt(near[0].tokenDeltaRaw as string);
-    const abs = raw < 0n ? -raw : raw;
-    return abs > 0n ? { raw: abs.toString(), decimals: near[0].decimals as number } : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

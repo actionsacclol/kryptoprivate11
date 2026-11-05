@@ -267,8 +267,13 @@ ok('a new file names both chains and no longer needs the legacy key', () => {
   assert.equal(act(f, 'bnb'), 'b', 'two chains, two signers, one list of keys');
 });
 
+ok('a file that listed wallets and yielded none is refused, never read as an empty list', () => {
+  assert.equal(parseFile({ version: 1, chainId: CHAIN, activeId: null, wallets: [{ junk: true }] }, CHAIN), null);
+});
+
 ok('parseFile refuses the wrong version, the wrong chain, and non-objects', () => {
-  assert.equal(parseFile({ version: 2, chainId: CHAIN, activeId: null, wallets: [] }, CHAIN), null);
+  // 2 is the app-password format (system/vault.ts). A version from the future is refused.
+  assert.equal(parseFile({ version: 3, chainId: CHAIN, activeId: null, wallets: [] }, CHAIN), null);
   assert.equal(parseFile({ version: 1, chainId: 1, activeId: null, wallets: [] }, CHAIN), null);
   assert.equal(parseFile({ version: 1, chainId: CHAIN, wallets: 'x' }, CHAIN), null);
   assert.equal(parseFile(null, CHAIN), null);

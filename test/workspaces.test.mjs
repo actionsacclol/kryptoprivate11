@@ -59,7 +59,7 @@ test('the three workspaces asked for exist and hold the right pages', () => {
   // Was "Copy Trading" and held one page. Renamed to Automation on
   // 2026-09-13 and given the other two things that act without a click.
   const automation = routesFor('automation');
-  for (const r of ['wallets', 'scripts', 'farming']) {
+  for (const r of ['mirror', 'scripts', 'farming']) {
     assert.ok(automation.includes(r), `automation holds ${r}`);
   }
 
@@ -273,7 +273,7 @@ test('workspaceOf never throws, whatever it is handed', () => {
 test('Profiles is its own page in the Settings & Legal sidebar, not a Settings section', () => {
   // 2026-09-26, user: "profiles should have its own section on the left side of settings panel".
   assert.equal(workspaceOf('profiles'), 'system');
-  assert.deepEqual(routesFor('system'), ['settings', 'profiles', 'about', 'legal']);
+  assert.deepEqual(routesFor('system'), ['settings', 'security', 'profiles', 'about', 'legal']);
   assert.match(sidebarSrc, /\{ id: 'profiles', label: 'Profiles'/);
   const page = fs.readFileSync(new URL('../src/pages/Profiles.tsx', import.meta.url), 'utf8');
   assert.match(page, /<ProfilesPanel \/>/, 'the page carries the panel');

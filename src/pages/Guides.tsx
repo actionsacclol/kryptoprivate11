@@ -26,6 +26,7 @@ import { GuideVideoPlayer, videoLength } from '../components/GuideVideoPlayer';
 import { cls } from '../utils/format';
 import { AIO_WALLET_VIDEO_URL, API_KEY_SITES, API_KEYS_VIDEO_URL, APP_GUIDE_VIDEOS, GUIDE_VIDEOS, MEMECOIN_GUIDE_URL, PUMP_QUICKSTART_URL, appVideoFile, type AppGuideVideo } from '../guideVideos';
 import { ADVANCED_GUIDES, type AdvancedGuide } from './guidesAdvanced';
+import { KRYPTO_MIRROR_NAME, KRYPTO_MIRROR_URL } from '../kryptoMirror';
 
 export interface SectionGuide {
   /** One or two short sentences. */
@@ -232,10 +233,10 @@ export const AIO_WALLET_GUIDE: SectionGuide = {
     'To cash out, press Compress: it sells every token and moves everything into one coin — SOL, ETH or BNB — ready to send. Send sends to any address.',
   ],
   careful: [
-    'Only the Buy button on a coin’s page, and scripts, top up by themselves. Quick-buy buttons, hotkeys, copy trading and Krypto Trader use only what is already on that chain — the float covers them.',
+    'Only the Buy button on a coin’s page, and scripts, top up by themselves. Quick-buy buttons, hotkeys and Krypto Trader use only what is already on that chain — the float covers them.',
     'Only SOL, BNB and Robinhood ETH (and USDC on Solana) can pay for a top-up. USDT, USDG, and anything on Ethereum, Base or Arbitrum count in the total but cannot.',
     'A top-up moves at least $25 when it can; what is left stays on that chain for your next buy. Moving money on its own pays Krypt’s 0.5%; money moved for a buy does not — the buy pays its usual 0.5%.',
-    'Compress leaves $KRYPTO, coins a running bot holds, and tiny leftovers alone. It does sell coins your copy trading bought.',
+    'Compress leaves $KRYPTO, coins a running bot holds, and tiny leftovers alone.',
     'If you lose the 12 words, nobody can get the wallet back. Not even us.',
   ],
   video: { url: AIO_WALLET_VIDEO_URL, label: 'Watch the All-in-One wallet guide' },
@@ -244,20 +245,17 @@ export const AIO_WALLET_GUIDE: SectionGuide = {
 /** Standalone deep-dive guides for the higher-stakes features, added
  *  2026-09-23. Each is its own card, like the AI and export guides. */
 export const COPY_TRADING_GUIDE: SectionGuide = {
-  what: 'Copy trading follows another trader: when they buy a coin, you buy it too, on your own money. It runs by itself once set up. It starts on paper (fake money) on purpose — our own numbers say copying loses money on average, so treat it as a test, not a plan.',
+  what: `Copy trading follows another trader: when they buy a coin, you buy it too, on your own money. It is no longer part of this app. It has its own app now, ${KRYPTO_MIRROR_NAME}.`,
   steps: [
-    'Open Automation, then Copy Simple. Paste the wallet address of the trader you want to follow.',
-    'Pick how much to spend each time they buy, and which chain.',
-    'Press Follow. It starts on paper, so no real money moves.',
-    'Watch it for a few days. Copy Trading, beside it, shows what you would have made.',
-    'Only if its record convinces you, switch that follow to Live.',
+    `Download ${KRYPTO_MIRROR_NAME} from the link below. It opens in your browser.`,
+    'Check a wallet there before you follow it.',
+    'Follow it on paper first, so no real money moves.',
   ],
   careful: [
-    'Copying someone copies their losses too. A wallet that did well last week can hand you its next bad week.',
-    'You buy after them, at a worse price, and they are often already out by the time you sell.',
-    'Keep it on Paper until you have watched it work with fake money. Live spends real SOL on its own.',
+    'Anything copy trading bought here is still in your wallet, and nothing sells it for you now. Check your Portfolio.',
+    'Copying someone copies their losses too. Our own numbers say copying loses money on average, so treat it as a test, not a plan.',
   ],
-  watch: 'copy',
+  links: [{ name: KRYPTO_MIRROR_NAME, url: KRYPTO_MIRROR_URL }],
 };
 
 export const SCRIPTS_GUIDE: SectionGuide = {
@@ -382,12 +380,9 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
     watch: 'trade',
   },
   automation: {
-    what: 'Things that trade without you clicking. Copy another trader, or write your own rules.',
+    what: 'Things that trade without you clicking. Write your own rules, or let a preset or an AI trade one coin.',
     steps: [
-      'Copy Simple: paste a trader\'s wallet, pick how much per trade, press Follow on paper. Switch the card to Live only when its record earns it.',
-      'Copy Trading: the same follows with every control — sizing, filters, delay, reverse and FOMO. Start on Copy Simple unless you need one.',
-      'Reverse does the opposite: it buys when that trader sells, and gets out on its own take-profit, stop-loss or timer. It is a bet, so it starts on paper.',
-      'FOMO waits for several wallets to buy the same coin within minutes, then buys too. Our numbers say such crowds usually lose, so it starts on paper.',
+      `Copy Trading: this moved to its own app, ${KRYPTO_MIRROR_NAME}. The page says where to get it.`,
       'Scripts: make a rule like "buy if the score is over 70". No code needed. Or paste a script an AI wrote for you.',
       'AI connection: let an AI assistant like Claude read the app, and trade only if you allow it. It starts off. See the AI connection guide.',
       'Everything starts in Paper mode. Watch it for a few days with fake money.',
@@ -397,7 +392,6 @@ export const SECTION_GUIDES: Record<Exclude<WorkspaceId, 'hub'>, SectionGuide> =
     careful: [
       'A Live script spends real money by itself, even while you sleep.',
       'The Kill switch turns every script off at once. Use it if anything looks wrong.',
-      'Copying a trader copies their losses too.',
     ],
   },
   engine: {

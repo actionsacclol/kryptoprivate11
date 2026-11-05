@@ -214,7 +214,11 @@ console.log('settingsvalidation: all tests passed');
   // prefills it and only saves a field the user touched).
   assert.match(src, /if \(fromRevision < 7\) \{/, 'revision-7 step exists');
   assert.match(src, /s\.onboarded = false;/, 'revision 7 replays onboarding');
-  assert.match(types, /SETTINGS_REVISION = 7;/);
+  // Revision 8 (7.0.0) turns Helius only off, once: it emptied a 1M plan in hours.
+  assert.match(src, /if \(fromRevision < 8\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(s\.rpc\) s\.rpc\.heliusOnlyFeed = false;/, 'revision 8 turns Helius only off');
+  assert.doesNotMatch(src, /heliusFeedSocket = false/, 'and leaves the separate feed-socket switch alone');
+  assert.match(types, /SETTINGS_REVISION = 8;/);
+  assert.match(types, /heliusOnlyFeed: false,/, 'off is the default for a new install');
   assert.match(types, /discordRpcEnabled: true,/, 'presence is the default');
   assert.match(types, /localTxBuild: true,/, 'local builder is the default');
   console.log('ok  revision-3 migration disables only the old breaker defaults, gated by revision');

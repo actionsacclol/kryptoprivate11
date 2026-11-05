@@ -75,7 +75,7 @@ const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
   assert.ok(/script\$\{scripts\.running === 1 \? '' : 's'\} running/.test(hub), 'and says how many run');
   assert.ok(/\(paper\)/.test(hub), 'a paper-only run is labelled paper');
   // Krypto Trader sessions joined the card on 2026-09-25: still a dash only when NOTHING could be read.
-  assert.ok(/if \(copyCount === null && scripts === null && traders === null\) return \{ line: '—'/.test(hub), 'the em dash only when none could be read');
+  assert.ok(/if \(scripts === null && traders === null\) return \{ line: '—'/.test(hub), 'the em dash only when none could be read');
   ok('the Hub Automation card counts running scripts, paper or live');
 }
 

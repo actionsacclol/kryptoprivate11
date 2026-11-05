@@ -57,9 +57,6 @@ import {
 } from '@shared/evmRunners';
 import { RunnerRateLimit } from '@shared/runners';
 import { logger } from '../system/logger';
-import * as copyTrade from '../engine/copyTrade';
-import { balanceOf as erc20BalanceOf } from './erc20';
-import { blockTimeMs } from './client';
 import { shortError } from './pons';
 import * as scout from '../engine/walletScout';
 import { tradeId } from '@shared/walletScout';
@@ -208,9 +205,6 @@ export interface ScannerHost {
   /** A curve trade printed a price — scripts on the chain hear it as their
    *  `tick` for the tokens they hold or subscribed to (2026-10-03). */
   onPrice?(chain: EvmChainKind, token: string, priceNative: number): void;
-  /** A followed wallet traded on this chain — scripts hear it as their
-   *  `leaderTrade` (2026-10-03: only copy trading heard it). */
-  onLeaderTrade?(chain: EvmChainKind, t: { wallet: string; token: string; symbol: string; isBuy: boolean; native: number; priceNative: number; soldFraction: number | null }): void;
 }
 
 let host: ScannerHost | null = null;
@@ -476,14 +470,10 @@ function track(chain: EvmChainKind, launch: EvmScanLaunch, key: string): void {
   st.status = { ...st.status, launchesSeen: st.status.launchesSeen + 1 };
 }
 
-// ── Copy trading on EVM ─────────────────────────────────────────────────
+// ── Prices off the curve feed ────────────────────────────────────────────
 //
-// A followed wallet's curve trades come through here, every poll: the
-// scanner already decodes every Pons and four.meme trade with its trader.
-// A leader is copied while a token is on its curve — the pool trades after
-// graduation are not ingested here. A sell is mirrored by the SHARE they
-// sold, which needs their remaining balance: one gated read, only for a
-// followed wallet.
+// The scanner already decodes every Pons and four.meme trade, so the last
+// print on a curve is free. Scripts' ticks and the EVM price reads use it.
 
 /** Curve → token, kept past the 130 s tracking window so an older token's trades still resolve. */
 const curveToToken = new Map<string, string>();
@@ -533,67 +523,6 @@ function notePrice(chain: EvmChainKind, token: string, quoteWei: bigint, tokensR
   return price;
 }
 
-/**
- * Hand a followed wallet's trade to copy trading.
- *
- * `blockNumber` is what dates it. The scanner resumes from its cursor, so a
- * stall, a slow endpoint or a restart hands `ingestTrades` a backlog of real
- * blocks — and stamping those with the poll's own clock told the copier that
- * a leader buy from twenty minutes ago had just happened. One `getBlock` per
- * block, cached, and only for the blocks a followed wallet actually traded
- * in. Unreadable stays null, which copyTrade reads as "age unknown" and
- * treats exactly as it did before block times existed.
- */
-async function forwardCopy(
-  chain: EvmChainKind,
-  token: string,
-  symbol: string,
-  trader: string,
-  isBuy: boolean,
-  native: number,
-  tokensRaw: bigint,
-  txHash: string,
-  price: number | null,
-  now: number,
-  blockNumber: bigint,
-): Promise<void> {
-  try {
-    // Both reads at once. This runs in front of a mirrored EXIT, and dating
-    // the trade must not cost it a serial round trip — the whole point of
-    // the change is that an exit arrives on time.
-    const [tradeAt, remaining] = await Promise.all([
-      blockTimeMs(chain, blockNumber),
-      // Their remaining balance decides the share of a sell; unreadable stays
-      // null, which the copy engine records as a skipped exit rather than
-      // guessing. A buy needs no such read.
-      isBuy ? Promise.resolve(null) : erc20BalanceOf(chain, token as Address, trader as Address),
-    ]);
-    let soldFraction: number | null = null;
-    if (!isBuy && remaining !== null) {
-      const sold = tokensRaw < 0n ? -tokensRaw : tokensRaw;
-      const total = sold + remaining;
-      soldFraction = total > 0n ? Number((sold * 10_000n) / total) / 10_000 : null;
-    }
-    copyTrade.onWalletTrade({
-      chain,
-      wallet: trader.toLowerCase(),
-      mint: token,
-      symbol,
-      isBuy,
-      sol: native,
-      priceSol: price ?? 0,
-      at: now,
-      tradeAt,
-      signature: txHash,
-      soldFraction,
-      tokens: Number(tokensRaw < 0n ? -tokensRaw : tokensRaw) / 1e18,
-    });
-    host?.onLeaderTrade?.(chain, { wallet: trader.toLowerCase(), token, symbol, isBuy, native, priceNative: price ?? 0, soldFraction });
-  } catch (e) {
-    logger.warn(`evm scanner ${chain}: could not forward a followed wallet's trade — ${shortError(e)}`);
-  }
-}
-
 async function ingestTrades(chain: EvmChainKind, from: bigint, to: bigint): Promise<void> {
   const st = state[chain];
   // This used to return early when no launch was being measured. It cannot
@@ -603,9 +532,6 @@ async function ingestTrades(chain: EvmChainKind, from: bigint, to: bigint): Prom
   // and the scanner only runs while the user has it open.
   const now = Date.now();
   let seen = 0;
-  const followed = copyTrade.activeWallets(chain);
-  const openCopies = new Set(copyTrade.openMints(chain));
-  const symbolOf = (token: string): string => st.tracked.get(token)?.launch.symbol ?? st.launches.find((l) => l.token === token)?.symbol ?? '';
 
   if (chain === 'robinhood') {
     for (const t of await fetchAllCurveTrades(from, to)) {
@@ -615,16 +541,10 @@ async function ingestTrades(chain: EvmChainKind, from: bigint, to: bigint): Prom
       // brand-new tokens would describe snipers and nobody else.
       const curve = t.curve.toLowerCase();
       const rhToken = st.byKey.get(curve);
-      // The copy path and the marks need the token behind a curve the
-      // scanner may no longer be tracking (or never saw launch).
-      const copyToken = rhToken ?? curveToToken.get(curve) ?? curveLookup?.(chain, curve) ?? null;
-      if (copyToken) {
-        const price = notePrice(chain, copyToken, t.quoteWei, t.tokensRaw, now);
-        if (price !== null && openCopies.has(copyToken)) copyTrade.markToMarket(copyToken, price, chain);
-        if (followed.size && followed.has(t.trader.toLowerCase())) {
-          void forwardCopy(chain, copyToken, symbolOf(copyToken), t.trader, t.isBuy, Number(t.quoteWei) / 1e18, t.tokensRaw, t.txHash, price, now, t.blockNumber);
-        }
-      }
+      // The price needs the token behind a curve the scanner may no longer
+      // be tracking (or never saw launch).
+      const priceToken = rhToken ?? curveToToken.get(curve) ?? curveLookup?.(chain, curve) ?? null;
+      if (priceToken) notePrice(chain, priceToken, t.quoteWei, t.tokensRaw, now);
       scout.note('robinhood', t.trader, curve, t.isBuy, Number(t.quoteWei) / 1e18, Number(t.tokensRaw), now, tradeId(`${t.txHash}:${t.logIndex}`, curve, t.trader, t.isBuy));
       recorder.record('tape_trade', {
         chain: 'robinhood',
@@ -659,14 +579,8 @@ async function ingestTrades(chain: EvmChainKind, from: bigint, to: bigint): Prom
       const kind = quoteKind.get(token);
       const amount = Number(t.quoteWei) / 1e18;
       if (kind === 'native') scout.note('bnb', t.trader, token, t.isBuy, amount, Number(t.tokensRaw), now, tradeId(`${t.txHash}:${t.logIndex}`, token, t.trader, t.isBuy));
-      // Copies and marks only on a BNB-quoted curve: a USDT price is not a BNB price.
-      if (kind === 'native') {
-        const price = notePrice(chain, token, t.quoteWei, t.tokensRaw, now);
-        if (price !== null && openCopies.has(token)) copyTrade.markToMarket(token, price, chain);
-        if (followed.size && followed.has(t.trader.toLowerCase())) {
-          void forwardCopy(chain, token, symbolOf(token), t.trader, t.isBuy, amount, t.tokensRaw, t.txHash, price, now, t.blockNumber);
-        }
-      }
+      // Prices only on a BNB-quoted curve: a USDT price is not a BNB price.
+      if (kind === 'native') notePrice(chain, token, t.quoteWei, t.tokensRaw, now);
       recorder.record('tape_trade', {
         chain: 'bnb',
         mint: token,

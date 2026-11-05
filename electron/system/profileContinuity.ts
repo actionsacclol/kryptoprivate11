@@ -28,6 +28,8 @@ export interface ProfilePick {
   redirectedFrom: string | null;
 }
 
+const KEY_FILES = [WALLET_FILE, 'vault.json', 'evm-wallets.json', 'aio-wallet.json'];
+
 export function pickUserDataDir(opts: {
   /** Electron's default (new-name) userData folder. */
   current: string;
@@ -38,9 +40,13 @@ export function pickUserDataDir(opts: {
   join: (...parts: string[]) => string;
 }): ProfilePick {
   const { current, legacy, exists, join } = opts;
-  if (exists(join(current, WALLET_FILE))) return { dir: current, redirectedFrom: null };
+  // A folder with any key store in it is somebody's. Going by wallets.json alone
+  // would walk away from a profile holding only EVM keys, or from a vault whose
+  // wallets.json is missing, and show an empty app with the keys still there.
+  const occupied = (dir: string): boolean => KEY_FILES.some((f) => exists(join(dir, f)));
+  if (occupied(current)) return { dir: current, redirectedFrom: null };
   for (const dir of legacy) {
-    if (exists(join(dir, WALLET_FILE))) return { dir, redirectedFrom: current };
+    if (occupied(dir)) return { dir, redirectedFrom: current };
   }
   return { dir: current, redirectedFrom: null };
 }

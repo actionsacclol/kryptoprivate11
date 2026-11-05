@@ -185,6 +185,10 @@ export interface RpcSettings {
    * only way to fill it.
    */
   execHttpUrl?: string;
+  /** DERIVED by resolveRpc, never stored: where the AMM tape connects when that is
+   *  not the launch feed's socket. Helius only leaves it on the public socket: it is
+   *  the costliest stream (about 80,000 credits an hour, shared/credits.ts). */
+  ammWssUrl?: string;
   /** HTTP JSON-RPC endpoint used for account lookups (mint safety checks). */
   httpUrl: string;
   /** Commitment level for the log subscription. `processed` = fastest. */
@@ -215,7 +219,7 @@ export function resolveRpc(rpc: RpcSettings): RpcSettings {
     // Every consumer reads [wssUrl, ...extraWssUrls] (the launch feed, the
     // amm tape, the DBC / Raydium / LaunchLab / Boop watchers), and the block
     // standby is its own switch — so these three fields are the whole of it.
-    return { ...rpc, wssUrl: heliusWss, extraWssUrls: [], blockFeed: false, blockFeedAmm: false, execHttpUrl: fast || `https://mainnet.helius-rpc.com/?api-key=${key}` };
+    return { ...rpc, wssUrl: heliusWss, ammWssUrl: rpc.wssUrl, extraWssUrls: [], blockFeed: false, blockFeedAmm: false, execHttpUrl: fast || `https://mainnet.helius-rpc.com/?api-key=${key}` };
   }
   return {
     ...rpc,
@@ -453,7 +457,7 @@ export interface WalletHolding {
  *  Saved settings are merged OVER defaults, so changing a default alone never
  *  reaches a user who already has the old value on disk — see
  *  `settings-store.ts` migrateUnsafe(). */
-export const SETTINGS_REVISION = 7;
+export const SETTINGS_REVISION = 8;
 
 import { defaultBotSettings, type BotSettings } from './bots';
 import { DEFAULT_MCP_SETTINGS, type McpSettings } from './mcp';
@@ -1013,8 +1017,8 @@ export type EngineEvent =
   | { kind: 'orders'; snapshot: import('./orders').OrdersSnapshot }
   /** Alert list changed (created, fired, muted, removed). */
   | { kind: 'alerts'; alerts: import('./alerts').Alert[] }
-  /** Copy-trade configs or results changed. */
-  | { kind: 'copy'; snapshot: import('./copytrade').CopySnapshot }
+  /** The bottom-left cards changed (shared/issues.ts). Not price alerts. */
+  | { kind: 'issues'; issues: import('./issues').AppIssue[] }
   /** User scripts and rules changed — a save, a fire, a refusal, a log line. */
   | { kind: 'automation'; snapshot: import('./automation').ScriptSnapshot }
   /** A script asked to pin (or unpin) a token on the renderer's Watchlist. */

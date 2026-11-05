@@ -112,6 +112,14 @@ export interface AioWalletInfo {
 }
 
 export const AIO_DEFAULT_LABEL = 'All-in-One';
+
+/** "12.34 USD", a floor marked "+" when a chain was unread or a holding is
+ *  unpriced; an em dash when nothing was measured. */
+export function aioTotalText(bal: AioBalances | null): string {
+  if (!bal) return '…';
+  if (bal.totalUsd === null) return '—';
+  return `${bal.totalUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${bal.partial || bal.unpriced ? '+' : ''} USD`;
+}
 const MAX_LABEL = 32;
 
 export function cleanAioLabel(raw: unknown): string {
@@ -132,7 +140,8 @@ export function parseAioFile(raw: unknown): AioRecord | null | 'invalid' {
   if (raw === null) return null;
   if (!raw || typeof raw !== 'object') return 'invalid';
   const o = raw as Record<string, unknown>;
-  if (o.version !== 1) return 'invalid';
+  // 2 is the same shape with a `kv1:` phrase (app password on). See walletStore.
+  if (o.version !== 1 && o.version !== 2) return 'invalid';
   if (o.wallet === null) return null;
   const w = o.wallet as Record<string, unknown> | undefined;
   if (!w || typeof w !== 'object') return 'invalid';

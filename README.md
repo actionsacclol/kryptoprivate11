@@ -81,7 +81,7 @@ That sounds small. It is the whole design:
   migration, and tracked-wallet activity, as desktop notifications.
 - **Hotkeys** — single-keypress buy/sell on the open token. Off by default, confirmation on
   by default, ignored while typing.
-- **Copy Trading** — track and label other traders' wallets, and **paper-copy** them before risking anything. (Your own keys live under **Wallet**.)
+- **Copy Trading** — moved to its own app, [Krypto Mirror](https://krypt.cc/mirror). This page says where to get it. (Your own keys live under **Wallet**.)
 - **Watchlist** — pinned tokens, stored locally.
 
 ### Automation (the original engine, intact)
@@ -134,7 +134,7 @@ knowing:
 | Migrated column | yes | yes | yes, any DEX |
 | **Launch analysis (bundle / sniper / dev, and what they still hold)** | yes, for any CA | no | no |
 | **Creator track record** | yes, for any CA | no | no |
-| Copy trading, dev-sell triggers | yes | no | no |
+| Dev-sell triggers | yes | no | no |
 
 **Why DBC is per-token rather than always-on.** pump.fun emits its events with Anchor's
 `emit!`, so they arrive as log lines and one `logsSubscribe` sees every trade for free.
@@ -159,21 +159,12 @@ The DBC layouts come from the program's own on-chain Anchor IDL and are pinned i
 (15.50%) matched the figure the event decoder produced for the same pool moments earlier
 (15.30%). `npm run test:dbc` re-verifies the live path.
 
-## Copy trading is paper-first, on purpose
+## Copy trading moved out
 
-Following a wallet is an automated strategy whose edge you have not measured, delegated to
-someone who does not know you exist. So a copy config starts in **paper** mode and disabled,
-and the paper record is kept honestly enough to actually decide on:
-
-- fills use the price **after your configured delay**, not the price the wallet got — copying
-  is a latency game, and filling at their price is the self-flattery that makes copy trading
-  look profitable when it isn't;
-- a flat round trip **loses money**, because the paper model pays what a real one would on
-  both sides: the 1% protocol fee and Krypt's 0.5%;
-- trades your filters rejected are **recorded as skips with reasons** — a scorecard that
-  hides what it kept you out of is measuring the wrong thing;
-- switching a config to live **disarms it**, so arming live is always a separate, confirmed
-  act, and a live config never comes back armed after a restart.
+Copy trading left this app on 2026-11-04 and lives on in
+[Krypto Mirror](https://krypt.cc/mirror), a separate download with its own wallets and
+settings. Nothing here trades off another wallet any more. An existing `copytrade.json` is
+left where it is, unread, and coins copy trading bought stay in the wallet to sell by hand.
 
 ## What the portfolio numbers actually mean
 
@@ -259,7 +250,8 @@ one-field upgrade.
   and the relayer's 0.5% when the local builder cannot be used — are not ours and are
   listed separately in the same breakdown.
 - **The key** is generated in-app and encrypted with Electron `safeStorage` (Windows DPAPI
-  / OS keystore). It never reaches the renderer or a log. It is still a hot wallet on your
+  / OS keystore), and with your app password if you set one (Settings & Legal → Security).
+  It never reaches the renderer or a log. It is still a hot wallet on your
   desktop: fund it with what you can afford to lose, set the max-balance cap, set a
   withdrawal address.
 - **Known gaps, stated plainly** (`docs/product-swarm-2026-08-16.md` §8): the signer

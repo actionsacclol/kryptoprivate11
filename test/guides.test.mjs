@@ -101,7 +101,7 @@ const cards = ['start', 'memecoins', 'api-setup', ...sectionIds, ...extraIds];
   const videos = read('../src/guideVideos.ts');
   const block = videos.slice(videos.indexOf('APP_GUIDE_VIDEOS'), videos.indexOf('export const appVideoFile'));
   const entries = [...block.matchAll(/\{ id: '([a-z0-9-]+)', title: '[^']+', blurb: '[^']+', durationSec: (\d+) \}/g)].map((m) => ({ id: m[1], sec: Number(m[2]) }));
-  assert.ok(entries.length >= 8, `the bundled videos are listed (${entries.length})`);
+  assert.ok(entries.length >= 7, `the bundled videos are listed (${entries.length})`);
   for (const { id, sec } of entries) {
     for (const ext of ['mp4', 'jpg', 'vtt']) {
       assert.ok(fs.existsSync(new URL(`../public/guide-videos/${id}.${ext}`, import.meta.url)), `${id}.${ext} is in public/guide-videos`);
@@ -111,7 +111,7 @@ const cards = ['start', 'memecoins', 'api-setup', ...sectionIds, ...extraIds];
   }
   const ids = new Set(entries.map((e) => e.id));
   const watched = [...page.matchAll(/watch: '([a-z0-9-]+)'/g)].map((m) => m[1]);
-  assert.ok(watched.length >= 8, 'the cards offer the videos');
+  assert.ok(watched.length >= 7, 'the cards offer the videos');
   for (const w of watched) assert.ok(ids.has(w), `card video "${w}" exists`);
   for (const id of ids) assert.ok(watched.includes(id), `video "${id}" is offered on a card`);
   const player = read('../src/components/GuideVideoPlayer.tsx');

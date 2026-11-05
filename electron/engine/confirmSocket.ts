@@ -14,6 +14,8 @@
 // before. Nothing here can make a fill later than it was.
 
 import WebSocket from 'ws';
+import * as heliusBudget from '../system/heliusBudget';
+import { isBilledHeliusUrl } from '../../shared/credits';
 
 export interface SignatureOutcome {
   /** The chain's error object for a landed-but-reverted tx; null = success. */
@@ -94,8 +96,10 @@ export function ensure(wssUrl: string): void {
     everPonged = true;
     lastPongAt = Date.now();
   });
+  const metered = isBilledHeliusUrl(wssUrl);
   sock.on('message', (raw) => {
     lastPongAt = Date.now();
+    if (metered) heliusBudget.addSocketBytes('Trade confirmations', Buffer.isBuffer(raw) ? raw.length : String(raw).length);
     let msg: {
       id?: number;
       result?: number | boolean;

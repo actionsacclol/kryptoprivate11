@@ -242,7 +242,7 @@ const src = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8').replace(
   const auth = src('../electron/system/pumpAuth.ts');
   assert.match(auth, /safeStorage\.encryptString\(tok\)/, 'the token is encrypted before it is written');
   assert.match(auth, /if \(!sealed\) \{/, 'and a failure to encrypt is handled');
-  const persist = auth.slice(auth.indexOf('function persist()'), auth.indexOf('export function status()'));
+  const persist = auth.slice(auth.indexOf('function persist('), auth.indexOf('export function status()'));
   assert.doesNotMatch(persist, /JSON\.stringify\(session\b/, 'the session is never serialised with its live token');
   assert.match(persist, /token: sealed/, 'only the sealed token reaches disk');
   // And the field is named so the support bundle redacts it.

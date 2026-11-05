@@ -37,6 +37,8 @@
 // Never for the firehose — a fill costs a credit, a held mint earns it.
 
 import WebSocket from 'ws';
+import * as heliusBudget from '../system/heliusBudget';
+import { isBilledHeliusUrl } from '../../shared/credits';
 import type { LogNotification, InnerEvent } from './feed';
 import { decodeCpiEventData, PUMP_PROGRAM_ID } from './pumpDecoder';
 import { getTransactions, resolveAccountKeys, noteSocketRejection, noteSocketRateLimit, socketParkRemainingMs } from '../chain/rpcClient';
@@ -58,7 +60,6 @@ export interface PriorityFeedHost {
    */
   onAccount(a: { mint: string; key: string; data: Buffer; slot: number; at: number }): void;
   /** Fill batches are HTTP calls against the key — bill them. */
-  billHttp(calls: number): void;
   log(level: 'info' | 'warn' | 'error', line: string): void;
 }
 
@@ -103,9 +104,6 @@ const accountBySub = new Map<number, string>();
 const accountPending = new Map<number, string>();
 /** Events delivered. */
 let events = 0;
-/** Uncompressed bytes received — billed against the Helius budget by the
- *  engine (2 credits / 0.1 MB). */
-let bytes = 0;
 
 export function attach(h: PriorityFeedHost): void {
   host = h;
@@ -115,9 +113,6 @@ export function eventCount(): number {
   return events;
 }
 
-export function byteCount(): number {
-  return bytes;
-}
 
 export function watchedMints(): string[] {
   return [...wanted.keys()];
@@ -306,9 +301,11 @@ function connect(): void {
     for (const mint of accounts.keys()) subscribeAccount(mint);
   });
 
+  const metered = isBilledHeliusUrl(url);
   sock.on('message', (raw) => {
     lastAlive = Date.now();
-    bytes += Buffer.isBuffer(raw) ? raw.length : String(raw).length;
+    const frameBytes = Buffer.isBuffer(raw) ? raw.length : String(raw).length;
+    if (metered) heliusBudget.addSocketBytes('Token tape', frameBytes);
     let msg: {
       id?: number;
       result?: number;
@@ -434,8 +431,7 @@ let currentUrl = '';
  *   • 16 `logsSubscribe` frames on ONE socket were all acked;
  *   • connections 11, 12 and 13 were refused with HTTP 429 at the handshake.
  * So the scarce resource is the socket this module already shares, and the
- * old cap silently unsubscribed held mints (and, in walletWatcher.ts, copy
- * leaders) to respect a limit the host does not have.
+ * old cap silently unsubscribed held mints to respect a limit the host does not have.
  *
  * 16 is what was actually verified, so this is a guard, not a claim: four
  * times the proven number, far above any realistic held-mint count, and there
@@ -592,7 +588,6 @@ async function runFillBatch(): Promise<void> {
   for (const s of sigs) fillQueue.delete(s);
   fillInFlight = true;
   try {
-    host.billHttp(sigs.length);
     const r = await getTransactions(url, sigs);
     const now = Date.now();
     sigs.forEach((sig, i) => {
@@ -634,7 +629,6 @@ export function _reset(): void {
   accountBySub.clear();
   accountPending.clear();
   events = 0;
-  bytes = 0;
   attempts = 0;
   currentUrl = '';
   capNotedAt = 0;

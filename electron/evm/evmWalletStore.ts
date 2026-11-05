@@ -141,7 +141,8 @@ function parseWallet(w: unknown): EvmStoredWallet | null {
 export function parseFile(raw: unknown, chainId: number): EvmWalletsFile | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
-  if (obj.version !== 1 || !Array.isArray(obj.wallets)) return null;
+  // 2 is the same shape with `kv1:` secrets (app password on). See walletStore.
+  if ((obj.version !== 1 && obj.version !== 2) || !Array.isArray(obj.wallets)) return null;
   // A file for another chain is not this chain's wallet list.
   if (typeof obj.chainId === 'number' && obj.chainId !== chainId) return null;
   const wallets: EvmStoredWallet[] = [];
@@ -149,6 +150,10 @@ export function parseFile(raw: unknown, chainId: number): EvmWalletsFile | null 
     const parsed = parseWallet(w);
     if (parsed && !wallets.some((x) => x.address.toLowerCase() === parsed.address.toLowerCase())) wallets.push(parsed);
   }
+  // A file that listed wallets and yielded none is one we failed to understand.
+  // Returning it as a valid empty list leaves the store writable, and the next
+  // generate would overwrite the only copy of the keys (swarm 2026-11-04).
+  if (wallets.length === 0 && (obj.wallets as unknown[]).length > 0) return null;
   // Migration: one signer becomes one signer PER CHAIN.
   //
   // A file written before 2026-09-11 has a single `activeId`. It seeds BOTH

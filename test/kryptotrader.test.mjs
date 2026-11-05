@@ -757,7 +757,7 @@ async function liveSession(h, opts = {}) {
   // 2026-10-01: the body moved into removeSolanaWallet, which the All-in-One
   // wallet's removal shares; the handler must still go through it.
   const rm = ipc.slice(ipc.indexOf('const removeSolanaWallet = '), ipc.indexOf('const removeSolanaWallet = ') + 1500);
-  assert.ok(ipc.slice(ipc.indexOf("ipcMain.handle('wallet:remove'"), ipc.indexOf("ipcMain.handle('wallet:remove'") + 200).includes('removeSolanaWallet('), 'wallet:remove goes through the guarded helper');
+  assert.ok(ipc.slice(ipc.indexOf("ipcMain.handle('wallet:remove'"), ipc.indexOf("ipcMain.handle('wallet:remove'") + 900).includes('removeSolanaWallet('), 'wallet:remove goes through the guarded helper');
   assert.ok(rm.indexOf('kryptoTrader.walletRemoveBlocked(') > 0 && rm.indexOf('kryptoTrader.walletRemoveBlocked(') < rm.indexOf("disarm('no_wallet')"), 'the guard runs BEFORE the unconditional disarm (critic #16)');
   const kill = ipc.slice(ipc.indexOf("ipcMain.handle('engine:kill'"), ipc.indexOf("ipcMain.handle('engine:kill'") + 400);
   assert.ok(kill.includes('kryptoTrader.pauseAll('), 'the engine kill switch pauses sessions');
@@ -1090,8 +1090,8 @@ const askAndSettle = async (h, dt = 10_000) => {
   assert.ok(!body('  async testTrade(', '\n  }\n').includes('traderClaimFor'), 'nor a manual button (testTrade)');
   const ipc = src('../electron/ipc.ts');
   assert.ok(ipc.includes('setTraderClaimCheck((ref, mint)') && ipc.includes('kryptoTrader.claimOn(address, mint, chain)'), 'main installs the check from kryptoTrader.claimOn');
-  assert.ok(src('../electron/engine/automation.ts').includes('traderClaimFor(') && src('../electron/engine/copyTrade.ts').includes('traderClaimFor('), 'scripts and copy consult it (behaviour pinned in automation / copytrade tests)');
-  ok('T22: a live session claims its (wallet, coin); scripts, copy, orders and MCP buys consult it; exits and manual buttons do not');
+  assert.ok(src('../electron/engine/automation.ts').includes('traderClaimFor('), 'scripts consult it (behaviour pinned in the automation tests)');
+  ok('T22: a live session claims its (wallet, coin); scripts, orders and MCP buys consult it; exits and manual buttons do not');
 }
 
 // ── critic #12: other wallets of the user on the same coin show at start ──
@@ -1510,7 +1510,6 @@ const byId = (id) => T.list().find((x) => x.id === id);
   assert.ok(hb.includes('traderClaimFor({ walletId: null, chain }, mint)'), 'hostBuy’s EVM branch (scripts bot.buy, MCP buy_token) consults the claim');
   assert.ok(hb.indexOf('traderClaimFor({ walletId: null, chain }, mint)') < hb.indexOf('this.evmCopy.buy(chain, mint, sol,'), 'before the EVM buy goes out');
   assert.ok(src('../electron/engine/automation.ts').includes('traderClaimFor({ walletId: null, address: wallet.address ?? null, chain }, mint)'), 'script buyGate on EVM');
-  assert.ok(src('../electron/engine/copyTrade.ts').includes('traderClaimFor({ walletId: c.walletId ?? null, chain: chainOf(c) }, t.mint)'), 'EVM copy buys');
   const ipc = src('../electron/ipc.ts');
   assert.ok(ipc.includes('kryptoTrader.claimOn(address, mint, chain)'), 'main resolves the claim per chain');
   assert.ok(ipc.includes('evmLedger.onSettled((f) => kryptoTrader.onLedgerFill(evmTraderFill(f)))'), 'EVM ledger fills reach the sessions');
@@ -1518,7 +1517,7 @@ const byId = (id) => T.list().find((x) => x.id === id);
   assert.ok(/walletVisibleOn\(w, chain\)/.test(ipc), 'the session wallet is one of that chain’s (evm-wallet-home-chain)');
   assert.ok(ipc.includes('evmRail.sell(chain, token, 100, false, { walletId, amountRaw })'), 'EVM sells go out as exact amountRaw');
   assert.ok(/if \(r\.simulated\) return \{ ok: false/.test(ipc), 'a disarmed chain’s simulation is never booked as a trade');
-  ok('wiring: EVM scripts, copy and MCP buys consult the claim; EVM ledger feeds sessions; wallet removal guarded; exact sells; no simulated fills');
+  ok('wiring: EVM scripts and MCP buys consult the claim; EVM ledger feeds sessions; wallet removal guarded; exact sells; no simulated fills');
 }
 
 // ══ Review fixes (2026-09-26) ══════════════════════════════════════════════

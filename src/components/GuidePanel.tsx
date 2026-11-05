@@ -29,7 +29,7 @@ const GUIDES: Guide[] = [
     title: 'Getting started, in order',
     summary: 'Wallet, funding, first trade — and what to do before any of it',
     body: [
-      'Create a wallet on the Wallet page. It is generated here and encrypted by your operating system; nobody, including us, can recover it. Back the key up somewhere safe BEFORE you put money in it.',
+      'Create a wallet on the Wallet page. It is generated here and encrypted by your operating system, and by your app password if you set one on the Security page. Nobody, including us, can recover it. Back the key up somewhere safe BEFORE you put money in it.',
       'Fund it with what you can afford to lose. This is a hot wallet on a desktop, not cold storage. Set a max-balance cap and a withdrawal address on the same page while you are there.',
       [
         'Once a wallet exists the app is in LIVE mode: a trade you place spends real SOL.',

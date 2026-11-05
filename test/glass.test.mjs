@@ -119,6 +119,7 @@ const ok = (m) => console.log('ok  ', m);
     'src/components/terminal/TradeReplay.tsx',
     'src/components/terminal/GifPicker.tsx',
     'src/components/terminal/ScriptInputsDialog.tsx',
+    'src/components/terminal/WalletPanel.tsx',
   ];
   for (const f of surfaces) {
     const src = read(f);

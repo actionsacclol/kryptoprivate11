@@ -52,7 +52,6 @@ export const APP_GUIDE_VIDEOS: readonly AppGuideVideo[] = [
   { id: 'trade', title: 'Buy and sell a coin', blurb: 'Find a coin, check it, buy it, sell it.', durationSec: 147 },
   { id: 'deposit', title: 'Deposit and withdraw', blurb: 'Put SOL in, take it back out.', durationSec: 133 },
   { id: 'widgets', title: 'Set up Widgets', blurb: 'Build your own screen out of boxes.', durationSec: 99 },
-  { id: 'copy', title: 'Copy trading', blurb: 'Follow another wallet, on paper first.', durationSec: 111 },
   { id: 'pump', title: 'Make a pump.fun account', blurb: 'Free, and it sends no transaction.', durationSec: 106 },
   { id: 'callout', title: 'Set up auto-callout', blurb: 'Post a callout every time you buy.', durationSec: 117 },
   { id: 'rpc', title: 'Use a paid RPC', blurb: 'Helius, QuickNode, Triton, Vibe Station or any other.', durationSec: 157 },

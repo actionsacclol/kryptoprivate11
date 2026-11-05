@@ -23,6 +23,7 @@ import { base58Decode } from './chain/base58';
 import { Keypair } from '@solana/web3.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import * as aioWallet from './system/aioWallet';
+import * as vault from './system/vault';
 import { aioBalances } from './engine/aioBalances';
 import * as solanaSend from './engine/send';
 import * as evmSend from './evm/send';
@@ -33,7 +34,9 @@ import { FLOAT_COOLDOWN_MS, FLOAT_MAX_FAILURES, FLOAT_MAX_PER_DAY, nextFloatRefi
 import { KNOWN_MINTS } from '@shared/swap';
 import * as fund from './engine/fund';
 import * as lab from '@shared/lab';
-import { getAccountInfo, getBalance, getMultipleAccountInfo, getTokenBalanceForMint } from './chain/rpcClient';
+import { clearRpcRejections, getAccountInfo, getBalance, getMultipleAccountInfo, getTokenBalanceForMint } from './chain/rpcClient';
+import { clearIssue, closeAllIssues, closeIssue, listIssues, onIssuesChanged, raiseIssue } from './system/appIssues';
+import * as heliusHealth from './system/heliusHealth';
 import * as kryptoMode from './engine/kryptoMode';
 import * as kryptoTrader from './engine/kryptoTrader';
 import type { TraderEvmHost, TraderLedgerFill, TraderMarket } from './engine/kryptoTrader';
@@ -46,7 +49,6 @@ import { curveRegime } from '@shared/odds';
 import * as pumpChain from './data/pumpChain';
 import * as tape from './data/tape';
 import * as advOrders from './engine/advOrders';
-import * as copyTrade from './engine/copyTrade';
 import * as ledger from './engine/ledger';
 import { curveProgressTokenPct } from './engine/curve';
 import { parseMintExtensions } from './engine/mintExtensions';
@@ -179,6 +181,9 @@ import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, uploadLaunchMetadata, uploadProfileI
 import * as updateCheck from './system/updateCheck';
 import * as pumpFees from './engine/pumpFees';
 import * as pumpAuth from './system/pumpAuth';
+import { requireProof } from './system/securityGate';
+import * as securityFlows from './system/securityFlows';
+import { gatedSettingsDiff } from '@shared/securityPolicy';
 import * as pumpProfile from './system/pumpProfile';
 import * as pumpSocial from './system/pumpSocial';
 import * as swap from './engine/swap';
@@ -255,7 +260,6 @@ import {
 import { TRIGGER_BASES, validateOrder, type NewOrderRequest, type TriggerBasis } from '@shared/orders';
 import { validateAlert, type NewAlertRequest } from '@shared/alerts';
 import { toCsv } from '@shared/portfolio';
-import { cleanBlocklist, validateConfig, type CopyConfig, FOMO_WALLET, type FomoSource } from '@shared/copytrade';
 import * as automation from './engine/automation';
 import { MAX_ACTIONS, MAX_CONDITIONS, type RuleAction, type RuleCondition, type RuleSet } from '@shared/automation';
 import { coerceInputs, parseInputs } from '@shared/scriptInputs';
@@ -295,6 +299,11 @@ export function getEngine(): SniperEngine {
         // The window no longer pops most engine notices up (2026-09-29), so
         // the Console is where they are kept.
         if (ev.kind === 'toast') logger[ev.level === 'success' ? 'info' : ev.level](`[notice] ${ev.message}`);
+        // An error stays on screen until it is closed. It used to flash top right
+        // and go, which is no use for "sell stuck, sell manually".
+        if (ev.kind === 'toast' && ev.level === 'error') {
+          raiseIssue({ id: `notice:${ev.message}`, level: 'error', title: '', body: ev.message, condition: false });
+        }
         // A fill, real or paper, dates the kept portfolio build.
         if ((ev.kind === 'fill' && ev.state !== 'failed') || ev.kind === 'paper') engine?.markPortfolioDirty();
         // User scripts see the same events the UI does, after it.
@@ -366,6 +375,7 @@ function sendToWindows(ev: EngineEvent): void {
  * precisely so that every listener, including this one, is safe.
  */
 logger.subscribe((l) => sendToWindows({ kind: 'log', level: l.level, line: l.line, at: l.at }));
+onIssuesChanged((issues) => sendToWindows({ kind: 'issues', issues }));
 
 function broadcast(ev: EngineEvent): void {
   // A log event goes to the logger, and the subscription above puts it on
@@ -524,9 +534,6 @@ export function setWindowHost(h: WindowHost): void {
 /** Clears the float's failure stop (set inside registerIpc). */
 let aioFloatReset: () => void = () => undefined;
 
-/** The All-in-One recovery phrase has been on screen this session (created,
- *  or revealed through the native dialog). Only then can "backed up" be set. */
-let aioPhraseShown = false;
 
 export function registerIpc(): void {
   // Construct the engine eagerly. It is otherwise built on first use, and
@@ -612,22 +619,10 @@ export function registerIpc(): void {
     onLaunchWindow: (chain, launch) => automation.onEvmLaunch(chain, launch),
     // …and the chain's runner flags, as their runner event and bot.runners().
     onRunner: (chain, flag, launch) => automation.onEvmRunner(chain, flag, launch),
-    // …the price prints, as the scripts' tick, and followed wallets' trades.
+    // …and the price prints, as the scripts' tick.
     onPrice: (chain, token, price) => {
       if (curveQuoteNative(chain, token) === true) automation.onEvmTick(chain, token, price);
     },
-    onLeaderTrade: (chain, t) =>
-      automation.onLeaderTrade({
-        chain,
-        mint: t.token,
-        symbol: t.symbol,
-        wallet: t.wallet,
-        label: copyTrade.all().find((c) => (c.chain ?? 'solana') === chain && c.wallet.toLowerCase() === t.wallet)?.label ?? '',
-        side: t.isBuy ? 'buy' : 'sell',
-        sol: t.native,
-        priceSol: curveQuoteNative(chain, t.token) === true ? t.priceNative : (evmPriceNative(chain, t.token) ?? 0),
-        soldFraction: t.soldFraction,
-      }),
   });
   automation.setEvmRunnerSource((chain) => evmScanner.flagged(chain));
   // What a Robinhood/BNB script reads that the engine host does not carry.
@@ -738,7 +733,15 @@ export function registerIpc(): void {
     }
     return r.ok ? ok(r.message, profiles.view()) : fail(r.message);
   });
-  ipcMain.handle('profiles:duplicate', (_e, name: unknown, copyWallets: unknown) => {
+  ipcMain.handle('profiles:duplicate', async (e, name: unknown, copyWallets: unknown) => {
+    if (copyWallets === true) {
+      // A copy with wallets is a second place every key lives. A password-protected
+      // profile has an encrypted backup for this, which goes through the same
+      // proof and leaves no second vault to forget about.
+      if (vault.isOn()) return fail('This profile has a password, so its wallets are not copied. Make a key backup on the Security page, then import it into the new profile.');
+      const proof = await requireProof(e.sender, { kind: 'keys', title: 'Copy this profile with its wallets', detail: ['A second copy of every key will exist on this computer.'], nativeWhenNone: true });
+      if (!proof.ok) return fail(proof.message);
+    }
     // The in-memory settings are the newest, but only when they were read: a
     // profile running on defaults because its file is unreadable would hand
     // the clone defaults dressed up as a copy.
@@ -755,7 +758,9 @@ export function registerIpc(): void {
     if (r.ok) retitle();
     return r.ok ? ok(r.message, profiles.view()) : fail(r.message);
   });
-  ipcMain.handle('profiles:remove', async (_e, id: unknown) => {
+  ipcMain.handle('profiles:remove', async (e, id: unknown) => {
+    const proof = await requireProof(e.sender, { kind: 'keys', title: 'Remove a profile', detail: ['It goes to the Recycle Bin, with any wallets in it.'], nativeWhenNone: true });
+    if (!proof.ok) return fail(proof.message);
     const r = await profiles.remove(id, (p) => shell.trashItem(p));
     if (r.ok) {
       logger.info(`profiles: removed ${String(id)} (to the Recycle Bin)`);
@@ -843,14 +848,6 @@ export function registerIpc(): void {
       out.push(`runners flagged ${st.runnersFlagged} this session`);
     } catch {
       out.push('engine          could not be read');
-    }
-    try {
-      const copy = getEngine().copySnapshot();
-      const live = copy.configs.filter((c) => c.mode === 'live').length;
-      const armed = copy.configs.filter((c) => c.enabled).length;
-      out.push(`copy trading    ${copy.configs.length} config(s), ${live} live, ${armed} armed${copy.liveBlockedReason ? ` — live blocked: ${copy.liveBlockedReason}` : ''}`);
-    } catch {
-      /* a missing copy snapshot is not worth a line */
     }
     try {
       const scripts = automation.all();
@@ -1026,7 +1023,7 @@ export function registerIpc(): void {
   // ── settings ─────────────────────────────────────────────────────
   ipcMain.handle('settings:get', () => ok('ok', store.load()));
 
-  ipcMain.handle('settings:update', (_e, patch: unknown) => {
+  ipcMain.handle('settings:update', async (e, patch: unknown) => {
     // `Partial<AppSettings>` is a compile-time claim only — at runtime the
     // renderer can send anything. Validate main-side before it reaches the
     // store (see settingsValidation.ts for why this matters).
@@ -1034,6 +1031,19 @@ export function registerIpc(): void {
     if (!v.ok || !v.patch) {
       logger.warn(`settings:update rejected — ${v.message}`);
       return fail(v.message);
+    }
+    // Who may command the bots is decided by pairing, in main. A patch carries the
+    // field along in a spread, so it is put back rather than trusted or dropped.
+    for (const kind of ['telegram', 'discord'] as const) {
+      const block = v.patch.bots?.[kind];
+      if (block) block.ownerId = store.load().bots[kind].ownerId;
+    }
+    // Most settings stay one click. Turning on something that moves money by
+    // itself, or hands control elsewhere, is a door to the same money.
+    const gated = gatedSettingsDiff(store.load() as never, v.patch as never);
+    if (gated.length) {
+      const proof = await requireProof(e.sender, { kind: 'money', title: 'Change a setting that moves money', detail: gated });
+      if (!proof.ok) return fail(proof.message);
     }
     try {
       const before = store.load();
@@ -1071,12 +1081,23 @@ export function registerIpc(): void {
       // nothing else until the next restart.
       if (next.rpc.heliusMonthlyCredits !== before.rpc.heliusMonthlyCredits) {
         heliusBudget.setLimit(next.rpc.heliusMonthlyCredits ?? 0);
+        clearIssue('helius-budget');
       }
       // A new key deserves a fresh try: without this, an endpoint rejected
       // once would keep being skipped for fifteen minutes after the user
       // pasted the corrected key.
       if (next.rpc.heliusApiKey !== before.rpc.heliusApiKey || next.rpc.httpUrl !== before.rpc.httpUrl) {
-        void import('./chain/rpcClient').then((m) => m.clearRpcRejections());
+        clearRpcRejections();
+      }
+      // The running scanner's sockets were built from the old settings. Without
+      // this a new key did nothing until the scanner was stopped and started.
+      getEngine().syncFeeds('Solana RPC settings changed');
+      if (
+        next.rpc.heliusApiKey !== before.rpc.heliusApiKey ||
+        next.rpc.heliusOnlyFeed !== before.rpc.heliusOnlyFeed ||
+        next.rpc.heliusFeedSocket !== before.rpc.heliusFeedSocket
+      ) {
+        void heliusHealth.checkNow();
       }
       // Same for the EVM chains: a corrected Alchemy key or RPC URL gets a
       // fresh try, and a chain switched on at runtime warms its launch
@@ -1209,8 +1230,10 @@ export function registerIpc(): void {
   // already logged; generate, import and rename were not, so "where did my
   // wallet go" had a gap exactly where it mattered (2026-09-21). No key, no
   // secret — the label and the public key, which is public.
-  ipcMain.handle('wallet:generate', (_e, label: unknown) => {
+  ipcMain.handle('wallet:generate', (e, label: unknown) => {
+    const hadKeys = securityFlows.hasAnyKeys();
     const r = wallet.generate(typeof label === 'string' ? label : '');
+    if (r.ok) void securityFlows.offerPasswordAfterFirstKey(e.sender, hadKeys);
     if (r.ok) { syncLiveMode(); refreshScoutOwnership(); }
     logger.info(r.ok ? `wallet:generate — a new wallet was created (${wallet.list().length} now), active is ${wallet.publicKey()}` : `wallet:generate failed — ${r.message}`);
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
@@ -1220,7 +1243,11 @@ export function registerIpc(): void {
     if (typeof secret !== 'string') return fail('Invalid key');
     const addr = solanaAddressOfSecret(secret);
     if (addr && !(await confirmImport(e.sender, 'this Solana wallet', [addr]))) return fail('Import cancelled');
+    const proof = await requireProof(e.sender, { kind: 'keys', title: 'Import a Solana key', detail: [addr ?? 'A Solana key'] });
+    if (!proof.ok) return fail(proof.message);
+    const hadKeys = securityFlows.hasAnyKeys();
     const r = wallet.importSecret(secret, typeof label === 'string' ? label : '');
+    if (r.ok) void securityFlows.offerPasswordAfterFirstKey(e.sender, hadKeys);
     if (r.ok) { syncLiveMode(); refreshScoutOwnership(); }
     // A sign-in-only pump.fun account with this address moves onto the wallet.
     if (r.ok && r.publicKey) {
@@ -1280,6 +1307,11 @@ export function registerIpc(): void {
     const next = String(addr).trim();
     const current = wallet.info().homeAddress;
     if (next === current) return ok('Withdrawal address unchanged', wallet.info());
+    // Clearing it closes a door, so only setting one needs proof.
+    if (next) {
+      const homeProof = await requireProof(e.sender, { kind: 'money', title: 'Change your withdrawal address', detail: [`New address: ${next}`, `Was: ${current ?? 'none'}`] });
+      if (!homeProof.ok) return fail(homeProof.message);
+    }
 
     const { response } = await confirmNative(e.sender, {
       type: 'warning',
@@ -1312,7 +1344,7 @@ export function registerIpc(): void {
    * stored home address, so this cannot be pointed anywhere else. Serialised
    * behind in-flight live trades inside engine.withdraw (never races a buy).
    */
-  ipcMain.handle('wallet:withdraw', async (_e, args: unknown) => {
+  ipcMain.handle('wallet:withdraw', async (e, args: unknown) => {
     const a = (args && typeof args === 'object' ? args : {}) as { walletId?: unknown; lamports?: unknown };
     const walletId = typeof a.walletId === 'string' && a.walletId ? a.walletId : undefined;
     let lamports: number | 'max';
@@ -1330,6 +1362,13 @@ export function registerIpc(): void {
       if (lamports > bal.data) return fail(`Amount exceeds the wallet balance (${(bal.data / 1e9).toFixed(4)} SOL)`);
     }
 
+    const withdrawProof = await requireProof(e.sender, {
+      kind: 'money',
+      title: `Withdraw ${lamports === 'max' ? 'the full balance' : `${(lamports / 1e9).toFixed(4)} SOL`}`,
+      detail: [`From: ${owner}`, `To: ${home}`, 'A withdrawal cannot be undone.'],
+      nativeWhenNone: true,
+    });
+    if (!withdrawProof.ok) return fail(withdrawProof.message);
     logger.warn(`wallet:withdraw requested — ${lamports === 'max' ? 'max' : `${(lamports / 1e9).toFixed(4)} SOL`} from ${owner.slice(0, 8)}… to ${home}`);
     try {
       const r = await getEngine().withdraw({ walletId, lamports });
@@ -1444,6 +1483,12 @@ export function registerIpc(): void {
       logger.warn(`send: cancelled at the confirmation dialog (${rv.amountText} on ${req.chain})`);
       return fail('Send cancelled');
     }
+    const sendProof = await requireProof(e.sender, {
+      kind: 'money',
+      title: `Send ${rv.amountText} on ${chainName}`,
+      detail: [`To: ${rv.to}`, `From: ${rv.from}`, 'A send cannot be undone.'],
+    });
+    if (!sendProof.ok) return fail(sendProof.message);
     logger.warn(`send: confirmed — ${rv.amountText} on ${req.chain} from ${rv.from} to ${rv.to}`);
     let result: SendResult;
     try {
@@ -1510,28 +1555,18 @@ export function registerIpc(): void {
     return r.ok ? ok('ok', wallet.info()) : fail(r.message);
   });
 
-  ipcMain.handle('wallet:backup', async () => {
-    const win = BrowserWindow.getFocusedWindow();
-    const res = await dialog.showSaveDialog(win!, {
-      title: 'Back up trading wallet keypair',
-      defaultPath: 'krypt-sniper-wallet.json',
-      filters: [{ name: 'Solana keypair', extensions: ['json'] }],
-    });
-    if (res.canceled || !res.filePath) return fail('Backup cancelled');
-    const r = wallet.backupToFile(res.filePath);
-    return r.ok ? ok(r.message) : fail(r.message);
-  });
-
-  ipcMain.handle('wallet:export', async () => {
-    const win = BrowserWindow.getFocusedWindow();
-    const res = await dialog.showSaveDialog(win!, {
-      title: 'Export all wallets (private keys, plaintext)',
-      defaultPath: 'krypt-wallets-PRIVATE.txt',
-      filters: [{ name: 'Text file', extensions: ['txt'] }],
-    });
-    if (res.canceled || !res.filePath) return fail('Export cancelled');
-    const r = wallet.exportAllToFile(res.filePath);
-    return r.ok ? ok(r.message, { count: r.count }) : fail(r.message);
+  ipcMain.handle('wallet:exportKey', async (e, id: unknown) => {
+    const held = wallet.list();
+    const w = typeof id === 'string' && id ? held.find((x) => x.id === id) : held.find((x) => x.publicKey === wallet.publicKey());
+    if (!w) return fail('No such wallet');
+    const r = await securityFlows.exportPlaintextKey(
+      e.sender,
+      { label: w.label, address: w.publicKey },
+      `${w.label.replace(/[^\w-]+/g, '_') || 'wallet'}-PRIVATE-KEY.txt`,
+      [{ name: 'Text file, for Phantom and others', extensions: ['txt'] }, { name: 'Solana CLI keypair', extensions: ['json'] }],
+      (dest) => (/\.json$/i.test(dest) ? wallet.backupToFile(dest, w.id) : wallet.exportKeyToFile(w.id, dest)),
+    );
+    return r.ok ? ok(r.message, { warnings: r.warnings ?? [] }) : fail(r.message);
   });
 
   ipcMain.handle('wallet:holdings', async () => {
@@ -1569,7 +1604,15 @@ export function registerIpc(): void {
     }
     return r;
   };
-  ipcMain.handle('wallet:remove', (_e, id: unknown) => {
+  ipcMain.handle('wallet:remove', async (e, id: unknown) => {
+    const target = typeof id === 'string' && id ? wallet.list().find((w) => w.id === id) : wallet.list().find((w) => w.publicKey === wallet.publicKey());
+    const proof = await requireProof(e.sender, {
+      kind: 'keys',
+      title: `Remove "${target?.label ?? 'this wallet'}"`,
+      detail: [target?.publicKey ?? '', 'Its key is deleted from this computer. Without a backup, anything it holds is gone for good.'],
+      nativeWhenNone: true,
+    });
+    if (!proof.ok) return fail(proof.message);
     const r = removeSolanaWallet(id);
     return r.ok ? ok(r.message, wallet.info()) : fail(r.message);
   });
@@ -1626,14 +1669,23 @@ export function registerIpc(): void {
         'Make sure nobody is watching your screen and nothing is recording it. If you did not just ask for a new wallet in Krypto Bot, press Cancel.',
     });
     if (response !== 1) return fail('Cancelled');
+    const createProof = await requireProof(e.sender, { kind: 'keys', title: 'Create an All-in-One wallet', detail: ['Its recovery phrase is shown once you confirm.'] });
+    if (!createProof.ok) return fail(createProof.message);
     const before = wallet.publicKey();
+    const hadKeys = securityFlows.hasAnyKeys();
     const r = aioWallet.create(label);
-    if (r.ok) aioPhraseShown = true;
     // Announced on failure too when a record now exists (the phrase is saved
     // and the page must show Repair), not only on success.
     if (r.ok || aioWallet.info().exists) afterAioKeysAdded(before);
-    // The phrase goes back ONCE, for the backup screen. Never logged.
-    return r.ok ? ok(r.message, { info: aioWallet.info(), phrase: r.phrase }) : fail(r.message);
+    // Shown in the security window. It never crosses to the page, so a fault in
+    // the page cannot read it (swarm 2026-11-04). Never logged.
+    if (!r.ok) return fail(r.message);
+    if (r.phrase && (await securityFlows.showPhrase(e.sender, r.phrase, true))) {
+      aioWallet.markBackedUp();
+      aioAnnounce();
+    }
+    void securityFlows.offerPasswordAfterFirstKey(e.sender, hadKeys);
+    return ok(r.message, { info: aioWallet.info() });
   });
   /**
    * Where does this phrase hold money? (2026-10-03.) Wallets derive different
@@ -1684,9 +1736,13 @@ export function registerIpc(): void {
     const paths = isAioPathChoice(choice) ? { solana: choice.solana, evm: choice.evm } : undefined;
     const addrs = typeof phrase === 'string' ? addressesOfPhrase(phrase, paths) : null;
     if (addrs && !(await confirmImport(e.sender, 'this All-in-One wallet (every chain)', addrs))) return fail('Import cancelled');
+    const proof = await requireProof(e.sender, { kind: 'keys', title: 'Import an All-in-One wallet', detail: addrs ?? ['A recovery phrase'] });
+    if (!proof.ok) return fail(proof.message);
     const before = wallet.publicKey();
+    const hadKeys = securityFlows.hasAnyKeys();
     const r = aioWallet.importPhrase(phrase, label, paths);
     if (r.ok || aioWallet.info().exists) afterAioKeysAdded(before);
+    if (r.ok) void securityFlows.offerPasswordAfterFirstKey(e.sender, hadKeys);
     return r.ok ? ok(r.message, aioWallet.info()) : fail(r.message);
   });
   /**
@@ -1713,20 +1769,18 @@ export function registerIpc(): void {
       logger.warn('aio wallet: recovery phrase NOT shown — cancelled at the confirmation dialog');
       return fail('Cancelled');
     }
+    const proof = await requireProof(e.sender, { kind: 'keys', title: 'Show your recovery phrase', detail: ['These words are every key in this wallet, on every chain.'] });
+    if (!proof.ok) return fail(proof.message);
     const r = aioWallet.reveal();
-    if (r.ok) aioPhraseShown = true;
-    if (r.ok) logger.warn('aio wallet: recovery phrase shown');
-    return r.ok ? ok('ok', r.phrase) : fail(r.message);
-  });
-  ipcMain.handle('aio:backedUp', () => {
-    // A bare claim from the page is not a backup: the phrase must have been
-    // on screen this session (create, or a natively confirmed reveal) —
-    // otherwise "backed up" unlocks Remove, which deletes the only copy
-    // (swarm 2026-10-03).
-    if (!aioPhraseShown) return fail('Show the recovery phrase and write it down first.');
-    const r = aioWallet.markBackedUp();
-    if (r.ok) aioAnnounce();
-    return r.ok ? ok(r.message, aioWallet.info()) : fail(r.message);
+    if (!r.ok || !r.phrase) return fail(r.message);
+    logger.warn('aio wallet: recovery phrase shown');
+    const needsBackup = !aioWallet.info().backedUp;
+    const wrote = await securityFlows.showPhrase(e.sender, r.phrase, needsBackup);
+    if (needsBackup && wrote) {
+      aioWallet.markBackedUp();
+      aioAnnounce();
+    }
+    return ok('ok', aioWallet.info());
   });
   ipcMain.handle('aio:repair', () => {
     const before = wallet.publicKey();
@@ -1815,6 +1869,8 @@ export function registerIpc(): void {
       logger.warn('aio wallet: remove cancelled at the confirmation dialog');
       return fail('Remove cancelled');
     }
+    const removeProof = await requireProof(e.sender, { kind: 'keys', title: 'Remove the All-in-One wallet', detail: [`Solana: ${i.solanaAddress ?? '—'}`, `EVM: ${i.evmAddress ?? '—'}`] });
+    if (!removeProof.ok) return fail(removeProof.message);
     if (removeEvm) {
       const r = evmRail.wallet.remove(i.evmWalletId!);
       if (!r.ok) return fail(`EVM key not removed: ${r.message}`);
@@ -2054,13 +2110,16 @@ export function registerIpc(): void {
 
   ipcMain.handle('rpc:resetCredits', () => {
     heliusBudget.reset();
+    clearIssue('helius-budget');
     return ok('Credit counter reset', heliusBudget.current());
   });
 
   ipcMain.handle('bots:status', () => ok('ok', bots.status()));
 
-  ipcMain.handle('bots:pair', (_e, kind: unknown) => {
+  ipcMain.handle('bots:pair', async (e, kind: unknown) => {
     if (kind !== 'telegram' && kind !== 'discord') return fail('Unknown bot');
+    const proof = await requireProof(e.sender, { kind: 'money', title: `Pair a ${kind === 'telegram' ? 'Telegram' : 'Discord'} chat`, detail: ['That chat will be able to talk to this app.'] });
+    if (!proof.ok) return fail(proof.message);
     // Starting the transport is what lets the user's /pair message arrive.
     bots.sync();
     return ok('ok', bots.beginPairing(kind));
@@ -2255,7 +2314,7 @@ export function registerIpc(): void {
         // this connection's mode and is worth an agent knowing: a paper
         // connection on a live app still cannot touch the real book.
         appMode: s.execution.liveEnabled ? 'live' : 'paper',
-        liveBlockedReason: getEngine().copySnapshot().liveBlockedReason,
+        liveBlockedReason: getEngine().executionBlockedReason(),
       };
     },
     positions: async (paper, chain) => {
@@ -2298,12 +2357,6 @@ export function registerIpc(): void {
     scoutWallet: async (address, chain) => {
       const rec = walletScout.wallets(chain as ScoutChain).find((x) => x.address === address.toLowerCase()) ?? null;
       return rec ? { wallet: rec, saved: walletScout.isSaved(chain as ScoutChain, address.toLowerCase()) } : null;
-    },
-    copyConfigs: async () => {
-      // The configs and their records, never the whole snapshot: `recent` is
-      // thousands of rows and the agent asked for the setup.
-      const snap = getEngine().copySnapshot();
-      return { configs: snap.configs, stats: snap.stats, liveExecutable: snap.liveExecutable, liveBlockedReason: snap.liveBlockedReason };
     },
     orders: async () => getEngine().ordersSnapshot(),
     kryptoSessions: async () =>
@@ -2421,8 +2474,12 @@ export function registerIpc(): void {
 
   ipcMain.handle('mcp:status', () => ok('ok', mcpPayload()));
 
-  ipcMain.handle('mcp:setEnabled', async (_e, on: unknown) => {
+  ipcMain.handle('mcp:setEnabled', async (e, on: unknown) => {
     const want = on === true;
+    if (want) {
+      const proof = await requireProof(e.sender, { kind: 'money', title: 'Turn on the AI connection', detail: ['Programs holding its token can use this app, up to the access level you set.'] });
+      if (!proof.ok) return fail(proof.message);
+    }
     const m = store.load().mcp;
     // Switching it on mints a token when there is none, so the panel never
     // shows a listener with nothing to authenticate against.
@@ -2444,8 +2501,13 @@ export function registerIpc(): void {
    * it should be a deliberate act with a line in the log behind it rather
    * than a field riding along inside some other panel's save.
    */
-  ipcMain.handle('mcp:setAccess', async (_e, level: unknown) => {
+  ipcMain.handle('mcp:setAccess', async (e, level: unknown) => {
     if (typeof level !== 'string' || !MCP_ACCESS_LEVELS.includes(level as McpAccess)) return fail('Unknown access level');
+    // Lowering it is always free: only moving up the list needs proof.
+    if (MCP_ACCESS_LEVELS.indexOf(level as McpAccess) > MCP_ACCESS_LEVELS.indexOf(store.load().mcp.access)) {
+      const proof = await requireProof(e.sender, { kind: 'money', title: 'Raise the AI connection’s access', detail: [`New level: ${level}`] });
+      if (!proof.ok) return fail(proof.message);
+    }
     store.update({ mcp: { ...store.load().mcp, access: level as McpAccess } });
     // A level change is a new arrangement: the rolling caps start over rather
     // than letting a switch to live inherit an hour of paper "spending".
@@ -2457,7 +2519,9 @@ export function registerIpc(): void {
     return ok(`The AI connection is now ${said}.`, mcpPayload());
   });
 
-  ipcMain.handle('mcp:newToken', async () => {
+  ipcMain.handle('mcp:newToken', async (e) => {
+    const tokenProof = await requireProof(e.sender, { kind: 'money', title: 'Make a new AI connection token', detail: ['Whoever holds it can use this app, up to the access level you set.'] });
+    if (!tokenProof.ok) return fail(tokenProof.message);
     store.update({ mcp: { ...store.load().mcp, token: mcpServer.newToken() } });
     // Every client holding the old one is refused from here; the listener is
     // restarted so nothing keeps a connection open under it.
@@ -2475,7 +2539,7 @@ export function registerIpc(): void {
     return r.ok ? ok(r.message, mcpPayload()) : fail(r.message);
   });
 
-  ipcMain.handle('mcp:setBudget', async (_e, raw: unknown) => {
+  ipcMain.handle('mcp:setBudget', async (e, raw: unknown) => {
     if (typeof raw !== 'object' || raw === null) return fail('Invalid budget');
     const b = raw as Record<string, unknown>;
     const m = store.load().mcp;
@@ -2487,9 +2551,36 @@ export function registerIpc(): void {
     if (!(next.maxBuySol > 0) || next.maxBuySol > 25) return fail('Max per trade must be between 0 and 25');
     if (!(next.hourlyCapSol > 0) || next.hourlyCapSol > 100) return fail('The hourly cap must be between 0 and 100');
     if (next.maxBuySol > next.hourlyCapSol) return fail('Max per trade is above the hourly cap');
+    if (next.maxBuySol > m.budget.maxBuySol || next.hourlyCapSol > m.budget.hourlyCapSol || next.maxTradesPerMinute > m.budget.maxTradesPerMinute) {
+      const budgetProof = await requireProof(e.sender, { kind: 'money', title: 'Raise the AI connection’s budget', detail: [`Per trade: ${next.maxBuySol} SOL`, `Per hour: ${next.hourlyCapSol} SOL`] });
+      if (!budgetProof.ok) return fail(budgetProof.message);
+    }
     if (!Number.isInteger(next.maxTradesPerMinute) || next.maxTradesPerMinute < 1 || next.maxTradesPerMinute > 60) return fail('Trades per minute must be between 1 and 60');
     store.update({ mcp: { ...m, budget: next } });
     return ok('Saved.', mcpPayload());
+  });
+
+  // ── The Security page ─────────────────────────────────────────────────
+  // Buttons and a status. Everything secret happens in the security window.
+  const flowReply = (r: securityFlows.FlowResult) => (r.ok ? ok(r.message, { warnings: r.warnings ?? [] }) : fail(r.message));
+  ipcMain.handle('security:status', () => ok('ok', securityFlows.status()));
+  ipcMain.handle('security:setPassword', async (e) => flowReply(await securityFlows.setPassword(e.sender)));
+  ipcMain.handle('security:changePassword', async (e) => flowReply(await securityFlows.changePassword(e.sender)));
+  ipcMain.handle('security:removePassword', async (e) => flowReply(await securityFlows.removePassword(e.sender)));
+  ipcMain.handle('security:newRecoveryCode', async (e) => flowReply(await securityFlows.newRecoveryCode(e.sender)));
+  ipcMain.handle('security:enable2fa', async (e) => flowReply(await securityFlows.enable2fa(e.sender)));
+  ipcMain.handle('security:disable2fa', async (e) => flowReply(await securityFlows.disable2fa(e.sender)));
+  ipcMain.handle('security:requestReset2fa', async (e) => flowReply(await securityFlows.requestReset2fa(e.sender)));
+  ipcMain.handle('security:cancelReset2fa', async (e) => flowReply(await securityFlows.cancelReset2fa(e.sender)));
+  ipcMain.handle('security:finishReset2fa', () => flowReply(securityFlows.finishReset2fa()));
+  ipcMain.handle('security:setIdle', async (e, minutes: unknown) => flowReply(await securityFlows.setIdle(e.sender, minutes)));
+  ipcMain.handle('security:lockNow', () => flowReply(securityFlows.lockNow()));
+  ipcMain.handle('security:exportBackup', async (e) => flowReply(await securityFlows.exportBackup(e.sender)));
+  ipcMain.handle('security:importBackup', async (e) => {
+    const before = wallet.publicKey();
+    const r = await securityFlows.importBackup(e.sender);
+    if (r.added) afterAioKeysAdded(before);
+    return flowReply(r);
   });
 
   // ── Per-chain Observatory ────────────────────────────────────────────
@@ -3103,7 +3194,6 @@ export function registerIpc(): void {
     claims: (chain, walletId, token) => {
       const out: string[] = [];
       const t = token.toLowerCase();
-      if (copyTrade.openMints(chain).some((m) => m.toLowerCase() === t)) out.push('an open copy-trade position on this coin');
       const addr = evmTraderWallet(chain, walletId);
       const active = evmWallet.address(chain)?.toLowerCase() ?? null;
       for (const o of automation.openedOn(token).concat(t !== token ? automation.openedOn(t) : [])) {
@@ -3159,8 +3249,6 @@ export function registerIpc(): void {
           /* engine not up: no positions */
         }
       }
-      // Conservative: an open copy row on this coin, whichever wallet.
-      if (copyTrade.openMints('solana').includes(mint)) out.push('an open copy-trade position on this coin');
       for (const o of automation.openedOn(mint)) {
         if (o.wallet === null ? walletId === active : o.wallet === address) out.push(`the script "${o.script}" holds this coin in this wallet`);
       }
@@ -3435,12 +3523,20 @@ export function registerIpc(): void {
   });
 
   /** USDC to this wallet's confirmed withdrawal address, and nowhere else. */
-  ipcMain.handle('calloutRewards:withdrawUsdc', async (_e, walletId: unknown, amountUsdc: unknown) => {
+  ipcMain.handle('calloutRewards:withdrawUsdc', async (e, walletId: unknown, amountUsdc: unknown) => {
     if (typeof walletId !== 'string' || !wallet.publicKeyOf(walletId)) return fail('That is not one of your wallets');
     let amountRaw: bigint | 'max';
     if (amountUsdc === 'max') amountRaw = 'max';
     else if (typeof amountUsdc === 'number' && Number.isFinite(amountUsdc) && amountUsdc > 0 && amountUsdc < 1e9) amountRaw = BigInt(Math.floor(amountUsdc * 1e6));
     else return fail('Amount must be a positive number of USDC, or max');
+    const usdcHome = wallet.list().find((w) => w.id === walletId)?.homeAddress ?? null;
+    const usdcProof = await requireProof(e.sender, {
+      kind: 'money',
+      title: `Withdraw ${amountUsdc === 'max' ? 'all USDC' : `${String(amountUsdc)} USDC`}`,
+      detail: [`To: ${usdcHome ?? 'your withdrawal address'}`, 'A withdrawal cannot be undone.'],
+      nativeWhenNone: true,
+    });
+    if (!usdcProof.ok) return fail(usdcProof.message);
     const { withdrawUsdc } = await import('./engine/tokenWithdraw');
     const s = store.load();
     const r = await withdrawUsdc(execUrlOf(s.rpc), { walletId, amountRaw });
@@ -3499,10 +3595,14 @@ export function registerIpc(): void {
     }
   });
 
-  ipcMain.handle('bridge:send', async (_e, raw: unknown, simulateOnly: unknown, quoteId: unknown) => {
+  ipcMain.handle('bridge:send', async (e, raw: unknown, simulateOnly: unknown, quoteId: unknown) => {
     if (!store.load().bridge.enabled) return fail('Bridging is switched off for this install.');
     const draft = bridgeDraftOf(raw);
     if (!draft) return fail('That is not a transfer');
+    if (simulateOnly !== true) {
+      const proof = await requireProof(e.sender, { kind: 'money', title: `Bridge ${draft.amount} from ${draft.from} to ${draft.to}`, detail: ['It goes to your own wallet on the other chain. A transfer cannot be undone.'], nativeWhenNone: true });
+      if (!proof.ok) return fail(proof.message);
+    }
     try {
       const r = await bridge.send(draft, bridgeDeps(), simulateOnly === true, typeof quoteId === 'string' ? quoteId : undefined);
       if (r.ok && simulateOnly !== true) logger.warn(`bridge: ${draft.amount} sent ${draft.from} to ${draft.to} (${r.txHash ?? 'no hash'})`);
@@ -3542,11 +3642,15 @@ export function registerIpc(): void {
       return fail(`Could not price that move: ${safeErr(err)}`);
     }
   });
-  ipcMain.handle('aio:moveSend', async (_e, raw: unknown, simulateOnly: unknown, quoteId: unknown) => {
+  ipcMain.handle('aio:moveSend', async (e, raw: unknown, simulateOnly: unknown, quoteId: unknown) => {
     const draft = bridgeDraftOf(raw);
     if (!draft) return fail('That is not a transfer');
     const blocked = aioMoveBlocked(draft);
     if (blocked) return fail(blocked);
+    if (simulateOnly !== true) {
+      const proof = await requireProof(e.sender, { kind: 'money', title: `Move ${draft.amount} from ${draft.from} to ${draft.to}`, detail: ['It goes to your All-in-One wallet on the other chain. A transfer cannot be undone.'], nativeWhenNone: true });
+      if (!proof.ok) return fail(proof.message);
+    }
     try {
       const r = await bridge.send(draft, bridgeDeps(), simulateOnly === true, typeof quoteId === 'string' ? quoteId : undefined);
       if (r.ok && simulateOnly !== true) logger.warn(`aio move: ${draft.amount} sent ${draft.from} to ${draft.to} (${r.txHash ?? 'no hash'})`);
@@ -3825,6 +3929,8 @@ export function registerIpc(): void {
         (plan.estFinalUsd !== null ? ` About $${plan.estFinalUsd.toFixed(2)} of ${plan.coin} at the end${plan.unread.length ? ' — not counting what could not be read' : ''}.` : ''),
     });
     if (response !== 1) return fail('Cancelled — nothing was sold or moved.');
+    const compressProof = await requireProof(e.sender, { kind: 'money', title: `Sell everything and move it to ${plan.coin}`, detail: ['Real transactions, on every chain listed in the last window.'] });
+    if (!compressProof.ok) return fail(compressProof.message);
     ran = true;
     const steps: Array<{ step: string; ok: boolean; message: string }> = [];
     const note = (step: string, state: 'running' | 'done' | 'failed', message: string): void => {
@@ -4253,6 +4359,8 @@ export function registerIpc(): void {
     if (typeof secret !== 'string' || !secret.trim()) return fail('Paste the wallet’s private key');
     const addr = solanaAddressOfSecret(secret);
     if (addr && !(await confirmImport(e.sender, 'this Solana wallet', [addr]))) return fail('Import cancelled');
+    const proof = await requireProof(e.sender, { kind: 'keys', title: 'Import a Solana key', detail: [addr ?? 'A Solana key'] });
+    if (!proof.ok) return fail(proof.message);
     const r = wallet.importSecret(secret, typeof label === 'string' ? label : '');
     logger.info(r.ok ? `pump:importAccount — a wallet was imported (${wallet.list().length} now)` : `pump:importAccount — import failed: ${r.message}`);
     if (!r.ok || !r.publicKey) return fail(r.message);
@@ -4588,12 +4696,14 @@ export function registerIpc(): void {
   // secret and always failed the hex check, `rename` and `remove` took it as
   // the wallet id and always answered "No such wallet". Only `select` had
   // been corrected. A contract test now pins the order for all five.
-  ipcMain.handle('evm:wallet:generate', (_e, chain: unknown, label: unknown) => {
+  ipcMain.handle('evm:wallet:generate', (e, chain: unknown, label: unknown) => {
     const c = chainOf(chain);
     if (!c) return fail('Unknown chain');
     try {
+      const hadKeys = securityFlows.hasAnyKeys();
       // Made FOR the chain whose page asked — see evmWalletStore.addWalletFor.
       const r = evmRail.wallet.generate(typeof label === 'string' ? label : '', c);
+      if (r.ok) void securityFlows.offerPasswordAfterFirstKey(e.sender, hadKeys);
       if (r.ok) { logger.warn(`evm wallet: generated ${r.address} for ${c}`); refreshScoutOwnership(); }
       return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
     } catch (err) {
@@ -4606,8 +4716,12 @@ export function registerIpc(): void {
     if (typeof secret !== 'string' || !secret.trim()) return fail('Paste a private key');
     const addr = evmAddressOfSecret(secret);
     if (addr && !(await confirmImport(e.sender, `this ${EVM_CHAIN_META[c].name} wallet`, [addr]))) return fail('Import cancelled');
+    const proof = await requireProof(e.sender, { kind: 'keys', title: `Import a ${EVM_CHAIN_META[c].name} key`, detail: [addr ?? 'An EVM key'] });
+    if (!proof.ok) return fail(proof.message);
     try {
+      const hadKeys = securityFlows.hasAnyKeys();
       const r = evmRail.wallet.importSecret(secret, typeof label === 'string' ? label : '', c);
+      if (r.ok) void securityFlows.offerPasswordAfterFirstKey(e.sender, hadKeys);
       if (r.ok) { logger.warn(`evm wallet: imported ${r.address} for ${c}`); refreshScoutOwnership(); }
       return r.ok ? ok(r.message, evmRail.wallet.info(c)) : fail(r.message);
     } catch (err) {
@@ -4654,9 +4768,18 @@ export function registerIpc(): void {
       return fail(`Wallet not renamed: ${safeErr(err)}`);
     }
   });
-  ipcMain.handle('evm:wallet:remove', (_e, chain: unknown, id: unknown) => {
+  ipcMain.handle('evm:wallet:remove', async (e, chain: unknown, id: unknown) => {
     const c = chainOf(chain);
     if (!c) return fail('Unknown chain');
+    const held = evmRail.wallet.list(c);
+    const target = typeof id === 'string' && id ? held.find((w) => w.id === id) : held.find((w) => w.id === evmRail.wallet.info(c).id);
+    const proof = await requireProof(e.sender, {
+      kind: 'keys',
+      title: `Remove "${target?.label ?? 'this wallet'}"`,
+      detail: [target?.address ?? '', 'Its key is deleted from this computer. Without a backup, anything it holds is gone for good.'],
+      nativeWhenNone: true,
+    });
+    if (!proof.ok) return fail(proof.message);
     // A Krypto Trader session on BNB / Robinhood trades from this wallet:
     // refused BEFORE anything is removed or disarmed (critic #16).
     const traderBlock = kryptoTrader.walletRemoveBlocked(typeof id === 'string' && id ? id : (evmRail.wallet.info(c).id ?? ''), 'evm');
@@ -4668,16 +4791,20 @@ export function registerIpc(): void {
       return fail(`Wallet not removed: ${safeErr(err)}`);
     }
   });
-  ipcMain.handle('evm:wallet:export', async () => {
-    const win = BrowserWindow.getFocusedWindow();
-    const res = await dialog.showSaveDialog(win!, {
-      title: 'Export EVM wallets (private keys, plaintext)',
-      defaultPath: 'krypt-evm-wallets-PRIVATE.txt',
-      filters: [{ name: 'Text file', extensions: ['txt'] }],
-    });
-    if (res.canceled || !res.filePath) return fail('Export cancelled');
-    const r = evmRail.wallet.exportAll(res.filePath);
-    return r.ok ? ok(r.message, { count: r.count }) : fail(r.message);
+  ipcMain.handle('evm:wallet:exportKey', async (e, chain: unknown, id: unknown) => {
+    const c = chainOf(chain);
+    if (!c) return fail('Unknown chain');
+    const held = evmRail.wallet.list(c);
+    const w = typeof id === 'string' && id ? held.find((x) => x.id === id) : held.find((x) => x.id === evmRail.wallet.info(c).id);
+    if (!w) return fail('No such wallet');
+    const r = await securityFlows.exportPlaintextKey(
+      e.sender,
+      { label: w.label, address: w.address },
+      `${w.label.replace(/[^\w-]+/g, '_') || 'wallet'}-PRIVATE-KEY.txt`,
+      [{ name: 'Text file', extensions: ['txt'] }],
+      (dest) => evmRail.wallet.exportKey(w.id, dest),
+    );
+    return r.ok ? ok(r.message, { warnings: r.warnings ?? [] }) : fail(r.message);
   });
   ipcMain.handle('evm:wallet:refreshBalance', async (_e, chain: unknown) => {
     const c = chainOf(chain);
@@ -5469,6 +5596,17 @@ export function registerIpc(): void {
     return r.ok ? ok(r.message, r) : fail(r.message);
   });
 
+  ipcMain.handle('issues:list', () => ok('ok', listIssues()));
+  ipcMain.handle('issues:close', (_e, id: unknown) => {
+    if (typeof id !== 'string') return fail('Nothing to close');
+    closeIssue(id);
+    return ok('ok');
+  });
+  ipcMain.handle('issues:closeAll', () => {
+    closeAllIssues();
+    return ok('ok');
+  });
+
   ipcMain.handle('alerts:list', () => ok('ok', getEngine().alertsSnapshot()));
 
   ipcMain.handle('alerts:create', (_e, raw: unknown) => {
@@ -5703,18 +5841,12 @@ export function registerIpc(): void {
     }
   });
 
-  // ── copy trading (term.txt §11) ──────────────────────────────────
+  // ── The EVM rails ──────────────────────────────────────────────────
   //
-  // A config can arrange for future real trades, so the shape is cleaned and
-  // re-validated main-side with the same function the form uses.
-  ipcMain.handle('copy:list', () => ok('ok', getEngine().copySnapshot()));
-
-  // ── Copy trading on the EVM chains ─────────────────────────────────
-  //
-  // The engine stays free of the rail; this is the bridge it copies through
-  // on Robinhood Chain and BNB. Prices come from what the Observatory last
-  // saw (its feed is the leader watcher on these chains), facts from the
-  // rail's summary, and the gate is the chain's own arm switch.
+  // The engine stays free of the rail; this is the bridge it reaches
+  // Robinhood Chain and BNB through. Prices come from what the Observatory
+  // last saw, facts from the rail's summary, and the gate is the chain's
+  // own arm switch.
   // The $KRYPTO fee waiver covers the EVM rails too. Injected here because
   // `evm/trade.ts` is kept free of the Solana half of the app.
   evmTrade.setHolderRate(() => kryptoHolding.holderRateApplies());
@@ -5724,37 +5856,10 @@ export function registerIpc(): void {
       const r = await evmRail.buy(chain, token, amountNative, false, { walletId, ...(opts?.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {}) });
       return { ok: r.ok, message: r.message, signature: r.hash ?? undefined, pending: r.stage === 'pending', spentSol: r.amountIn ? Number(BigInt(r.amountIn)) / 1e18 : undefined };
     },
-    // `amountRaw` wins over the percent in the rail, which is the point: a
-    // mirrored copy sell is sized from the base units the copy holds, not
-    // from a share of a balance that also contains hand-bought bags.
     sell: async (chain, token, pct, walletId, amountRaw, opts) => {
       const r = await evmRail.sell(chain, token, pct, false, { walletId, amountRaw, ...(opts?.slippagePct !== undefined ? { slippagePct: opts.slippagePct } : {}) });
       return { ok: r.ok, message: r.stage === 'pending' ? `broadcast but not confirmed in time — check Trades (${r.message})` : r.message, signature: r.hash ?? undefined };
     },
-    // The three reads copy trading settles a position with: what this wallet
-    // holds, what a confirmed transaction moved, and — for a copy opened
-    // before quantities were tracked — the ledger's record of its buy.
-    tokensOf: (chain, token, walletId) => evmRail.tokensOf(chain, token, walletId),
-    fillTokens: (chain, hash) => evmRail.fillTokens(chain, hash),
-    buyFill: async (chain, token, atMs, walletId) => evmRail.buyFill(chain, token, atMs, walletId),
-    // A followed wallet on an EVM chain is seen ONLY through that chain's
-    // scanner poll — there is no per-wallet subscription here the way Solana
-    // has one. An armed copy config on a stopped scanner therefore watched
-    // nothing, silently (2026-09-15). Enabling one starts the feed it needs;
-    // `start` is idempotent and this never stops one the user started.
-    leaderFeed: (chain) => {
-      const st = evmScanner.status(chain);
-      return { running: st.running, lastPollAt: st.lastPollAt || null };
-    },
-    ensureLeaderFeed: (chain) => {
-      const r = evmScanner.start(chain);
-      return r.ok ? null : r.message;
-    },
-    // A leader's balance, so an EVM sell whose size the log did not carry can
-    // still be recovered exactly (`recoverFraction`). The bridge has declared
-    // this since the rail was generalised; nothing ever implemented it, so
-    // every such sell went unmirrored on both EVM chains.
-    holdingOf: (chain, owner, token) => evmRail.holdingOf(chain, owner, token),
     blocked: (chain) => {
       const s = store.load();
       if (!s.evm[chain].enabled) return `${EVM_CHAIN_META[chain].name} is switched off in Settings`;
@@ -5809,124 +5914,9 @@ export function registerIpc(): void {
   });
   evmScanner.setCurveLookup((chain, curve) => evmDiscover.tokenForCurve(chain, curve));
 
-  ipcMain.handle('copy:save', (_e, raw: unknown) => {
-    if (typeof raw !== 'object' || raw === null) return fail('Invalid config');
-    const r = raw as CopyConfig;
-    // The chain decides which wallets are ours and what an address looks like.
-    const copyChain: ChainKind = r.chain === 'robinhood' || r.chain === 'bnb' ? r.chain : 'solana';
-    // The wallet the copies sign with: one of this install's ON THAT CHAIN,
-    // or null for the active one. Checked here, where the wallet lists live.
-    if (r.walletId !== undefined && r.walletId !== null) {
-      const ours = copyChain === 'solana' ? wallet.list().some((w) => w.id === r.walletId) : evmWallet.list(copyChain).some((w) => w.id === r.walletId);
-      if (typeof r.walletId !== 'string' || !ours) return fail('The wallet to copy with is not one of yours on that chain');
-    }
-    // The address is handed to the wallet watcher to open a live
-    // subscription on, so it has to BE an address — `validateConfig` only
-    // asks for 32 characters, and `copy:resetStats` 30 lines below has
-    // always tested the real thing. Checked here rather than in
-    // shared/copytrade.ts so the renderer's form and this handler cannot
-    // disagree about what an address is (see the report: validateConfig is
-    // the right long-term home).
-    const fomo = r.direction === 'fomo';
-    const walletAddr = fomo ? FOMO_WALLET : String(r.wallet ?? '').trim();
-    // A FOMO config follows a set of wallets, not an address (2026-09-20).
-    if (!fomo && (copyChain === 'solana' ? !isAddress(walletAddr) : !isEvmAddress(walletAddr))) return fail(`Enter a valid wallet address for ${copyChain === 'solana' ? 'Solana' : EVM_CHAIN_META[copyChain].name}`);
-    // Absent or null is OFF for every optional filter; a value present is
-    // carried as a number and validated, never coerced to "off".
-    const optNum = (v: unknown): number | null => (v === undefined || v === null ? null : Number(v));
-    const clean = {
-      id: typeof r.id === 'string' && r.id ? r.id : undefined,
-      // Both of these were checked above and then left out of the rebuild,
-      // so neither survived a save. Without the chain, `validateConfig`
-      // judged a 0x leader by Solana’s rules and refused a valid address:
-      // following a leader on Robinhood or BNB was impossible from the form
-      // that offers it. Without walletId, the wallet the user picked to copy
-      // with fell back to the active signer.
-      chain: copyChain,
-      walletId: r.walletId ?? null,
-      wallet: walletAddr,
-      label: String(r.label ?? '').slice(0, 40),
-      enabled: r.enabled === true,
-      mode: r.mode === 'live' ? ('live' as const) : ('paper' as const),
-      sizing: r.sizing === 'proportional' ? ('proportional' as const) : ('fixed' as const),
-      sizeValue: Number(r.sizeValue),
-      maxTradeSol: Number(r.maxTradeSol),
-      minLiquidityUsd: r.minLiquidityUsd === null || r.minLiquidityUsd === undefined ? null : Number(r.minLiquidityUsd),
-      maxMarketCapUsd: r.maxMarketCapUsd === null || r.maxMarketCapUsd === undefined ? null : Number(r.maxMarketCapUsd),
-      minKryptScore: r.minKryptScore === null || r.minKryptScore === undefined ? null : Number(r.minKryptScore),
-      onlyPumpfun: r.onlyPumpfun === true,
-      // The 2026-09-21 filters (docs/copy-trade-competitors-2026-09-21.md).
-      // Every one of them is READ here because a field this rebuild forgets
-      // is a field that never survives a save (ipccontract.test pins it).
-      minMarketCapUsd: optNum(r.minMarketCapUsd),
-      minLeaderSol: optNum(r.minLeaderSol),
-      maxLeaderSol: optNum(r.maxLeaderSol),
-      minTokenAgeSec: optNum(r.minTokenAgeSec),
-      maxTokenAgeSec: optNum(r.maxTokenAgeSec),
-      maxBuysPerToken: optNum(r.maxBuysPerToken),
-      blockedMints: cleanBlocklist(r.blockedMints),
-      blockedCreators: cleanBlocklist(r.blockedCreators),
-      minLeaderSellPct: optNum(r.minLeaderSellPct),
-      exitTrailingPct: optNum(r.exitTrailingPct),
-      delayMs: Number(r.delayMs) || 0,
-      maxSlippagePct: Number(r.maxSlippagePct),
-      copySells: r.copySells !== false,
-      dailyLossLimitSol: Number(r.dailyLossLimitSol),
-      dailyTradeLimit: Number(r.dailyTradeLimit),
-      // The per-minute burst wall (shared/copytrade.ts). It was NOT carried
-      // here, so the field never survived a save: every config silently ran
-      // on DEFAULT_COPIES_PER_MINUTE and the user had no way to change it.
-      // Absent stays absent — the engine reads that as the default — but a
-      // value that is present is validated, never coerced to one.
-      maxCopiesPerMinute:
-        r.maxCopiesPerMinute === undefined || r.maxCopiesPerMinute === null ? null : Number(r.maxCopiesPerMinute),
-      // Reverse copying (2026-09-20): the direction, and the position's own
-      // exits. Absent stays null — the engine reads that as the default.
-      direction: r.direction === 'reverse' ? ('reverse' as const) : r.direction === 'fomo' ? ('fomo' as const) : ('copy' as const),
-      exitTakeProfitPct: r.exitTakeProfitPct === undefined || r.exitTakeProfitPct === null ? null : Number(r.exitTakeProfitPct),
-      exitStopLossPct: r.exitStopLossPct === undefined || r.exitStopLossPct === null ? null : Number(r.exitStopLossPct),
-      exitMaxHoldMin: r.exitMaxHoldMin === undefined || r.exitMaxHoldMin === null ? null : Number(r.exitMaxHoldMin),
-      // FOMO (2026-09-20): the crowd rule. Absent stays null — the defaults.
-      fomoSource: r.fomoSource === undefined || r.fomoSource === null ? null : (String(r.fomoSource) as FomoSource),
-      fomoMinWallets: r.fomoMinWallets === undefined || r.fomoMinWallets === null ? null : Number(r.fomoMinWallets),
-      fomoWindowSec: r.fomoWindowSec === undefined || r.fomoWindowSec === null ? null : Number(r.fomoWindowSec),
-      fomoTopN: r.fomoTopN === undefined || r.fomoTopN === null ? null : Number(r.fomoTopN),
-      fomoCrowdExitPct: r.fomoCrowdExitPct === undefined || r.fomoCrowdExitPct === null ? null : Number(r.fomoCrowdExitPct),
-    };
-    const v = validateConfig(clean);
-    if (!v.ok) return fail(v.message);
-    const res = getEngine().upsertCopyConfig(clean);
-    return res.ok ? ok(res.message, getEngine().copySnapshot()) : fail(res.message);
-  });
-
-  ipcMain.handle('copy:remove', (_e, id: unknown) => {
-    if (typeof id !== 'string' || !id) return fail('Invalid id');
-    const r = getEngine().removeCopyConfig(id);
-    return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
-  });
-
-  // Start a followed wallet's OWN record over (the configs and copies stay).
-  ipcMain.handle('copy:resetStats', (_e, wallet: unknown) => {
-    if (typeof wallet !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) return fail('Invalid wallet');
-    const r = getEngine().resetCopyLeader(wallet);
-    return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
-  });
-
-  // Clear PAPER results only. Deliberately separate from `copy:remove`,
-  // which deletes the config, its live history and the leader's record —
-  // three things that were only ever bundled because there was no other
-  // button (user report, 2026-09-13). Takes effect immediately; no restart.
-  ipcMain.handle('copy:resetPaper', (_e, configId: unknown) => {
-    if (configId !== undefined && configId !== null && typeof configId !== 'string') return fail('Invalid id');
-    const id = typeof configId === 'string' && configId ? configId : undefined;
-    const r = getEngine().resetCopyPaper(id);
-    return r.ok ? ok(r.message, getEngine().copySnapshot()) : fail(r.message);
-  });
-
   // "Reset all paper trades": the paper book on every chain, then every paper
   // script's own registry and day, so neither points at the cleared record.
-  // Copy trading keeps its own paper reset (copy:resetPaper); live is never
-  // touched. No arguments — there is nothing for the renderer to choose.
+  // Live is never touched. No arguments — there is nothing for the renderer to choose.
   ipcMain.handle('paper:reset', () => {
     const r = getEngine().resetPaperBook();
     if (!r.ok) return fail(r.message);

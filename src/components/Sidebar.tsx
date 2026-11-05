@@ -25,7 +25,7 @@ import {
   Telescope,
   BookMarked,
   BookOpen,
-  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout, UserPlus, AtSign, Bot, CandlestickChart, Layers } from 'lucide-react';
+  Wallet, Flame, Coins, FolderPlus, Receipt, Code2, Repeat, Shuffle, Sprout, AtSign, Bot, CandlestickChart, Layers, ShieldCheck } from 'lucide-react';
 import { groupsFor, workspaceSpec, type WorkspaceId } from '../workspaces';
 import { prefetchRoute } from '../routeLoaders';
 import { COPYRIGHT_LINE } from '@shared/legal/entity';
@@ -58,9 +58,8 @@ export type RouteId =
   | 'autocallout'
   | 'pumpaccounts'
   | 'orders'
-  | 'copysimple'
   | 'trader'
-  | 'wallets'
+  | 'mirror'
   | 'scripts'
   | 'farming'
   | 'mcp'
@@ -84,6 +83,7 @@ export type RouteId =
   | 'console'
   | 'settings'
   | 'profiles'
+  | 'security'
   | 'about'
   | 'legal';
 
@@ -137,14 +137,9 @@ export const AUTOMATION_ROUTES: RouteSpec[] = [
   { id: 'dashboard', label: 'Observatory', i18n: 'nav.observatory', hint: 'Solana engine dashboard', icon: Telescope },
   { id: 'observatoryrobinhood', label: 'Observatory · Robinhood', hint: 'Pons launches on Robinhood Chain', icon: Telescope },
   { id: 'observatorybnb', label: 'Observatory · BNB', hint: 'four.meme launches on BNB Smart Chain', icon: Telescope },
-  // Lives under Automation, not Terminal: this is the one page that trades on
-  // its own initiative, off someone else's activity rather than your click.
-  // It also used to be called "Wallets", one letter from the page holding YOUR
-  // keys — a collision that got worse once a single "Wallet" held several.
-  // Copy Simple (2026-09-20): the three-question way in. Same store as
-  // Copy Trading, which keeps every control.
-  { id: 'copysimple', label: 'Copy Simple', hint: 'Paste a wallet, pick an amount, follow on paper', icon: UserPlus },
-  { id: 'wallets', label: 'Copy Trading', i18n: 'nav.copyTrading', hint: "Follow other traders' wallets — every control", icon: Users },
+  // Copy trading left this app on 2026-11-04. The sidebar row stays, under the
+  // name people look for, and its page says where the feature went.
+  { id: 'mirror', label: 'Copy Trading', i18n: 'nav.copyTrading', hint: 'Now its own app: Krypto Mirror', icon: Users },
   // Krypto Trader (2026-09-25): Krypto Mode for any coin — one coin, one of
   // your wallets, a preset or an AI, paper first. No market-cap/volume goal.
   { id: 'trader', label: 'Krypto Trader', hint: 'Trade one coin from one wallet with a preset or an AI — paper first', icon: CandlestickChart },
@@ -188,6 +183,7 @@ export const LAYOUT_ROUTES: RouteSpec[] = [
 
 export const SYSTEM_ROUTES: RouteSpec[] = [
   { id: 'settings', label: 'Settings', i18n: 'nav.settings', icon: Settings },
+  { id: 'security', label: 'Security', hint: 'Password, authenticator codes and key backups', icon: ShieldCheck },
   { id: 'profiles', label: 'Profiles', hint: 'Separate copies of the app that run side by side', icon: Layers },
   { id: 'about', label: 'About', i18n: 'nav.about', icon: Sparkles },
   { id: 'legal', label: 'Legal', i18n: 'nav.legal', hint: 'Terms, privacy, risk disclosure', icon: Scale },

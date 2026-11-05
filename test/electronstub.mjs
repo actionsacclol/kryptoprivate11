@@ -12,8 +12,14 @@ export const app = {
 
 export const safeStorage = {
   isEncryptionAvailable: () => true,
-  encryptString: (s) => Buffer.from(`stub:${s}`, 'utf8'),
-  decryptString: (buf) => Buffer.from(buf).toString('utf8').replace(/^stub:/, ''),
+  encryptString: (s) => Buffer.from(`${process.env.KRYPT_TEST_DPAPI_FAIL ? 'new:' : 'stub:'}${s}`, 'utf8'),
+  decryptString: (buf) => {
+    // What a Windows password reset looks like to the app: everything sealed
+    // before it is refused, and what is sealed after it works.
+    const text = Buffer.from(buf).toString('utf8');
+    if (process.env.KRYPT_TEST_DPAPI_FAIL && !text.startsWith('new:')) throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString.');
+    return text.replace(/^(stub|new):/, '');
+  },
 };
 
 export default { app, safeStorage };

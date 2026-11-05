@@ -233,7 +233,7 @@ export const PRIVACY_POLICY: LegalDocument = {
       heading: '3. What stays on your machine',
       body: [
         'All of the following is written to your own computer and never transmitted to us: your settings; your wallet keys; your watchlist; your orders and trade history; recorded market events, if you switch recording on; crash logs; and your record of accepting these documents.',
-        'Wallet keys are encrypted at rest using your operating system\'s secure storage (DPAPI on Windows). If your OS cannot provide secure storage, the software refuses to store a key rather than storing it unprotected.',
+        'Wallet keys are encrypted at rest using your operating system\'s secure storage (DPAPI on Windows). If your OS cannot provide secure storage, the software refuses to store a key rather than storing it unprotected. If you set an app password, your keys are also encrypted with it. We never see that password and cannot reset it.',
         'You can delete all of it by uninstalling the software and removing its data folder.',
       ],
     },
@@ -416,7 +416,7 @@ export const SOFTWARE_TERMS: LegalDocument = {
       body: [
         'You are responsible for the security of your computer, your operating system account, your backups, and your private keys. Anyone with access to your machine and your OS account may be able to use the software.',
         'Back up your keys before you use the software. Take a system restore point before installing. We are not responsible for data loss, file corruption, system configuration changes, hardware problems, or any voided warranty arising from installing or running the software.',
-        'The software stores keys encrypted with your operating system\'s secure storage. That protects the file at rest; it does not protect you from malware running as you, from someone with access to your unlocked machine, or from your own mistakes.',
+        'The software stores keys encrypted with your operating system\'s secure storage. That protects the file at rest; it does not protect you from malware running as you, from someone with access to your unlocked machine, or from your own mistakes. An app password and authenticator codes are optional checks inside the software. They do not change this. If you lose both your app password and your recovery code, nobody can open your keys, and any funds they control are lost.',
       ],
     },
     {

@@ -1,6 +1,6 @@
 // User automation — rules and scripts, under budget, through the pipeline.
 //
-// The shape mirrors advOrders and copyTrade: the engine injects execution
+// The shape mirrors advOrders: the engine injects execution
 // and gating, this module notices things and decides. What it adds is a
 // wall around each script — a budget checked on EVERY action, in this
 // process, whatever the script asked for — and, for code scripts, the
@@ -21,8 +21,8 @@
 //   6. every refusal is logged on the script with its reason.
 //
 // What a script can react to: launches and their updates, runner flags, its
-// positions, price ticks on what it holds or subscribed to, trades by the
-// wallets followed on Copy Trading, its own advanced orders changing state,
+// positions, price ticks on what it holds or subscribed to, its own advanced
+// orders changing state,
 // alerts firing, a daily time, and a timer. What it can do: buy, sell, sell
 // everything, place and cancel advanced orders, apply an order template,
 // create alerts, watch/unwatch, notify, log, and turn itself off.
@@ -45,7 +45,6 @@ import {
   validateScript,
   withAlert,
   withGlobals,
-  withLeader,
   withLaunchLinks,
   withLaunchIntel,
   withMarket,
@@ -58,7 +57,6 @@ import {
   MAX_SCRIPTS,
   MAX_STATE_BYTES,
   RULE_ACTIONS,
-  type LeaderFacts,
   type LaunchLinks,
   type MarketFacts,
   type ScriptLinks,
@@ -89,10 +87,8 @@ import { CANDLE_INTERVALS, DISCOVER_COLUMNS, type CandleInterval, type CandleSer
 import type { Callout } from '@shared/callouts';
 import type { TradeHistoryRow } from '@shared/portfolio';
 import type { ScoutRow, ScoutWallet, ScoutWindow } from '@shared/walletScout';
-import type { CopySnapshot } from '@shared/copytrade';
 import type { Alert } from '@shared/alerts';
 import type { OrderTemplate } from '@shared/orderTemplates';
-import type { CopyTrade } from '@shared/copytrade';
 import { nativeSymbolOf } from '@shared/evm';
 import type { ChainKind } from '@shared/evm';
 import type { EvmScanLaunch } from '@shared/evmScan';
@@ -136,24 +132,6 @@ export interface OrderView {
   /** Paused because the app stopped while it was EXECUTING — its trade may
    *  have landed. Never re-place one without checking the wallet. */
   interrupted?: boolean;
-}
-
-export interface LeaderView {
-  wallet: string;
-  label: string;
-  enabled: boolean;
-  mode: string;
-  /** The chain the config follows; absent = Solana. */
-  chain?: ChainKind;
-}
-
-/** A followed wallet's swap, as the engine reports it (copy trading's feed). */
-export interface LeaderTrade extends LeaderFacts {
-  mint: string;
-  symbol: string;
-  /** The chain the leader traded on; absent = Solana. Only scripts on that
-   *  chain hear it. */
-  chain?: ChainKind;
 }
 
 /** A fill the ledger reconciled against the chain (host.onFillSettled). */
@@ -247,8 +225,6 @@ export interface AutomationHost {
   walletScores(chain: ChainKind, window: ScoutWindow, limit: number, onlyWorthALook: boolean): { onRecord: number; filtered: boolean; rows: ScoutRow[] };
   /** One wallet's Scout record on a chain. */
   walletRecord(address: string, chain: ChainKind): { wallet: ScoutWallet; saved: boolean } | null;
-  /** The Copy Trading configs and their records — never the recent-rows firehose. */
-  copyConfigs(): Pick<CopySnapshot, 'configs' | 'stats' | 'liveExecutable' | 'liveBlockedReason'>;
   /** Every alert on the Alerts page. */
   alerts(): Alert[];
   // ── Housekeeping the pages have (2026-09-27) ───────────────────────────
@@ -303,7 +279,6 @@ export interface AutomationHost {
   /** Pin / unpin on the renderer's Watchlist. */
   pin(mint: string, on: boolean): void;
   runners(): RunnerFlag[];
-  leaders(): LeaderView[];
   notify(title: string, body: string): void;
   /**
    * Post a pump.fun callout on a coin, as one of the user's pump accounts.
@@ -524,13 +499,6 @@ const alertFires = new Map<string, number | null>();
 /** Runner flags seen, so an expiry can be told from a list that never had
  *  the mint (2026-09-27). Bounded: pruned to what the last list still held. */
 let knownRunners = new Set<string>();
-/** Copy trade id → last state seen, to diff snapshots into copyFill events. */
-const copyStates = new Map<string, string>();
-/** False until the first copy snapshot has seeded the map (it is history). */
-let copySeeded = false;
-/** Most copyFill events one snapshot may raise — a real burst is a few. */
-const COPY_FILLS_PER_SNAPSHOT = 10;
-
 let offSettled: (() => void) | null = null;
 
 export function attach(h: AutomationHost): void {
@@ -1796,8 +1764,7 @@ async function actInner(s: UserScript, action: RuleAction, ctx: RuleContext | nu
 /**
  * The script's share (0..1] of the wallet's bag of `mint`, by cost basis, or
  * null when it cannot be worked out (the wallet's basis is unknown, or none of
- * the script's own spend is priced). The same construction copyTrade.ts
- * `walletPctFor` uses, and the reason `opened` carries costSol at all. Used
+ * the script's own spend is priced). The reason `opened` carries costSol at all. Used
  * by sellOne and by the sell orders a script arms (2026-10-23), which sold a
  * percentage of the whole holding with no scaling at all.
  *
@@ -3115,8 +3082,6 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (!address) return answer(false, undefined, 'walletRecord: pass a wallet address');
         return answer(true, h.walletRecord(address, scriptChain(s)));
       }
-      case 'copyConfigs':
-        return answer(true, h.copyConfigs());
       case 'alerts':
         // Alerts are a Solana-side feature (shared/alerts.ts carries no chain).
         return answer(true, scriptChain(s) === 'solana' ? h.alerts() : []);
@@ -3268,9 +3233,6 @@ async function handleCall(s: UserScript, id: number, method: string, args: unkno
         if (c !== 'solana') return answer(true, (evmRunnerSource?.(c as EvmChainKind) ?? []).map((f) => contextFromEvmRunner(f, evmHooks?.launch(c as EvmChainKind, f.token) ?? null, now)));
         return answer(true, h.runners().map((f) => contextFromRunner(f, h.launch(f.mint), now)));
       }
-      case 'leaders':
-        // This chain's followed wallets only (they came mixed, with no chain).
-        return answer(true, h.leaders().filter((l) => (l.chain ?? 'solana') === scriptChain(s)));
       case 'wallet':
         // The script's OWN chain wallet — an EVM script read Solana's.
         return answer(true, h.wallet(scriptChain(s)));
@@ -3443,25 +3405,6 @@ function toCodeScripts(eventName: string, chain: ChainKind, build: (s: UserScrip
   }
 }
 
-function copyFillPayload(t: CopyTrade): Record<string, unknown> {
-  return {
-    id: t.id,
-    configId: t.configId,
-    wallet: t.wallet,
-    mint: t.mint,
-    symbol: t.symbol,
-    side: t.kind === 'exit' ? 'sell' : 'buy',
-    mode: t.mode,
-    state: t.state,
-    theirSol: t.theirSol,
-    ourSol: t.ourSol,
-    pnlSol: t.pnlSol,
-    reason: t.reason,
-    direction: t.direction ?? 'copy',
-    at: t.at,
-  };
-}
-
 /**
  * A coin's curve completed and it migrated (pump.fun, Meteora DBC). Every
  * Solana script hears it: graduations are a few a minute, and the coins a
@@ -3562,28 +3505,6 @@ export function onEngineEvent(ev: EngineEvent): void {
       const rows = ev.data.map(scriptHoldingFromWallet);
       const at = ev.at;
       toCodeScripts('holdings', 'solana', async () => ({ at, holdings: rows }));
-      return;
-    }
-    // Copy trading's rows, diffed into "this copy changed state": opened,
-    // closed (a mirrored exit), skipped (2026-09-27). The leader's own
-    // trade is `leaderTrade`; this is what the app did about it.
-    case 'copy': {
-      // The FIRST snapshot is history — copy trading reloads its persisted
-      // rows and puts the newest 100 in `recent` — so it seeds the diff and
-      // announces nothing (audit 2026-09-27: it would have pushed 100 stale
-      // copyFill events into every script's 50-slot queue). From then on a
-      // new row or a changed state is an event, at most a handful a snapshot.
-      let announced = 0;
-      for (const t of ev.snapshot.recent) {
-        const prev = copyStates.get(t.id);
-        copyStates.set(t.id, t.state);
-        if (copyStates.size > 4_000) copyStates.delete(copyStates.keys().next().value as string);
-        if (!copySeeded || prev === t.state) continue;
-        if (++announced > COPY_FILLS_PER_SNAPSHOT) continue;
-        const row = t;
-        toCodeScripts('copyFill', row.chain ?? 'solana', async () => copyFillPayload(row));
-      }
-      copySeeded = true;
       return;
     }
     case 'tick': {
@@ -3822,16 +3743,6 @@ export function onEvmTick(chain: ChainKind, token: string, priceNative: number):
   }
 }
 
-/** A followed wallet traded (copy trading's watcher). */
-export function onLeaderTrade(t: LeaderTrade): void {
-  if (!host || !scripts.some((s) => s.enabled)) return;
-  fanOut('leader_trade', 'leaderTrade', t.mint, t.chain ?? 'solana', async (s) => {
-    const c = await ctxFor(s, t.mint);
-    if (!c.symbol && t.symbol) c.symbol = t.symbol;
-    return withLeader(c, t);
-  });
-}
-
 /** Position rules and `position` events, over what each script holds. */
 export async function pollPositions(): Promise<void> {
   const h = host;
@@ -3904,8 +3815,6 @@ export function _reset(): void {
   orderStates.clear();
   alertFires.clear();
   knownRunners = new Set();
-  copyStates.clear();
-  copySeeded = false;
   peaks.clear();
   restartWindow.clear();
   startChains.clear();

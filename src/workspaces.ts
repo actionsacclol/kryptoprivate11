@@ -67,17 +67,17 @@ export const WORKSPACES: WorkspaceSpec[] = [
     title: 'Automation',
     // Was "Copy Trading", which named ONE of the things in it. What actually
     // unites these pages is that each one acts off something other than your
-    // click — another trader's wallet, a rule you wrote, a schedule. Scripts
-    // moved here from Main Engine for that reason: it is not part of the
-    // scanner, it just happened to be built alongside it.
-    blurb: 'Everything that trades without you clicking: followed wallets, your own rules, an AI assistant, and farming.',
-    // Copy Simple first (2026-09-20): the three-question follow is the
-    // page a newcomer should land on; Copy Trading beside it has every
-    // control on the same configs.
+    // click — a rule you wrote, a schedule. Scripts moved here from Main
+    // Engine for that reason: it is not part of the scanner, it just happened
+    // to be built alongside it.
+    blurb: 'Everything that trades without you clicking: your own rules, a preset or an AI on one coin, and farming.',
+    // `mirror` is the Copy Trading row, an advert since copy trading became
+    // its own app (2026-11-04). Not first: the workspace lands on its first
+    // route, and opening Automation should reach a tool, not an ad.
     // AI connection (MCP) moved here from Settings on 2026-09-23.
     // Krypto Trader (2026-09-25) sits beside Scripts: both trade on rules you
     // set, under a budget, paper first.
-    routes: ['copysimple', 'wallets', 'trader', 'scripts', 'autocallout', 'pumpaccounts', 'mcp', 'farming'],
+    routes: ['trader', 'scripts', 'mirror', 'autocallout', 'pumpaccounts', 'mcp', 'farming'],
     icon: 'automation',
     ready: true,
   },
@@ -103,7 +103,7 @@ export const WORKSPACES: WorkspaceSpec[] = [
   {
     id: 'wallets',
     title: 'Wallet Utilities',
-    blurb: 'Your keys, what reward pools paid them, and the wallet list you fund and copy from.',
+    blurb: 'Your keys, what reward pools paid them, and the wallet list you fund from.',
     routes: ['walletaio', 'wallet', 'walletrobinhood', 'walletbnb', 'swap', 'bridge', 'creator', 'funder'],
     groups: [
       { label: 'Your wallets', routes: ['walletaio', 'wallet', 'walletrobinhood', 'walletbnb'] },
@@ -171,7 +171,7 @@ export const WORKSPACES: WorkspaceSpec[] = [
     id: 'system',
     title: 'Settings & Legal',
     blurb: 'Preferences, providers, keys, and the documents you accepted.',
-    routes: ['settings', 'profiles', 'about', 'legal'],
+    routes: ['settings', 'security', 'profiles', 'about', 'legal'],
     icon: 'settings',
     ready: true,
   },

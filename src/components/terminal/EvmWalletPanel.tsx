@@ -320,18 +320,12 @@ export function EvmWalletPanel({
     void reload();
   };
 
+  // A native warning, the proof and a typed confirmation, all in main.
   const doExport = async (): Promise<void> => {
-    const yes = await modal.confirm({
-      title: 'Export EVM wallets',
-      message:
-        'This writes the PRIVATE KEYS of every EVM wallet to a plain text file for MetaMask or Rabby. Anyone who gets that file can spend these wallets on every EVM chain. Save it offline and delete it when done. Continue?',
-      confirmLabel: 'Export private keys',
-      destructive: true,
-    });
-    if (!yes) return;
-    const r = await window.krypt.evm.wallet.exportAll();
-    if (r.ok) toast.success(`Exported ${r.data?.count ?? ''} wallet(s) — delete that file once imported`);
-    else toast.warn(r.message);
+    const r = await window.krypt.evm.wallet.exportKey(tab);
+    if (r.ok) toast.success(r.message);
+    else if (r.message !== 'Cancelled') toast.warn(r.message);
+    for (const w of r.data?.warnings ?? []) toast.warn(w);
   };
 
   /**
@@ -598,7 +592,7 @@ export function EvmWalletPanel({
                 <Download className="h-3.5 w-3.5" /> Import key
               </GhostButton>
               <GhostButton onClick={() => void doExport()}>
-                <Download className="h-3.5 w-3.5" /> Export all (MetaMask)
+                <Download className="h-3.5 w-3.5" /> Export this key (MetaMask)
               </GhostButton>
             </div>
             </>

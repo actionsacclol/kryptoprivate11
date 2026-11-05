@@ -15,9 +15,8 @@
 // fetch any was a page that looked broken until the feed had run for a day.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bookmark, BookmarkCheck, Check, Loader2, Play, Plus, Search, SlidersHorizontal, Square, Trash2, Trophy, Users } from 'lucide-react';
+import { Bookmark, BookmarkCheck, Check, Loader2, Play, Search, SlidersHorizontal, Square, Trash2, Trophy, Users } from 'lucide-react';
 import { EVM_CHAIN_META } from '@shared/evm';
-import { defaultConfig } from '@shared/copytrade';
 import { useToast } from '../state/ToastProvider';
 import { useModal } from '../state/ModalProvider';
 import { FLAG_TEXT, WalletDrawer } from '../components/WalletDrawer';
@@ -175,8 +174,6 @@ export function Scout() {
   const [saved, setSaved] = useState<string[]>([]);
   const [counts, setCounts] = useState<{ tracked: number; watching: number; cap: number } | null>(null);
   const [clearBusy, setClearBusy] = useState(false);
-  /** Wallets already on the Copy Trading page, so Follow can say so. */
-  const [followed, setFollowed] = useState<string[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   /** Null until read — an unknown collector state must not render as "off". */
@@ -203,16 +200,6 @@ export function Scout() {
     const r = await window.krypt.scout.scanStatus(chain);
     setScan(r.ok && r.data ? r.data : null);
   }, [chain]);
-
-  // Which of these are already on the Copy Trading page. Read once and after a
-  // follow, because it changes only when the user acts.
-  const readFollowed = useCallback(async () => {
-    const r = await window.krypt.copy.list();
-    if (r.ok && r.data) setFollowed(r.data.configs.map((c) => c.wallet));
-  }, []);
-  useEffect(() => {
-    void readFollowed();
-  }, [readFollowed]);
 
   const copyAddress = useCallback(
     async (address: string) => {
@@ -312,29 +299,6 @@ export function Scout() {
       setBusy(false);
     }
   }, [chain, collecting, readCollecting]);
-
-  /**
-   * Follow a wallet: create a PAPER copy config, disabled, exactly as the copy
-   * page's own default does. Never live and never armed from here — the house
-   * rule is that copying starts on paper, and a leaderboard is the last place
-   * to make an exception to it.
-   *
-   * Solana only, because copy trading watches Solana wallets; the button does
-   * not appear on the EVM chains rather than appearing and failing.
-   */
-  const follow = useCallback(
-    async (address: string, direction: 'copy' | 'reverse' = 'copy') => {
-      const cfg = defaultConfig(address, `Scout ${address.slice(0, 4)}…${address.slice(-4)}`, 'solana', direction);
-      const r = await window.krypt.copy.save(cfg);
-      if (r.ok) {
-        toast.success(direction === 'reverse' ? 'Added as a REVERSE copy — paper, and switched off until you arm it.' : 'Added to copy trading — paper, and switched off until you arm it.');
-        // The row says "Following" from here on; a toast that fades was the
-        // only feedback before, which read as the button doing nothing.
-        void readFollowed();
-      } else toast.error(r.message);
-    },
-    [toast, readFollowed],
-  );
 
   const clearTracked = useCallback(async () => {
     const yes = await modal.confirm({
@@ -630,7 +594,7 @@ export function Scout() {
                   <th className="px-3 py-2 text-right font-medium">Trips</th>
                   <th className="px-3 py-2 text-right font-medium">Median hold</th>
                   {/* Pinned to the right edge. The board is nine columns wide
-                      and the panel is not, so Save and Follow — the two things
+                      and the panel is not, so Save — the thing
                       anyone actually does from this table — used to sit off
                       screen behind a horizontal scrollbar nobody found. */}
                   <th className="sticky right-0 border-l border-white/10 bg-krypt-panel px-3 py-2" />
@@ -722,27 +686,6 @@ export function Scout() {
                             {isSaved ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
                             {isSaved ? 'Saved' : 'Save'}
                           </button>
-                          {chain === 'solana' &&
-                            // Following left no mark on the row, so the button
-                            // looked like it had done nothing — it had quietly
-                            // added a paper config and said so in a toast that
-                            // was gone a moment later.
-                            (followed.includes(r.address) ? (
-                              <span
-                                className="flex items-center gap-1.5 rounded-lg border border-krypt-purple/40 bg-krypt-purple/10 px-3 py-2 text-label font-medium text-krypt-purple"
-                                title="Already on the Copy Trading page — paper, and switched off until you arm it"
-                              >
-                                <Check className="h-4 w-4" /> Following
-                              </span>
-                            ) : (
-                              <button
-                                onClick={() => void follow(r.address)}
-                                className="flex items-center gap-1.5 rounded-lg border border-krypt-purple/50 bg-krypt-purple/10 px-3 py-2 text-label font-medium text-white transition hover:bg-krypt-purple/20"
-                                title="Add to copy trading on PAPER — nothing is bought, and it stays switched off until you arm it yourself"
-                              >
-                                <Plus className="h-4 w-4" /> Follow
-                              </button>
-                            ))}
                         </span>
                       </td>
                     </tr>
@@ -779,10 +722,8 @@ export function Scout() {
         window={window_}
         row={detail ? allRows.find((r) => r.address === detail) ?? null : null}
         saved={detail ? saved.includes(detail) : false}
-        following={detail ? followed.includes(detail) : false}
         onClose={() => setDetail(null)}
         onToggleSave={(a) => void toggleSave(a)}
-        onFollow={(a, direction) => void follow(a, direction)}
         onCopyAddress={(a) => void copyAddress(a)}
       />
     </div>

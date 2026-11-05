@@ -153,16 +153,6 @@ for (const [channel, expected] of Object.entries(CHANNELS)) {
       // registry keeps it and never takes it from the window (2026-09-27).
       ownedByMain: ['createdAt', 'updatedAt', 'enabled', 'bundled'],
     },
-    {
-      channel: 'copy:save',
-      until: 'copy:remove',
-      source: '../shared/copytrade.ts',
-      type: 'CopyConfig',
-      // `exitsOnly` is set by a restart's disarm and cleared by arming, both
-      // in main (2026-10-23); a window that could set it could keep a
-      // disarmed config's exits running against the user's own pause.
-      ownedByMain: ['createdAt', 'exitsOnly'],
-    },
     // The other three rebuilders. All complete when this was written
     // (2026-09-18) - they are here so the NEXT field added to one of these
     // types cannot be forgotten on the way across, which is the only way

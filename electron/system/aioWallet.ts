@@ -20,6 +20,9 @@ import { Keypair } from '@solana/web3.js';
 import * as wallet from './wallet';
 import * as evmWallet from '../evm/evmWallet';
 import { logger } from './logger';
+import { durableWrite, readBackup, type BackupMode } from './durableWrite';
+import * as vault from './vault';
+import { aad } from './vaultCrypto';
 import { evmPrivateKeyAtPath, newSeedPhrase, normaliseSeedPhrase, seedPhraseProblem, solanaSeedAtPath } from './seedPhrase';
 import {
   aioFileBody,
@@ -48,6 +51,27 @@ function encAvailable(): boolean {
   }
 }
 
+function parseText(text: string | null): ReturnType<typeof parseAioFile> {
+  if (text === null) return 'invalid';
+  try {
+    return parseAioFile(JSON.parse(text));
+  } catch {
+    return 'invalid';
+  }
+}
+
+const cached = (): AioRecord | null => cache ?? null;
+
+/** Damaged or gone, with a previous generation that reads: use it read-only. */
+function fallBackToBackup(why: string): boolean {
+  const bak = parseText(readBackup(file()));
+  if (bak === 'invalid') return false;
+  loadFailure = `${why}. Running from the previous copy of your All-in-One record. Nothing will be saved until this is resolved.`;
+  logger.error(`aio wallet: ${loadFailure}`);
+  cache = bak;
+  return true;
+}
+
 function load(): AioRecord | null {
   if (cache !== undefined) return cache;
   let text: string;
@@ -55,22 +79,26 @@ function load(): AioRecord | null {
     text = fs.readFileSync(file(), 'utf8');
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (fallBackToBackup(`${file()} is missing`)) return cached();
+      if (vault.isOn()) {
+        loadFailure = `${file()} is missing, and an app password is set, so it should exist. Nothing will be written until this is resolved.`;
+        logger.error(`aio wallet: ${loadFailure}`);
+        cache = null;
+        return cache;
+      }
       loadFailure = null;
       cache = null;
       return cache;
     }
+    if (fallBackToBackup(`${file()} could not be read (${(e as Error).message})`)) return cached();
     loadFailure = `${file()} could not be read (${(e as Error).message}). Your recovery phrase is still in it — the app will not write to it until this is resolved.`;
     logger.error(`aio wallet: ${loadFailure}`);
     cache = null;
     return cache;
   }
-  let parsed: ReturnType<typeof parseAioFile>;
-  try {
-    parsed = parseAioFile(JSON.parse(text));
-  } catch {
-    parsed = 'invalid';
-  }
+  const parsed = parseText(text);
   if (parsed === 'invalid') {
+    if (fallBackToBackup(`${file()} is not an All-in-One record this version understands`)) return cached();
     loadFailure = `${file()} is not an All-in-One record this version understands. It is left untouched — your recovery phrase may still be in it.`;
     logger.error(`aio wallet: ${loadFailure}`);
     cache = null;
@@ -81,13 +109,64 @@ function load(): AioRecord | null {
   return cache;
 }
 
-function persist(rec: AioRecord | null): void {
+function persist(rec: AioRecord | null, backup: BackupMode = 'keep'): void {
   if (loadFailure) throw new Error(`refusing to write aio-wallet.json — ${loadFailure}`);
-  const tmp = `${file()}.tmp`;
-  // Owner-only, like the other key stores (evm-wallets.json).
-  fs.writeFileSync(tmp, JSON.stringify(aioFileBody(rec), null, 2), { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, file());
+  // The version says which encryption the phrase uses (see wallet.ts).
+  durableWrite(file(), JSON.stringify({ ...aioFileBody(rec), version: vault.writesKv1() ? 2 : 1 }, null, 2), { backup });
   cache = rec;
+}
+
+function sealPhrase(phrase: string, solanaAddress: string): string {
+  if (vault.writesKv1()) return vault.seal(Buffer.from(phrase, 'utf8'), aad.aioPhrase(solanaAddress));
+  return safeStorage.encryptString(phrase).toString('base64');
+}
+
+function openPhrase(rec: AioRecord): string {
+  if (vault.isKv1(rec.phraseEnc)) return vault.open(rec.phraseEnc, aad.aioPhrase(rec.solanaAddress)).toString('utf8');
+  return safeStorage.decryptString(Buffer.from(rec.phraseEnc, 'base64'));
+}
+
+/** Why the phrase cannot be used, or null. */
+export function phraseProblem(): string | null {
+  const rec = load();
+  if (!rec) return null;
+  try {
+    const seed = solanaSeedAtPath(openPhrase(rec), aioSolanaPath(rec.paths?.solana));
+    const address = Keypair.fromSeed(seed).publicKey.toBase58();
+    seed.fill(0);
+    return address === rec.solanaAddress ? null : 'the stored recovery phrase does not match its address';
+  } catch (err) {
+    return `the recovery phrase cannot be decrypted (${(err as Error).message})`;
+  }
+}
+
+/** Re-encrypt the phrase in the current write mode and prove it. Throws. A file
+ *  is always written, so "missing" can mean something once a password is on. */
+export function resealAll(): void {
+  const rec = load();
+  if (loadFailure) throw new Error(loadFailure);
+  if (!rec) {
+    persist(null, 'scrub');
+    return;
+  }
+  const problem = phraseProblem();
+  if (problem) throw new Error(`All-in-One wallet: ${problem}`);
+  persist({ ...rec, phraseEnc: sealPhrase(openPhrase(rec), rec.solanaAddress) }, 'scrub');
+  cache = undefined;
+  const after = phraseProblem();
+  if (after) throw new Error(`All-in-One wallet: ${after}`);
+}
+
+export function reloadFromDisk(): void {
+  cache = undefined;
+  loadFailure = null;
+}
+
+/** For the encrypted backup file only. */
+export function phraseForBackup(): { label: string; phrase: string; paths?: { solana: string; evm: string } } | null {
+  const rec = load();
+  if (!rec) return null;
+  return { label: rec.label, phrase: openPhrase(rec), ...(rec.paths ? { paths: rec.paths } : {}) };
 }
 
 function blocked(): { ok: false; message: string } | null {
@@ -168,7 +247,7 @@ function setUp(phrase: string, labelIn: unknown, fresh: boolean, paths?: { solan
     evmAddress,
     solanaWalletId: null,
     evmWalletId: null,
-    phraseEnc: safeStorage.encryptString(clean).toString('base64'),
+    phraseEnc: sealPhrase(clean, solanaAddress),
     createdAt: Date.now(),
     // An imported phrase is one the user already holds somewhere.
     backedUpAt: fresh ? null : Date.now(),
@@ -211,7 +290,7 @@ export function reveal(): { ok: boolean; message: string; phrase?: string } {
   const rec = load();
   if (!rec) return { ok: false, message: 'No All-in-One wallet.' };
   try {
-    return { ok: true, message: 'ok', phrase: safeStorage.decryptString(Buffer.from(rec.phraseEnc, 'base64')) };
+    return { ok: true, message: 'ok', phrase: openPhrase(rec) };
   } catch (err) {
     return { ok: false, message: `The recovery phrase could not be decrypted on this machine (${(err as Error).message}).` };
   }
@@ -256,7 +335,8 @@ export function forget(): { ok: boolean; message: string } {
   const b = blocked();
   if (b) return b;
   if (!load()) return { ok: false, message: 'No All-in-One wallet.' };
-  persist(null);
+  // `scrub`: the previous generation still holds the phrase.
+  persist(null, 'scrub');
   logger.warn('aio wallet: removed');
   return { ok: true, message: 'All-in-One wallet removed' };
 }

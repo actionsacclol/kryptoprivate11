@@ -22,7 +22,7 @@ const rec = {
   assert.deepEqual(parseAioFile(aioFileBody(rec)), rec, 'round trip');
   assert.equal(parseAioFile(aioFileBody(null)), null, 'an explicit "no wallet" body');
   assert.equal(parseAioFile(null), null);
-  for (const bad of [{}, { version: 2, wallet: rec }, { version: 1 }, { version: 1, wallet: { ...rec, phraseEnc: '' } }, { version: 1, wallet: { ...rec, solanaAddress: 'nope' } }, { version: 1, wallet: { ...rec, evmAddress: '0x12' } }, 'text', 42]) {
+  for (const bad of [{}, { version: 3, wallet: rec }, { version: 1 }, { version: 1, wallet: { ...rec, phraseEnc: '' } }, { version: 1, wallet: { ...rec, solanaAddress: 'nope' } }, { version: 1, wallet: { ...rec, evmAddress: '0x12' } }, 'text', 42]) {
     assert.equal(parseAioFile(bad), 'invalid', `refused: ${JSON.stringify(bad).slice(0, 60)}`);
   }
   const partial = parseAioFile({ version: 1, wallet: { ...rec, solanaWalletId: null, evmWalletId: '' } });

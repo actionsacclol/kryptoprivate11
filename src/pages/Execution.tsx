@@ -307,7 +307,7 @@ export function Execution() {
               ))}
             </div>
             <p className="mt-2 text-label leading-relaxed text-krypt-muted/70">
-              Stops, take-profits, copy trading and auto-exits always use Fast. Scripts choose per trade with{' '}
+              Stops, take-profits and auto-exits always use Fast. Scripts choose per trade with{' '}
               <span className="font-mono">{"{ lane: 'lean' }"}</span>.
             </p>
           </div>

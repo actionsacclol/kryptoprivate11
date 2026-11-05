@@ -18,6 +18,7 @@
 // undici Node bundles, which is exactly why setGlobalDispatcher() here
 // changes what the global `fetch` does.
 
+import { meterHttp } from './heliusBudget';
 import { Agent, setGlobalDispatcher } from 'undici';
 
 let installed = false;
@@ -48,6 +49,8 @@ export function installNetAgent(): void {
  */
 export async function warm(url: string, body?: string): Promise<boolean> {
   try {
+    // A warming POST is a real call and Helius bills it like one.
+    if (body !== undefined) meterHttp(url, /"method"\s*:\s*"(\w+)"/.exec(body)?.[1] ?? 'other');
     const res = await fetch(url, {
       method: body === undefined ? 'GET' : 'POST',
       headers: body === undefined ? undefined : { 'content-type': 'application/json' },

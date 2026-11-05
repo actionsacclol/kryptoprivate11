@@ -21,6 +21,7 @@ import { CalloutsRail } from './components/CalloutsRail';
 import { LiteModeHost } from './components/LiteModeHost';
 import { Discover } from './pages/Discover';
 import { TokenPage } from './pages/Token';
+import { IssueStack } from './components/IssueStack';
 import { isEvmAddress, isEvmChain, type ChainKind } from '@shared/evm';
 
 // The EVM token page (Robinhood Chain, BNB Smart Chain) is not on the route
@@ -57,8 +58,7 @@ const EvmObservatoryPage = lazy(() => ROUTE_LOADERS.observatoryrobinhood().then(
 const Launches = lazy(() => ROUTE_LOADERS.launches().then((m) => ({ default: m.Launches })));
 const Positions = lazy(() => ROUTE_LOADERS.paper().then((m) => ({ default: m.Positions })));
 const PortfolioPage = lazy(() => ROUTE_LOADERS.positions().then((m) => ({ default: m.PortfolioPage })));
-const WalletsPage = lazy(() => ROUTE_LOADERS.wallets().then((m) => ({ default: m.WalletsPage })));
-const CopySimplePage = lazy(() => ROUTE_LOADERS.copysimple().then((m) => ({ default: m.CopySimplePage })));
+const KryptoMirrorPage = lazy(() => ROUTE_LOADERS.mirror().then((m) => ({ default: m.KryptoMirrorPage })));
 const KryptoTraderPage = lazy(() => ROUTE_LOADERS.trader().then((m) => ({ default: m.KryptoTraderPage })));
 const Execution = lazy(() => ROUTE_LOADERS.execution().then((m) => ({ default: m.Execution })));
 const History = lazy(() => ROUTE_LOADERS.history().then((m) => ({ default: m.History })));
@@ -74,10 +74,11 @@ const Console = lazy(() => ROUTE_LOADERS.console().then((m) => ({ default: m.Con
 const SettingsPage = lazy(() => ROUTE_LOADERS.settings().then((m) => ({ default: m.SettingsPage })));
 const About = lazy(() => ROUTE_LOADERS.about().then((m) => ({ default: m.About })));
 const ProfilesPage = lazy(() => ROUTE_LOADERS.profiles().then((m) => ({ default: m.ProfilesPage })));
+const SecurityPage = lazy(() => ROUTE_LOADERS.security().then((m) => ({ default: m.SecurityPage })));
 
 // Fetched in the background once the first screen has settled, most-visited
 // first: the click that opens one of these then needs no network round trip.
-const WARM_ROUTES: RouteId[] = ['trades', 'positions', 'orders', 'watchlist', 'runners', 'launches', 'wallets', 'scripts'];
+const WARM_ROUTES: RouteId[] = ['trades', 'positions', 'orders', 'watchlist', 'runners', 'launches', 'scripts'];
 
 function RouteFallback() {
   return (
@@ -323,6 +324,7 @@ export default function App() {
       {/* `inert` (not typed in React 18) removes the whole shell from the
           tab order and hit-testing while the onboarding gate is up. */}
       <div className="contents" {...(gated ? ({ inert: '' } as Record<string, string>) : {})}>
+      {!gated && <IssueStack besideSidebar={!onHub} onOpen={navigate} />}
       {!onHub && (
         <SidebarLive
           current={target}
@@ -337,7 +339,7 @@ export default function App() {
       <div className="flex flex-1 min-w-0 min-h-0">
       <div className="flex flex-col flex-1 min-w-0 relative">
         <IntegrityBanner />
-        <TopBar search={<TokenSearch onOpen={openToken} />} onOpenAutomation={() => navigate('dashboard')} onOpenRunners={() => navigate('runners')} onOpenProfiles={() => navigate('profiles')} onOpenAioWallet={() => navigate('walletaio')} onHub={onHub ? undefined : toHub} />
+        <TopBar search={<TokenSearch onOpen={openToken} />} onOpenAutomation={() => navigate('dashboard')} onOpenRunners={() => navigate('runners')} onOpenProfiles={() => navigate('profiles')} onOpenWallet={(r) => navigate(r)} onHub={onHub ? undefined : toHub} />
         {isPending && (
           <div
             className="pointer-events-none absolute left-0 right-0 top-0 z-30 h-0.5 bg-krypt-purple/80 animate-pulse"
@@ -415,8 +417,7 @@ export default function App() {
                   {route === 'positions' && <PortfolioPage onOpenToken={openToken} />}
                   {route === 'paper' && <Positions />}
                   {route === 'legal' && <LegalPage />}
-                  {route === 'copysimple' && <CopySimplePage onOpenAdvanced={() => navigate('wallets')} onOpenScout={() => navigate('scout')} />}
-                  {route === 'wallets' && <WalletsPage />}
+                  {route === 'mirror' && <KryptoMirrorPage onOpenPortfolio={() => navigate('positions')} />}
                   {route === 'trader' && <KryptoTraderPage />}
                   {route === 'scripts' && <ScriptsPage />}
                   {route === 'execution' && <Execution />}
@@ -439,6 +440,7 @@ export default function App() {
                   {route === 'settings' && <SettingsPage onNavigate={navigate} />}
                   {route === 'about' && <About />}
                   {route === 'profiles' && <ProfilesPage />}
+                  {route === 'security' && <SecurityPage />}
                 </div>
               </Suspense>
             </div>
